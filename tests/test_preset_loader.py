@@ -45,22 +45,35 @@ def isolated_preset_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     """Point ``llm_models_config.user_config_dir`` at a temp directory.
 
     ``user_config_dir`` consults ``$XDG_CONFIG_HOME``, falling back to
-    ``~/.config``; we set both so the user's real ``~/.config/llm-models``
-    is invisible regardless of which path the implementation uses.
+    ``~/.config``. Both are set via monkeypatch so the test fixture
+    sees an empty preset dir regardless of which path the
+    implementation uses.
+
+    A module reload + teardown restore keeps the module-level cache
+    consistent across tests — without the teardown, downstream tests
+    that import :mod:`llm_models_config` inherit the test's
+    XDG_CONFIG_HOME view (it had already been torn down by
+    monkeypatch, but the cached values inside the reloaded module
+    persisted), which intermittently broke the TUI test that probes
+    presets through a different code path.
     """
     xdg = tmp_path / "xdg"
     preset_dir = xdg / "llm-models"
     preset_dir.mkdir(parents=True)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
     monkeypatch.setenv("HOME", str(tmp_path))
-    # Reload llm_models_config to clear any cached paths
-    import llm_models_config.paths
-    importlib.reload(llm_models_config.paths)
-    import llm_models_config.store
-    importlib.reload(llm_models_config.store)
     import llm_models_config
+    import llm_models_config.paths
+    import llm_models_config.store
+    importlib.reload(llm_models_config.paths)
+    importlib.reload(llm_models_config.store)
     importlib.reload(llm_models_config)
-    return preset_dir
+    yield preset_dir
+    # Restore module state so subsequent tests see the real
+    # filesystem layout via their own monkeypatch (or no patch at all).
+    importlib.reload(llm_models_config.paths)
+    importlib.reload(llm_models_config.store)
+    importlib.reload(llm_models_config)
 
 
 def _write_preset(preset_dir: Path, alias: str, body: str) -> Path:

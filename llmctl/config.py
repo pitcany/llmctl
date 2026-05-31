@@ -156,6 +156,81 @@ class VLLMConfig(BaseModel):
     defaults: VLLMDefaultsConfig = Field(default_factory=VLLMDefaultsConfig)
 
 
+class SlotConfig(BaseModel):
+    """One per-GPU TP=1 slot the slot subcommand recognises.
+
+    A slot is the *stable* serving identity (e.g. ``coder`` on GPU 0
+    port 8001). The user-chosen preset only contributes
+    model/quant/ctx; ``gpu``, ``port``, and the slot ``name`` are
+    pinned here so downstream client configs never change when the
+    underlying model swaps.
+    """
+
+    enabled: bool = True
+    gpu: str = Field(description="CUDA_VISIBLE_DEVICES value, usually one index.")
+    port: int = Field(ge=1, le=65535)
+    unit_name: str = Field(description="Bare systemd unit name (no .service).")
+    env_file_path: Path | None = None
+
+    def resolve_env_file(self, slot_name: str) -> Path:
+        """Same resolution chain as :meth:`ManagedUnitConfig.resolve_env_file`,
+        scoped to this slot's unit name."""
+        if self.env_file_path is not None:
+            return Path(self.env_file_path).expanduser()
+        env_override = os.environ.get(f"LLMCTL_SLOT_{slot_name.upper()}_ENV_FILE")
+        if env_override:
+            return Path(env_override).expanduser()
+        ai_home = os.environ.get("AI_HOME")
+        if ai_home:
+            return Path(ai_home).expanduser() / "services" / f"{self.unit_name}.env"
+        return Path.home() / "AI" / "services" / f"{self.unit_name}.env"
+
+
+class SlotsConfig(BaseModel):
+    """Container for all per-GPU slots. Extendable beyond coder/reasoner.
+
+    The default coder/reasoner posture matches yannik-desktop so the
+    cutover doesn't require config changes on the existing host. Add a
+    third slot (e.g. ``vision``) by setting ``slots.vision`` in
+    ``settings.yaml``.
+    """
+
+    coder: SlotConfig = Field(
+        default_factory=lambda: SlotConfig(
+            enabled=True, gpu="0", port=8001, unit_name="vllm-coder"
+        )
+    )
+    reasoner: SlotConfig = Field(
+        default_factory=lambda: SlotConfig(
+            enabled=True, gpu="1", port=8002, unit_name="vllm-reasoner"
+        )
+    )
+
+    def get(self, slot_name: str) -> SlotConfig | None:
+        """Return the named slot or ``None`` if undefined.
+
+        Used by the slot CLI so unknown slot names produce a clean
+        error with the available list rather than an AttributeError.
+        """
+        return getattr(self, slot_name, None) if hasattr(self, slot_name) else None
+
+
+class FleetUnitsConfig(BaseModel):
+    """Bare unit names for the fleet preflight orchestrator.
+
+    The preflight ("stop competing units before starting the TP unit")
+    needs to know which units claim the same GPUs as the target. These
+    defaults match the ``NOPASSWD`` sudoers entries on yannik-desktop;
+    re-target via ``settings.yaml`` for other hosts.
+    """
+
+    tp: str = "vllm-tp"
+    coder: str = "vllm-coder"
+    reasoner: str = "vllm-reasoner"
+    ollama: str = "ollama"
+    fleet_target: str = "agents.target"
+
+
 class ManagedUnitsConfig(BaseModel):
     """Container for all managed systemd units llmctl knows about.
 
@@ -180,6 +255,8 @@ class ManagedUnitsConfig(BaseModel):
             enabled=False, unit_name="vllm-reasoner", default_port=8002
         )
     )
+    slots: SlotsConfig = Field(default_factory=SlotsConfig)
+    fleet: FleetUnitsConfig = Field(default_factory=FleetUnitsConfig)
 
 
 def default_runtime_configs() -> dict[str, RuntimeConfig]:
