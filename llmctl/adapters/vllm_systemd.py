@@ -34,6 +34,8 @@ from llmctl.config import ManagedUnitConfig
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.integrations.vllm_env import VLLMLaunchSpec, render_vllm_env
 
+LifecycleHook = Callable[[VLLMLaunchSpec], None]
+
 
 class LegacyUnitError(RuntimeError):
     """Raised when the installed unit predates the launcher-script ExecStart.
@@ -84,6 +86,8 @@ class VLLMSystemdAdapter:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         http_get: Callable[[str, float], object] | None = None,
+        pre_start_hooks: list[LifecycleHook] | None = None,
+        post_start_hooks: list[LifecycleHook] | None = None,
     ) -> None:
         self.config = config or ManagedUnitConfig(unit_name="vllm-tp", default_port=8003)
         self.env_file_path = (
@@ -96,6 +100,13 @@ class VLLMSystemdAdapter:
         self._clock = clock
         self._sleep = sleep
         self._http_get = http_get or _default_http_get
+        # Hooks are deliberately list-typed (not single callables) so
+        # multiple integrations (hermes verify, harbor preflight, custom
+        # notifiers) can stack without an aggregator pattern. Exceptions
+        # from hooks abort the lifecycle; integrations should swallow
+        # their own non-fatal warnings internally.
+        self.pre_start_hooks: list[LifecycleHook] = list(pre_start_hooks or [])
+        self.post_start_hooks: list[LifecycleHook] = list(post_start_hooks or [])
 
     def ensure_launcher_unit(self) -> None:
         """Raise :class:`LegacyUnitError` against the legacy ExecStart unit.
@@ -173,6 +184,8 @@ class VLLMSystemdAdapter:
             the body string (for tests), readiness flag, and any error.
         """
         self.ensure_launcher_unit()
+        for hook in self.pre_start_hooks:
+            hook(spec)
         env_path, body = self.write_env(spec)
 
         restart_result = self.systemctl.restart(self.unit_name)
@@ -189,6 +202,8 @@ class VLLMSystemdAdapter:
             )
 
         if not wait_for_ready:
+            for hook in self.post_start_hooks:
+                hook(spec)
             return ManagedRestartResult(env_path=env_path, env_body=body, ready=True)
 
         ready = self._wait_for_ready(
@@ -196,6 +211,11 @@ class VLLMSystemdAdapter:
             timeout_s=timeout_s,
             poll_interval_s=poll_interval_s,
         )
+        # Post-start hooks fire only when ready — verification against a
+        # half-started service produces misleading diagnostics.
+        if ready:
+            for hook in self.post_start_hooks:
+                hook(spec)
         return ManagedRestartResult(
             env_path=env_path,
             env_body=body,
