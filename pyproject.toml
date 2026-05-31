@@ -24,6 +24,7 @@ classifiers = [
 dependencies = [
   "fastapi>=0.115.0",
   "httpx>=0.27.0",
+  "llm-models-config",
   "nvidia-ml-py>=12.555.43",
   "platformdirs>=4.2.0",
   "psutil>=6.0.0",
@@ -50,6 +51,7 @@ dev = [
 
 [tool.uv.sources]
 gpu-models = { workspace = true }
+llm-models-config = { workspace = true }
 
 [project.scripts]
 llmctl = "llmctl.cli:app"

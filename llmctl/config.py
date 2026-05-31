@@ -15,7 +15,7 @@ import yaml
 from platformdirs import user_config_dir, user_data_dir, user_log_dir
 from pydantic import BaseModel, Field
 
-APP_NAME = "llm-mission-control"
+APP_NAME = "llmctl"
 
 
 class AppSettings(BaseModel):
@@ -79,6 +79,109 @@ class RuntimeConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
+class ManagedUnitConfig(BaseModel):
+    """Config for an externally-installed systemd unit that llmctl manages.
+
+    Every field has a default so a fresh install works out of the box,
+    but each can be overridden in ``settings.yaml`` so llmctl can run on
+    a host with a different layout, different unit names, or a different
+    launcher script. This keeps llmctl independent of any specific
+    repo's path conventions (``~/AI/services/...`` is just one option).
+    """
+
+    enabled: bool = False
+    unit_name: str = "vllm-tp"
+    env_file_path: Path | None = None
+    # The marker string the legacy-unit guard looks for in `systemctl cat`
+    # output. If the unit's ExecStart doesn't contain this substring, the
+    # guard refuses to write to env_file_path. Set to None to disable the
+    # guard for unusual launcher setups.
+    launcher_marker: str | None = "vllm-launcher.sh"
+    # Default port the readiness poll hits. Overridden per-spec at launch.
+    default_port: int = 8003
+
+    def resolve_env_file(self) -> Path:
+        """Return the env file path, with sensible fallback.
+
+        Order:
+        1. Explicit ``env_file_path`` from config
+        2. ``$LLMCTL_VLLM_ENV_FILE`` environment override
+        3. ``$AI_HOME/services/<unit_name>.env`` if AI_HOME is set
+        4. ``~/AI/services/<unit_name>.env`` (matches yannik-desktop, the
+           original cutover target — won't surprise existing installs but
+           a clean install on another host will likely override via config)
+        """
+        if self.env_file_path is not None:
+            return Path(self.env_file_path).expanduser()
+        env_override = os.environ.get("LLMCTL_VLLM_ENV_FILE")
+        if env_override:
+            return Path(env_override).expanduser()
+        ai_home = os.environ.get("AI_HOME")
+        if ai_home:
+            return Path(ai_home).expanduser() / "services" / f"{self.unit_name}.env"
+        return Path.home() / "AI" / "services" / f"{self.unit_name}.env"
+
+
+class VLLMDefaultsConfig(BaseModel):
+    """Cross-preset launch defaults for the vLLM runtime.
+
+    The :class:`~llm_models_config.schema.Model` from
+    ``~/.config/llm-models/<alias>.yaml`` carries per-preset values
+    (served name, model id, quantization, max sequences, etc.); this
+    block carries the values that don't vary per preset (GPU layout,
+    port, batching, NCCL flags).
+
+    Default values match the production posture on yannik-desktop so
+    a fresh install behaves the same as the existing setup. Override
+    via ``settings.yaml`` to relocate the production endpoint, pin
+    different GPUs, or tune batching.
+    """
+
+    gpus: str = "0,1"
+    tensor_parallel: int = 2
+    port: int = 8003
+    host: str = "0.0.0.0"
+    max_model_len: int = 32768
+    gpu_memory_utilization: float = 0.85
+    prefix_cache: bool = True
+    chunked_prefill: bool = True
+    nccl_p2p_disable: bool = False
+    max_num_seqs: int | None = None
+    max_batched_tokens: int | None = None
+
+
+class VLLMConfig(BaseModel):
+    """Top-level vLLM-specific settings."""
+
+    defaults: VLLMDefaultsConfig = Field(default_factory=VLLMDefaultsConfig)
+
+
+class ManagedUnitsConfig(BaseModel):
+    """Container for all managed systemd units llmctl knows about.
+
+    Keyed by logical role rather than unit name so the same role can be
+    re-targeted to a different unit on another host without touching code.
+    """
+
+    vllm_tp: ManagedUnitConfig = Field(
+        default_factory=lambda: ManagedUnitConfig(
+            enabled=False, unit_name="vllm-tp", default_port=8003
+        )
+    )
+    # Slot units (per-GPU TP=1) are wired in Phase 4. Defaulted here so
+    # config files written today don't need a migration when slots ship.
+    vllm_coder: ManagedUnitConfig = Field(
+        default_factory=lambda: ManagedUnitConfig(
+            enabled=False, unit_name="vllm-coder", default_port=8001
+        )
+    )
+    vllm_reasoner: ManagedUnitConfig = Field(
+        default_factory=lambda: ManagedUnitConfig(
+            enabled=False, unit_name="vllm-reasoner", default_port=8002
+        )
+    )
+
+
 def default_runtime_configs() -> dict[str, RuntimeConfig]:
     """Return built-in default configuration for every supported runtime."""
     return {
@@ -110,6 +213,8 @@ class Settings(BaseModel):
     scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
     paths: PathSettings = Field(default_factory=PathSettings)
     runtimes: dict[str, RuntimeConfig] = Field(default_factory=dict)
+    managed_units: ManagedUnitsConfig = Field(default_factory=ManagedUnitsConfig)
+    vllm: VLLMConfig = Field(default_factory=VLLMConfig)
 
     def runtime_config(self, runtime: str) -> RuntimeConfig:
         """Return effective runtime config, merging defaults with YAML overrides."""

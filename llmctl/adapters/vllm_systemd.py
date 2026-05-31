@@ -30,6 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from llmctl.config import ManagedUnitConfig
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.integrations.vllm_env import VLLMLaunchSpec, render_vllm_env
 
@@ -60,10 +61,13 @@ class VLLMSystemdAdapter:
     surface that touches the filesystem or invokes ``systemctl``.
 
     Args:
-        env_file_path: Where to write the rendered env body.
-            Defaults to ``~/AI/services/vllm-tp.env``.
-        unit_name: Bare systemd unit name (matches the NOPASSWD sudoers
-            scope on yannik-desktop). Defaults to ``vllm-tp``.
+        config: Managed-unit configuration; provides unit name, env file
+            path, legacy-unit marker, and default port. When omitted,
+            a default :class:`ManagedUnitConfig` is used (matches the
+            ``vllm-tp`` posture on yannik-desktop).
+        env_file_path: Optional explicit override for the env file path,
+            takes precedence over the config-resolved path. Kept for
+            test ergonomics and ad-hoc CLI use.
         systemctl: Injected runner for tests; falls back to a real one.
         clock: Injected monotonic clock for tests.
         sleep: Injected sleep function for tests.
@@ -73,18 +77,21 @@ class VLLMSystemdAdapter:
 
     def __init__(
         self,
-        env_file_path: Path | None = None,
+        config: ManagedUnitConfig | None = None,
         *,
-        unit_name: str = "vllm-tp",
+        env_file_path: Path | None = None,
         systemctl: SystemctlRunner | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         http_get: Callable[[str, float], object] | None = None,
     ) -> None:
-        self.env_file_path = env_file_path or (
-            Path.home() / "AI" / "services" / "vllm-tp.env"
+        self.config = config or ManagedUnitConfig(unit_name="vllm-tp", default_port=8003)
+        self.env_file_path = (
+            Path(env_file_path).expanduser()
+            if env_file_path is not None
+            else self.config.resolve_env_file()
         )
-        self.unit_name = unit_name
+        self.unit_name = self.config.unit_name
         self.systemctl = systemctl or SystemctlRunner()
         self._clock = clock
         self._sleep = sleep
@@ -93,20 +100,30 @@ class VLLMSystemdAdapter:
     def ensure_launcher_unit(self) -> None:
         """Raise :class:`LegacyUnitError` against the legacy ExecStart unit.
 
+        The marker substring checked in ``systemctl cat`` output comes
+        from :attr:`ManagedUnitConfig.launcher_marker`. Set ``launcher_marker``
+        to ``None`` in config to disable this guard entirely (useful when
+        you've installed a custom launcher with a different filename).
+
         Skipped silently when ``systemctl`` is unavailable (e.g. container
         without systemd), since there's no unit to validate in that case.
         """
+        if self.config.launcher_marker is None:
+            return
         if not self.systemctl.available():
             return
         body = self.systemctl.cat(self.unit_name)
         if not body:
             return  # unit not installed; the start call will surface the error
-        if "vllm-launcher.sh" not in body:
+        if self.config.launcher_marker not in body:
             raise LegacyUnitError(
-                f"{self.unit_name}.service is not the launcher-based unit. "
-                f"llmctl writes the VLLM_* schema consumed by vllm-launcher.sh; "
-                f"running against the legacy ExecStart would silently load "
-                f"nothing. Install the launcher-based unit first."
+                f"{self.unit_name}.service ExecStart does not contain "
+                f"{self.config.launcher_marker!r}. llmctl writes the VLLM_* "
+                f"schema consumed by the launcher script; running against a "
+                f"different launcher would silently load nothing or pass the "
+                f"wrong args. Install the launcher-based unit first, or set "
+                f"managed_units.<role>.launcher_marker: null in settings.yaml "
+                f"to bypass this guard."
             )
 
     def write_env(self, spec: VLLMLaunchSpec) -> tuple[Path, str]:
