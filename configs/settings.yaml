@@ -1,0 +1,59 @@
+app:
+  name: llm-mission-control
+  log_level: INFO
+  safe_mode: true
+
+database:
+  # Override with LLMCTL_DB_URL. Default is computed with platformdirs.
+  url: null
+
+api:
+  host: 127.0.0.1
+  port: 8088
+  cors_origins: []
+
+telemetry:
+  gpu_poll_interval_seconds: 2.0
+  process_poll_interval_seconds: 2.0
+
+scheduler:
+  dry_run_default: true
+  require_confirmation_for_start: true
+  require_confirmation_for_stop: true
+  require_confirmation_for_delete: true
+  default_host: 127.0.0.1
+  port_ranges:
+    vllm: [8000, 8099]
+    llama_cpp: [8100, 8199]
+    python_script: [8200, 8299]
+  gpu_policy: most-free
+  safety_margin_gb: 1.0
+  allow_public_bind: false
+  require_auth_token: false
+  logs_dir: null
+
+paths:
+  config_dir: null
+  data_dir: null
+  logs_dir: null
+
+# Per-runtime connection and launch configuration. Values here override the
+# built-in defaults (see llmctl.config.default_runtime_configs). HTTP server
+# runtimes use `endpoint`; process-launch runtimes use `binary`, `host`,
+# `port_range`.
+runtimes:
+  ollama:
+    endpoint: http://127.0.0.1:11434
+  lmstudio:
+    endpoint: http://127.0.0.1:1234
+  vllm:
+    binary: vllm
+    host: 127.0.0.1
+    port_range: [8000, 8099]
+  llama_cpp:
+    binary: llama-server
+    host: 127.0.0.1
+    port_range: [8100, 8199]
+  python_script:
+    host: 127.0.0.1
+    port_range: [8200, 8299]

@@ -1,0 +1,694 @@
+"""Typer CLI skeleton for LLM Mission Control."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Annotated
+
+import typer
+import uvicorn
+from rich.console import Console
+from rich.table import Table
+from sqlmodel import Session
+
+from llmctl.api.app import create_app
+from llmctl.config import load_settings
+from llmctl.db import get_engine, init_db
+from llmctl.schemas import BenchmarkRunRequest, ModelCreate, SessionStartRequest
+from llmctl.services.benchmarks import BenchmarkService
+from llmctl.services.registry import RegistryService
+from llmctl.services.sessions import SessionService
+from llmctl.telemetry.gpu import get_gpu_info
+
+app = typer.Typer(
+    name="llmctl",
+    help="Local-first mission control scaffold for LLM runtimes.",
+    no_args_is_help=True,
+)
+console = Console()
+
+
+def _parse_gpus(gpus: str | None, cpu: bool) -> tuple[list[int], str, bool]:
+    """Parse a ``--gpus`` value into (gpu_ids, mode, allow_cpu).
+
+    Modes: ``auto``, ``balanced``, ``most-free``, ``least-used``, ``cpu``, or an
+    explicit comma-separated id list (e.g. ``0,1``) which yields mode
+    ``explicit``.
+    """
+    value = (gpus or "auto").strip().lower()
+    if cpu or value == "cpu":
+        return [], "cpu", True
+    if value in {"auto", "balanced", "most-free", "least-used"}:
+        return [], value, False
+    ids = [int(part) for part in value.split(",") if part.strip()]
+    return ids, "explicit", False
+
+
+def _session() -> Session:
+    settings = load_settings()
+    init_db(settings.database_url)
+    return Session(get_engine(settings.database_url))
+
+
+@app.command()
+def scan() -> None:
+    """Scan configured model directories and runtime registries."""
+    with _session() as db:
+        models = RegistryService(db).scan()
+    console.print(
+        f"[bold cyan]Scan scaffold complete.[/bold cyan] "
+        f"{len(models)} models currently registered."
+    )
+
+
+@app.command("models")
+def models_cmd() -> None:
+    """List registered models."""
+    with _session() as db:
+        models = RegistryService(db).list_models()
+    table = Table(title="Models")
+    table.add_column("ID")
+    table.add_column("Name")
+    table.add_column("Runtime")
+    table.add_column("Status")
+    for model in models:
+        table.add_row(model.id or "", model.name, model.runtime.value, model.status.value)
+    console.print(table)
+
+
+@app.command()
+def gpus() -> None:
+    """Show NVIDIA GPU telemetry."""
+    gpus_info = get_gpu_info()
+    if not gpus_info:
+        console.print(
+            "[yellow]No NVIDIA GPU telemetry available or "
+            "NVML could not initialize.[/yellow]"
+        )
+        return
+    table = Table(title="GPUs")
+    table.add_column("Idx")
+    table.add_column("Name")
+    table.add_column("Memory (used/total)")
+    table.add_column("Util")
+    table.add_column("Temp")
+    table.add_column("Power")
+    table.add_column("Procs")
+    for gpu in gpus_info:
+        memory = "unknown"
+        if gpu.memory_used_mb is not None and gpu.memory_total_mb is not None:
+            memory = f"{gpu.memory_used_mb}/{gpu.memory_total_mb} MiB"
+        util = (
+            "unknown"
+            if gpu.utilization_gpu_percent is None
+            else f"{gpu.utilization_gpu_percent}%"
+        )
+        temp = "n/a" if gpu.temperature_c is None else f"{gpu.temperature_c}C"
+        power = "n/a" if gpu.power_draw_watts is None else f"{gpu.power_draw_watts:.0f}W"
+        table.add_row(
+            str(gpu.index),
+            gpu.name,
+            memory,
+            util,
+            temp,
+            power,
+            str(len(gpu.processes)),
+        )
+    console.print(table)
+
+
+@app.command("sessions")
+def sessions_cmd() -> None:
+    """List runtime sessions."""
+    with _session() as db:
+        sessions = SessionService(db).list_sessions()
+    table = Table(title="Sessions")
+    table.add_column("ID")
+    table.add_column("Runtime")
+    table.add_column("Status")
+    table.add_column("Model")
+    for session in sessions:
+        table.add_row(
+            session.id or "",
+            session.runtime.value,
+            session.status.value,
+            session.model_id or "",
+        )
+    console.print(table)
+
+
+@app.command("add-model")
+def add_model(
+    name: Annotated[str, typer.Option(help="Display name for the model.")],
+    runtime: Annotated[
+        str,
+        typer.Option(help="Runtime: vllm, llama_cpp, lmstudio, ollama, python_script"),
+    ],
+    path: Annotated[Path | None, typer.Option(help="Optional local path.")] = None,
+    source: Annotated[str | None, typer.Option(help="Optional runtime/source identifier.")] = None,
+    estimated_vram: Annotated[
+        float | None, typer.Option(help="Estimated VRAM (GB) for scheduling.")
+    ] = None,
+) -> None:
+    """Register a model record."""
+    payload = ModelCreate(
+        name=name,
+        runtime=runtime,
+        path=str(path) if path else None,
+        source=source,
+        estimated_vram_gb=estimated_vram,
+    )
+    with _session() as db:
+        model = RegistryService(db).add_model(payload)
+    console.print(f"[green]Registered model[/green] {model.name} ({model.id})")
+
+
+@app.command("delete-model")
+def delete_model(model_id: Annotated[str, typer.Argument(help="Model ID to soft-delete.")]) -> None:
+    """Soft-delete a model record."""
+    with _session() as db:
+        deleted = RegistryService(db).delete_model(model_id)
+    if deleted:
+        console.print(f"[green]Soft-deleted model[/green] {model_id}")
+    else:
+        raise typer.BadParameter(f"Model not found: {model_id}")
+
+
+def _build_start_request(
+    db: Session,
+    model_id: str,
+    profile: str | None,
+    gpus: str,
+    cpu: bool,
+    force: bool,
+    dry_run: bool,
+) -> SessionStartRequest:
+    """Resolve model/profile and build a :class:`SessionStartRequest`."""
+    from llmctl.db import ModelRecord
+    from llmctl.services.profiles import ProfileService
+
+    gpu_ids, mode, allow_cpu = _parse_gpus(gpus, cpu)
+    model = db.get(ModelRecord, model_id)
+    if model is None:
+        raise typer.BadParameter(f"Model not found: {model_id}")
+    profile_id: str | None = None
+    if profile:
+        resolved = ProfileService(db).get_by_name(profile)
+        if resolved is None:
+            raise typer.BadParameter(f"Profile not found: {profile}")
+        profile_id = resolved.id
+    return SessionStartRequest(
+        model_id=model_id,
+        profile_id=profile_id,
+        runtime=model.runtime,
+        gpu_ids=gpu_ids,
+        gpu_mode=mode,
+        gpus_auto=mode in {"auto", "balanced", "most-free", "least-used"},
+        allow_cpu=allow_cpu,
+        force=force,
+        dry_run=dry_run,
+    )
+
+
+def _print_plan_warnings(plan: object) -> None:
+    """Print any warnings and refusal reasons attached to a launch plan."""
+    for warning in getattr(plan, "warnings", []) or []:
+        console.print(f"[yellow]warning:[/yellow] {warning}")
+    for reason in getattr(plan, "refusal_reasons", []) or []:
+        console.print(f"[red]refusal:[/red] {reason}")
+
+
+@app.command()
+def start(
+    model_id: Annotated[str, typer.Argument(help="Model ID to launch.")],
+    profile: Annotated[
+        str | None, typer.Option(help="Profile name (see `llmctl profiles`).")
+    ] = None,
+    gpus: Annotated[
+        str,
+        typer.Option(
+            help="GPU selection: auto, balanced, most-free, least-used, cpu, or a list like '0,1'."
+        ),
+    ] = "auto",
+    cpu: Annotated[bool, typer.Option(help="Force CPU-only mode (hide GPUs).")] = False,
+    force: Annotated[bool, typer.Option(help="Launch even when safety checks refuse.")] = False,
+    dry_run: Annotated[
+        bool, typer.Option(help="Plan only; do not launch a process.")
+    ] = False,
+) -> None:
+    """Launch a model session (or plan it with --dry-run)."""
+    from llmctl.services.scheduler import SchedulerError
+
+    with _session() as db:
+        request = _build_start_request(db, model_id, profile, gpus, cpu, force, dry_run)
+        try:
+            session = SessionService(db).start(request)
+        except SchedulerError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    if session.launch_plan is not None:
+        _print_plan_warnings(session.launch_plan)
+    if session.status.value == "running":
+        console.print(
+            f"[green]Started session[/green] {session.id} "
+            f"pid={session.pid} -> {session.endpoint_url}"
+        )
+    elif session.status.value == "planned":
+        console.print(
+            f"[cyan]Planned session[/cyan] {session.id} "
+            f"({session.runtime.value}); no process launched."
+        )
+    else:
+        console.print(
+            f"[red]Session {session.id} {session.status.value}[/red]: {session.error}"
+        )
+
+
+@app.command()
+def plan(
+    model_id: Annotated[str, typer.Argument(help="Model ID to plan a launch for.")],
+    profile: Annotated[str | None, typer.Option(help="Profile name.")] = None,
+    gpus: Annotated[
+        str,
+        typer.Option(
+            help="GPU selection: auto, balanced, most-free, least-used, cpu, or a list like '0,1'."
+        ),
+    ] = "auto",
+    cpu: Annotated[bool, typer.Option(help="Plan CPU-only mode (hide GPUs).")] = False,
+) -> None:
+    """Print the launch plan for a model without launching anything."""
+    with _session() as db:
+        request = _build_start_request(db, model_id, profile, gpus, cpu, force=False, dry_run=True)
+        launch_plan = SessionService(db).plan(request)
+
+    table = Table(title="Launch Plan", show_header=False)
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    table.add_row("Model", f"{launch_plan.model_name or launch_plan.model_id} ")
+    table.add_row("Backend", launch_plan.runtime.value)
+    table.add_row("Profile", launch_plan.profile_name or "-")
+    table.add_row("GPU mode", launch_plan.gpu_selection_mode)
+    table.add_row("Selected GPUs", ",".join(map(str, launch_plan.gpu_ids)) or "cpu")
+    table.add_row("Tensor parallel", str(launch_plan.tensor_parallel_size))
+    table.add_row("Port", str(launch_plan.port or "-"))
+    table.add_row("Endpoint", launch_plan.endpoint_url or "-")
+    est = (
+        "unknown"
+        if launch_plan.estimated_vram_gb is None
+        else f"{launch_plan.estimated_vram_gb:.1f} GB"
+    )
+    free = "n/a" if launch_plan.free_vram_gb is None else f"{launch_plan.free_vram_gb:.1f} GB"
+    table.add_row("Estimated VRAM", est)
+    table.add_row("Free VRAM", free)
+    table.add_row("Command", launch_plan.command_preview)
+    console.print(table)
+    _print_plan_warnings(launch_plan)
+    if launch_plan.refusal_reasons:
+        console.print(
+            "[red]This launch would be refused (use --force on `start` to override).[/red]"
+        )
+    else:
+        console.print("[green]This launch is allowed.[/green]")
+
+
+@app.command()
+def doctor() -> None:
+    """Report backend binaries, GPU telemetry, and scheduler configuration."""
+    from llmctl.services.backends import detect_backends
+    from llmctl.telemetry.gpu import nvml_available
+
+    settings = load_settings()
+    backends = detect_backends(settings)
+    table = Table(title="Backend Binaries")
+    table.add_column("Backend")
+    table.add_column("Binary")
+    table.add_column("Available")
+    table.add_column("Path")
+    for entry in backends:
+        available = "[green]yes[/green]" if entry["available"] else "[red]no[/red]"
+        table.add_row(
+            str(entry["backend"]),
+            str(entry["binary"]),
+            available,
+            str(entry["path"] or "-"),
+        )
+    console.print(table)
+
+    gpus_info = get_gpu_info()
+    console.print(
+        f"[bold]GPUs:[/bold] {len(gpus_info)}  "
+        f"[bold]NVML:[/bold] {nvml_available()}  "
+        f"[bold]Safe mode:[/bold] {settings.app.safe_mode}"
+    )
+    sched = settings.scheduler
+    console.print(
+        f"[bold]Scheduler:[/bold] policy={sched.gpu_policy} "
+        f"safety_margin={sched.safety_margin_gb}GB "
+        f"public_bind={sched.allow_public_bind} default_host={sched.default_host}"
+    )
+    missing = [b["backend"] for b in backends if not b["available"]]
+    if missing:
+        console.print(f"[yellow]Missing backends:[/yellow] {', '.join(missing)}")
+
+
+@app.command()
+def cleanup(
+    remove_stale: Annotated[
+        bool, typer.Option(help="Delete stopped/failed session records.")
+    ] = False,
+) -> None:
+    """Detect dead sessions, free their ports, and optionally purge stale records."""
+    with _session() as db:
+        report = SessionService(db).cleanup(remove_stale=remove_stale)
+    console.print(
+        f"[green]Cleanup complete.[/green] "
+        f"dead_marked={report['dead_marked']} "
+        f"stale_removed={report['stale_removed']} "
+        f"active_remaining={report['active_remaining']}"
+    )
+    freed = report["freed_ports"]
+    if freed:
+        console.print(f"[cyan]Freed ports:[/cyan] {', '.join(map(str, freed))}")
+
+
+@app.command()
+def stop(session_id: Annotated[str, typer.Argument(help="Session ID to stop.")]) -> None:
+    """Mark a session stopped safely."""
+    with _session() as db:
+        session = SessionService(db).stop(session_id)
+    if not session:
+        raise typer.BadParameter(f"Session not found: {session_id}")
+    console.print(f"[green]Session marked stopped[/green] {session_id}")
+
+
+@app.command()
+def restart(session_id: Annotated[str, typer.Argument(help="Session ID to restart-plan.")]) -> None:
+    """Plan a safe session restart."""
+    with _session() as db:
+        session = SessionService(db).restart(session_id)
+    if not session:
+        raise typer.BadParameter(f"Session not found: {session_id}")
+    console.print(f"[cyan]Restart planned[/cyan] {session_id}; no process launched.")
+
+
+@app.command()
+def logs(
+    session_id: Annotated[
+        str | None, typer.Argument(help="Session ID to tail logs for.")
+    ] = None,
+    lines: Annotated[int, typer.Option(help="Number of log lines / events to show.")] = 50,
+) -> None:
+    """Tail a session's log file, or show recent events when no ID is given."""
+    from llmctl.services.events import list_events
+
+    if session_id:
+        with _session() as db:
+            content = SessionService(db).tail_log(session_id, lines=lines)
+        if content is None:
+            raise typer.BadParameter(f"Session not found: {session_id}")
+        if not content:
+            console.print("[yellow]No log output for this session yet.[/yellow]")
+        else:
+            console.print(content)
+        return
+
+    with _session() as db:
+        events = list_events(db, limit=lines)
+    if not events:
+        console.print("[yellow]No events recorded yet.[/yellow]")
+        return
+    table = Table(title=f"Recent Events (latest {lines})")
+    table.add_column("Time")
+    table.add_column("Level")
+    table.add_column("Category")
+    table.add_column("Message")
+    for event in events:
+        table.add_row(
+            event.created_at.isoformat(timespec="seconds"),
+            event.level.value,
+            event.category,
+            event.message,
+        )
+    console.print(table)
+
+
+@app.command()
+def profiles() -> None:
+    """List available launch profiles."""
+    from llmctl.services.profiles import ProfileService
+
+    with _session() as db:
+        items = ProfileService(db).list_profiles()
+    table = Table(title="Profiles")
+    table.add_column("Name")
+    table.add_column("Runtime")
+    table.add_column("Description")
+    for item in items:
+        table.add_row(item.name, item.runtime.value, item.description or "")
+    console.print(table)
+
+
+@app.command()
+def health() -> None:
+    """Show overall and per-runtime health."""
+    from llmctl.services.health import HealthService
+
+    data = HealthService(load_settings()).get_health()
+    console.print(
+        f"[bold]State:[/bold] {data['state']}  "
+        f"[bold]Safe mode:[/bold] {data['safe_mode']}  "
+        f"[bold]GPUs:[/bold] {data['gpu_count']}  "
+        f"[bold]NVML:[/bold] {data['nvml_available']}"
+    )
+    table = Table(title="Runtime Health")
+    table.add_column("Runtime")
+    table.add_column("State")
+    table.add_column("Message")
+    for name, info in data["runtimes"].items():
+        table.add_row(name, info["state"], info["message"])
+    console.print(table)
+
+
+@app.command()
+def bench(
+    name: Annotated[str, typer.Option(help="Benchmark name.")] = "smoke",
+    model_id: Annotated[str | None, typer.Option(help="Model ID to benchmark.")] = None,
+    session_id: Annotated[str | None, typer.Option(help="Running session ID to target.")] = None,
+    prompt: Annotated[
+        list[str] | None, typer.Option(help="Prompt to send (repeatable).")
+    ] = None,
+    max_tokens: Annotated[int, typer.Option(help="Max completion tokens per prompt.")] = 64,
+    concurrency: Annotated[
+        int, typer.Option(help="Parallel in-flight requests (load level).")
+    ] = 1,
+    sweep: Annotated[
+        str | None,
+        typer.Option(help="Concurrency sweep, e.g. '1,2,4,8' (overrides --concurrency)."),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--no-dry-run",
+            help="Synthetic mock run vs. real execution against a live endpoint.",
+        ),
+    ] = True,
+) -> None:
+    """Benchmark a model: real execution when reachable, else a mock fallback."""
+    sweep_levels = (
+        [int(part) for part in sweep.split(",") if part.strip()] if sweep else []
+    )
+    payload = BenchmarkRunRequest(
+        name=name,
+        model_id=model_id,
+        session_id=session_id,
+        prompts=list(prompt) if prompt else [],
+        parameters={"max_tokens": max_tokens},
+        concurrency=concurrency,
+        sweep=sweep_levels,
+        dry_run=dry_run,
+    )
+    if sweep_levels:
+        with _session() as db:
+            results = BenchmarkService(db).run_sweep(payload)
+        table = Table(title=f"Benchmark sweep: {name}")
+        table.add_column("Concurrency", style="cyan")
+        table.add_column("Mode")
+        table.add_column("Throughput")
+        table.add_column("TTFT")
+        for item in results:
+            level = item.parameters.get("concurrency", "?")
+            mode = str(item.parameters.get("mode", "?"))
+            tps = "n/a" if item.tokens_per_second is None else f"{item.tokens_per_second:.1f} tok/s"
+            ttft = (
+                "n/a"
+                if item.time_to_first_token_ms is None
+                else f"{item.time_to_first_token_ms:.1f} ms"
+            )
+            table.add_row(str(level), mode, tps, ttft)
+        console.print(table)
+        return
+    with _session() as db:
+        result = BenchmarkService(db).run(payload)
+    mode = str(result.parameters.get("mode", "?"))
+    reason = result.parameters.get("reason")
+    table = Table(title=f"Benchmark: {result.name}", show_header=False)
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    mode_color = "green" if mode == "live" else "yellow"
+    table.add_row("Mode", f"[{mode_color}]{mode}[/{mode_color}]")
+    if reason:
+        table.add_row("Reason", str(reason))
+    table.add_row("Concurrency", str(result.parameters.get("concurrency", 1)))
+    table.add_row("Prompt tokens", str(result.prompt_tokens))
+    table.add_row("Completion tokens", str(result.completion_tokens))
+    table.add_row("Total tokens", str(result.total_tokens))
+    latency = "n/a" if result.latency_ms is None else f"{result.latency_ms:.1f} ms"
+    tps = "n/a" if result.tokens_per_second is None else f"{result.tokens_per_second:.1f} tok/s"
+    table.add_row("Latency", latency)
+    table.add_row("Throughput", tps)
+    ttft = (
+        "n/a"
+        if result.time_to_first_token_ms is None
+        else f"{result.time_to_first_token_ms:.1f} ms"
+    )
+    table.add_row("Time to first token", ttft)
+    console.print(table)
+    if mode == "mock":
+        console.print(
+            "[yellow]Mock fallback used[/yellow] (no live runtime). "
+            "Run with [bold]--no-dry-run[/bold] against a started session for real metrics."
+        )
+
+
+@app.command()
+def tui() -> None:
+    """Launch the Textual TUI skeleton."""
+    from llmctl.tui.app import MissionControlApp
+
+    MissionControlApp().run()
+
+
+@app.command()
+def serve(
+    host: Annotated[str | None, typer.Option(help="Bind host; defaults to settings.")] = None,
+    port: Annotated[int | None, typer.Option(help="Bind port; defaults to settings.")] = None,
+) -> None:
+    """Serve the FastAPI scaffold."""
+    settings = load_settings()
+    uvicorn.run(
+        create_app(settings),
+        host=host or settings.api.host,
+        port=port or settings.api.port,
+    )
+
+
+@app.command("generate-systemd")
+def generate_systemd(
+    user: Annotated[bool, typer.Option(help="Generate a user service unit.")] = True,
+    output: Annotated[
+        Path | None, typer.Option(help="Write the unit to this file instead of stdout.")
+    ] = None,
+) -> None:
+    """Generate a systemd unit for the Mission Control API."""
+    from llmctl.services.systemd import render_api_unit
+
+    unit = render_api_unit(load_settings(), user=user)
+    _emit_unit(unit, output)
+
+
+@app.command("generate-systemd-session")
+def generate_systemd_session(
+    session_id: Annotated[str, typer.Argument(help="Session ID to persist.")],
+    user: Annotated[bool, typer.Option(help="Generate a user service unit.")] = True,
+    output: Annotated[
+        Path | None, typer.Option(help="Write the unit to this file instead of stdout.")
+    ] = None,
+) -> None:
+    """Generate a systemd unit that relaunches a session on boot."""
+    from llmctl.services.systemd import render_session_unit
+
+    with _session() as db:
+        session = SessionService(db).get_session(session_id)
+    if session is None:
+        raise typer.BadParameter(f"Session not found: {session_id}")
+    unit = render_session_unit(session, user=user)
+    _emit_unit(unit, output)
+
+
+@app.command("install-systemd")
+def install_systemd(
+    session_id: Annotated[
+        str | None, typer.Option(help="Install a session unit instead of the API unit.")
+    ] = None,
+    all_sessions: Annotated[
+        bool, typer.Option("--all", help="Install a unit for every active session.")
+    ] = False,
+    user: Annotated[bool, typer.Option(help="Install as a user service unit.")] = True,
+    enable: Annotated[bool, typer.Option(help="Enable and start the unit after writing.")] = True,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--no-dry-run",
+            help="Preview the install actions without writing or enabling anything.",
+        ),
+    ] = True,
+) -> None:
+    """Write and enable a systemd unit for the API or a session (safe dry-run default)."""
+    from llmctl.services.systemd import (
+        install_unit,
+        render_api_unit,
+        render_session_unit,
+    )
+
+    def _install(unit: object) -> None:
+        for warning in unit.warnings:  # type: ignore[attr-defined]
+            console.print(f"[yellow]warning:[/yellow] {warning}")
+        report = install_unit(unit, dry_run=dry_run, enable=enable)  # type: ignore[arg-type]
+        header = "DRY RUN - would run" if report.dry_run else "Install report"
+        color = "yellow" if report.dry_run else "green"
+        console.print(
+            f"[{color}]{header}[/{color}] for {unit.name} -> {report.unit_path}"  # type: ignore[attr-defined]
+        )
+        for action in report.actions:
+            console.print(f"  - {action}")
+        for message in report.messages:
+            console.print(f"  [cyan]{message}[/cyan]")
+
+    if all_sessions:
+        active_states = {"running", "starting", "planned"}
+        with _session() as db:
+            sessions = SessionService(db).list_sessions()
+        active = [s for s in sessions if s.status.value in active_states]
+        if not active:
+            console.print("[yellow]No active sessions to persist.[/yellow]")
+            return
+        console.print(f"[cyan]Persisting {len(active)} active session(s).[/cyan]")
+        for session in active:
+            _install(render_session_unit(session, user=user))
+        return
+
+    if session_id:
+        with _session() as db:
+            session = SessionService(db).get_session(session_id)
+        if session is None:
+            raise typer.BadParameter(f"Session not found: {session_id}")
+        unit = render_session_unit(session, user=user)
+    else:
+        unit = render_api_unit(load_settings(), user=user)
+    _install(unit)
+
+
+
+def _emit_unit(unit: object, output: Path | None) -> None:
+    """Print a rendered systemd unit (and warnings) or write it to a file."""
+    name = getattr(unit, "name", "unit.service")
+    content = getattr(unit, "content", "")
+    for warning in getattr(unit, "warnings", []) or []:
+        console.print(f"[yellow]warning:[/yellow] {warning}")
+    if output is not None:
+        output.write_text(content, encoding="utf-8")
+        console.print(f"[green]Wrote {name}[/green] -> {output}")
+        return
+    console.print(content)
+    console.print("[cyan]Install with:[/cyan]")
+    for command in unit.install_commands():  # type: ignore[attr-defined]
+        console.print(f"  {command}")

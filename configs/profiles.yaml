@@ -1,0 +1,78 @@
+profiles:
+  - name: fast
+    runtime: vllm
+    description: Low-latency single-GPU serving for small/medium models.
+    parameters:
+      max_model_len: 4096
+      gpu_memory_utilization: 0.85
+      dtype: auto
+      tensor_parallel_size: 1
+    gpu_policy:
+      strategy: prefer_most_free
+      allow_multi_gpu: false
+
+  - name: coding
+    runtime: vllm
+    description: Coding assistant profile with larger context.
+    parameters:
+      max_model_len: 16384
+      gpu_memory_utilization: 0.85
+      served_model_name: coder
+      tensor_parallel_size: 1
+    gpu_policy:
+      strategy: prefer_most_free
+      allow_multi_gpu: false
+
+  - name: reasoning
+    runtime: vllm
+    description: High-context reasoning profile with aggressive VRAM use.
+    parameters:
+      max_model_len: 32768
+      gpu_memory_utilization: 0.90
+      tensor_parallel_size: 1
+    gpu_policy:
+      strategy: prefer_most_free
+      allow_multi_gpu: false
+
+  - name: long-context
+    runtime: vllm
+    description: Very long context, dual-GPU tensor parallel.
+    parameters:
+      max_model_len: 131072
+      gpu_memory_utilization: 0.90
+      tensor_parallel_size: 2
+    gpu_policy:
+      strategy: explicit_or_most_free
+      allow_multi_gpu: true
+
+  - name: tutoring
+    runtime: llama_cpp
+    description: Friendly CPU/GPU-hybrid tutoring profile via llama.cpp.
+    parameters:
+      ctx_size: 8192
+      n_gpu_layers: -1
+    gpu_policy:
+      strategy: prefer_most_free
+      allow_multi_gpu: false
+
+  - name: adtech
+    runtime: vllm
+    description: Throughput-oriented profile for ad/marketing copy generation.
+    parameters:
+      max_model_len: 8192
+      gpu_memory_utilization: 0.88
+      dtype: float16
+      tensor_parallel_size: 1
+    gpu_policy:
+      strategy: prefer_most_free
+      allow_multi_gpu: false
+
+  - name: quant
+    runtime: llama_cpp
+    description: Quantized GGUF profile for memory-constrained hosts.
+    parameters:
+      ctx_size: 4096
+      n_gpu_layers: 35
+    gpu_policy:
+      strategy: prefer_most_free
+      allow_multi_gpu: false

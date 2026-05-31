@@ -1,0 +1,29 @@
+# Model discovery directories.
+# Keep machine-specific absolute paths out of source control. Operators can set
+# environment variables or edit this file locally.
+model_roots:
+  - name: hf-cache
+    enabled: true
+    env_var: HF_HOME
+    relative_path: hub
+    runtimes: [vllm, llama_cpp]
+  - name: ollama-library
+    enabled: true
+    env_var: OLLAMA_MODELS
+    relative_path: .
+    runtimes: [ollama]
+  - name: lm-studio-models
+    enabled: true
+    env_var: LMSTUDIO_MODELS_DIR
+    relative_path: .
+    runtimes: [lmstudio]
+scan:
+  follow_symlinks: false
+  max_depth: 4
+  include_patterns:
+    - "*.gguf"
+    - "config.json"
+    - "Modelfile"
+  exclude_patterns:
+    - ".git"
+    - "*.tmp"
