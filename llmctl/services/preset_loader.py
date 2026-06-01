@@ -19,10 +19,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from llmctl.config import VLLMDefaultsConfig
 from llmctl.integrations.vllm_env import VLLMLaunchSpec
 from llmctl.presets import Model, load_all, load_all_records
+from llmctl.schemas import Model as RegistryModel
+
+#: Resolution state of a preset against the Model registry.
+#:
+#: - ``"explicit"`` — preset.model_ref was set and matched a Model.id
+#: - ``"auto"``     — model_ref unset, fuzzy-matched on model_id/served_name
+#: - ``"missing"``  — model_ref set but no Model with that id exists
+#: - ``"unlinked"`` — no model_ref and no auto-match found
+LinkageState = Literal["explicit", "auto", "missing", "unlinked"]
 
 
 @dataclass(frozen=True)
@@ -37,6 +47,36 @@ class PresetView:
     tensor_parallel: int
     quantization: str
     source_path: Path | None
+    #: Populated when the loader is given a registry snapshot;
+    #: None when no resolution was attempted (e.g. CLI-only callers).
+    linked_model_id: str | None = None
+    linked_model_name: str | None = None
+    linkage_state: LinkageState | None = None
+
+
+def resolve_preset_link(
+    preset: Model,
+    models: list[RegistryModel],
+) -> tuple[RegistryModel | None, LinkageState]:
+    """Resolve a preset against the Model registry.
+
+    Order matters: an explicit ``model_ref`` always wins (even when it
+    points at nothing, surfaced as ``"missing"``), so a user who pinned
+    a registry id can see it broke rather than silently falling back to
+    fuzzy matching against a different row.
+    """
+    if preset.model_ref:
+        match = next((m for m in models if m.id == preset.model_ref), None)
+        return (match, "explicit" if match else "missing")
+
+    match = next((m for m in models if m.source == preset.model_id), None)
+    if match is None:
+        match = next(
+            (m for m in models if m.source == preset.served_name), None
+        )
+    if match is None:
+        match = next((m for m in models if m.name == preset.served_name), None)
+    return (match, "auto" if match else "unlinked")
 
 
 def model_to_launch_spec(
@@ -111,6 +151,26 @@ def model_to_launch_spec(
     )
 
 
+def preset_count_by_model(
+    *,
+    config_dir: Path | None = None,
+    models: list[RegistryModel],
+) -> dict[str, int]:
+    """Return ``{Model.id: count}`` of presets linking to each registry row.
+
+    Counts both explicit ``model_ref`` matches and auto-matches —
+    anything that resolves to a concrete Model. Models with no
+    referring presets are not present in the result.
+    """
+    records = load_all_records(config_dir=config_dir)
+    counts: dict[str, int] = {}
+    for record in records.values():
+        match, _ = resolve_preset_link(record.model, models)
+        if match and match.id:
+            counts[match.id] = counts.get(match.id, 0) + 1
+    return counts
+
+
 def load_presets(
     *,
     defaults: VLLMDefaultsConfig | None = None,
@@ -130,19 +190,40 @@ def load_presets(
     return {alias: model_to_launch_spec(model, defaults) for alias, model in models.items()}
 
 
-def load_preset_views(*, config_dir: Path | None = None) -> list[PresetView]:
-    """Return a metadata view of every loaded preset for CLI/TUI listing."""
+def load_preset_views(
+    *,
+    config_dir: Path | None = None,
+    models: list[RegistryModel] | None = None,
+) -> list[PresetView]:
+    """Return a metadata view of every loaded preset for CLI/TUI listing.
+
+    When ``models`` is provided, every view is enriched with linkage
+    info via :func:`resolve_preset_link`. CLI callers that don't need
+    the registry can pass ``None`` and the linkage fields stay ``None``.
+    """
     records = load_all_records(config_dir=config_dir)
-    return [
-        PresetView(
-            alias=alias,
-            served_name=record.model.served_name,
-            model_id=record.model.model_id,
-            family=record.model.family,
-            param_count_b=record.model.param_count_b,
-            tensor_parallel=record.model.tensor_parallel_size,
-            quantization=record.model.quantization,
-            source_path=record.source_path,
+    views: list[PresetView] = []
+    for alias, record in sorted(records.items()):
+        linked_id: str | None = None
+        linked_name: str | None = None
+        state: LinkageState | None = None
+        if models is not None:
+            match, state = resolve_preset_link(record.model, models)
+            linked_id = match.id if match else None
+            linked_name = match.name if match else None
+        views.append(
+            PresetView(
+                alias=alias,
+                served_name=record.model.served_name,
+                model_id=record.model.model_id,
+                family=record.model.family,
+                param_count_b=record.model.param_count_b,
+                tensor_parallel=record.model.tensor_parallel_size,
+                quantization=record.model.quantization,
+                source_path=record.source_path,
+                linked_model_id=linked_id,
+                linked_model_name=linked_name,
+                linkage_state=state,
+            )
         )
-        for alias, record in sorted(records.items())
-    ]
+    return views

@@ -59,8 +59,16 @@ def fake_views() -> list[PresetView]:
 
 
 def _patch_preset_loader(views: list[PresetView]):
-    """Patch screens_presets.load_preset_views to return our fixtures."""
-    return patch("llmctl.tui.screens_presets.load_preset_views", return_value=views)
+    """Patch the screen's data-layer fetch to return our fixtures.
+
+    The screen now goes through ``_data.get_preset_views_with_links``,
+    which queries the Model registry to fill linkage info. Tests that
+    don't care about linkage short-circuit it here.
+    """
+    return patch(
+        "llmctl.tui._data.get_preset_views_with_links",
+        return_value=views,
+    )
 
 
 def test_presets_screen_renders_rows(temp_db, fake_views) -> None:
@@ -342,3 +350,65 @@ def test_run_editor_on_preset_invokes_editor_and_revalidates(
 
     model = run_editor_on_preset(target, editor=[str(fake_editor)])
     assert model.model_id == "org/edited"
+
+
+def test_presets_screen_renders_linkage_column(temp_db) -> None:
+    """The new 'Linked' column appears with the right glyph per state."""
+    from textual.widgets import DataTable
+
+    linked_views = [
+        PresetView(
+            alias="auto-linked",
+            served_name="auto-linked",
+            model_id="org/x",
+            family=None,
+            param_count_b=None,
+            tensor_parallel=2,
+            quantization="awq",
+            source_path=None,
+            linked_model_id="m-1",
+            linked_model_name="x-model",
+            linkage_state="auto",
+        ),
+        PresetView(
+            alias="missing-ref",
+            served_name="missing-ref",
+            model_id="org/y",
+            family=None,
+            param_count_b=None,
+            tensor_parallel=2,
+            quantization="awq",
+            source_path=None,
+            linked_model_id=None,
+            linked_model_name=None,
+            linkage_state="missing",
+        ),
+    ]
+
+    async def _run() -> None:
+        with _patch_preset_loader(linked_views):
+            app = MissionControlApp()
+            async with app.run_test() as pilot:
+                await pilot.press("p")
+                for _ in range(150):
+                    await pilot.pause(0.05)
+                    if (
+                        isinstance(app.screen, PresetsScreen)
+                        and len(app.screen._row_aliases) >= 2
+                    ):
+                        break
+                assert isinstance(app.screen, PresetsScreen)
+                table = app.screen.query_one("#presets-table", DataTable)
+                # The 8th column is the new "Linked" cell.
+                col_count = len(table.columns)
+                assert col_count == 8
+                row_keys = list(table.rows.keys())
+                # auto-linked row shows the model name; missing row carries the warning glyph.
+                cell_auto = table.get_cell(row_keys[0], list(table.columns.keys())[7])
+                cell_missing = table.get_cell(
+                    row_keys[1], list(table.columns.keys())[7]
+                )
+                assert "x-model" in str(cell_auto)
+                assert "missing" in str(cell_missing)
+
+    asyncio.run(_run())

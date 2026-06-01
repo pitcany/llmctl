@@ -20,7 +20,7 @@ from textual.widgets import DataTable, Footer, Header, Static
 from llmctl.config import load_settings
 from llmctl.presets import Model as PresetModel
 from llmctl.presets import PresetSchemaError
-from llmctl.services.preset_loader import PresetView, load_preset_views
+from llmctl.services.preset_loader import PresetView
 from llmctl.services.vllm_orchestrator import (
     OrchestratorOptions,
     OrchestratorResult,
@@ -40,6 +40,24 @@ from llmctl.tui._modals_registry import (
     ConfirmDelete,
     DeleteModal,
 )
+
+
+def _format_link_cell(view: PresetView) -> str:
+    """Render the linkage badge for a preset row.
+
+    ``●`` linked (explicit model_ref), ``○`` auto-matched,
+    ``⚠`` model_ref set but registry has no such id, ``-`` no link.
+    Falls back to ``-`` when no resolution has been attempted.
+    """
+    state = view.linkage_state
+    if state is None or state == "unlinked":
+        return f"[{C_MUTED}]-[/]"
+    if state == "missing":
+        return f"[{C_ERR}]⚠ missing[/]"
+    glyph = "●" if state == "explicit" else "○"
+    color = C_OK if state == "explicit" else C_ACCENT
+    label = view.linked_model_name or (view.linked_model_id or "")
+    return f"[{color}]{glyph}[/] {label}"
 
 
 class PresetsScreen(DataScreen):
@@ -76,14 +94,21 @@ class PresetsScreen(DataScreen):
         )
         table: DataTable[str] = DataTable(id="presets-table", cursor_type="row")
         table.add_columns(
-            "Alias", "Served name", "Model ID", "Family", "Size (B)", "TP", "Quant"
+            "Alias",
+            "Served name",
+            "Model ID",
+            "Family",
+            "Size (B)",
+            "TP",
+            "Quant",
+            "Linked",
         )
         yield table
         yield Footer()
 
     def fetch(self) -> Any:
-        """Load all preset views (runs in a worker thread)."""
-        return load_preset_views()
+        """Load all preset views, including registry linkage (worker thread)."""
+        return _data.get_preset_views_with_links()
 
     def render_data(self, data: Any) -> None:
         """Render the preset table, preserving the cursor position."""
@@ -103,6 +128,7 @@ class PresetsScreen(DataScreen):
                 "-",
                 "-",
                 "-",
+                "-",
             )
             return
 
@@ -115,6 +141,7 @@ class PresetsScreen(DataScreen):
                 f"{v.param_count_b:.0f}" if v.param_count_b else "-",
                 str(v.tensor_parallel),
                 v.quantization,
+                _format_link_cell(v),
             )
         if 0 <= cursor < len(self._row_aliases):
             table.move_cursor(row=cursor)

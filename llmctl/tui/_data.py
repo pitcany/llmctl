@@ -166,6 +166,24 @@ class PresetValidationError(ValueError):
     """Raised when the TUI submits a preset payload that fails the schema."""
 
 
+def get_preset_views_with_links() -> list[Any]:
+    """Return preset views enriched with registry linkage info."""
+    from llmctl.services.preset_loader import load_preset_views
+
+    with db_session() as db:
+        models = RegistryService(db).list_models()
+    return load_preset_views(models=models)
+
+
+def get_preset_count_by_model() -> dict[str, int]:
+    """Return ``{Model.id: preset_count}`` for the Models screen."""
+    from llmctl.services.preset_loader import preset_count_by_model
+
+    with db_session() as db:
+        models = RegistryService(db).list_models()
+    return preset_count_by_model(models=models)
+
+
 def get_preset(alias: str) -> PresetModel | None:
     """Return the canonical preset for ``alias`` or None."""
     record = _load_preset_records().get(alias)

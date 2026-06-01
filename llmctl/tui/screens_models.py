@@ -8,6 +8,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Header, Static
 
+from llmctl.schemas import ModelCreate, ModelUpdate
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, DataScreen
 from llmctl.tui._modals import LaunchPlanModal
@@ -18,7 +19,6 @@ from llmctl.tui._modals_registry import (
     DeleteModal,
     ModelFormModal,
 )
-from llmctl.schemas import ModelCreate, ModelUpdate
 
 
 class ModelsScreen(DataScreen):
@@ -52,18 +52,32 @@ class ModelsScreen(DataScreen):
             id="models-title",
         )
         table: DataTable[str] = DataTable(id="models-table", cursor_type="row")
-        table.add_columns("ID", "Name", "Runtime", "Backend", "Status", "Quant", "Path")
+        table.add_columns(
+            "ID",
+            "Name",
+            "Runtime",
+            "Backend",
+            "Status",
+            "Quant",
+            "Path",
+            "Presets",
+        )
         yield table
         yield Footer()
 
     def fetch(self) -> Any:
-        """Return the current model list plus backend availability."""
-        return {"models": _data.get_models(), "availability": _data.get_backend_map()}
+        """Return the current model list, backend availability, preset counts."""
+        return {
+            "models": _data.get_models(),
+            "availability": _data.get_backend_map(),
+            "preset_counts": _data.get_preset_count_by_model(),
+        }
 
     def render_data(self, data: Any) -> None:
         """Render the models table, dimming models with a missing backend."""
         models = data["models"]
         availability = data["availability"]
+        preset_counts: dict[str, int] = data.get("preset_counts", {})
         table = self.query_one("#models-table", DataTable)
         cursor = table.cursor_row
         table.clear()
@@ -81,6 +95,8 @@ class ModelsScreen(DataScreen):
             else:
                 backend_cell = f"[{C_ERR}]no binary[/]"
                 name_cell = f"[{C_MUTED}]{model.name}[/]"
+            count = preset_counts.get(mid, 0)
+            preset_cell = str(count) if count else f"[{C_MUTED}]-[/]"
             table.add_row(
                 mid[:8],
                 name_cell,
@@ -89,9 +105,12 @@ class ModelsScreen(DataScreen):
                 model.status.value,
                 model.quantization or "-",
                 (model.path or "-")[-32:],
+                preset_cell,
             )
         if not models:
-            table.add_row("-", "No models registered (ctrl+s to scan)", "-", "-", "-", "-", "-")
+            table.add_row(
+                "-", "No models registered (ctrl+s to scan)", "-", "-", "-", "-", "-", "-"
+            )
         if 0 <= cursor < len(self._ids):
             table.move_cursor(row=cursor)
 

@@ -68,6 +68,15 @@ class Model(BaseModel):
     tool_parser: str | None = None
     reasoning_parser: str | None = None
 
+    model_ref: str | None = Field(
+        default=None,
+        description=(
+            "Optional Model registry id. When set, the TUI/CLI links "
+            "this preset to that registry row explicitly. When unset, "
+            "the loader auto-matches via model_id/served_name."
+        ),
+    )
+
     tq: bool | None = Field(
         default=None,
         description="TurboQuant preference; None falls back to renderer defaults.",
