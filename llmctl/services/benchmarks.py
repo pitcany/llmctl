@@ -361,6 +361,8 @@ class BenchmarkService:
             return self._mock(request, prompts, params, "dry-run requested")
         target = self._resolve_target(request)
         if target is None:
+            if request.require_live:
+                return self._no_endpoint_failure(request, prompts, params)
             return self._mock(
                 request, prompts, params, "no reachable runtime endpoint"
             )
@@ -413,12 +415,30 @@ class BenchmarkService:
             if model:
                 name = model.source or model.name
                 backend = model.runtime.value
+                # Match owned sessions first (started by llmctl, model_id set).
                 running = self.db.exec(
                     select(SessionRecord).where(
                         SessionRecord.model_id == model.id,
                         SessionRecord.status == SessionStatus.RUNNING,
                     )
                 ).first()
+                # Adopted sessions (e.g. vllm-tp.service tracked via
+                # `llmctl adopt`) carry served_name but not model_id, so fall
+                # back to matching the served name against model.source / .name.
+                if running is None and name:
+                    running = self.db.exec(
+                        select(SessionRecord).where(
+                            SessionRecord.served_name == name,
+                            SessionRecord.status == SessionStatus.RUNNING,
+                        )
+                    ).first()
+                if running is None and model.name and model.name != name:
+                    running = self.db.exec(
+                        select(SessionRecord).where(
+                            SessionRecord.served_name == model.name,
+                            SessionRecord.status == SessionStatus.RUNNING,
+                        )
+                    ).first()
                 if running and running.endpoint_url:
                     return running.endpoint_url, name, backend
                 config = self.settings.runtime_config(model.runtime.value)
@@ -715,6 +735,45 @@ class BenchmarkService:
             "backend": target.backend,
             "success": False,
             "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    def _no_endpoint_failure(
+        self,
+        request: BenchmarkRunRequest,
+        prompts: list[str],
+        params: dict[str, object],
+    ) -> dict[str, object]:
+        """Persist a strict-live miss as ``success=False`` with a hint.
+
+        Used when the caller passes ``require_live=True`` (e.g. the TUI when
+        the operator explicitly picked "live" mode) so endpoint
+        misconfiguration surfaces in the history instead of being papered
+        over by a synthetic mock result.
+        """
+        hint = (
+            "No live endpoint resolved for this model. "
+            "Adopt the running runtime (e.g. `llmctl adopt vllm <url>`) "
+            "or pick the 'mock' mode if a synthetic run is what you want."
+        )
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "latency_ms": None,
+            "tokens_per_second": None,
+            "ttft_ms": None,
+            "samples": [],
+            "parameters": {
+                **params,
+                "mode": "live",
+                "reason": "no reachable runtime endpoint",
+                "kind": request.kind.value,
+                "prompt_count": len(prompts),
+                "concurrency": max(1, int(params.get("concurrency", 1))),
+            },
+            "backend": None,
+            "success": False,
+            "error": hint,
         }
 
     def _mock(

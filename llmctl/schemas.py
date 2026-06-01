@@ -295,6 +295,11 @@ class BenchmarkRunRequest(BaseModel):
     concurrency: int = 1
     sweep: list[int] = Field(default_factory=list)
     dry_run: bool = False
+    #: When True, refuse to silently mock-fallback if no endpoint resolves.
+    #: The TUI sets this whenever the operator explicitly picks "live" mode
+    #: so a misconfigured endpoint surfaces as a failure record instead of
+    #: a green-but-fake row in the history.
+    require_live: bool = False
 
 
 class AdapterStatus(BaseModel):

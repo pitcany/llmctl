@@ -108,6 +108,73 @@ def test_benchmark_no_endpoint_falls_back_to_mock(db: Session) -> None:
     assert result.parameters["reason"] == "no reachable runtime endpoint"
 
 
+def test_benchmark_require_live_records_failure_when_no_endpoint(db: Session) -> None:
+    """Strict-live opts out of the mock fallback — record a failure instead."""
+    model_id = RegistryService(db).add_model(
+        ModelCreate(name="v", runtime="vllm", source="org/model")
+    ).id
+    result = BenchmarkService(db).run(
+        BenchmarkRunRequest(
+            name="strict", model_id=model_id, dry_run=False, require_live=True
+        )
+    )
+    assert result.success is False
+    assert result.parameters["mode"] == "live"
+    assert "endpoint" in (result.error or "").lower()
+
+
+def test_benchmark_resolves_adopted_endpoint_by_served_name(
+    db: Session, tmp_path: Path
+) -> None:
+    """Adopted vLLM sessions (model_id=None) must still resolve by served_name."""
+    from llmctl.db import SessionKind, SessionRecord, SessionStatus, utcnow
+    from llmctl.schemas import RuntimeName
+
+    # Stand up an adopted session row the way `llmctl adopt` would.
+    served = "llama-3.3-70b"
+    model_id = RegistryService(db).add_model(
+        ModelCreate(name=served, runtime="vllm", source=served)
+    ).id
+    db.add(
+        SessionRecord(
+            runtime=RuntimeName.VLLM,
+            status=SessionStatus.RUNNING,
+            kind=SessionKind.ADOPTED,
+            port=8003,
+            endpoint_url="http://127.0.0.1:8003",
+            served_name=served,
+            adopted_at=utcnow(),
+            started_at=utcnow(),
+        )
+    )
+    db.commit()
+
+    # Stream a single-chunk SSE so the live runner completes.
+    sse = (
+        'data: {"choices":[{"delta":{"content":"ok"}}],'
+        '"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, content=sse.encode("utf-8"))
+
+    factory = lambda: httpx.Client(transport=httpx.MockTransport(handler))  # noqa: E731
+    result = BenchmarkService(db, client_factory=factory).run(
+        BenchmarkRunRequest(
+            name="adopted",
+            model_id=model_id,
+            dry_run=False,
+            require_live=True,
+        )
+    )
+    assert result.success is True
+    assert result.parameters["mode"] == "live"
+    assert captured["url"].startswith("http://127.0.0.1:8003/")
+
+
 def test_benchmark_concurrency_live(db: Session) -> None:
     model_id = _ollama_model(db)
     sse = (

@@ -34,6 +34,10 @@ class BenchmarkLaunch:
     max_tokens: int
     context_length: int | None
     dry_run: bool
+    #: True when the operator explicitly picked "live" (vs. left blank).
+    #: The screen forwards this to the service as ``require_live`` so a
+    #: missing endpoint records a failure rather than a silent mock.
+    require_live: bool
 
 
 _KIND_OPTIONS: list[tuple[str, str]] = [
@@ -112,7 +116,9 @@ class BenchmarkLaunchModal(ModalScreen[BenchmarkLaunch | None]):
             yield Input(value="", id="bench-context-length")
 
             yield Label(
-                "Mode: blank = live (real run); 'mock' = synthetic dry-run"
+                "Mode: blank = live (best-effort, mocks if no endpoint); "
+                "'live' = strict (fails if no endpoint); "
+                "'mock' = synthetic dry-run"
             )
             yield Input(value="", id="bench-mode")
 
@@ -184,6 +190,10 @@ class BenchmarkLaunchModal(ModalScreen[BenchmarkLaunch | None]):
         if mode not in {"", "live", "mock"}:
             raise ValueError("Mode must be blank, 'live', or 'mock'.")
         dry_run = mode == "mock"
+        # Blank defaults to live but tolerates an endpoint miss; an explicit
+        # "live" is a contract that we should fail loudly if no endpoint
+        # resolves, instead of silently mocking.
+        require_live = mode == "live"
         return BenchmarkLaunch(
             model_id=model_id,
             kind=kind,
@@ -191,6 +201,7 @@ class BenchmarkLaunchModal(ModalScreen[BenchmarkLaunch | None]):
             max_tokens=max_tokens,
             context_length=context_length,
             dry_run=dry_run,
+            require_live=require_live,
         )
 
     def _show_error(self, message: str) -> None:

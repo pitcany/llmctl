@@ -115,6 +115,7 @@ def test_launch_modal_dispatches_run_with_chosen_kind(temp_db) -> None:
                     max_tokens=256,
                     context_length=None,
                     dry_run=False,
+                    require_live=True,
                 )
                 screen._on_launch_chosen(launch)
                 # Worker runs off-thread; wait until our fake records the call.
@@ -128,6 +129,7 @@ def test_launch_modal_dispatches_run_with_chosen_kind(temp_db) -> None:
     assert captured["kind"] == BenchmarkKind.HEALTH
     assert captured["name"] == "probe"
     assert captured["dry_run"] is False
+    assert captured["require_live"] is True
 
 
 def test_delete_action_invokes_data_layer(temp_db) -> None:
