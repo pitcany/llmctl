@@ -235,7 +235,19 @@ class TestRuntimeAdapters:
         assert runtimes == required_runtimes
 
     def test_adapter_safety_constraints(self):
-        """Test adapters are safe placeholders."""
+        """Test the adapter's safety contract.
+
+        Originally asserted ``discover_models() == []`` because the vLLM
+        adapter was a no-op scaffold. After Phase A wired live HTTP
+        probes against managed-unit ports, that assertion would fail
+        on any host that actually serves vLLM (e.g. yannik-desktop).
+        The contract that still matters is:
+
+        * ``dry_run=True`` start MUST return a PLANNED session (no
+          process launched), and
+        * ``health_check`` MUST return a status keyed to the right
+          runtime (i.e. it's safe to call against any host).
+        """
         import asyncio
 
         from llmctl.schemas import LaunchPlan
@@ -243,16 +255,10 @@ class TestRuntimeAdapters:
         router = RuntimeRouter()
         adapter = router.get_adapter(RuntimeName.VLLM)
 
-        # Test discover returns empty list
-        models = asyncio.run(adapter.discover_models())
-        assert models == []
-
-        # Test start returns planned session
         plan = LaunchPlan(runtime=RuntimeName.VLLM, dry_run=True)
         session = asyncio.run(adapter.start(plan))
         assert session.status.value == "planned"
 
-        # Test health check
         health = asyncio.run(adapter.health_check())
         assert health.runtime == RuntimeName.VLLM
 

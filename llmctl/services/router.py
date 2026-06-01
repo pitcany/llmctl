@@ -32,7 +32,11 @@ class RuntimeRouter:
         )
         runtime_config = self.settings.runtime_config
         self.adapters: dict[RuntimeName, RuntimeAdapter] = {
-            RuntimeName.VLLM: VLLMAdapter(runtime_config("vllm"), self.supervisor),
+            RuntimeName.VLLM: VLLMAdapter(
+                runtime_config("vllm"),
+                self.supervisor,
+                managed_units=self.settings.managed_units,
+            ),
             RuntimeName.LLAMA_CPP: LlamaCppAdapter(runtime_config("llama_cpp"), self.supervisor),
             RuntimeName.LMSTUDIO: LMStudioAdapter(runtime_config("lmstudio").endpoint),
             RuntimeName.OLLAMA: OllamaAdapter(runtime_config("ollama").endpoint),
