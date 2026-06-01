@@ -245,6 +245,84 @@ def test_render_session_unit_server_runtime_warns(db: Session) -> None:
     assert "llmctl start" in unit.content
 
 
+def test_render_session_unit_refuses_adopted(db: Session) -> None:
+    """ADOPTED sessions have no llmctl-issued launch command; refuse loudly."""
+    from llmctl.db import RuntimeName as _Rt
+    from llmctl.db import SessionKind as _Kind
+    from llmctl.db import SessionRecord, SessionStatus, utcnow
+    from llmctl.services.sessions import AdoptError, record_to_session
+
+    record = SessionRecord(
+        runtime=_Rt.VLLM,
+        status=SessionStatus.RUNNING,
+        kind=_Kind.ADOPTED,
+        endpoint_url="http://127.0.0.1:8003",
+        port=8003,
+        served_name="llama-3.3-70b",
+        systemd_unit="vllm-tp.service",
+        adopted_at=utcnow(),
+        launch_plan={
+            "runtime": "vllm",
+            "command": [],
+            "endpoint_url": "http://127.0.0.1:8003",
+            "dry_run": False,
+        },
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    schema = record_to_session(record)
+    with pytest.raises(AdoptError, match="adopted"):
+        render_session_unit(schema, user=True)
+
+
+def test_api_systemd_unit_returns_409_for_adopted(tmp_path: Path) -> None:
+    """API /sessions/{id}/systemd-unit returns 409 for adopted sessions."""
+    from sqlmodel import Session as DBSession
+
+    from llmctl.db import (
+        RuntimeName as _Rt,
+    )
+    from llmctl.db import (
+        SessionKind as _Kind,
+    )
+    from llmctl.db import (
+        SessionRecord,
+        SessionStatus,
+        get_engine,
+        init_db,
+        utcnow,
+    )
+
+    db_url = f"sqlite:///{tmp_path / 'systemd-adopt.db'}"
+    init_db(db_url)
+    with DBSession(get_engine(db_url)) as db:
+        record = SessionRecord(
+            runtime=_Rt.VLLM,
+            status=SessionStatus.RUNNING,
+            kind=_Kind.ADOPTED,
+            endpoint_url="http://127.0.0.1:8003",
+            port=8003,
+            served_name="llama-3.3-70b",
+            systemd_unit="vllm-tp.service",
+            adopted_at=utcnow(),
+            launch_plan={
+                "runtime": "vllm",
+                "command": [],
+                "endpoint_url": "http://127.0.0.1:8003",
+                "dry_run": False,
+            },
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        session_id = record.id
+    client = TestClient(create_app(database_url=db_url))
+    resp = client.get(f"/sessions/{session_id}/systemd-unit")
+    assert resp.status_code == 409
+    assert "adopted" in resp.json()["detail"].lower()
+
+
 def test_session_systemd_unit_endpoint(tmp_path: Path) -> None:
     client = TestClient(create_app(database_url=f"sqlite:///{tmp_path / 'api.db'}"))
     model = client.post(
@@ -351,7 +429,7 @@ def test_install_systemd_all(tmp_path: Path, monkeypatch) -> None:
 
     result = CliRunner().invoke(cli_app, ["install-systemd", "--all", "--dry-run"])
     assert result.exit_code == 0
-    assert "Persisting 1 active session" in result.stdout
+    assert "Persisting 1 owned session" in result.stdout
     assert "DRY RUN" in result.stdout
     assert "llmctl-session-" in result.stdout
 

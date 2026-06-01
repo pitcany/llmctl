@@ -126,6 +126,14 @@ class RouterSettings(BaseModel):
     # Allow binding to anything other than 127.0.0.1 / localhost. Off by
     # default so a YAML typo can't open the router to LAN traffic.
     allow_public_bind: bool = False
+    # Background reconcile cadence for the gateway. Every interval the
+    # gateway probes adopted endpoints, marks dead ones STOPPED, and
+    # auto-revives systemd-restarted units back to RUNNING. Keeps
+    # ``GET /v1/models`` and ``llmctl sessions`` accurate without
+    # forcing those reads to do their own probing. ``0`` disables the
+    # background task (useful for tests and for setups where the user
+    # prefers explicit ``llmctl reconcile``).
+    reconcile_interval_s: int = 10
 
 
 class RuntimeConfig(BaseModel):

@@ -21,17 +21,19 @@ import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from llmctl.api.gateway import create_gateway_app
 from llmctl.config import RouterSettings, Settings
 from llmctl.db import (
     ProfileRecord,
     RuntimeName,
+    SessionKind,
     SessionRecord,
     SessionStatus,
     get_engine,
     init_db,
+    utcnow,
 )
 from llmctl.services.gateway import GatewayService
 
@@ -329,6 +331,198 @@ def test_resolves_via_profile_name(tmp_path: Path) -> None:
         )
     assert response.status_code == 200
     assert response.headers["x-llmctl-session"] == session_id
+
+
+# -- served_name column (Phase 4) + adopted routing -------------------------
+
+
+def _seed_adopted(
+    db_url: str,
+    *,
+    served_name: str,
+    endpoint_url: str,
+    systemd_unit: str | None = "vllm-tp.service",
+) -> str:
+    """Insert a RUNNING vLLM session with kind=ADOPTED and column-stored served_name."""
+    engine = get_engine(db_url)
+    with Session(engine) as db:
+        record = SessionRecord(
+            runtime=RuntimeName.VLLM,
+            status=SessionStatus.RUNNING,
+            kind=SessionKind.ADOPTED,
+            endpoint_url=endpoint_url,
+            health_url=f"{endpoint_url}/v1/models",
+            port=int(endpoint_url.rsplit(":", 1)[1]),
+            systemd_unit=systemd_unit,
+            served_name=served_name,
+            adopted_at=utcnow(),
+            launch_plan={"command": []},
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        return record.id
+
+
+def test_served_name_prefers_record_column(tmp_path: Path) -> None:
+    """When SessionRecord.served_name is set, it wins over launch_plan parsing."""
+    settings = _settings(tmp_path)
+    # Plant a launch_plan that would parse to "from-plan" so we can prove the
+    # column takes precedence.
+    engine = get_engine(settings.database.url)
+    with Session(engine) as db:
+        record = SessionRecord(
+            runtime=RuntimeName.VLLM,
+            status=SessionStatus.RUNNING,
+            endpoint_url="http://127.0.0.1:8003",
+            port=8003,
+            served_name="from-column",
+            launch_plan={
+                "command": ["vllm", "serve", "org/x", "--served-model-name", "from-plan"]
+            },
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        assert GatewayService._served_name(record) == "from-column"
+
+
+def test_served_name_falls_back_to_launch_plan_when_column_empty(tmp_path: Path) -> None:
+    """Legacy OWNED rows without a served_name column still parse from launch_plan."""
+    settings = _settings(tmp_path)
+    _seed_session(
+        settings.database.url,
+        served_name="from-plan",
+        endpoint_url="http://127.0.0.1:8003",
+    )
+    engine = get_engine(settings.database.url)
+    with Session(engine) as db:
+        record = db.exec(select(SessionRecord)).one()
+        assert record.served_name is None
+        assert GatewayService._served_name(record) == "from-plan"
+
+
+def test_adopted_session_appears_in_list_models(tmp_path: Path) -> None:
+    """An ADOPTED session is exposed via /v1/models under its column-stored served_name."""
+    settings = _settings(tmp_path)
+    _seed_adopted(
+        settings.database.url,
+        served_name="llama-3.3-70b",
+        endpoint_url="http://127.0.0.1:8003",
+    )
+    response = _client(settings).get("/v1/models")
+    assert response.status_code == 200
+    ids = {item["id"] for item in response.json()["data"]}
+    assert "llama-3.3-70b" in ids
+
+
+def test_adopted_session_resolves_and_routes(tmp_path: Path) -> None:
+    """End-to-end: adopted vllm-tp.service is routable through the gateway."""
+    settings = _settings(tmp_path)
+    session_id = _seed_adopted(
+        settings.database.url,
+        served_name="llama-3.3-70b",
+        endpoint_url="http://127.0.0.1:8003",
+    )
+    with respx.mock(assert_all_called=True) as router:
+        router.post("http://127.0.0.1:8003/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json={"ok": True})
+        )
+        response = _client(settings).post(
+            "/v1/chat/completions",
+            json={"model": "llama-3.3-70b", "messages": []},
+        )
+    assert response.status_code == 200
+    assert response.headers["x-llmctl-session"] == session_id
+
+
+# -- background reconcile (lifespan) -----------------------------------------
+
+
+def test_gateway_lifespan_runs_periodic_reconcile(tmp_path: Path) -> None:
+    """Booting the gateway should fire reconcile() at least once.
+
+    Inserts a STOPPED ADOPTED row whose endpoint is "alive" per the
+    monkeypatched probe; entering the TestClient context triggers the
+    FastAPI lifespan, which starts the background reconcile task; we
+    poll the DB briefly until the row flips to RUNNING (auto-revive).
+    """
+    import time
+
+    from llmctl.api import gateway as gateway_mod
+
+    settings = _settings(tmp_path)
+    settings.router.reconcile_interval_s = 0.05  # type: ignore[assignment]
+
+    engine = get_engine(settings.database.url)
+    with Session(engine) as db:
+        record = SessionRecord(
+            runtime=RuntimeName.VLLM,
+            status=SessionStatus.STOPPED,
+            kind=SessionKind.ADOPTED,
+            endpoint_url="http://127.0.0.1:8003",
+            port=8003,
+            served_name="llama-3.3-70b",
+            adopted_at=utcnow(),
+            launch_plan={"command": []},
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        session_id = record.id
+
+    def fake_reconcile_once(_engine: object) -> int:
+        from llmctl.services.sessions import SessionService
+
+        with Session(_engine) as db:  # type: ignore[arg-type]
+            svc = SessionService(db, probe=lambda _u, _t: ["llama-3.3-70b"])
+            return svc.reconcile()
+
+    original = gateway_mod._reconcile_once
+    gateway_mod._reconcile_once = fake_reconcile_once
+    try:
+        client = TestClient(create_gateway_app(settings, database_url=settings.database.url))
+        with client:
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                with Session(engine) as db:
+                    refreshed = db.exec(
+                        select(SessionRecord).where(SessionRecord.id == session_id)
+                    ).one()
+                    if refreshed.status == SessionStatus.RUNNING:
+                        break
+                time.sleep(0.05)
+        with Session(engine) as db:
+            final = db.exec(select(SessionRecord).where(SessionRecord.id == session_id)).one()
+        assert final.status == SessionStatus.RUNNING
+    finally:
+        gateway_mod._reconcile_once = original
+
+
+def test_gateway_lifespan_skips_reconcile_when_interval_zero(tmp_path: Path) -> None:
+    """reconcile_interval_s == 0 disables the background task entirely."""
+    import time
+
+    from llmctl.api import gateway as gateway_mod
+
+    settings = _settings(tmp_path)
+    settings.router.reconcile_interval_s = 0  # type: ignore[assignment]
+
+    calls = {"n": 0}
+
+    def counting_reconcile(_engine: object) -> int:
+        calls["n"] += 1
+        return 0
+
+    original = gateway_mod._reconcile_once
+    gateway_mod._reconcile_once = counting_reconcile
+    try:
+        client = TestClient(create_gateway_app(settings, database_url=settings.database.url))
+        with client:
+            time.sleep(0.2)
+        assert calls["n"] == 0
+    finally:
+        gateway_mod._reconcile_once = original
 
 
 @pytest.fixture(autouse=True)

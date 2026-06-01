@@ -228,22 +228,35 @@ class GatewayService:
 
     @staticmethod
     def _served_name(record: SessionRecord) -> str | None:
-        """Return the model id this session actually serves over HTTP."""
+        """Return the model id this session actually serves over HTTP.
+
+        Resolution order:
+
+        1. The explicit ``served_name`` column on the record. Adopted
+           sessions populate this at adopt time; future ``start`` paths
+           may also write it directly so the gateway never has to parse
+           a command line.
+        2. The launch plan's ``--served-model-name`` argument when set.
+           Legacy OWNED rows from before the column existed still get
+           routed correctly via this fallback.
+        3. The vLLM CLI's positional model argument (``vllm serve <id>``)
+           when no served-model-name override was passed.
+        4. The session id, as a last-resort stable address for
+           llama.cpp / python-script sessions that don't have a
+           canonical model name.
+        """
+        if record.served_name:
+            return record.served_name
         plan = record.launch_plan or {}
-        # Prefer the explicit served_model_name when the launch plan set one.
         if isinstance(plan, dict):
             params = plan.get("command") or []
             if isinstance(params, list):
                 for idx, token in enumerate(params):
                     if token == "--served-model-name" and idx + 1 < len(params):
                         return str(params[idx + 1])
-            # vLLM serves the HF repo id when no served-model-name override.
             command = plan.get("command")
             if isinstance(command, list) and len(command) >= 3 and command[1] == "serve":
                 return str(command[2])
-        # Llama.cpp / python-script sessions: use the session id as the served
-        # identity. They don't have a canonical "model name" the same way
-        # vLLM does, but a stable id is sufficient to address them.
         return record.id
 
     def _resolve_target_string(self, target: str | None) -> RouteTarget | None:

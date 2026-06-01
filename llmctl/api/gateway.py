@@ -29,7 +29,10 @@ unauthenticated caller enumerate the gateway's existence.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator, Generator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -41,11 +44,40 @@ from llmctl.api.deps import get_db_session
 from llmctl.config import Settings, load_settings
 from llmctl.db import SQLModel, apply_migrations, get_engine
 from llmctl.services.gateway import GatewayService, RouteTarget
+from llmctl.services.sessions import SessionService
+
+_LOGGER = logging.getLogger(__name__)
 
 # Chat/completions can take many minutes; the gateway is intentionally
 # patient with the upstream. Connect timeout stays short so a dead
 # upstream fails fast.
 _PROXY_TIMEOUT = httpx.Timeout(connect=5.0, read=600.0, write=60.0, pool=5.0)
+
+
+async def _periodic_reconcile(engine: Any, interval_s: float) -> None:
+    """Run ``SessionService.reconcile()`` every ``interval_s`` seconds.
+
+    Reconciles immediately on first tick (so a gateway restart picks up
+    stale adopted state without a delay), then sleeps. Each tick opens a
+    fresh DB session so the worker never holds a long-lived connection.
+    Probes are blocking I/O, so we run them in a thread to keep the event
+    loop responsive to actual proxy traffic.
+    """
+    while True:
+        try:
+            await asyncio.to_thread(_reconcile_once, engine)
+            await asyncio.sleep(interval_s)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - defensive
+            _LOGGER.exception("Background reconcile tick failed; will retry next interval.")
+            await asyncio.sleep(interval_s)
+
+
+def _reconcile_once(engine: Any) -> int:
+    """Open a DB session and run one reconcile pass."""
+    with Session(engine) as db:
+        return SessionService(db).reconcile()
 
 
 def create_gateway_app(
@@ -70,10 +102,37 @@ def create_gateway_app(
     SQLModel.metadata.create_all(engine)
     apply_migrations(engine)
 
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        """Run a periodic reconcile while the gateway is serving.
+
+        The gateway is the natural home for periodic reconcile: it's the
+        consumer that most needs fresh routing state, it's already a long-
+        lived process, and running reconcile here keeps ``GET /sessions``
+        and ``llmctl sessions`` accurate without forcing those reads to do
+        their own probing. ``interval == 0`` disables the task.
+        """
+        interval = effective_settings.router.reconcile_interval_s
+        task = (
+            asyncio.create_task(_periodic_reconcile(engine, interval))
+            if interval > 0
+            else None
+        )
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # pragma: no cover - shutdown path
+                    pass
+
     app = FastAPI(
         title="LLMCTL Gateway",
         version="0.1.0",
         description="Local OpenAI-compatible router for active llmctl sessions.",
+        lifespan=lifespan,
     )
 
     def session_dependency() -> Generator[Session, None, None]:

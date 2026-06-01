@@ -12,13 +12,13 @@ from rich.table import Table
 from sqlmodel import Session
 
 from llmctl.api.app import create_app
-from llmctl.config import load_settings
-from llmctl.db import get_engine, init_db
+from llmctl.config import ManagedUnitConfig, load_settings
+from llmctl.db import RuntimeName, get_engine, init_db
 from llmctl.schemas import BenchmarkRunRequest, ModelCreate, SessionStartRequest
 from llmctl.services.benchmarks import BenchmarkService
 from llmctl.services.preset_loader import load_preset_views
 from llmctl.services.registry import RegistryService
-from llmctl.services.sessions import SessionService
+from llmctl.services.sessions import AdoptError, SessionService
 from llmctl.services.vllm_orchestrator import (
     OrchestratorOptions,
     UnknownPresetError,
@@ -422,10 +422,32 @@ def cleanup(
 
 
 @app.command()
+def reconcile() -> None:
+    """Synchronize tracked sessions with reality.
+
+    For OWNED sessions: PID-check; mark STOPPED when the process is gone.
+    For ADOPTED sessions: HTTP-probe ``{endpoint}/v1/models``; flip
+    RUNNING↔STOPPED based on whether the upstream responds. The gateway
+    runs the same pass periodically (``router.reconcile_interval_s``);
+    this command is the explicit, on-demand equivalent.
+    """
+    with _session() as db:
+        changed = SessionService(db).reconcile()
+    if changed:
+        console.print(f"[green]Reconcile complete.[/green] {changed} session(s) transitioned.")
+    else:
+        console.print("[cyan]Reconcile complete.[/cyan] no changes.")
+
+
+@app.command()
 def stop(session_id: Annotated[str, typer.Argument(help="Session ID to stop.")]) -> None:
     """Mark a session stopped safely."""
     with _session() as db:
-        session = SessionService(db).stop(session_id)
+        try:
+            session = SessionService(db).stop(session_id)
+        except AdoptError as exc:
+            console.print(f"[red]Stop refused:[/red] {exc}")
+            raise typer.Exit(1) from exc
     if not session:
         raise typer.BadParameter(f"Session not found: {session_id}")
     console.print(f"[green]Session marked stopped[/green] {session_id}")
@@ -435,7 +457,11 @@ def stop(session_id: Annotated[str, typer.Argument(help="Session ID to stop.")])
 def restart(session_id: Annotated[str, typer.Argument(help="Session ID to restart-plan.")]) -> None:
     """Plan a safe session restart."""
     with _session() as db:
-        session = SessionService(db).restart(session_id)
+        try:
+            session = SessionService(db).restart(session_id)
+        except AdoptError as exc:
+            console.print(f"[red]Restart refused:[/red] {exc}")
+            raise typer.Exit(1) from exc
     if not session:
         raise typer.BadParameter(f"Session not found: {session_id}")
     console.print(f"[cyan]Restart planned[/cyan] {session_id}; no process launched.")
@@ -645,7 +671,11 @@ def generate_systemd_session(
         session = SessionService(db).get_session(session_id)
     if session is None:
         raise typer.BadParameter(f"Session not found: {session_id}")
-    unit = render_session_unit(session, user=user)
+    try:
+        unit = render_session_unit(session, user=user)
+    except AdoptError as exc:
+        console.print(f"[red]generate-systemd-session refused:[/red] {exc}")
+        raise typer.Exit(1) from exc
     _emit_unit(unit, output)
 
 
@@ -693,11 +723,21 @@ def install_systemd(
         with _session() as db:
             sessions = SessionService(db).list_sessions()
         active = [s for s in sessions if s.status.value in active_states]
-        if not active:
-            console.print("[yellow]No active sessions to persist.[/yellow]")
+        # ADOPTED sessions don't have an llmctl-issued launch command;
+        # their lifecycle belongs to the upstream systemd unit. Skip them
+        # rather than abort the whole --all batch.
+        owned = [s for s in active if s.kind.value != "adopted"]
+        skipped = [s for s in active if s.kind.value == "adopted"]
+        for s in skipped:
+            console.print(
+                f"[yellow]Skip adopted session[/yellow] {s.id} "
+                f"({s.systemd_unit or s.endpoint_url}); already managed by systemd."
+            )
+        if not owned:
+            console.print("[yellow]No owned sessions to persist.[/yellow]")
             return
-        console.print(f"[cyan]Persisting {len(active)} active session(s).[/cyan]")
-        for session in active:
+        console.print(f"[cyan]Persisting {len(owned)} owned session(s).[/cyan]")
+        for session in owned:
             _install(render_session_unit(session, user=user))
         return
 
@@ -706,7 +746,11 @@ def install_systemd(
             session = SessionService(db).get_session(session_id)
         if session is None:
             raise typer.BadParameter(f"Session not found: {session_id}")
-        unit = render_session_unit(session, user=user)
+        try:
+            unit = render_session_unit(session, user=user)
+        except AdoptError as exc:
+            console.print(f"[red]install-systemd refused:[/red] {exc}")
+            raise typer.Exit(1) from exc
     else:
         unit = render_api_unit(load_settings(), user=user)
     _install(unit)
@@ -1112,3 +1156,171 @@ def set_alias_cmd(
                 f"[green]Bound[/green] {alias} -> {resolved_target} "
                 f"(session {view.resolved_session_id}, served as {view.resolved_served_name})."
             )
+
+
+# ---------------------------------------------------------------------------
+# Adopt flow — track externally-managed runtime endpoints (systemd vLLM units,
+# manually-started llama.cpp servers, etc.) as kind=ADOPTED sessions so the
+# gateway can route to them without llmctl ever spawning a process.
+# ---------------------------------------------------------------------------
+
+
+#: CLI shorthand -> ManagedUnitsConfig attribute name. Lets the user type
+#: ``llmctl adopt-managed vllm-tp`` instead of ``vllm_tp``.
+_MANAGED_ROLES: dict[str, str] = {
+    "vllm-tp": "vllm_tp",
+    "vllm-coder": "vllm_coder",
+    "vllm-reasoner": "vllm_reasoner",
+}
+
+
+def _print_adopted(session: object, *, prefix: str = "Adopted") -> None:
+    """Render an adopt confirmation line shared by adopt + adopt-managed."""
+    console.print(
+        f"[green]{prefix}[/green] {session.id}  "  # type: ignore[attr-defined]
+        f"runtime={session.runtime.value}  "  # type: ignore[attr-defined]
+        f"served_name={session.served_name or '-'}  "  # type: ignore[attr-defined]
+        f"endpoint={session.endpoint_url}  "  # type: ignore[attr-defined]
+        f"unit={session.systemd_unit or '-'}"  # type: ignore[attr-defined]
+    )
+
+
+@app.command("adopt")
+def adopt_cmd(
+    endpoint: Annotated[
+        str,
+        typer.Option("--endpoint", "-e", help="Base URL of the running upstream, e.g. http://127.0.0.1:8003."),
+    ],
+    runtime: Annotated[
+        str,
+        typer.Option(
+            "--runtime", "-r",
+            help="Runtime adapter id (vllm, llama_cpp, lmstudio, ollama, python_script).",
+        ),
+    ] = "vllm",
+    unit: Annotated[
+        str | None,
+        typer.Option("--unit", help="Optional systemd unit name to associate (e.g. vllm-tp.service)."),
+    ] = None,
+    served_name: Annotated[
+        str | None,
+        typer.Option(
+            "--served-name",
+            help="OpenAI model id the upstream answers to. Defaults to the first id from /v1/models.",
+        ),
+    ] = None,
+    timeout: Annotated[
+        float,
+        typer.Option(help="Probe timeout in seconds against {endpoint}/v1/models."),
+    ] = 1.5,
+) -> None:
+    """Track an externally-managed runtime endpoint as a kind=ADOPTED session."""
+    try:
+        runtime_enum = RuntimeName(runtime)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"Unknown runtime '{runtime}'. Choose one of: "
+            f"{', '.join(r.value for r in RuntimeName)}."
+        ) from exc
+
+    with _session() as db:
+        service = SessionService(db)
+        try:
+            session = service.adopt(
+                runtime_enum,
+                endpoint,
+                served_name=served_name,
+                systemd_unit=unit,
+                timeout_s=timeout,
+            )
+        except AdoptError as exc:
+            console.print(f"[red]Adopt failed:[/red] {exc}")
+            raise typer.Exit(1) from exc
+    _print_adopted(session)
+
+
+@app.command("adopt-managed")
+def adopt_managed_cmd(
+    role: Annotated[
+        str | None,
+        typer.Argument(
+            help="Managed-unit role to adopt (vllm-tp, vllm-coder, vllm-reasoner). "
+            "Omit and pass --all to adopt every running role.",
+        ),
+    ] = None,
+    all_roles: Annotated[
+        bool,
+        typer.Option("--all", help="Probe and adopt every managed-unit role that responds."),
+    ] = False,
+    timeout: Annotated[
+        float,
+        typer.Option(help="Probe timeout in seconds per role."),
+    ] = 1.5,
+) -> None:
+    """Adopt one or all managed systemd units declared in settings.managed_units.*."""
+    if role is None and not all_roles:
+        raise typer.BadParameter("Pass a role (vllm-tp|vllm-coder|vllm-reasoner) or --all.")
+    if role is not None and all_roles:
+        raise typer.BadParameter("Pass a role OR --all, not both.")
+
+    settings = load_settings()
+    if all_roles:
+        targets = list(_MANAGED_ROLES.items())
+    else:
+        attr = _MANAGED_ROLES.get(role or "")
+        if attr is None:
+            raise typer.BadParameter(
+                f"Unknown role '{role}'. Choose: {', '.join(sorted(_MANAGED_ROLES))}."
+            )
+        targets = [(role or "", attr)]
+
+    adopted = 0
+    skipped = 0
+    with _session() as db:
+        service = SessionService(db)
+        for cli_role, attr in targets:
+            unit_cfg: ManagedUnitConfig = getattr(settings.managed_units, attr)
+            endpoint = f"http://127.0.0.1:{unit_cfg.default_port}"
+            try:
+                session = service.adopt(
+                    RuntimeName.VLLM,
+                    endpoint,
+                    systemd_unit=f"{unit_cfg.unit_name}.service",
+                    timeout_s=timeout,
+                )
+            except AdoptError as exc:
+                skipped += 1
+                console.print(
+                    f"[yellow]Skip {cli_role}[/yellow] ({endpoint}): {exc}"
+                )
+                continue
+            adopted += 1
+            _print_adopted(session)
+
+    summary_color = "green" if adopted else "yellow"
+    console.print(
+        f"[{summary_color}]Done.[/{summary_color}] adopted={adopted}, skipped={skipped}."
+    )
+    if adopted == 0 and skipped > 0:
+        raise typer.Exit(1)
+
+
+@app.command("detach")
+def detach_cmd(
+    session_id: Annotated[str, typer.Argument(help="ADOPTED session id to remove from tracking.")],
+) -> None:
+    """Remove an adopted session from llmctl tracking (upstream untouched)."""
+    with _session() as db:
+        service = SessionService(db)
+        try:
+            session = service.detach(session_id)
+        except AdoptError as exc:
+            console.print(f"[red]Detach refused:[/red] {exc}")
+            raise typer.Exit(1) from exc
+    if session is None:
+        raise typer.BadParameter(f"Session not found: {session_id}")
+    console.print(
+        f"[green]Detached[/green] {session_id} "
+        f"(endpoint={session.endpoint_url}, unit={session.systemd_unit or '-'}). "
+        "The upstream process was not touched."
+    )

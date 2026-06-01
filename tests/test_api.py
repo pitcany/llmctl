@@ -47,3 +47,47 @@ def test_api_model_session_benchmark_flow(tmp_path: Path) -> None:
 
     deleted = client.delete(f"/models/{model_id}")
     assert deleted.status_code == 204
+
+
+def test_api_stop_restart_adopted_session_returns_409(tmp_path: Path) -> None:
+    """ADOPTED sessions can't be stopped/restarted via the API — expect 409."""
+    from sqlmodel import Session
+
+    from llmctl.db import (
+        RuntimeName,
+        SessionKind,
+        SessionRecord,
+        SessionStatus,
+        get_engine,
+        init_db,
+        utcnow,
+    )
+
+    db_url = f"sqlite:///{tmp_path / 'adopt-api.sqlite3'}"
+    init_db(db_url)
+    with Session(get_engine(db_url)) as db:
+        record = SessionRecord(
+            runtime=RuntimeName.VLLM,
+            status=SessionStatus.RUNNING,
+            kind=SessionKind.ADOPTED,
+            endpoint_url="http://127.0.0.1:8003",
+            port=8003,
+            served_name="llama-3.3-70b",
+            systemd_unit="vllm-tp.service",
+            adopted_at=utcnow(),
+            launch_plan={"command": []},
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+        session_id = record.id
+
+    client = TestClient(create_app(database_url=db_url))
+
+    stop_resp = client.post(f"/sessions/{session_id}/stop")
+    assert stop_resp.status_code == 409
+    assert "adopted" in stop_resp.json()["detail"].lower()
+
+    restart_resp = client.post(f"/sessions/{session_id}/restart")
+    assert restart_resp.status_code == 409
+    assert "adopted" in restart_resp.json()["detail"].lower()

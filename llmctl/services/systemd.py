@@ -22,8 +22,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from llmctl.config import Settings, load_settings
-from llmctl.db import RuntimeName
+from llmctl.db import RuntimeName, SessionKind
 from llmctl.schemas import Session
+from llmctl.services.sessions import AdoptError
 
 #: Runtimes that run as their own managed daemons; a per-session process unit
 #: does not apply (their own service should be enabled instead).
@@ -94,7 +95,21 @@ def render_session_unit(
     user: bool = True,
     working_dir: str | None = None,
 ) -> SystemdUnit:
-    """Render a systemd unit that relaunches ``session``'s runtime on boot."""
+    """Render a systemd unit that relaunches ``session``'s runtime on boot.
+
+    Refuses for ``ADOPTED`` sessions: they have no llmctl-issued launch
+    command, only a pointer to an externally-managed systemd unit (e.g.
+    ``vllm-tp.service``), so generating a unit for them would emit a
+    nonsense ``llmctl start None`` placeholder. The caller should
+    install the upstream unit directly.
+    """
+    if session.kind == SessionKind.ADOPTED:
+        target = session.systemd_unit or session.endpoint_url or "the upstream unit"
+        raise AdoptError(
+            f"Session {session.id} is adopted ({target}); llmctl does not own its "
+            "launch command. Install the existing systemd unit directly "
+            f"(e.g. `sudo systemctl enable {session.systemd_unit or '<unit>'}`)."
+        )
     warnings: list[str] = []
     plan = session.launch_plan
     runtime = session.runtime

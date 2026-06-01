@@ -40,23 +40,23 @@ def _default_http_get(url: str, timeout: float) -> Any:
     return urllib.request.urlopen(url, timeout=timeout)  # noqa: S310 - localhost only
 
 
-def _probe_managed_unit(
-    unit: ManagedUnitConfig,
+def probe_openai_v1_models(
+    base_url: str,
+    timeout: float = _PROBE_TIMEOUT_S,
     http_get: Callable[[str, float], Any] | None = None,
 ) -> list[str] | None:
-    """Probe ``http://localhost:<port>/v1/models``.
+    """Probe ``<base_url>/v1/models`` and return served model ids.
 
-    Returns the served model IDs on success, ``None`` on failure (unit
-    not running, port not bound, malformed payload — all treated the
-    same). Mirrors :meth:`llmctl.adapters.vllm.VLLMAdapter._probe_unit`
-    intentionally — keeping the two probes structurally identical means
-    the "vllm available?" answer cannot disagree between health-check
-    and scheduler-warning code paths.
+    Returns the list of served model IDs on success and ``None`` on any
+    failure (host unreachable, malformed payload, timeout, etc.) — all
+    treated the same so the caller has a single "is this endpoint
+    useful?" signal. Used by the doctor/dashboard probe path *and* by
+    the adopt flow that tracks externally-managed endpoints.
     """
     http_get = http_get or _default_http_get
-    url = f"http://localhost:{unit.default_port}/v1/models"
+    url = f"{base_url.rstrip('/')}/v1/models"
     try:
-        resp = http_get(url, _PROBE_TIMEOUT_S)
+        resp = http_get(url, timeout)
         payload = json.loads(resp.read().decode("utf-8", errors="replace"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
         return None
@@ -68,6 +68,22 @@ def _probe_managed_unit(
         if isinstance(mid, str):
             ids.append(mid)
     return ids
+
+
+def _probe_managed_unit(
+    unit: ManagedUnitConfig,
+    http_get: Callable[[str, float], Any] | None = None,
+) -> list[str] | None:
+    """Probe a managed-unit's local port for ``/v1/models``.
+
+    Thin wrapper around :func:`probe_openai_v1_models` for code paths
+    that already have a :class:`ManagedUnitConfig` in hand.
+    """
+    return probe_openai_v1_models(
+        f"http://localhost:{unit.default_port}",
+        _PROBE_TIMEOUT_S,
+        http_get,
+    )
 
 
 def _vllm_managed_unit_available(

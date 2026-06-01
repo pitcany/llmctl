@@ -51,6 +51,19 @@ class SessionStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SessionKind(StrEnum):
+    """Whether llmctl owns the process or only tracks an external endpoint.
+
+    ``OWNED`` sessions are spawned and supervised by llmctl (the historical
+    default). ``ADOPTED`` sessions point at an externally-managed endpoint
+    (typically a systemd unit such as ``vllm-tp``) and are tracked for
+    routing/visibility only — llmctl never spawns or kills them.
+    """
+
+    OWNED = "owned"
+    ADOPTED = "adopted"
+
+
 class EventLevel(StrEnum):
     """Event severity levels."""
 
@@ -149,6 +162,7 @@ class SessionRecord(SQLModel, table=True):
     profile_id: str | None = Field(default=None, foreign_key="profiles.id", index=True)
     runtime: RuntimeName = Field(index=True)
     status: SessionStatus = Field(default=SessionStatus.PLANNED, index=True)
+    kind: SessionKind | None = Field(default=SessionKind.OWNED, index=True)
     pid: int | None = Field(default=None, index=True)
     port: int | None = Field(default=None, index=True)
     endpoint_url: str | None = None
@@ -159,6 +173,9 @@ class SessionRecord(SQLModel, table=True):
     command: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     launch_plan: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     error: str | None = None
+    systemd_unit: str | None = Field(default=None, index=True)
+    served_name: str | None = Field(default=None, index=True)
+    adopted_at: datetime | None = None
     created_at: datetime = Field(default_factory=utcnow, index=True)
     started_at: datetime | None = None
     stopped_at: datetime | None = None

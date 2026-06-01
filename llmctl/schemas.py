@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from llmctl.db import ModelStatus, RuntimeName, SessionStatus
+from llmctl.db import ModelStatus, RuntimeName, SessionKind, SessionStatus
 
 
 class HealthState(StrEnum):
@@ -222,6 +222,7 @@ class Session(BaseModel):
     profile_id: str | None = None
     runtime: RuntimeName
     status: SessionStatus = SessionStatus.PLANNED
+    kind: SessionKind = SessionKind.OWNED
     pid: int | None = None
     port: int | None = None
     endpoint_url: str | None = None
@@ -229,6 +230,9 @@ class Session(BaseModel):
     gpu_ids: list[int] = Field(default_factory=list)
     launch_plan: LaunchPlan | None = None
     error: str | None = None
+    systemd_unit: str | None = None
+    served_name: str | None = None
+    adopted_at: datetime | None = None
     created_at: datetime | None = None
     started_at: datetime | None = None
     stopped_at: datetime | None = None
