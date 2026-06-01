@@ -8,8 +8,9 @@ files were produced by gpu-models's ``_write_env`` before deletion,
 so a passing test here proves llmctl writes the exact same bytes
 gpu-models would have.
 
-Regenerate fixtures (only meaningful while gpu-models still exists
-in some checkout) with ``tests/fixtures/_capture_parity_fixtures.py``.
+The fixtures are the source of truth; see git history for the
+one-shot capture script that produced them before gpu-models was
+deleted.
 """
 
 from __future__ import annotations

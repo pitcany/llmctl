@@ -5,7 +5,7 @@ projects through :func:`model_to_launch_spec`, renders via
 :func:`render_vllm_env`, and asserts byte-equality against captured
 gpu-models fixtures at ``tests/fixtures/env_renders/``. After Phase 7
 removed the gpu-models package, the fixtures are the source of truth
-(see ``tests/fixtures/_capture_parity_fixtures.py``).
+(see git history for the one-shot capture script).
 """
 
 from __future__ import annotations
