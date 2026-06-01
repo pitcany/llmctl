@@ -11,49 +11,36 @@ externally-installed systemd unit, restarts the unit, waits for
 If you used `gpu-models` before — `llmctl` replaced it. The legacy
 `gpu-models <verb>` invocations still work via a compat shim.
 
-> For the full reference, see [LLMCTL-USER-GUIDE.md](./LLMCTL-USER-GUIDE.md).
-> For the broader workstation context, see [RUNBOOK.md](./RUNBOOK.md).
+> For the full reference, see [USER-GUIDE.md](./USER-GUIDE.md).
 
 ---
 
 ## Install
 
-### Option A — conda env (recommended for ad-hoc use)
+Python 3.12+ required.
+
+### Option A — uv (recommended)
 
 ```bash
-conda activate <your-env>            # any env on Python 3.12+
-bash ~/AI/scripts/install-llmctl.sh
+git clone https://github.com/<you>/llmctl.git
+cd llmctl
+uv sync --extra dev
 ```
 
-The script installs `llmctl` editable into the active environment.
-Without the wrapper, run the one-line manual install below.
+The `llmctl` console script lands in `.venv/bin/`. Either activate
+the venv or run `uv run llmctl <verb>`.
+
+### Option B — pip editable
+
+```bash
+git clone https://github.com/<you>/llmctl.git
+pip install -e ./llmctl
+```
 
 Confirm:
 
 ```bash
 llmctl --help
-```
-
-### Option B — uv workspace (recommended for the `~/AI` repo)
-
-If you're inside `~/AI`, llmctl is already a workspace member:
-
-```bash
-cd ~/AI
-uv sync --extra dev
-```
-
-The `llmctl` console script lands in `~/AI/.venv/bin/`. The thin
-shim at `~/AI/bin/llmctl` (in `$PATH` by default) execs it so bare
-`llmctl` works from anywhere — no `uv run`, no venv activation.
-
-### Manual install (without the script)
-
-If you want to know what the script does, or you're scripting your
-own setup:
-
-```bash
-pip install -e ~/AI/packages/llmctl
 ```
 
 ### Verify the install picks up your presets
@@ -64,7 +51,7 @@ llmctl presets
 
 You should see one row per `~/.config/llmctl/presets/*.yaml` file.
 If the table is empty, that's expected on a fresh box — see [User Guide
-§ Presets](./LLMCTL-USER-GUIDE.md#presets) for how to write one.
+§ Presets](./USER-GUIDE.md#presets) for how to write one.
 
 ---
 
@@ -195,8 +182,9 @@ the guard if you've installed a non-standard launcher.
 
 ### Legacy `gpu-models` invocations
 
-Still work via `~/AI/bin/gpu-models` (translates to `llmctl`).
-Prints a deprecation hint — silence with:
+If you're migrating from the `gpu-models` CLI (the predecessor that
+shipped in `~/AI`), a thin `gpu-models` shim translates to `llmctl`
+and prints a deprecation hint. Silence with:
 
 ```bash
 export LLMCTL_QUIET_DEPRECATION=1
@@ -205,7 +193,7 @@ export LLMCTL_QUIET_DEPRECATION=1
 ### Nothing visible — is the install correct?
 
 ```bash
-which llmctl              # should be ~/AI/bin/llmctl or your conda env's bin/
+which llmctl              # should resolve to your venv/conda env's bin/
 llmctl --help             # if this works, install is fine
 llmctl health             # vllm should be "ok" if vllm-tp is running
 llmctl status             # shows the managed units + slots and their env paths
@@ -218,6 +206,4 @@ into the environment currently on your `PATH`.
 
 ## Next steps
 
-- **Operational reference**: [LLMCTL-USER-GUIDE.md](./LLMCTL-USER-GUIDE.md)
-- **Broader workstation context**: [RUNBOOK.md](./RUNBOOK.md)
-- **Architecture overview**: [ARCHITECTURE.md](./ARCHITECTURE.md)
+- **Operational reference**: [USER-GUIDE.md](./USER-GUIDE.md)

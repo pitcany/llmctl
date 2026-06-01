@@ -1,7 +1,7 @@
 # llmctl User Guide
 
 Operational reference for everything `llmctl` does. For 5-minute
-install + first command, see [LLMCTL-QUICKSTART.md](./LLMCTL-QUICKSTART.md).
+install + first command, see [QUICKSTART.md](./QUICKSTART.md).
 
 ## Table of contents
 
@@ -42,10 +42,11 @@ An externally-installed systemd `.service` file that llmctl owns the
 - `vllm-coder` (port 8001, GPU 0, slot)
 - `vllm-reasoner` (port 8002, GPU 1, slot)
 
-llmctl never installs these units itself — they already exist on
-your box (look in `~/AI/services/`). It just writes their
-`EnvironmentFile`, calls `sudo systemctl restart <unit>`, and polls
-`/v1/models` for readiness.
+llmctl never installs these units itself — they must already exist
+on your box. The reference unit files used in development live in
+the upstream `~/AI/services/` directory; you can adapt them or write
+your own. llmctl just writes their `EnvironmentFile`, calls
+`sudo systemctl restart <unit>`, and polls `/v1/models` for readiness.
 
 ### Slot
 
@@ -419,7 +420,7 @@ The two render functions (`render_vllm_env` for the TP fleet,
 `render_slot_env` for slots) produce env file output that is
 **byte-identical** to the output `gpu-models` used to produce. The
 parity is locked in by 14 fixture files at
-`packages/llmctl/tests/fixtures/env_renders/`.
+`tests/fixtures/env_renders/`.
 
 ---
 
@@ -501,7 +502,9 @@ launcher would silently ignore.
 
 Two options:
 
-- Install the launcher-based unit: `bash ~/AI/scripts/apply-spec-rollout.sh --apply`
+- Install a launcher-script-based unit (the upstream `~/AI` repo
+  ships an example `apply-spec-rollout.sh` and a `vllm-launcher.sh`
+  reference; replicate the pattern for your host)
 - Disable the guard if you've installed a non-standard launcher:
   ```yaml
   managed_units:
@@ -546,36 +549,36 @@ errors. Two fixes:
 ### Package structure
 
 ```
-packages/llmctl/
-├── llmctl/
-│   ├── adapters/        # vLLM, llama.cpp, LM Studio, Ollama, python
-│   │   ├── vllm.py              # HTTP-probe health + discovery (Phase A)
-│   │   └── vllm_systemd.py      # VLLMSystemdAdapter (Phase 1)
-│   ├── integrations/    # external-system glue
-│   │   ├── vllm_env.py          # render_vllm_env, render_slot_env (Phase 1+4)
-│   │   ├── systemctl.py         # SystemctlRunner (Phase 1)
-│   │   ├── hermes.py            # provider verify (Phase 3)
-│   │   ├── harbor.py            # ollama-container stop (Phase 3)
-│   │   ├── fleet.py             # preflight_stop (Phase 4)
-│   │   └── turboquant.py        # --tq override (Phase 4)
-│   ├── services/
-│   │   ├── preset_loader.py     # Model -> VLLMLaunchSpec (Phase 2)
-│   │   └── vllm_orchestrator.py # start_vllm_tp, start_slot (Phase 5)
-│   ├── presets/         # schema + XDG-aware YAML loader (Phase 7c)
-│   ├── tui/             # Textual screens
-│   │   ├── screens_presets.py   # Presets screen (Phase B)
-│   │   ├── screens_units.py     # Units screen (Phase C)
-│   │   └── _modals_presets.py   # TP/coder/reasoner picker (Phase B)
-│   ├── cli.py           # Typer command surface
-│   ├── config.py        # all settings schemas
-│   └── ...
-└── tests/               # 296 tests
-    └── fixtures/env_renders/    # 14 byte-parity fixtures
+llmctl/
+├── adapters/        # vLLM, llama.cpp, LM Studio, Ollama, python
+│   ├── vllm.py              # HTTP-probe health + discovery (Phase A)
+│   └── vllm_systemd.py      # VLLMSystemdAdapter (Phase 1)
+├── integrations/    # external-system glue
+│   ├── vllm_env.py          # render_vllm_env, render_slot_env (Phase 1+4)
+│   ├── systemctl.py         # SystemctlRunner (Phase 1)
+│   ├── hermes.py            # provider verify (Phase 3)
+│   ├── harbor.py            # ollama-container stop (Phase 3)
+│   ├── fleet.py             # preflight_stop (Phase 4)
+│   └── turboquant.py        # --tq override (Phase 4)
+├── services/
+│   ├── preset_loader.py     # Model -> VLLMLaunchSpec (Phase 2)
+│   └── vllm_orchestrator.py # start_vllm_tp, start_slot (Phase 5)
+├── presets/         # schema + XDG-aware YAML loader (Phase 7c)
+├── tui/             # Textual screens
+│   ├── screens_presets.py   # Presets screen (Phase B)
+│   ├── screens_units.py     # Units screen (Phase C)
+│   └── _modals_presets.py   # TP/coder/reasoner picker (Phase B)
+├── cli.py           # Typer command surface
+├── config.py        # all settings schemas
+└── ...
+
+tests/               # see README for current test count
+└── fixtures/env_renders/    # 14 byte-parity fixtures
 ```
 
 ### Test coverage
 
-296 tests. Notable:
+Notable suites:
 
 - `test_vllm_env_render.py` + `test_vllm_env_parity.py` — render
   function unit tests + byte-parity vs frozen `gpu-models` fixtures
@@ -586,7 +589,9 @@ packages/llmctl/
 - `test_vllm_adapter_http_probe.py` — Phase A probe behavior
 - `test_tui_presets.py`, `test_tui_units.py` — Textual pilot tests
 
-Run: `uv run pytest packages/llmctl/tests -q` (≈45–55s)
+Run: `uv run pytest -q` (≈45–55s for the CI-eligible subset; markers
+`requires_gpu`, `requires_systemd`, `live_hf`, `bench_live` are skipped
+in CI and need the right host to run).
 
 ### Where to look when debugging
 
@@ -610,9 +615,9 @@ This package replaced `gpu-models` in May 2026 via 8 phases:
 - **Phase 3**: Hermes + Harbor integrations as lifecycle hooks
 - **Phase 4**: slot system + TurboQuant + fleet preflight
 - **Phase 5**: production CLI verbs + injectable preset shim
-- **Phase 7**: deleted `packages/gpu-models/`; compat shim at `bin/gpu-models`
+- **Phase 7**: deleted the upstream `packages/gpu-models/`; compat shim ships in the upstream `~/AI` repo at `bin/gpu-models`
 - **Phase 7c**: forked the preset schema into `llmctl.presets`
-- **Phase 8**: RUNBOOK migration note
+- **Phase 8**: migration note added to the upstream `~/AI` runbook
 
 Then a second pass added:
 
