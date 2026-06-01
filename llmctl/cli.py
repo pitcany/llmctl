@@ -1367,13 +1367,19 @@ def adopt_cmd(
     ] = "vllm",
     unit: Annotated[
         str | None,
-        typer.Option("--unit", help="Optional systemd unit name to associate (e.g. vllm-tp.service)."),
+        typer.Option(
+            "--unit",
+            help="Optional systemd unit name to associate (e.g. vllm-tp.service).",
+        ),
     ] = None,
     served_name: Annotated[
         str | None,
         typer.Option(
             "--served-name",
-            help="OpenAI model id the upstream answers to. Defaults to the first id from /v1/models.",
+            help=(
+                "OpenAI model id the upstream answers to. "
+                "Defaults to the first id from /v1/models."
+            ),
         ),
     ] = None,
     timeout: Annotated[

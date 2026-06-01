@@ -705,7 +705,9 @@ class BenchmarkService:
         live failures are recorded as-is so the operator can see what broke
         when reviewing the benchmark history.
         """
-        endpoint_url = target.chat_url if request.kind != BenchmarkKind.HEALTH else target.models_url
+        endpoint_url = (
+            target.chat_url if request.kind != BenchmarkKind.HEALTH else target.models_url
+        )
         return {
             "prompt_tokens": 0,
             "completion_tokens": 0,

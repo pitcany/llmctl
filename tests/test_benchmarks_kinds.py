@@ -18,7 +18,6 @@ from llmctl.db import BenchmarkKind, get_engine, init_db
 from llmctl.schemas import BenchmarkRunRequest, ModelCreate
 from llmctl.services.benchmarks import (
     DEFAULT_PROMPT,
-    LONG_CONTEXT_QUESTION,
     BenchmarkService,
 )
 from llmctl.services.registry import RegistryService

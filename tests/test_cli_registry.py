@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from sqlmodel import Session
 from typer.testing import CliRunner
 
 from llmctl.cli import app
@@ -19,7 +20,6 @@ from llmctl.db import RuntimeName, get_engine, init_db
 from llmctl.schemas import ModelCreate, ProfileCreate
 from llmctl.services.profiles import ProfileService
 from llmctl.services.registry import RegistryService
-from sqlmodel import Session
 
 
 @pytest.fixture()
