@@ -32,6 +32,11 @@ class Model(BaseModel):
     quantization: str | None = None
     size_bytes: int | None = None
     estimated_vram_gb: float | None = None
+    max_context: int | None = None
+    parameter_count: int | None = None
+    notes: str | None = None
+    default_profile_id: str | None = None
+    active: bool = True
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     status: ModelStatus = ModelStatus.REGISTERED
@@ -49,8 +54,31 @@ class ModelCreate(BaseModel):
     format: str | None = None
     quantization: str | None = None
     estimated_vram_gb: float | None = None
+    max_context: int | None = None
+    parameter_count: int | None = None
+    notes: str | None = None
+    default_profile_id: str | None = None
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelUpdate(BaseModel):
+    """Partial-update payload for a model. All fields optional."""
+
+    name: str | None = None
+    runtime: RuntimeName | None = None
+    source: str | None = None
+    path: str | None = None
+    format: str | None = None
+    quantization: str | None = None
+    estimated_vram_gb: float | None = None
+    max_context: int | None = None
+    parameter_count: int | None = None
+    notes: str | None = None
+    default_profile_id: str | None = None
+    active: bool | None = None
+    tags: list[str] | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class Profile(BaseModel):
@@ -60,9 +88,77 @@ class Profile(BaseModel):
     name: str
     runtime: RuntimeName
     description: str | None = None
+    tensor_parallel_size: int | None = None
+    max_model_len: int | None = None
+    gpu_memory_utilization: float | None = None
+    dtype: str | None = None
+    quantization: str | None = None
+    extra_args: list[str] = Field(default_factory=list)
+    environment_variables: dict[str, str] = Field(default_factory=dict)
+    scheduler_preferences: dict[str, Any] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
     gpu_policy: dict[str, Any] = Field(default_factory=dict)
     safety: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProfileCreate(BaseModel):
+    """Payload to create a profile."""
+
+    name: str
+    runtime: RuntimeName
+    description: str | None = None
+    tensor_parallel_size: int | None = None
+    max_model_len: int | None = None
+    gpu_memory_utilization: float | None = None
+    dtype: str | None = None
+    quantization: str | None = None
+    extra_args: list[str] = Field(default_factory=list)
+    environment_variables: dict[str, str] = Field(default_factory=dict)
+    scheduler_preferences: dict[str, Any] = Field(default_factory=dict)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    gpu_policy: dict[str, Any] = Field(default_factory=dict)
+    safety: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProfileUpdate(BaseModel):
+    """Partial-update payload for a profile. All fields optional."""
+
+    name: str | None = None
+    runtime: RuntimeName | None = None
+    description: str | None = None
+    tensor_parallel_size: int | None = None
+    max_model_len: int | None = None
+    gpu_memory_utilization: float | None = None
+    dtype: str | None = None
+    quantization: str | None = None
+    extra_args: list[str] | None = None
+    environment_variables: dict[str, str] | None = None
+    scheduler_preferences: dict[str, Any] | None = None
+    parameters: dict[str, Any] | None = None
+    gpu_policy: dict[str, Any] | None = None
+    safety: dict[str, Any] | None = None
+
+
+class ValidationIssue(BaseModel):
+    """Single validation warning or error raised against a profile/model."""
+
+    severity: str = "warning"
+    field: str | None = None
+    message: str
+
+
+class RegistryExport(BaseModel):
+    """Portable export bundle for the model registry.
+
+    Used by ``llmctl export-registry`` / ``import-registry``. ``version`` lets
+    importers recognise legacy bundles and ``settings`` is reserved for future
+    feature toggles (currently empty).
+    """
+
+    version: int = 1
+    models: list[Model] = Field(default_factory=list)
+    profiles: list[Profile] = Field(default_factory=list)
+    settings: dict[str, Any] = Field(default_factory=dict)
 
 
 class GPUInfo(BaseModel):

@@ -2,17 +2,20 @@
 
 Manages model records and runtime discovery. ``scan`` queries every runtime
 adapter for available models and upserts them into the registry, marking newly
-found models as ``DISCOVERED``.
+found models as ``DISCOVERED``. CRUD methods (``add``, ``update``, ``clone``,
+``enable``/``disable``, ``delete``) cover the management surface exposed to the
+CLI, TUI, and API.
 """
 
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from sqlmodel import Session, select
 
 from llmctl.db import ModelRecord, ModelStatus, utcnow
-from llmctl.schemas import Model, ModelCreate
+from llmctl.schemas import Model, ModelCreate, ModelUpdate
 from llmctl.services.router import RuntimeRouter
 
 
@@ -28,6 +31,11 @@ def record_to_model(record: ModelRecord) -> Model:
         quantization=record.quantization,
         size_bytes=record.size_bytes,
         estimated_vram_gb=record.estimated_vram_gb,
+        max_context=record.max_context,
+        parameter_count=record.parameter_count,
+        notes=record.notes,
+        default_profile_id=record.default_profile_id,
+        active=record.active if record.active is not None else True,
         tags=record.tags,
         metadata=record.metadata_json,
         status=record.status,
@@ -37,7 +45,7 @@ def record_to_model(record: ModelRecord) -> Model:
 
 
 class RegistryService:
-    """Service interface for model registration and discovery."""
+    """Service interface for model registration, discovery, and CRUD."""
 
     def __init__(self, db: Session, router: RuntimeRouter | None = None) -> None:
         self.db = db
@@ -62,12 +70,61 @@ class RegistryService:
                 self._upsert(model)
         return self.list_models()
 
-    def list_models(self) -> list[Model]:
-        """List non-deleted models."""
-        records = self.db.exec(
-            select(ModelRecord).where(ModelRecord.status != ModelStatus.DELETED)
-        ).all()
+    def scan_discovered_only(self) -> list[Model]:
+        """Return adapter-discovered models without persisting them.
+
+        Used by ``llmctl scan`` (without ``--import``) so the user can review
+        candidates before committing them to the registry.
+        """
+        discovered: list[Model] = []
+        for runtime in self.router.list_runtimes():
+            adapter = self.router.get_adapter(runtime)
+            try:
+                results = asyncio.run(adapter.discover_models())
+            except Exception:
+                results = []
+            discovered.extend(results)
+        return discovered
+
+    def list_models(self, include_inactive: bool = False) -> list[Model]:
+        """List non-deleted models. Inactive rows are hidden by default."""
+        statement = select(ModelRecord).where(ModelRecord.status != ModelStatus.DELETED)
+        if not include_inactive:
+            statement = statement.where(ModelRecord.active != False)  # noqa: E712
+        records = self.db.exec(statement).all()
         return [record_to_model(record) for record in records]
+
+    def get_model(self, model_id: str) -> Model | None:
+        """Return a model by id (active or inactive, but not deleted)."""
+        record = self.db.get(ModelRecord, model_id)
+        if not record or record.status == ModelStatus.DELETED:
+            return None
+        return record_to_model(record)
+
+    def find(self, name_or_id: str) -> Model | None:
+        """Return a model by id first, then by exact name match.
+
+        Raises ValueError when ``name_or_id`` is a name shared across multiple
+        runtimes — the caller must disambiguate with the model id.
+        """
+        direct = self.db.get(ModelRecord, name_or_id)
+        if direct is not None and direct.status != ModelStatus.DELETED:
+            return record_to_model(direct)
+        matches = self.db.exec(
+            select(ModelRecord).where(
+                ModelRecord.name == name_or_id,
+                ModelRecord.status != ModelStatus.DELETED,
+            )
+        ).all()
+        if not matches:
+            return None
+        if len(matches) > 1:
+            runtimes = ", ".join(sorted({m.runtime.value for m in matches}))
+            raise ValueError(
+                f"Model name '{name_or_id}' is ambiguous across runtimes "
+                f"[{runtimes}]; pass the model id instead."
+            )
+        return record_to_model(matches[0])
 
     def add_model(self, payload: ModelCreate) -> Model:
         """Register a model record."""
@@ -79,6 +136,11 @@ class RegistryService:
             format=payload.format,
             quantization=payload.quantization,
             estimated_vram_gb=payload.estimated_vram_gb,
+            max_context=payload.max_context,
+            parameter_count=payload.parameter_count,
+            notes=payload.notes,
+            default_profile_id=payload.default_profile_id,
+            active=True,
             tags=payload.tags,
             metadata_json=payload.metadata,
         )
@@ -87,16 +149,112 @@ class RegistryService:
         self.db.refresh(record)
         return record_to_model(record)
 
-    def delete_model(self, model_id: str) -> bool:
-        """Soft-delete a model record."""
+    def update_model(self, model_id: str, updates: ModelUpdate) -> Model | None:
+        """Apply a partial update to a model record."""
+        record = self.db.get(ModelRecord, model_id)
+        if not record or record.status == ModelStatus.DELETED:
+            return None
+        data = updates.model_dump(exclude_unset=True)
+        if "metadata" in data:
+            record.metadata_json = data.pop("metadata") or {}
+        for field_name, value in data.items():
+            setattr(record, field_name, value)
+        record.updated_at = utcnow()
+        self.db.add(record)
+        self.db.commit()
+        self.db.refresh(record)
+        return record_to_model(record)
+
+    def clone_model(self, model_id: str, new_name: str) -> Model | None:
+        """Duplicate a model record under a new name."""
+        record = self.db.get(ModelRecord, model_id)
+        if not record or record.status == ModelStatus.DELETED:
+            return None
+        clone = ModelRecord(
+            name=new_name,
+            runtime=record.runtime,
+            source=record.source,
+            path=record.path,
+            format=record.format,
+            quantization=record.quantization,
+            size_bytes=record.size_bytes,
+            estimated_vram_gb=record.estimated_vram_gb,
+            max_context=record.max_context,
+            parameter_count=record.parameter_count,
+            notes=record.notes,
+            default_profile_id=record.default_profile_id,
+            active=True,
+            tags=list(record.tags),
+            metadata_json=dict(record.metadata_json),
+            status=ModelStatus.REGISTERED,
+        )
+        self.db.add(clone)
+        self.db.commit()
+        self.db.refresh(clone)
+        return record_to_model(clone)
+
+    def enable_model(self, model_id: str) -> bool:
+        """Mark a model as active."""
+        return self._set_active(model_id, True)
+
+    def disable_model(self, model_id: str) -> bool:
+        """Mark a model as inactive (hidden from default listings)."""
+        return self._set_active(model_id, False)
+
+    def delete_model(self, model_id: str, *, delete_files: bool = False) -> bool:
+        """Soft-delete a model record.
+
+        ``delete_files=True`` additionally removes the on-disk artifact at
+        ``record.path``. This is intentionally opt-in: callers must explicitly
+        request file deletion (matching the ``--delete-files`` CLI flag).
+        Missing paths and unexpected I/O errors are silently skipped.
+        """
         record = self.db.get(ModelRecord, model_id)
         if not record:
             return False
+        if delete_files and record.path:
+            self._delete_artifact(record.path)
         record.status = ModelStatus.DELETED
         record.updated_at = utcnow()
         self.db.add(record)
         self.db.commit()
         return True
+
+    def _set_active(self, model_id: str, value: bool) -> bool:
+        record = self.db.get(ModelRecord, model_id)
+        if not record or record.status == ModelStatus.DELETED:
+            return False
+        record.active = value
+        record.updated_at = utcnow()
+        self.db.add(record)
+        self.db.commit()
+        return True
+
+    @staticmethod
+    def _delete_artifact(path_str: str) -> None:
+        """Remove a file or directory referenced by a model record.
+
+        Best-effort: missing or unreadable paths leave the registry update
+        unchanged. Symlinks are unlinked, not followed.
+        """
+        try:
+            target = Path(path_str)
+            if not target.exists() and not target.is_symlink():
+                return
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+                return
+            if target.is_dir():
+                for sub in sorted(
+                    target.rglob("*"), key=lambda p: len(p.parts), reverse=True
+                ):
+                    if sub.is_symlink() or sub.is_file():
+                        sub.unlink()
+                    elif sub.is_dir():
+                        sub.rmdir()
+                target.rmdir()
+        except OSError:
+            return
 
     def _upsert(self, model: Model) -> None:
         """Insert a discovered model or refresh an existing record."""
@@ -130,6 +288,7 @@ class RegistryService:
             tags=model.tags,
             metadata_json=model.metadata,
             status=ModelStatus.DISCOVERED,
+            active=True,
         )
         self.db.add(record)
         self.db.commit()

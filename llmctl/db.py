@@ -88,6 +88,20 @@ class ModelRecord(SQLModel, table=True):
     quantization: str | None = None
     size_bytes: int | None = None
     estimated_vram_gb: float | None = None
+    max_context: int | None = None
+    parameter_count: int | None = Field(
+        default=None,
+        description="Approximate parameter count (raw integer, not billions).",
+    )
+    notes: str | None = None
+    default_profile_id: str | None = Field(
+        default=None, foreign_key="profiles.id", index=True
+    )
+    # ``active`` is independent of ``status``: a registered model can be
+    # disabled without losing its row. Nullable for forward-compat with
+    # databases created before this column existed — the service layer
+    # treats NULL as active.
+    active: bool | None = Field(default=True, index=True)
     tags: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     status: ModelStatus = Field(default=ModelStatus.REGISTERED, index=True)
@@ -104,6 +118,20 @@ class ProfileRecord(SQLModel, table=True):
     name: str = Field(index=True, unique=True)
     runtime: RuntimeName = Field(index=True)
     description: str | None = None
+    # Promoted top-level launch knobs. ``parameters`` remains the canonical
+    # store for everything else (backward compatible with profiles.yaml).
+    tensor_parallel_size: int | None = None
+    max_model_len: int | None = None
+    gpu_memory_utilization: float | None = None
+    dtype: str | None = None
+    quantization: str | None = None
+    extra_args: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    environment_variables: dict[str, str] = Field(
+        default_factory=dict, sa_column=Column(JSON)
+    )
+    scheduler_preferences: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column(JSON)
+    )
     parameters: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     gpu_policy: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     safety: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
