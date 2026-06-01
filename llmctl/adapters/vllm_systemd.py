@@ -35,6 +35,7 @@ from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.integrations.vllm_env import VLLMLaunchSpec, render_vllm_env
 
 LifecycleHook = Callable[[VLLMLaunchSpec], None]
+EnvRenderer = Callable[[VLLMLaunchSpec], str]
 
 
 class LegacyUnitError(RuntimeError):
@@ -88,6 +89,7 @@ class VLLMSystemdAdapter:
         http_get: Callable[[str, float], object] | None = None,
         pre_start_hooks: list[LifecycleHook] | None = None,
         post_start_hooks: list[LifecycleHook] | None = None,
+        renderer: EnvRenderer | None = None,
     ) -> None:
         self.config = config or ManagedUnitConfig(unit_name="vllm-tp", default_port=8003)
         self.env_file_path = (
@@ -107,6 +109,11 @@ class VLLMSystemdAdapter:
         # their own non-fatal warnings internally.
         self.pre_start_hooks: list[LifecycleHook] = list(pre_start_hooks or [])
         self.post_start_hooks: list[LifecycleHook] = list(post_start_hooks or [])
+        # Renderer is pluggable so the same adapter wraps both TP units
+        # (render_vllm_env) and slot units (functools.partial of
+        # render_slot_env with a bound VLLMSlotInfo). Default to the TP
+        # renderer for backward compatibility with Phase 1 callers.
+        self.renderer: EnvRenderer = renderer or render_vllm_env
 
     def ensure_launcher_unit(self) -> None:
         """Raise :class:`LegacyUnitError` against the legacy ExecStart unit.
@@ -143,7 +150,7 @@ class VLLMSystemdAdapter:
         Returns the (path, body) pair so callers can assert byte-equality
         in tests without re-reading from disk.
         """
-        body = render_vllm_env(spec)
+        body = self.renderer(spec)
         self.env_file_path.parent.mkdir(parents=True, exist_ok=True)
         self.env_file_path.write_text(body)
         return self.env_file_path, body

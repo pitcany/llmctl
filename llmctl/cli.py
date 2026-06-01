@@ -16,8 +16,15 @@ from llmctl.config import load_settings
 from llmctl.db import get_engine, init_db
 from llmctl.schemas import BenchmarkRunRequest, ModelCreate, SessionStartRequest
 from llmctl.services.benchmarks import BenchmarkService
+from llmctl.services.preset_loader import load_preset_views
 from llmctl.services.registry import RegistryService
 from llmctl.services.sessions import SessionService
+from llmctl.services.vllm_orchestrator import (
+    OrchestratorOptions,
+    UnknownPresetError,
+    start_slot,
+    start_vllm_tp,
+)
 from llmctl.telemetry.gpu import get_gpu_info
 
 app = typer.Typer(
@@ -692,3 +699,221 @@ def _emit_unit(unit: object, output: Path | None) -> None:
     console.print("[cyan]Install with:[/cyan]")
     for command in unit.install_commands():  # type: ignore[attr-defined]
         console.print(f"  {command}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: gpu-models replacement verbs (vllm, slot, presets, status).
+# These wrap the high-level orchestrator in services/vllm_orchestrator.py;
+# the orchestrator owns lifecycle (preset load -> TQ -> preflight ->
+# adapter restart -> hermes verify) so the CLI is purely arg-parsing +
+# result formatting.
+# ---------------------------------------------------------------------------
+
+
+def _build_options(
+    tq: bool | None,
+    no_tq: bool,
+    dry_run: bool,
+    no_wait: bool,
+) -> OrchestratorOptions:
+    """Resolve the tri-state TQ flag and turn CLI flags into options."""
+    if no_tq and tq:
+        raise typer.BadParameter("--tq and --no-tq are mutually exclusive")
+    tq_override: bool | None = None
+    if tq:
+        tq_override = True
+    if no_tq:
+        tq_override = False
+    return OrchestratorOptions(
+        tq_override=tq_override,
+        dry_run=dry_run,
+        wait_for_ready=not no_wait,
+    )
+
+
+@app.command("vllm")
+def vllm_cmd(
+    preset: Annotated[
+        str,
+        typer.Argument(help="Preset alias from ~/.config/llm-models/."),
+    ],
+    tq: Annotated[
+        bool,
+        typer.Option("--tq", help="Force TurboQuant KV cache on for this start."),
+    ] = False,
+    no_tq: Annotated[
+        bool,
+        typer.Option("--no-tq", help="Force TurboQuant KV cache off for this start."),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print the env file + planned actions, no changes."),
+    ] = False,
+    no_wait: Annotated[
+        bool,
+        typer.Option("--no-wait", help="Skip waiting for /v1/models readiness after restart."),
+    ] = False,
+) -> None:
+    """Start the TP-fleet vLLM unit on PRESET (replaces ``gpu-models vllm``)."""
+    settings = load_settings()
+    options = _build_options(tq if tq else None, no_tq, dry_run, no_wait)
+    try:
+        result = start_vllm_tp(
+            preset,
+            managed_unit=settings.managed_units.vllm_tp,
+            defaults=settings.vllm.defaults,
+            fleet=settings.managed_units.fleet,
+            options=options,
+        )
+    except UnknownPresetError as exc:
+        raise typer.Exit(2) from exc
+
+    if result.dry_run:
+        return
+    if not result.ok:
+        console.print("[red]vLLM start did not complete cleanly.[/red]")
+        if result.fleet_failed:
+            console.print(f"  fleet preflight failed on: {', '.join(result.fleet_failed)}")
+        if result.restart is not None and result.restart.error:
+            console.print(f"  restart: {result.restart.error}")
+        raise typer.Exit(1)
+    console.print(
+        f"[green]vLLM ready[/green] — serving {result.spec.served_name} "
+        f"on port {result.spec.port}"
+    )
+
+
+@app.command("slot")
+def slot_cmd(
+    slot: Annotated[
+        str,
+        typer.Argument(help="Slot name (e.g. coder, reasoner)."),
+    ],
+    preset: Annotated[
+        str,
+        typer.Argument(help="Preset alias from ~/.config/llm-models/."),
+    ],
+    tq: Annotated[
+        bool,
+        typer.Option("--tq", help="Force TurboQuant KV cache on for this start."),
+    ] = False,
+    no_tq: Annotated[
+        bool,
+        typer.Option("--no-tq", help="Force TurboQuant KV cache off for this start."),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print the env file + planned actions, no changes."),
+    ] = False,
+    no_wait: Annotated[
+        bool,
+        typer.Option("--no-wait", help="Skip waiting for /v1/models readiness after restart."),
+    ] = False,
+) -> None:
+    """Apply PRESET to a per-GPU slot (replaces ``gpu-models slot``)."""
+    settings = load_settings()
+    slot_config = settings.managed_units.slots.get(slot)
+    if slot_config is None:
+        available = ", ".join(sorted(vars(settings.managed_units.slots)))
+        console.print(f"[red]unknown slot[/red] {slot!r}. Available: {available}")
+        raise typer.Exit(2)
+
+    options = _build_options(tq if tq else None, no_tq, dry_run, no_wait)
+    try:
+        result = start_slot(
+            slot,
+            preset,
+            slot_config=slot_config,
+            defaults=settings.vllm.defaults,
+            fleet=settings.managed_units.fleet,
+            options=options,
+        )
+    except UnknownPresetError as exc:
+        raise typer.Exit(2) from exc
+
+    if result.dry_run:
+        return
+    if not result.ok:
+        console.print(f"[red]Slot {slot} start did not complete cleanly.[/red]")
+        if result.fleet_failed:
+            console.print(f"  fleet preflight failed on: {', '.join(result.fleet_failed)}")
+        if result.restart is not None and result.restart.error:
+            console.print(f"  restart: {result.restart.error}")
+        raise typer.Exit(1)
+    console.print(
+        f"[green]Slot {slot} ready[/green] — serving as '{slot}' "
+        f"(model {result.spec.served_name}) on port {result.spec.port}"
+    )
+
+
+@app.command("presets")
+def presets_cmd() -> None:
+    """List preset aliases known to llmctl (from ~/.config/llm-models/)."""
+    views = load_preset_views()
+    if not views:
+        console.print(
+            "[yellow]No presets found.[/yellow] "
+            "Write one to ~/.config/llm-models/<alias>.yaml"
+        )
+        return
+    table = Table(title="Presets")
+    table.add_column("alias", style="cyan")
+    table.add_column("served name")
+    table.add_column("model id")
+    table.add_column("family")
+    table.add_column("size (B)", justify="right")
+    table.add_column("tp", justify="right")
+    table.add_column("quant")
+    for v in views:
+        table.add_row(
+            v.alias,
+            v.served_name,
+            v.model_id,
+            v.family or "-",
+            f"{v.param_count_b:.0f}" if v.param_count_b else "-",
+            str(v.tensor_parallel),
+            v.quantization,
+        )
+    console.print(table)
+
+
+@app.command("status")
+def status_cmd() -> None:
+    """Quick overview of managed units and the presets they could serve."""
+    settings = load_settings()
+    table = Table(title="Managed units")
+    table.add_column("role", style="cyan")
+    table.add_column("unit name")
+    table.add_column("env file")
+    table.add_column("default port", justify="right")
+    for role, unit in (
+        ("vllm-tp", settings.managed_units.vllm_tp),
+        ("vllm-coder", settings.managed_units.vllm_coder),
+        ("vllm-reasoner", settings.managed_units.vllm_reasoner),
+    ):
+        table.add_row(
+            role,
+            unit.unit_name,
+            str(unit.resolve_env_file()),
+            str(unit.default_port),
+        )
+    console.print(table)
+    slots = settings.managed_units.slots
+    slot_table = Table(title="Slots")
+    slot_table.add_column("name", style="cyan")
+    slot_table.add_column("gpu", justify="right")
+    slot_table.add_column("port", justify="right")
+    slot_table.add_column("unit name")
+    slot_table.add_column("env file")
+    for name in ("coder", "reasoner"):
+        cfg = slots.get(name)
+        if cfg is None:
+            continue
+        slot_table.add_row(
+            name,
+            cfg.gpu,
+            str(cfg.port),
+            cfg.unit_name,
+            str(cfg.resolve_env_file(name)),
+        )
+    console.print(slot_table)

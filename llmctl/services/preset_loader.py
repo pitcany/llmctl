@@ -20,16 +20,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from llm_models_config import load_all
 from llm_models_config.schema import Model
 
 from llmctl.config import VLLMDefaultsConfig
 from llmctl.integrations.vllm_env import VLLMLaunchSpec
-
-if TYPE_CHECKING:
-    pass
+from llmctl.services.preset_store import PresetStore, default_store
 
 
 @dataclass(frozen=True)
@@ -113,25 +109,29 @@ def model_to_launch_spec(
 def load_presets(
     *,
     defaults: VLLMDefaultsConfig | None = None,
+    store: PresetStore | None = None,
 ) -> dict[str, VLLMLaunchSpec]:
     """Load every preset on disk and return ``{alias: VLLMLaunchSpec}``.
 
     Args:
         defaults: Cross-preset defaults; uses :class:`VLLMDefaultsConfig`
             built-ins when omitted (matches the production posture).
-
-    The user-config directory comes from
-    :func:`llm_models_config.paths.user_config_dir` — override via
-    ``$XDG_CONFIG_HOME`` (sets ``$XDG_CONFIG_HOME/llm-models``).
+        store: Injectable preset source. Defaults to
+            :func:`~llmctl.services.preset_store.default_store` which
+            reads ``~/.config/llm-models/<alias>.yaml`` via
+            :func:`llm_models_config.load_all`. Tests pass an
+            :class:`~llmctl.services.preset_store.InMemoryPresetStore`.
     """
-    models = load_all()
+    store = store or default_store()
+    models = store.load()
     defaults = defaults or VLLMDefaultsConfig()
     return {alias: model_to_launch_spec(model, defaults) for alias, model in models.items()}
 
 
-def load_preset_views() -> list[PresetView]:
+def load_preset_views(*, store: PresetStore | None = None) -> list[PresetView]:
     """Return a metadata view of every loaded preset for CLI/TUI listing."""
-    models = load_all()
+    store = store or default_store()
+    models = store.load()
     return [
         PresetView(
             alias=alias,
