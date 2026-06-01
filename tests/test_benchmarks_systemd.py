@@ -81,7 +81,8 @@ def test_benchmark_live_with_injected_client(db: Session) -> None:
     assert result.samples and result.samples[0]["response"] == "a b c"
 
 
-def test_benchmark_unreachable_falls_back_to_mock(db: Session) -> None:
+def test_benchmark_unreachable_persists_failure(db: Session) -> None:
+    """Live failures are recorded as ``success=False`` (no silent mock)."""
     model_id = _ollama_model(db)
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -91,8 +92,9 @@ def test_benchmark_unreachable_falls_back_to_mock(db: Session) -> None:
     result = BenchmarkService(db, client_factory=factory).run(
         BenchmarkRunRequest(name="x", model_id=model_id, dry_run=False)
     )
-    assert result.parameters["mode"] == "mock"
-    assert "unreachable" in str(result.parameters["reason"])
+    assert result.success is False
+    assert result.parameters["mode"] == "live"
+    assert "ConnectError" in (result.error or "")
 
 
 def test_benchmark_no_endpoint_falls_back_to_mock(db: Session) -> None:

@@ -51,6 +51,22 @@ class SessionStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class BenchmarkKind(StrEnum):
+    """Benchmark workload kind.
+
+    ``CHAT`` streams /v1/chat/completions (default; measures TTFT + tok/s).
+    ``COMPLETION`` uses /v1/completions for backends without chat support.
+    ``HEALTH`` times /v1/models or backend health endpoint.
+    ``LONG_CONTEXT`` sends a configurable long prompt to verify the model
+    survives near its context limit.
+    """
+
+    CHAT = "chat"
+    COMPLETION = "completion"
+    HEALTH = "health"
+    LONG_CONTEXT = "long_context"
+
+
 class SessionKind(StrEnum):
     """Whether llmctl owns the process or only tracks an external endpoint.
 
@@ -198,6 +214,12 @@ class BenchmarkRecord(SQLModel, table=True):
     latency_ms: float | None = None
     tokens_per_second: float | None = None
     ttft_ms: float | None = None
+    kind: str | None = Field(default=None, index=True)
+    backend: str | None = Field(default=None, index=True)
+    context_length: int | None = None
+    peak_vram_mb: int | None = None
+    avg_gpu_util_pct: float | None = None
+    max_gpu_util_pct: float | None = None
     gpu_snapshot: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     parameters: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     samples: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))

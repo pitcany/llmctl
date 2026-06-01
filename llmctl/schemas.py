@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from llmctl.db import ModelStatus, RuntimeName, SessionKind, SessionStatus
+from llmctl.db import BenchmarkKind, ModelStatus, RuntimeName, SessionKind, SessionStatus
 
 
 class HealthState(StrEnum):
@@ -261,12 +261,18 @@ class BenchmarkResult(BaseModel):
     session_id: str | None = None
     profile_id: str | None = None
     name: str
+    kind: BenchmarkKind | None = None
+    backend: str | None = None
+    context_length: int | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
     latency_ms: float | None = None
     tokens_per_second: float | None = None
     time_to_first_token_ms: float | None = None
+    peak_vram_mb: int | None = None
+    avg_gpu_util_pct: float | None = None
+    max_gpu_util_pct: float | None = None
     gpu_snapshot: dict[str, Any] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
     samples: list[dict[str, Any]] = Field(default_factory=list)
@@ -282,11 +288,13 @@ class BenchmarkRunRequest(BaseModel):
     session_id: str | None = None
     profile_id: str | None = None
     name: str = "smoke"
+    kind: BenchmarkKind = BenchmarkKind.CHAT
+    context_length: int | None = None
     prompts: list[str] = Field(default_factory=list)
     parameters: dict[str, Any] = Field(default_factory=dict)
     concurrency: int = 1
     sweep: list[int] = Field(default_factory=list)
-    dry_run: bool = True
+    dry_run: bool = False
 
 
 class AdapterStatus(BaseModel):

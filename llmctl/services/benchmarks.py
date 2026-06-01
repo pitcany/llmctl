@@ -24,18 +24,41 @@ from sqlmodel import Session as DBSession
 from sqlmodel import select
 
 from llmctl.config import Settings, load_settings
-from llmctl.db import BenchmarkRecord, ModelRecord, SessionRecord, SessionStatus
+from llmctl.db import (
+    BenchmarkKind,
+    BenchmarkRecord,
+    ModelRecord,
+    SessionRecord,
+    SessionStatus,
+)
 from llmctl.schemas import BenchmarkResult, BenchmarkRunRequest
 from llmctl.telemetry.gpu import get_gpu_info, nvml_available
+from llmctl.telemetry.gpu_sampler import GPUSampler, GPUSamplerSummary
 
-#: Default prompt used when a request supplies none.
-DEFAULT_PROMPT = "In one sentence, explain what a GPU is."
+#: Default chat prompt used when a request supplies none. Picked to exercise
+#: reasoning + token throughput on a paragraph-length response.
+DEFAULT_PROMPT = (
+    "Explain the difference between maximum likelihood and Bayesian inference "
+    "in one paragraph."
+)
 #: Default completion length requested per prompt.
-DEFAULT_MAX_TOKENS = 64
+DEFAULT_MAX_TOKENS = 256
+#: Long-context smoke test prompt seed; we repeat this to fill the requested
+#: context_length so the model has to ingest a real load.
+LONG_CONTEXT_SEED = (
+    "The following is a stress test of long-context handling. Please answer "
+    "the question at the end after reading the preamble.\n\n"
+)
+#: Marker question appended to the long-context prompt.
+LONG_CONTEXT_QUESTION = (
+    "\n\nQUESTION: In one sentence, what was the topic of the preamble?"
+)
 #: Assumed throughput (tokens/sec) for the synthetic mock benchmark.
 MOCK_TOKENS_PER_SECOND = 50.0
 #: HTTP timeout (seconds) for live benchmark calls.
 REQUEST_TIMEOUT = 60.0
+#: HTTP timeout (seconds) for health checks (short — they should be snappy).
+HEALTH_TIMEOUT = 5.0
 #: Maximum characters of generated text stored per sample.
 SAMPLE_CHAR_LIMIT = 500
 
@@ -50,24 +73,51 @@ _DONE = object()
 class _Target:
     """A resolved live benchmark endpoint."""
 
-    chat_url: str
+    base_url: str
     model_name: str
+    backend: str | None = None
+
+    @property
+    def chat_url(self) -> str:
+        return self.base_url.rstrip("/") + "/v1/chat/completions"
+
+    @property
+    def completion_url(self) -> str:
+        return self.base_url.rstrip("/") + "/v1/completions"
+
+    @property
+    def models_url(self) -> str:
+        return self.base_url.rstrip("/") + "/v1/models"
 
 
 def record_to_benchmark(record: BenchmarkRecord) -> BenchmarkResult:
     """Convert benchmark DB record to schema."""
+    kind_value: BenchmarkKind | None
+    if record.kind is None:
+        kind_value = None
+    else:
+        try:
+            kind_value = BenchmarkKind(record.kind)
+        except ValueError:
+            kind_value = None
     return BenchmarkResult(
         id=record.id,
         model_id=record.model_id,
         session_id=record.session_id,
         profile_id=record.profile_id,
         name=record.name,
+        kind=kind_value,
+        backend=record.backend,
+        context_length=record.context_length,
         prompt_tokens=record.prompt_tokens,
         completion_tokens=record.completion_tokens,
         total_tokens=record.total_tokens,
         latency_ms=record.latency_ms,
         tokens_per_second=record.tokens_per_second,
         time_to_first_token_ms=record.ttft_ms,
+        peak_vram_mb=record.peak_vram_mb,
+        avg_gpu_util_pct=record.avg_gpu_util_pct,
+        max_gpu_util_pct=record.max_gpu_util_pct,
         gpu_snapshot=record.gpu_snapshot,
         parameters=record.parameters,
         samples=record.samples,
@@ -142,36 +192,71 @@ class BenchmarkService:
         self.settings = settings or load_settings()
         self._client_factory = client_factory
 
-    def list_results(self) -> list[BenchmarkResult]:
-        """List recorded benchmark results."""
-        records = self.db.exec(select(BenchmarkRecord)).all()
+    def list_results(
+        self,
+        *,
+        model_id: str | None = None,
+        session_id: str | None = None,
+        kind: BenchmarkKind | str | None = None,
+        limit: int | None = None,
+    ) -> list[BenchmarkResult]:
+        """List recorded benchmark results, newest first when ``limit`` is given.
+
+        Filters compose with AND semantics. ``limit`` is applied after sorting
+        by ``created_at DESC`` so callers can ask for the "latest N for model X".
+        """
+        statement = select(BenchmarkRecord)
+        if model_id is not None:
+            statement = statement.where(BenchmarkRecord.model_id == model_id)
+        if session_id is not None:
+            statement = statement.where(BenchmarkRecord.session_id == session_id)
+        if kind is not None:
+            kind_str = kind.value if isinstance(kind, BenchmarkKind) else str(kind)
+            statement = statement.where(BenchmarkRecord.kind == kind_str)
+        if limit is not None:
+            statement = statement.order_by(BenchmarkRecord.created_at.desc()).limit(limit)
+        records = self.db.exec(statement).all()
         return [record_to_benchmark(record) for record in records]
+
+    def get_result(self, benchmark_id: str) -> BenchmarkResult | None:
+        """Return a single recorded benchmark by id, or ``None`` if missing."""
+        record = self.db.get(BenchmarkRecord, benchmark_id)
+        return record_to_benchmark(record) if record is not None else None
 
     def run(self, request: BenchmarkRunRequest) -> BenchmarkResult:
         """Execute a benchmark and persist its result.
 
-        Streams a real run against a live runtime endpoint and falls back to a
-        deterministic synthetic benchmark when the runtime is unavailable or a
-        dry run is requested. The fallback is recorded with ``parameters.mode ==
-        "mock"`` and a human-readable ``reason``.
+        Streams a real run against a live runtime endpoint. On ``--dry-run`` (or
+        when no endpoint can be resolved at all) it records a deterministic
+        synthetic result with ``parameters.mode == "mock"``. Live runs that
+        fail mid-flight are persisted with ``success=False`` and the error
+        message so failures are inspectable in the history.
         """
-        prompts = request.prompts or [DEFAULT_PROMPT]
+        prompts = self._resolve_prompts(request)
         params = dict(request.parameters)
         params.setdefault("concurrency", max(1, request.concurrency))
         snapshot = _gpu_snapshot()
-        metrics = self._measure(request, prompts, params)
+        with GPUSampler() as sampler:
+            metrics = self._measure(request, prompts, params)
+        gpu_summary = sampler.summary()
         record = BenchmarkRecord(
             model_id=request.model_id,
             session_id=request.session_id,
             profile_id=request.profile_id,
             name=request.name,
+            kind=request.kind.value,
+            backend=metrics.get("backend"),
+            context_length=request.context_length,
             prompt_tokens=metrics["prompt_tokens"],
             completion_tokens=metrics["completion_tokens"],
             total_tokens=metrics["total_tokens"],
             latency_ms=metrics["latency_ms"],
             tokens_per_second=metrics["tokens_per_second"],
             ttft_ms=metrics["ttft_ms"],
-            gpu_snapshot=snapshot,
+            peak_vram_mb=gpu_summary.peak_vram_mb,
+            avg_gpu_util_pct=gpu_summary.avg_gpu_util_pct,
+            max_gpu_util_pct=gpu_summary.max_gpu_util_pct,
+            gpu_snapshot=self._merge_snapshot(snapshot, gpu_summary),
             parameters=metrics["parameters"],
             samples=metrics["samples"],
             success=metrics["success"],
@@ -197,11 +282,18 @@ class BenchmarkService:
             for key in ("max_tokens", "temperature", "concurrency")
             if key in record.parameters
         }
+        kind = (
+            BenchmarkKind(record.kind)
+            if record.kind in {k.value for k in BenchmarkKind}
+            else BenchmarkKind.CHAT
+        )
         request = BenchmarkRunRequest(
             name=record.name,
             model_id=record.model_id,
             session_id=record.session_id,
             profile_id=record.profile_id,
+            kind=kind,
+            context_length=record.context_length,
             prompts=prompts,
             parameters=params,
             concurrency=int(record.parameters.get("concurrency", 1) or 1),
@@ -241,38 +333,72 @@ class BenchmarkService:
         prompts: list[str],
         params: dict[str, object],
     ) -> dict[str, object]:
-        """Return benchmark metrics, choosing live execution or a mock fallback."""
+        """Return benchmark metrics for the requested ``kind``.
+
+        Behaviour:
+          * Explicit ``dry_run`` -> deterministic mock result for the kind.
+          * No reachable endpoint -> mock result with reason
+            ``"no reachable runtime endpoint"``.
+          * Endpoint reachable but the call fails -> *failure record*:
+            ``success=False``, the exception in ``error``. Mock fallback is
+            NOT used for live failures (we want failures to be inspectable).
+        """
         if request.dry_run:
-            return self._mock(prompts, params, "dry-run requested")
+            return self._mock(request, prompts, params, "dry-run requested")
         target = self._resolve_target(request)
         if target is None:
-            return self._mock(prompts, params, "no reachable runtime endpoint")
+            return self._mock(
+                request, prompts, params, "no reachable runtime endpoint"
+            )
         try:
-            return self._run_live(target, prompts, params)
-        except Exception as exc:  # noqa: BLE001 - graceful fallback to mock
-            return self._mock(prompts, params, f"runtime unreachable: {exc}")
+            return self._run_kind(request, target, prompts, params)
+        except Exception as exc:  # noqa: BLE001 - persist as failure record
+            return self._failure(request, target, prompts, params, exc)
+
+    def _run_kind(
+        self,
+        request: BenchmarkRunRequest,
+        target: _Target,
+        prompts: list[str],
+        params: dict[str, object],
+    ) -> dict[str, object]:
+        """Dispatch the live runner appropriate to ``request.kind``."""
+        if request.kind == BenchmarkKind.HEALTH:
+            return self._run_health(target, params)
+        if request.kind == BenchmarkKind.COMPLETION:
+            return self._run_live(target, prompts, params, endpoint="completion")
+        if request.kind == BenchmarkKind.LONG_CONTEXT:
+            ctx_prompts = [self._build_long_context_prompt(request)]
+            return self._run_live(target, ctx_prompts, params, endpoint="chat")
+        return self._run_live(target, prompts, params, endpoint="chat")
 
     def _resolve_target(self, request: BenchmarkRunRequest) -> _Target | None:
         """Resolve the live OpenAI-compatible endpoint for the request, if any."""
-        endpoint, model_name = self._resolve_endpoint(request)
+        endpoint, model_name, backend = self._resolve_endpoint(request)
         if not endpoint:
             return None
-        chat_url = endpoint.rstrip("/") + "/v1/chat/completions"
-        return _Target(chat_url=chat_url, model_name=model_name or "local-model")
+        return _Target(
+            base_url=endpoint,
+            model_name=model_name or "local-model",
+            backend=backend,
+        )
 
     def _resolve_endpoint(
         self, request: BenchmarkRunRequest
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None]:
         """Find a serving endpoint via an explicit session, a running session,
-        or the runtime's default server endpoint."""
+        or the runtime's default server endpoint. Returns (url, model, backend).
+        """
         if request.session_id:
             record = self.db.get(SessionRecord, request.session_id)
             if record and record.endpoint_url:
-                return record.endpoint_url, self._model_name(record.model_id)
+                backend = record.runtime.value if record.runtime else None
+                return record.endpoint_url, self._model_name(record.model_id), backend
         if request.model_id:
             model = self.db.get(ModelRecord, request.model_id)
             if model:
                 name = model.source or model.name
+                backend = model.runtime.value
                 running = self.db.exec(
                     select(SessionRecord).where(
                         SessionRecord.model_id == model.id,
@@ -280,11 +406,11 @@ class BenchmarkService:
                     )
                 ).first()
                 if running and running.endpoint_url:
-                    return running.endpoint_url, name
+                    return running.endpoint_url, name, backend
                 config = self.settings.runtime_config(model.runtime.value)
                 if config.endpoint:
-                    return config.endpoint, name
-        return None, None
+                    return config.endpoint, name, backend
+        return None, None, None
 
     def _model_name(self, model_id: str | None) -> str | None:
         """Return a model's served name (source preferred) by id."""
@@ -293,17 +419,104 @@ class BenchmarkService:
         model = self.db.get(ModelRecord, model_id)
         return (model.source or model.name) if model else None
 
+    def _resolve_prompts(self, request: BenchmarkRunRequest) -> list[str]:
+        """Pick prompts for a run based on kind and request input."""
+        if request.kind == BenchmarkKind.HEALTH:
+            return []
+        if request.prompts:
+            return list(request.prompts)
+        return [DEFAULT_PROMPT]
+
+    @staticmethod
+    def _build_long_context_prompt(request: BenchmarkRunRequest) -> str:
+        """Pad ``LONG_CONTEXT_SEED`` to roughly ``context_length`` tokens.
+
+        We approximate 1 token == 4 characters (the standard OpenAI rule of
+        thumb) when the user gives a token budget. Defaults to ~8K tokens
+        when no ``context_length`` is provided.
+        """
+        target_tokens = request.context_length or 8192
+        target_chars = max(target_tokens * 4, len(LONG_CONTEXT_SEED) + 1)
+        body = LONG_CONTEXT_SEED
+        while len(body) < target_chars:
+            body += LONG_CONTEXT_SEED
+        return body[:target_chars] + LONG_CONTEXT_QUESTION
+
+    @staticmethod
+    def _merge_snapshot(
+        snapshot: dict[str, object], summary: GPUSamplerSummary
+    ) -> dict[str, object]:
+        """Add sampler aggregates onto the point-in-time GPU snapshot."""
+        merged = dict(snapshot)
+        merged["sample_count"] = summary.sample_count
+        merged["peak_vram_mb"] = summary.peak_vram_mb
+        merged["avg_gpu_util_pct"] = summary.avg_gpu_util_pct
+        merged["max_gpu_util_pct"] = summary.max_gpu_util_pct
+        return merged
+
+    def _run_health(
+        self, target: _Target, params: dict[str, object]
+    ) -> dict[str, object]:
+        """Time a GET against ``/v1/models``; record latency as ttft+total."""
+        client = (
+            self._client_factory()
+            if self._client_factory is not None
+            else httpx.Client(timeout=HEALTH_TIMEOUT)
+        )
+        start = time.perf_counter()
+        body_text = ""
+        status_code: int | None = None
+        with client:
+            response = client.get(target.models_url)
+            status_code = response.status_code
+            response.raise_for_status()
+            body_text = response.text[:SAMPLE_CHAR_LIMIT]
+        elapsed_ms = round((time.perf_counter() - start) * 1000.0, 2)
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "latency_ms": elapsed_ms,
+            "tokens_per_second": None,
+            "ttft_ms": elapsed_ms,
+            "samples": [
+                {
+                    "prompt": "GET /v1/models",
+                    "response": body_text,
+                    "status_code": status_code,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "latency_ms": elapsed_ms,
+                    "ttft_ms": elapsed_ms,
+                }
+            ],
+            "parameters": {
+                **params,
+                "mode": "live",
+                "endpoint": target.models_url,
+                "kind": BenchmarkKind.HEALTH.value,
+            },
+            "backend": target.backend,
+            "success": True,
+            "error": None,
+        }
+
     def _run_live(
         self,
         target: _Target,
         prompts: list[str],
         params: dict[str, object],
+        *,
+        endpoint: str = "chat",
     ) -> dict[str, object]:
         """Stream prompts against a live endpoint; aggregate latency/TTFT/tps.
 
         With ``concurrency > 1`` requests are dispatched in parallel and
         throughput is computed from wall-clock time, measuring sustained
-        tokens/sec under load. TTFT is averaged across requests.
+        tokens/sec under load. TTFT is averaged across requests. The
+        ``endpoint`` selector picks between ``"chat"`` (``/v1/chat/completions``)
+        and ``"completion"`` (``/v1/completions``) -- the same streaming
+        runner handles both, since both speak SSE with the same delta shape.
         """
         max_tokens = int(params.get("max_tokens", DEFAULT_MAX_TOKENS))
         temperature = float(params.get("temperature", 0.0))
@@ -313,19 +526,30 @@ class BenchmarkService:
             if self._client_factory is not None
             else httpx.Client(timeout=REQUEST_TIMEOUT)
         )
+        endpoint_url = (
+            target.completion_url if endpoint == "completion" else target.chat_url
+        )
         wall_start = time.perf_counter()
         samples: list[dict[str, object]] = []
         with client:
             if concurrency == 1:
                 for prompt in prompts:
                     samples.append(
-                        self._stream_one(client, target, prompt, max_tokens, temperature)
+                        self._stream_one(
+                            client, target, prompt, max_tokens, temperature, endpoint
+                        )
                     )
             else:
                 with ThreadPoolExecutor(max_workers=concurrency) as pool:
                     futures = [
                         pool.submit(
-                            self._stream_one, client, target, prompt, max_tokens, temperature
+                            self._stream_one,
+                            client,
+                            target,
+                            prompt,
+                            max_tokens,
+                            temperature,
+                            endpoint,
                         )
                         for prompt in prompts
                     ]
@@ -351,10 +575,12 @@ class BenchmarkService:
             "parameters": {
                 **params,
                 "mode": "live",
-                "endpoint": target.chat_url,
+                "endpoint": endpoint_url,
+                "endpoint_kind": endpoint,
                 "prompt_count": len(prompts),
                 "concurrency": concurrency,
             },
+            "backend": target.backend,
             "success": True,
             "error": None,
         }
@@ -366,21 +592,39 @@ class BenchmarkService:
         prompt: str,
         max_tokens: int,
         temperature: float,
+        endpoint: str = "chat",
     ) -> dict[str, object]:
-        """Stream a single prompt, capturing TTFT and the response text."""
-        body = {
-            "model": target.model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
+        """Stream a single prompt, capturing TTFT and the response text.
+
+        ``endpoint`` is ``"chat"`` or ``"completion"``; the body shape differs
+        (``messages=[...]`` vs ``prompt=...``) but the SSE chunks come back
+        in the same delta-with-content format both ways.
+        """
+        if endpoint == "completion":
+            url = target.completion_url
+            body: dict[str, object] = {
+                "model": target.model_name,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+        else:
+            url = target.chat_url
+            body = {
+                "model": target.model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
         start = time.perf_counter()
         ttft: float | None = None
         content_parts: list[str] = []
         usage: dict[str, object] = {}
-        with client.stream("POST", target.chat_url, json=body) as response:
+        with client.stream("POST", url, json=body) as response:
             response.raise_for_status()
             for line in response.iter_lines():
                 payload = _parse_sse_line(line)
@@ -413,16 +657,98 @@ class BenchmarkService:
             "ttft_ms": round(ttft * 1000.0, 2) if ttft is not None else None,
         }
 
+    def _failure(
+        self,
+        request: BenchmarkRunRequest,
+        target: _Target,
+        prompts: list[str],
+        params: dict[str, object],
+        exc: BaseException,
+    ) -> dict[str, object]:
+        """Persist a live-run failure as ``success=False`` with the error msg.
+
+        Unlike the mock fallback (used only on dry-run or no-endpoint cases),
+        live failures are recorded as-is so the operator can see what broke
+        when reviewing the benchmark history.
+        """
+        endpoint_url = target.chat_url if request.kind != BenchmarkKind.HEALTH else target.models_url
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "latency_ms": None,
+            "tokens_per_second": None,
+            "ttft_ms": None,
+            "samples": [
+                {
+                    "prompt": prompt,
+                    "response": "",
+                    "prompt_tokens": _estimate_tokens(prompt),
+                    "completion_tokens": 0,
+                    "latency_ms": None,
+                    "ttft_ms": None,
+                }
+                for prompt in prompts
+            ],
+            "parameters": {
+                **params,
+                "mode": "live",
+                "endpoint": endpoint_url,
+                "kind": request.kind.value,
+                "prompt_count": len(prompts),
+                "concurrency": max(1, int(params.get("concurrency", 1))),
+            },
+            "backend": target.backend,
+            "success": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
     def _mock(
         self,
+        request: BenchmarkRunRequest,
         prompts: list[str],
         params: dict[str, object],
         reason: str,
     ) -> dict[str, object]:
-        """Return deterministic synthetic metrics for environments without a runtime."""
+        """Return deterministic synthetic metrics for environments without a runtime.
+
+        For ``HEALTH`` kind there are no prompts; we emit a single fake sample
+        so the record still carries a ``mode=mock`` row in the history.
+        """
         max_tokens = int(params.get("max_tokens", DEFAULT_MAX_TOKENS))
         per_prompt_latency_ms = round(max_tokens / MOCK_TOKENS_PER_SECOND * 1000.0, 2)
         ttft_ms = round(1000.0 / MOCK_TOKENS_PER_SECOND, 2)
+        if request.kind == BenchmarkKind.HEALTH:
+            samples = [
+                {
+                    "prompt": "GET /v1/models",
+                    "response": f"[mock health: {reason}]",
+                    "status_code": None,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "latency_ms": ttft_ms,
+                    "ttft_ms": ttft_ms,
+                }
+            ]
+            return {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "latency_ms": ttft_ms,
+                "tokens_per_second": None,
+                "ttft_ms": ttft_ms,
+                "samples": samples,
+                "parameters": {
+                    **params,
+                    "mode": "mock",
+                    "reason": reason,
+                    "kind": request.kind.value,
+                    "concurrency": max(1, int(params.get("concurrency", 1))),
+                },
+                "backend": None,
+                "success": True,
+                "error": None,
+            }
         samples = [
             {
                 "prompt": prompt,
@@ -448,9 +774,11 @@ class BenchmarkService:
                 **params,
                 "mode": "mock",
                 "reason": reason,
+                "kind": request.kind.value,
                 "prompt_count": len(prompts),
                 "concurrency": max(1, int(params.get("concurrency", 1))),
             },
+            "backend": None,
             "success": True,
             "error": None,
         }
