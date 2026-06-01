@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import time
+import urllib.error
 from pathlib import Path
 
+import pytest
 from sqlmodel import Session
 
 from llmctl.db import ModelRecord, RuntimeName, SessionStatus, get_engine, init_db
@@ -13,6 +15,20 @@ from llmctl.services.backends import detect_backends, missing_backends
 from llmctl.services.router import RuntimeRouter
 from llmctl.services.sessions import SessionService
 from llmctl.telemetry.process import ProcessSupervisor
+
+
+@pytest.fixture(autouse=True)
+def _no_vllm_http_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase A: detect_backends accepts "managed unit serving" as a sign
+    vLLM is available. In CI that probe should fail; on the dev host
+    (vllm-tp.service actually running) it would succeed and flip the
+    "vllm should be missing in test" assertion. Pin the probe to fail
+    so test outcomes are host-independent."""
+
+    def fail(url: str, timeout: float):
+        raise urllib.error.URLError("test: vllm probe disabled")
+
+    monkeypatch.setattr("llmctl.services.backends._default_http_get", fail)
 
 
 def test_detect_backends_reports_python_available() -> None:

@@ -7,7 +7,7 @@ from typing import Any
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
@@ -37,7 +37,8 @@ class SessionsScreen(DataScreen):
         self._tail_id: str | None = None
 
     def compose(self) -> ComposeResult:
-        """Compose the sessions table and the log-tail pane."""
+        """Compose the sessions table + log-tail pane with screen-scoped chrome."""
+        yield Header()
         yield Static(
             f"Sessions  -  [{C_MUTED}]x = stop, ctrl+r = restart, c = cleanup[/]",
             classes="panel safe",
@@ -53,6 +54,7 @@ class SessionsScreen(DataScreen):
         )
         with VerticalScroll(id="session-log-wrap", classes="panel"):
             yield Static("", id="session-log")
+        yield Footer()
 
     def fetch(self) -> Any:
         """Return sessions plus the tail of the highlighted session's log."""

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from textual.app import ComposeResult
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.config import ManagedUnitConfig, SlotConfig, load_settings
 from llmctl.integrations.systemctl import SystemctlRunner
@@ -60,7 +60,8 @@ class UnitsScreen(DataScreen):
         self._http_get = http_get or _default_http_get
 
     def compose(self) -> ComposeResult:
-        """Compose the units table chrome."""
+        """Compose the units table chrome with screen-scoped Header/Footer."""
+        yield Header()
         yield Static(
             f"Managed Units  -  [{C_MUTED}]probes vllm-tp/coder/reasoner every 3s; "
             f"ctrl+r = refresh now[/]",
@@ -72,6 +73,7 @@ class UnitsScreen(DataScreen):
             "Role", "Unit", "Active", "Port", "Served (live)", "Env file"
         )
         yield table
+        yield Footer()
 
     def fetch(self) -> Any:
         """Probe each managed unit + slot in a worker thread.

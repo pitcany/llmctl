@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from textual.app import ComposeResult
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
@@ -23,11 +23,13 @@ class LogsScreen(DataScreen):
     """Event/log viewer screen showing the live audit trail."""
 
     def compose(self) -> ComposeResult:
-        """Compose the events table."""
+        """Compose the events table with screen-scoped chrome."""
+        yield Header()
         yield Static("Events / Logs  -  live audit trail", classes="panel safe", id="logs-title")
         table: DataTable[str] = DataTable(id="logs-table", cursor_type="row")
         table.add_columns("Time", "Level", "Category", "Message")
         yield table
+        yield Footer()
 
     def fetch(self) -> Any:
         """Return the most recent audit events."""

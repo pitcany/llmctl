@@ -6,7 +6,7 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
@@ -25,7 +25,8 @@ class DoctorScreen(DataScreen):
         self._rows: list[tuple[str, str]] = []
 
     def compose(self) -> ComposeResult:
-        """Compose the doctor diagnostics table."""
+        """Compose the doctor diagnostics table with screen-scoped chrome."""
+        yield Header()
         yield Static(
             f"Doctor  -  backend binary detection  "
             f"[{C_MUTED}]c = copy install command for selected backend[/]",
@@ -36,6 +37,7 @@ class DoctorScreen(DataScreen):
         table.add_columns("Backend", "Binary", "Status", "Path / Install command")
         yield table
         yield Static("", classes="panel muted", id="doctor-summary")
+        yield Footer()
 
     def fetch(self) -> Any:
         """Return backend availability plus a GPU/scheduler summary."""

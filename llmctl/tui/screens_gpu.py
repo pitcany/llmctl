@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from textual.app import ComposeResult
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
 from llmctl.tui._base import C_MUTED, C_OK, C_WARN, DataScreen
@@ -15,12 +15,14 @@ class GPUScreen(DataScreen):
     """GPU telemetry screen backed by NVML (or a clear fallback note)."""
 
     def compose(self) -> ComposeResult:
-        """Compose the GPU table and status note."""
+        """Compose the GPU table and status note with screen-scoped chrome."""
+        yield Header()
         yield Static("NVIDIA GPUs  -  live telemetry", classes="panel safe", id="gpus-title")
         yield Static("", classes="panel muted", id="gpus-note")
         table: DataTable[str] = DataTable(id="gpus-table", cursor_type="row")
         table.add_columns("Idx", "Name", "Memory (used/total)", "Util", "Temp", "Power", "Procs")
         yield table
+        yield Footer()
 
     def fetch(self) -> Any:
         """Return GPU telemetry (empty on non-NVIDIA hosts)."""

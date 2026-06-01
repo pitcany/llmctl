@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from textual.app import ComposeResult
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.config import load_settings
 from llmctl.services.preset_loader import PresetView, load_preset_views
@@ -44,7 +44,12 @@ class PresetsScreen(DataScreen):
         self._row_aliases: list[str] = []
 
     def compose(self) -> ComposeResult:
-        """Compose the preset table chrome."""
+        """Compose the preset table chrome with screen-scoped Header/Footer.
+
+        Each screen yields its own Header/Footer because Textual's
+        ``push_screen`` covers the App-level chrome.
+        """
+        yield Header()
         yield Static(
             f"Presets  -  [{C_MUTED}]enter = launch (TP / coder / reasoner), "
             f"ctrl+r = refresh, see also: llmctl presets[/]",
@@ -56,6 +61,7 @@ class PresetsScreen(DataScreen):
             "Alias", "Served name", "Model ID", "Family", "Size (B)", "TP", "Quant"
         )
         yield table
+        yield Footer()
 
     def fetch(self) -> Any:
         """Load all preset views (runs in a worker thread)."""

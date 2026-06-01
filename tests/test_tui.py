@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,24 @@ from llmctl.tui import _data
 from llmctl.tui.app import MissionControlApp
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
+
+
+@pytest.fixture(autouse=True)
+def _no_vllm_http_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the vLLM managed-unit HTTP probe to fail.
+
+    Phase A made ``detect_backends`` accept "managed unit serving" as
+    a sign that vLLM is available — which is correct in production but
+    breaks every test that assumed ``vllm`` would report unavailable
+    in CI (where no managed unit is running). On the dev host (with
+    vllm-tp.service actually running) the unmocked probe would succeed
+    and flip the assertion. Pin the probe to fail so test outcomes are
+    host-independent.
+    """
+    def fail(url: str, timeout: float):
+        raise urllib.error.URLError("test: vllm probe disabled")
+
+    monkeypatch.setattr("llmctl.services.backends._default_http_get", fail)
 
 
 @pytest.fixture

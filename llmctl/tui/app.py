@@ -5,7 +5,6 @@ from __future__ import annotations
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
-from textual.widgets import Footer, Header
 
 from llmctl.tui.screens_benchmarks import BenchmarksScreen
 from llmctl.tui.screens_dashboard import DashboardScreen
@@ -37,10 +36,22 @@ class MissionControlApp(App[None]):
     #stat-grid {
         grid-size: 3 2;
         grid-gutter: 1;
+        /* Each row needs enough vertical space for: border (2 rows) +
+           padding (2 rows) + 2 content rows = 6 minimum. Pad to 7 so a
+           narrow terminal doesn't clip the value line. Without explicit
+           grid-rows, Textual's grid was sizing rows to fit the container's
+           remaining height, collapsing card content to zero rows. */
+        grid-rows: 7 7;
         height: auto;
         margin: 0 1;
     }
-    .stat-card { height: 5; content-align: left top; }
+    /* Override .panel's padding for stat cards specifically: 0 vertical
+       padding (border alone is enough chrome) so both title and value
+       fit inside the 7-row card body. */
+    .stat-card {
+        content-align: left top;
+        padding: 0 1;
+    }
 
     DataTable { margin: 1; height: 1fr; }
     DataTable > .datatable--header { background: #0c1a1c; text-style: bold; }
@@ -71,9 +82,16 @@ class MissionControlApp(App[None]):
     ]
 
     def compose(self) -> ComposeResult:
-        """Compose persistent UI chrome."""
-        yield Header()
-        yield Footer()
+        """The app body is empty — each screen owns its own Header/Footer.
+
+        In Textual's push_screen model an installed screen replaces the
+        visible area, so widgets yielded at app scope (Header/Footer
+        included) would disappear the moment any screen was pushed.
+        Each :class:`DataScreen` subclass yields its own chrome for that
+        reason; this method intentionally produces nothing.
+        """
+        return
+        yield  # unreachable — keeps the generator/ComposeResult typing honest
 
     def on_mount(self) -> None:
         """Install screens, show the dashboard, and start the refresh timer."""
