@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Lint / type
+.ruff_cache/
+.mypy_cache/
+
+# Local DB and state (llmctl defaults)
+*.sqlite3
+*.sqlite3-journal
+*.db
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local config overrides
+*.local.env
+.env
+.env.local

@@ -20,12 +20,14 @@ required.
 
 ## Docs
 
-- **[Quickstart](../../docs/LLMCTL-QUICKSTART.md)** — install + first
-  command in 5 minutes
-- **[User guide](../../docs/LLMCTL-USER-GUIDE.md)** — full CLI/TUI
-  reference, configuration schema, integrations, troubleshooting
-- **[Workstation runbook](../../docs/RUNBOOK.md)** — broader
-  ~/AI context (Hermes routing, Harbor services, Tailscale, etc.)
+- **[Quickstart](docs/QUICKSTART.md)** — install + first command in 5
+  minutes
+- **[User guide](docs/USER-GUIDE.md)** — full CLI/TUI reference,
+  configuration schema, integrations, troubleshooting
+
+For the workstation context this tool was extracted from (Hermes
+routing, Harbor services, Tailscale exposure, etc.), see the
+`RUNBOOK.md` in the upstream `~/AI` repo.
 
 ## Quick taste
 
@@ -185,9 +187,11 @@ the user guide for the full schema.
 ## Test
 
 ```bash
-cd ~/AI
-uv run pytest packages/llmctl/tests -q
-uv run ruff check packages/llmctl
+uv sync --extra dev
+uv run pytest -q
+uv run ruff check .
 ```
 
-383 tests, ~70–80s wall time.
+383 tests, ~70–80s wall time. Tests marked `requires_gpu`,
+`requires_systemd`, `live_hf`, or `bench_live` are skipped in CI; run
+them locally on the appropriate host.

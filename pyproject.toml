@@ -39,7 +39,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3.0",
+  "pytest-asyncio>=0.23",
   "pytest-cov>=5.0.0",
+  "respx>=0.21",
   "ruff>=0.6.0",
 ]
 
@@ -48,6 +50,17 @@ llmctl = "llmctl.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["llmctl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = ["--import-mode=importlib"]
+markers = [
+  "requires_gpu: test needs a CUDA GPU; skipped in CI",
+  "live_hf: test hits HF Hub over the network; skipped in CI",
+  "bench_live: opt-in live bench test; needs running endpoint + BENCH_LIVE=1",
+  "requires_systemd: test requires live systemd manager; skipped in CI",
+]
 
 [tool.ruff]
 line-length = 100
