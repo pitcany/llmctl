@@ -201,6 +201,21 @@ def test_benchmark_list_results(db: Session) -> None:
     assert results[0].name == "a"
 
 
+def test_benchmark_delete_removes_row(db: Session) -> None:
+    model_id = _ollama_model(db)
+    service = BenchmarkService(db)
+    result = service.run(
+        BenchmarkRunRequest(name="prune-me", model_id=model_id, dry_run=True)
+    )
+    assert service.delete(result.id or "") is True
+    assert service.get_result(result.id or "") is None
+    assert service.list_results() == []
+
+
+def test_benchmark_delete_missing_returns_false(db: Session) -> None:
+    assert BenchmarkService(db).delete("does-not-exist") is False
+
+
 # -- systemd unit generation ------------------------------------------------
 
 
@@ -391,6 +406,27 @@ def test_benchmark_rerun_endpoint(tmp_path: Path) -> None:
     assert len(client.get("/benchmarks").json()) == 2
 
     missing = client.post("/benchmarks/does-not-exist/rerun")
+    assert missing.status_code == 404
+
+
+def test_benchmark_delete_endpoint(tmp_path: Path) -> None:
+    client = TestClient(create_app(database_url=f"sqlite:///{tmp_path / 'd.db'}"))
+    model = client.post(
+        "/models", json={"name": "o", "runtime": "ollama", "source": "o:latest"}
+    )
+    model_id = model.json()["id"]
+    created = client.post(
+        "/benchmarks/run",
+        json={"model_id": model_id, "name": "prune", "dry_run": True},
+    )
+    benchmark_id = created.json()["id"]
+
+    deleted = client.delete(f"/benchmarks/{benchmark_id}")
+    assert deleted.status_code == 204
+    assert client.get(f"/benchmarks/{benchmark_id}").status_code == 404
+    assert client.get("/benchmarks").json() == []
+
+    missing = client.delete("/benchmarks/does-not-exist")
     assert missing.status_code == 404
 
 

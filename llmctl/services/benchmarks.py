@@ -223,6 +223,20 @@ class BenchmarkService:
         record = self.db.get(BenchmarkRecord, benchmark_id)
         return record_to_benchmark(record) if record is not None else None
 
+    def delete(self, benchmark_id: str) -> bool:
+        """Hard-delete a recorded benchmark row; returns ``False`` if missing.
+
+        Benchmarks are immutable historical run records — there's no soft-delete
+        state to preserve, and the operator's intent when pruning history is to
+        actually drop the row (e.g. a botched dry-run cluttering the screen).
+        """
+        record = self.db.get(BenchmarkRecord, benchmark_id)
+        if record is None:
+            return False
+        self.db.delete(record)
+        self.db.commit()
+        return True
+
     def run(self, request: BenchmarkRunRequest) -> BenchmarkResult:
         """Execute a benchmark and persist its result.
 

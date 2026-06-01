@@ -152,13 +152,16 @@ def test_app_boots_and_navigates(temp_db: Settings) -> None:
         async with app.run_test() as pilot:
             # Dashboard is the default screen.
             assert isinstance(app.screen, DashboardScreen)
+            # `d` is shadowed by CRUD screens (Models/Presets/Profiles/Benchmarks
+            # bind it to Delete), so the final hop back to Dashboard must come
+            # from a screen that does NOT redefine `d` — Logs here.
             for key, screen_cls in (
                 ("m", ModelsScreen),
                 ("s", SessionsScreen),
                 ("g", GPUScreen),
-                ("l", LogsScreen),
                 ("o", DoctorScreen),
                 ("b", BenchmarksScreen),
+                ("l", LogsScreen),
                 ("d", DashboardScreen),
             ):
                 await pilot.press(key)

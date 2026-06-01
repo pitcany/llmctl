@@ -498,6 +498,12 @@ def rerun_benchmark(benchmark_id: str) -> BenchmarkResult | None:
         return BenchmarkService(db).rerun(benchmark_id)
 
 
+def delete_benchmark(benchmark_id: str) -> bool:
+    """Delete a benchmark row by id; returns ``False`` if the row was missing."""
+    with db_session() as db:
+        return BenchmarkService(db).delete(benchmark_id)
+
+
 def run_benchmark(
     name: str,
     model_id: str | None = None,

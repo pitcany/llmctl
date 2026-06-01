@@ -21,6 +21,7 @@ from llmctl.config import Settings
 from llmctl.db import BenchmarkKind, RuntimeName
 from llmctl.schemas import BenchmarkResult, Model
 from llmctl.tui._modals_benchmarks import BenchmarkLaunch, BenchmarkLaunchModal
+from llmctl.tui._modals_registry import ConfirmDelete, DeleteModal
 from llmctl.tui.app import MissionControlApp
 from llmctl.tui.screens_benchmarks import BenchmarksScreen
 
@@ -127,6 +128,77 @@ def test_launch_modal_dispatches_run_with_chosen_kind(temp_db) -> None:
     assert captured["kind"] == BenchmarkKind.HEALTH
     assert captured["name"] == "probe"
     assert captured["dry_run"] is False
+
+
+def test_delete_action_invokes_data_layer(temp_db) -> None:
+    """Confirming the delete modal calls _data.delete_benchmark for the cursor row."""
+
+    deleted: list[str] = []
+
+    async def _run() -> None:
+        with patch(
+            "llmctl.tui._data.get_benchmarks", return_value=[_fake_result()]
+        ), patch("llmctl.tui._data.get_models", return_value=[_fake_model()]), patch(
+            "llmctl.tui._data.delete_benchmark",
+            side_effect=lambda bench_id: deleted.append(bench_id) or True,
+        ):
+            app = MissionControlApp()
+            async with app.run_test() as pilot:
+                await pilot.press("b")
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, BenchmarksScreen):
+                        break
+                screen = app.screen
+                assert isinstance(screen, BenchmarksScreen)
+                # Skip the modal — exercise the dispatcher path directly so the
+                # test stays focused on the wiring under our control.
+                screen.action_delete_benchmark()
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, DeleteModal):
+                        break
+                assert isinstance(app.screen, DeleteModal)
+                app.screen.dismiss(ConfirmDelete(delete_files=False))
+                for _ in range(100):
+                    await pilot.pause(0.05)
+                    if deleted:
+                        break
+
+    asyncio.run(_run())
+    assert deleted == ["bench-1"]
+
+
+def test_delete_action_on_empty_table_warns(temp_db) -> None:
+    """Pressing `d` with no rows surfaces the same 'launch one first' hint."""
+
+    notifications: list[str] = []
+
+    async def _run() -> None:
+        with patch("llmctl.tui._data.get_benchmarks", return_value=[]), patch(
+            "llmctl.tui._data.get_models", return_value=[]
+        ):
+            app = MissionControlApp()
+            async with app.run_test() as pilot:
+                await pilot.press("b")
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, BenchmarksScreen):
+                        break
+                assert isinstance(app.screen, BenchmarksScreen)
+                with patch.object(
+                    app,
+                    "notify",
+                    side_effect=lambda msg, **kw: notifications.append(msg),
+                ):
+                    await pilot.press("d")
+                    for _ in range(20):
+                        await pilot.pause(0.05)
+                        if notifications:
+                            break
+
+    asyncio.run(_run())
+    assert any("Press 'n'" in n for n in notifications), notifications
 
 
 def test_empty_baseline_press_warns_with_next_step(temp_db) -> None:

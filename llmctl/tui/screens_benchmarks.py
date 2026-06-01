@@ -11,6 +11,7 @@ from textual.widgets import DataTable, Footer, Header, Static
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
 from llmctl.tui._modals_benchmarks import BenchmarkLaunch, BenchmarkLaunchModal
+from llmctl.tui._modals_registry import ConfirmDelete, DeleteModal
 
 
 class BenchmarksScreen(DataScreen):
@@ -21,6 +22,7 @@ class BenchmarksScreen(DataScreen):
         Binding("enter", "rerun", "Re-run", show=True),
         Binding("c", "set_baseline", "Baseline", show=True),
         Binding("x", "clear_baseline", "Clear baseline", show=True),
+        Binding("d", "delete_benchmark", "Delete", show=True),
     ]
 
     def __init__(self, model_filter: str | None = None) -> None:
@@ -43,7 +45,7 @@ class BenchmarksScreen(DataScreen):
         yield Header()
         chrome = (
             f"Benchmarks  -  [{C_MUTED}]n = new run, enter = re-run, "
-            f"c = baseline, x = clear baseline[/]"
+            f"c = baseline, x = clear baseline, d = delete[/]"
         )
         if self._model_filter:
             chrome += f"  [{C_MUTED}]filter: model={self._model_filter}[/]"
@@ -234,6 +236,49 @@ class BenchmarksScreen(DataScreen):
             self.app.notify(
                 f"Re-ran '{result.name}' ({mode}).",
                 title="Benchmark complete",
+            )
+        self.refresh_data()
+
+    def action_delete_benchmark(self) -> None:
+        """Confirm and hard-delete the cursor-row benchmark."""
+        benchmark_id = self._selected_id()
+        if not benchmark_id:
+            if not self._ids:
+                self.app.notify(
+                    "No benchmarks yet. Press 'n' to launch one.",
+                    severity="warning",
+                )
+            else:
+                self.app.notify(
+                    "Highlight a row with arrow keys, then press 'd'.",
+                    severity="warning",
+                )
+            return
+
+        def _on_close(payload: ConfirmDelete | None) -> None:
+            if payload is None:
+                return
+            if self._baseline_id == benchmark_id:
+                self._baseline_id = None
+            self.run_action_worker(
+                lambda: _data.delete_benchmark(benchmark_id),
+                lambda removed: self._after_delete(benchmark_id, removed),
+            )
+
+        self.app.push_screen(
+            DeleteModal(f"benchmark run '{benchmark_id}'", allow_file_delete=False),
+            _on_close,
+        )
+
+    def _after_delete(self, benchmark_id: str, removed: bool) -> None:
+        """Refresh and notify after a delete completes."""
+        if removed:
+            self.app.notify(
+                f"Deleted benchmark {benchmark_id!r}.", title="Benchmarks"
+            )
+        else:
+            self.app.notify(
+                f"Benchmark {benchmark_id!r} was already gone.", severity="warning"
             )
         self.refresh_data()
 

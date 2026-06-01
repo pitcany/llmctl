@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlmodel import Session
 
 from llmctl.api.deps import get_db_session
@@ -65,3 +65,13 @@ def rerun_benchmark(
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Benchmark not found")
     return result
+
+
+@router.delete("/{benchmark_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_benchmark(
+    benchmark_id: str, db: Session = Depends(get_db_session)
+) -> Response:
+    """Hard-delete a stored benchmark row."""
+    if not BenchmarkService(db).delete(benchmark_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Benchmark not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
