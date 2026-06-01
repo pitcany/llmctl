@@ -1,22 +1,51 @@
 # Model discovery directories.
-# Keep machine-specific absolute paths out of source control. Operators can set
-# environment variables or edit this file locally.
+#
+# Each root has two ways to resolve to an on-disk path:
+#   - env_var (+ relative_path): used when the listed env var is set;
+#     joined with relative_path. Honours documented overrides like
+#     HF_HOME, OLLAMA_MODELS, LMSTUDIO_MODELS_DIR.
+#   - default_path: absolute fallback when the env var is unset, pointing
+#     at the upstream tool's default location. Lets a fresh install
+#     discover models without any host-specific configuration.
+#
+# Discovery resolves duplicate roots (env var pointing at the default)
+# to a single scan, so listing both is safe.
 model_roots:
+  # HuggingFace cache — vLLM, transformers, AWQ, etc. all read from here.
   - name: hf-cache
     enabled: true
     env_var: HF_HOME
     relative_path: hub
+    default_path: ~/.cache/huggingface/hub
     runtimes: [vllm, llama_cpp]
-  - name: ollama-library
+
+  # Ollama — user-mode daemon (macOS default; Linux when run as $USER).
+  - name: ollama-user
     enabled: true
     env_var: OLLAMA_MODELS
     relative_path: .
+    default_path: ~/.ollama/models
     runtimes: [ollama]
-  - name: lm-studio-models
+
+  # Ollama — system daemon (Linux apt/snap install). No env override;
+  # the daemon hardcodes this when running as the ollama service user.
+  - name: ollama-system
+    enabled: true
+    default_path: /usr/share/ollama/.ollama/models
+    runtimes: [ollama]
+
+  # LM Studio — local app cache. Configurable in-app via "Models Directory".
+  # Upstream default is ~/.lmstudio/models on Linux/macOS/Windows (LM Studio
+  # 0.3.x and newer); the app also writes a ~/.lmstudio-home-pointer file
+  # when the user relocates its home dir, but honouring that needs a custom
+  # resolver — not the YAML default. Track as a follow-up if it matters.
+  - name: lm-studio
     enabled: true
     env_var: LMSTUDIO_MODELS_DIR
     relative_path: .
+    default_path: ~/.lmstudio/models
     runtimes: [lmstudio]
+
 scan:
   follow_symlinks: false
   max_depth: 4

@@ -338,25 +338,41 @@ class Settings(BaseModel):
 
 
 class ModelRoot(BaseModel):
-    """A model discovery root from model_dirs.yaml."""
+    """A model discovery root from model_dirs.yaml.
+
+    Resolution order in :meth:`resolve_path`:
+
+    1. ``env_var`` (when set and the variable is populated): joined with
+       ``relative_path``. Used for caches with a documented env override
+       (``HF_HOME``, ``OLLAMA_MODELS``, ``LMSTUDIO_MODELS_DIR``).
+    2. ``default_path``: absolute fallback to the upstream tool's default
+       location, so discovery works on a fresh box that hasn't customised
+       anything (``~/.cache/huggingface``, ``~/.ollama/models``, etc.).
+    3. ``relative_path``: legacy single-field form, expanded against the
+       user's home.
+    """
 
     name: str
     enabled: bool = True
     env_var: str | None = None
+    default_path: str | None = None
     relative_path: str = "."
     runtimes: list[str] = Field(default_factory=list)
 
     def resolve_path(self) -> Path | None:
-        """Resolve root path from environment plus relative path.
+        """Resolve root path from env var, default_path, or relative_path.
 
-        Returns None when the configured environment variable is unavailable.
+        Returns None only when every option is unavailable.
         """
         if self.env_var:
             base = os.getenv(self.env_var)
-            if not base:
-                return None
-            return Path(base).expanduser() / self.relative_path
-        return Path(self.relative_path).expanduser()
+            if base:
+                return Path(base).expanduser() / self.relative_path
+        if self.default_path:
+            return Path(self.default_path).expanduser()
+        if self.relative_path and self.relative_path != ".":
+            return Path(self.relative_path).expanduser()
+        return None
 
 
 class ModelDirsConfig(BaseModel):
