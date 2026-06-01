@@ -917,3 +917,170 @@ def status_cmd() -> None:
             str(cfg.resolve_env_file(name)),
         )
     console.print(slot_table)
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible router/gateway commands.
+#
+# The gateway runs as a separate FastAPI app from the control-plane API
+# served by `llmctl serve` — different port, different surface, different
+# blast radius. `gateway` runs the proxy; `router-status` probes it;
+# `aliases` and `set-alias` manage the role -> session mapping the proxy
+# uses for the `local-<role>` virtual model ids.
+# ---------------------------------------------------------------------------
+
+
+def _router_url(settings: object) -> str:
+    """Compose the local URL the CLI uses to talk to the gateway."""
+    router = settings.router  # type: ignore[attr-defined]
+    host = router.host if router.host not in ("0.0.0.0", "") else "127.0.0.1"
+    return f"http://{host}:{router.port}"
+
+
+@app.command("gateway")
+def gateway_cmd(
+    host: Annotated[str | None, typer.Option(help="Bind host; defaults to router.host.")] = None,
+    port: Annotated[int | None, typer.Option(help="Bind port; defaults to router.port.")] = None,
+) -> None:
+    """Serve the OpenAI-compatible router gateway."""
+    from llmctl.api.gateway import create_gateway_app
+
+    settings = load_settings()
+    bind_host = host or settings.router.host
+    bind_port = port or settings.router.port
+
+    if bind_host not in ("127.0.0.1", "localhost") and not settings.router.allow_public_bind:
+        raise typer.BadParameter(
+            f"Refusing to bind gateway to {bind_host}: set router.allow_public_bind=true "
+            "in settings.yaml to override. The recommended way to expose the gateway is "
+            "via `tailscale serve --bg --https=<port> http://127.0.0.1:<router.port>` "
+            "instead of binding the process publicly."
+        )
+
+    uvicorn.run(create_gateway_app(settings), host=bind_host, port=bind_port)
+
+
+@app.command("router-status")
+def router_status_cmd() -> None:
+    """Probe the gateway and show its current routing view."""
+    import httpx
+
+    settings = load_settings()
+    url = f"{_router_url(settings)}/health"
+    headers = {}
+    if settings.router.auth_token:
+        headers["Authorization"] = f"Bearer {settings.router.auth_token}"
+    try:
+        response = httpx.get(url, headers=headers, timeout=2.0)
+    except httpx.HTTPError as exc:
+        console.print(f"[red]Gateway unreachable[/red] at {url}: {exc}")
+        console.print(
+            "[cyan]Start it with[/cyan] `llmctl gateway` (default 127.0.0.1:9000)."
+        )
+        raise typer.Exit(1) from exc
+
+    if response.status_code == 401:
+        console.print(
+            "[red]Auth required.[/red] Set router.auth_token in settings.yaml or unset it."
+        )
+        raise typer.Exit(1)
+    if response.status_code != 200:
+        console.print(f"[red]Gateway returned HTTP {response.status_code}.[/red]")
+        raise typer.Exit(1)
+
+    payload = response.json()
+    router = payload.get("router", {})
+    console.print(
+        f"[green]Gateway up[/green] at {url}  "
+        f"auth={'on' if router.get('auth_required') else 'off'}  "
+        f"auto_start={router.get('auto_start')}  "
+        f"fallback={router.get('fallback_policy')}"
+    )
+    aliases = payload.get("aliases", [])
+    table = Table(title="Aliases")
+    table.add_column("alias", style="cyan")
+    table.add_column("target")
+    table.add_column("session")
+    table.add_column("served name")
+    table.add_column("healthy")
+    for entry in aliases:
+        healthy = entry.get("healthy")
+        color = "green" if healthy else "yellow" if entry.get("target") else "red"
+        table.add_row(
+            entry.get("name", ""),
+            entry.get("target") or "-",
+            entry.get("session_id") or "-",
+            entry.get("served_name") or "-",
+            f"[{color}]{'yes' if healthy else 'no'}[/{color}]",
+        )
+    console.print(table)
+
+
+@app.command("aliases")
+def aliases_cmd() -> None:
+    """List configured router aliases and their resolved targets."""
+    from llmctl.services.gateway import GatewayService
+
+    settings = load_settings()
+    with _session() as db:
+        rows = GatewayService(db, settings).alias_view()
+
+    table = Table(title="Router aliases")
+    table.add_column("alias", style="cyan")
+    table.add_column("public id")
+    table.add_column("target")
+    table.add_column("session")
+    table.add_column("served name")
+    table.add_column("status")
+    for row in rows:
+        if row.target is None:
+            status_text = "[red]unbound[/red]"
+        elif row.healthy:
+            status_text = "[green]healthy[/green]"
+        else:
+            status_text = "[yellow]bound, no active session[/yellow]"
+        table.add_row(
+            row.name,
+            f"local-{row.name}",
+            row.target or "-",
+            row.resolved_session_id or "-",
+            row.resolved_served_name or "-",
+            status_text,
+        )
+    console.print(table)
+
+
+@app.command("set-alias")
+def set_alias_cmd(
+    alias: Annotated[str, typer.Argument(help="Alias role (e.g. coding, reasoning).")],
+    target: Annotated[
+        str | None,
+        typer.Argument(
+            help="Session id, profile name, or served model name to bind. "
+            "Pass '-' to clear the alias.",
+        ),
+    ] = None,
+) -> None:
+    """Bind ALIAS to a session/profile/served name (overlay JSON, not YAML)."""
+    from llmctl.services.gateway import GatewayService
+
+    settings = load_settings()
+    resolved_target = None if target in (None, "-") else target
+    with _session() as db:
+        service = GatewayService(db, settings)
+        service.set_alias(alias, resolved_target)
+        rows = {row.name: row for row in service.alias_view()}
+    if resolved_target is None:
+        console.print(f"[yellow]Cleared alias[/yellow] {alias}.")
+    else:
+        view = rows.get(alias)
+        if view is None or not view.healthy:
+            console.print(
+                f"[yellow]Bound[/yellow] {alias} -> {resolved_target}; "
+                "no active session resolves yet (will activate when a matching session starts)."
+            )
+        else:
+            console.print(
+                f"[green]Bound[/green] {alias} -> {resolved_target} "
+                f"(session {view.resolved_session_id}, served as {view.resolved_served_name})."
+            )

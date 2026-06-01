@@ -63,6 +63,71 @@ class SchedulerSettings(BaseModel):
     logs_dir: str | None = None
 
 
+# Aliases the router resolves out of the box. Each maps a *role* (what the
+# caller asked for) to either a session id, a profile name, or a served
+# model name — the gateway resolves whichever comes first to an active
+# session at request time. None of these have a target by default; the
+# user pins them with `llmctl set-alias <role> <session_id>` (or by
+# editing router.aliases in settings.yaml). The seven roles are the spec
+# defaults; users may add their own freely.
+_DEFAULT_ROUTER_ALIASES = (
+    "reasoning",
+    "coding",
+    "fast",
+    "long-context",
+    "tutoring",
+    "adtech",
+    "quant",
+)
+
+
+class RouterSettings(BaseModel):
+    """OpenAI-compatible router/gateway settings.
+
+    The gateway exposes a single local endpoint (default 127.0.0.1:9000)
+    that proxies OpenAI-style calls (``/v1/models``,
+    ``/v1/chat/completions``, ``/v1/completions``) to whichever active
+    local session matches the requested model id or alias. It is
+    intentionally bound to loopback by default — public binds require
+    explicit opt-in via ``allow_public_bind`` *and* a value other than
+    ``127.0.0.1``/``localhost`` for ``host``. See
+    ``docs/router-tailscale.md`` (Tailscale-safe expose recipe) for the
+    recommended way to make the gateway reachable from another machine.
+    """
+
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = 9000
+    # When non-None, the gateway requires
+    # ``Authorization: Bearer <auth_token>`` on every /v1/* request.
+    # Health and the lightweight /v1/models discovery endpoint always
+    # accept the same header; pass through curl/openai clients that send
+    # it on every request.
+    auth_token: str | None = None
+    # Logical role -> session id / profile name / served model name. The
+    # router tries each lookup in that order. Keys here are pre-populated
+    # for the spec-required roles so `llmctl aliases` shows the set of
+    # roles the host *intends* to support even before any are bound.
+    aliases: dict[str, str | None] = Field(
+        default_factory=lambda: {name: None for name in _DEFAULT_ROUTER_ALIASES}
+    )
+    # ``error`` (default) returns 404 when the requested model can't be
+    # resolved. ``fallback`` routes to ``fallback_target`` (a session id,
+    # profile name, or served model name) so a misconfigured client still
+    # gets *some* answer instead of a hard failure.
+    fallback_policy: str = "error"
+    fallback_target: str | None = None
+    # When true, the router may issue a control-plane "start" for a
+    # session matching the requested alias if nothing is running. Off by
+    # default — the spec explicitly calls this out, and silently spinning
+    # up a vLLM process from a network request is the kind of thing you
+    # want behind a checkbox, not a default.
+    auto_start: bool = False
+    # Allow binding to anything other than 127.0.0.1 / localhost. Off by
+    # default so a YAML typo can't open the router to LAN traffic.
+    allow_public_bind: bool = False
+
+
 class RuntimeConfig(BaseModel):
     """Per-runtime connection and launch configuration.
 
@@ -292,6 +357,7 @@ class Settings(BaseModel):
     runtimes: dict[str, RuntimeConfig] = Field(default_factory=dict)
     managed_units: ManagedUnitsConfig = Field(default_factory=ManagedUnitsConfig)
     vllm: VLLMConfig = Field(default_factory=VLLMConfig)
+    router: RouterSettings = Field(default_factory=RouterSettings)
 
     def runtime_config(self, runtime: str) -> RuntimeConfig:
         """Return effective runtime config, merging defaults with YAML overrides."""

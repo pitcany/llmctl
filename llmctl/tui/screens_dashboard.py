@@ -120,6 +120,35 @@ class DashboardScreen(DataScreen):
             lines.append("\n[b]Scheduler warnings[/b]")
             for warning in warnings:
                 lines.append(f"  [{C_WARN}]![/] {warning}")
+        router = data.get("router") or {}
+        if router:
+            lines.append("\n[b]Router gateway[/b]")
+            running = router.get("running")
+            color = C_OK if running else C_WARN
+            state = "running" if running else "stopped"
+            host = router.get("host", "127.0.0.1")
+            port = router.get("port", "?")
+            auth = "auth" if router.get("auth_required") else "no-auth"
+            lines.append(f"  [{color}]*[/] http://{host}:{port}  {state}  {auth}")
+            aliases = router.get("aliases") or []
+            bound = [a for a in aliases if a.get("target")]
+            if not aliases:
+                lines.append(f"  [{C_MUTED}]No aliases configured.[/]")
+            else:
+                for entry in aliases:
+                    target = entry.get("target") or "-"
+                    healthy = entry.get("healthy")
+                    a_color = (
+                        C_OK if healthy else C_WARN if entry.get("target") else C_MUTED
+                    )
+                    session_id = entry.get("session_id") or "-"
+                    lines.append(
+                        f"  [{a_color}]·[/] {entry['name']:<14} -> {target}  "
+                        f"[{C_MUTED}]session={session_id}[/]"
+                    )
+                lines.append(
+                    f"  [{C_MUTED}]{len(bound)}/{len(aliases)} aliases bound.[/]"
+                )
         gpu_note = (
             "NVML detected" if data["nvml_available"] else "No NVIDIA GPU / NVML (fallback mode)"
         )

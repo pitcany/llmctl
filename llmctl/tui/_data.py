@@ -28,6 +28,7 @@ from llmctl.schemas import Session as RuntimeSession
 from llmctl.services.backends import detect_backends, missing_backends
 from llmctl.services.benchmarks import BenchmarkService
 from llmctl.services.events import list_events
+from llmctl.services.gateway import GatewayService
 from llmctl.services.health import HealthService
 from llmctl.services.profiles import ProfileService
 from llmctl.services.registry import RegistryService
@@ -263,10 +264,12 @@ def run_benchmark(
 
 def get_overview() -> dict[str, Any]:
     """Return aggregate counts and health for the dashboard."""
+    settings = load_settings()
     with db_session() as db:
         models = RegistryService(db).list_models()
         sessions = SessionService(db).list_sessions()
         profiles = ProfileService(db).list_profiles()
+        aliases = GatewayService(db, settings).alias_view()
     gpus = get_gpu_info()
     health = HealthService().get_health()
     running = sum(1 for s in sessions if s.status.value == "running")
@@ -286,6 +289,7 @@ def get_overview() -> dict[str, Any]:
             warnings.append(f"{backend} backend missing - no registered models affected")
     if not gpus:
         warnings.append("No NVIDIA GPU detected; vLLM launches require --cpu or --force.")
+    router_running = _probe_gateway(settings)
     return {
         "models": len(models),
         "sessions_total": len(sessions),
@@ -298,4 +302,34 @@ def get_overview() -> dict[str, Any]:
         "state": str(health.get("state")),
         "runtimes": health.get("runtimes", {}),
         "scheduler_warnings": warnings,
+        "router": {
+            "running": router_running,
+            "host": settings.router.host,
+            "port": settings.router.port,
+            "auth_required": bool(settings.router.auth_token),
+            "aliases": [
+                {
+                    "name": a.name,
+                    "target": a.target,
+                    "session_id": a.resolved_session_id,
+                    "healthy": a.healthy,
+                }
+                for a in aliases
+            ],
+        },
     }
+
+
+def _probe_gateway(settings: Any) -> bool:
+    """Best-effort liveness probe of the gateway /health endpoint."""
+    import httpx
+
+    host = settings.router.host if settings.router.host not in ("0.0.0.0", "") else "127.0.0.1"
+    url = f"http://{host}:{settings.router.port}/health"
+    headers = {}
+    if settings.router.auth_token:
+        headers["Authorization"] = f"Bearer {settings.router.auth_token}"
+    try:
+        return httpx.get(url, headers=headers, timeout=0.5).status_code == 200
+    except httpx.HTTPError:
+        return False

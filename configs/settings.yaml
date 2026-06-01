@@ -32,6 +32,41 @@ scheduler:
   require_auth_token: false
   logs_dir: null
 
+# OpenAI-compatible router/gateway. Run with `llmctl gateway`.
+#
+# Loopback by default. To expose to another machine the recommended path
+# is Tailscale Serve, which terminates TLS for you and never touches the
+# local bind:
+#
+#     tailscale serve --bg --https=9443 http://127.0.0.1:9000
+#
+# Only set `allow_public_bind: true` if you understand the LAN exposure
+# tradeoff. `auth_token` is matched verbatim against
+# `Authorization: Bearer <token>`; leave it null to disable auth on
+# loopback.
+#
+# Aliases map a logical role to a session id, profile name, or served
+# model name. Pin them with `llmctl set-alias <role> <target>` — that
+# writes to <config_dir>/router_aliases.json, leaving this file
+# untouched. The seven defaults are the spec-required roles.
+router:
+  enabled: true
+  host: 127.0.0.1
+  port: 9000
+  auth_token: null
+  aliases:
+    reasoning: null
+    coding: null
+    fast: null
+    long-context: null
+    tutoring: null
+    adtech: null
+    quant: null
+  fallback_policy: error
+  fallback_target: null
+  auto_start: false
+  allow_public_bind: false
+
 paths:
   config_dir: null
   data_dir: null
