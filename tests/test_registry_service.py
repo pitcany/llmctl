@@ -151,6 +151,40 @@ def test_find_ambiguous_name_raises(tmp_path: Path) -> None:
             service.find("dual")
 
 
+def test_scan_discovered_only_excludes_existing(tmp_path: Path) -> None:
+    """Dry-run scan must hide models already in the registry.
+
+    Otherwise the ``llmctl scan`` preview keeps showing the same rows the
+    user already imported, making the diff useless.
+    """
+    from unittest.mock import patch
+
+    from llmctl.schemas import Model
+    from llmctl.services.router import RuntimeRouter
+
+    with _db(tmp_path) as db:
+        service = RegistryService(db, router=RuntimeRouter())
+        _make(service, name="existing", runtime=RuntimeName.VLLM, source="/srv/existing")
+
+        # Pretend the adapter rediscovers the same model plus a new one.
+        async def fake_discover():
+            return [
+                Model(name="existing", runtime=RuntimeName.VLLM, source="/srv/existing"),
+                Model(name="brand-new", runtime=RuntimeName.VLLM, source="/srv/new"),
+            ]
+
+        with patch.object(
+            service.router.get_adapter(RuntimeName.VLLM),
+            "discover_models",
+            side_effect=fake_discover,
+        ):
+            with patch.object(service.router, "list_runtimes", return_value=[RuntimeName.VLLM]):
+                results = service.scan_discovered_only()
+
+    names = {model.name for model in results}
+    assert names == {"brand-new"}
+
+
 def test_list_models_includes_null_active_rows(tmp_path: Path) -> None:
     """Models migrated before the ``active`` column existed have NULL there.
 

@@ -252,6 +252,18 @@ def test_export_and_import_registry_round_trip(cli_env: Path) -> None:
     assert "export-profile" in profile_names
 
 
+def test_resolve_gpu_mode_handles_spaces() -> None:
+    """``--gpus "0, 1"`` must classify as explicit, not pass through as a mode."""
+    from llmctl.cli_registry import _resolve_gpu_mode
+
+    assert _resolve_gpu_mode("0") == "explicit"
+    assert _resolve_gpu_mode("0,1") == "explicit"
+    assert _resolve_gpu_mode("0, 1") == "explicit"
+    assert _resolve_gpu_mode(" 0 , 1 ") == "explicit"
+    assert _resolve_gpu_mode("auto") == "auto"
+    assert _resolve_gpu_mode("most-free") == "most-free"
+
+
 def test_scan_dry_run_does_not_persist(cli_env: Path) -> None:
     runner = CliRunner()
     # No model dirs configured — should be a clean no-op.

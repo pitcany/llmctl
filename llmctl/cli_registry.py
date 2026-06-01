@@ -123,6 +123,17 @@ def _prompt_optional_float(label: str, default: float | None = None) -> float | 
         raise typer.BadParameter(f"{label}: expected number") from exc
 
 
+def _resolve_gpu_mode(gpus: str) -> str:
+    """Classify a ``--gpus`` argument as a named mode or an explicit id list.
+
+    Accepts forms like ``"auto"``, ``"0"``, ``"0,1"``, or ``"0, 1"``. The
+    previous one-liner only stripped commas, so ``"0, 1"`` failed the
+    ``isdigit`` check and fell through as a literal mode name (later
+    rejected by the scheduler). Strip whitespace too.
+    """
+    return "explicit" if gpus.replace(",", "").replace(" ", "").isdigit() else gpus
+
+
 def _prompt_runtime(default: RuntimeName | None = None) -> RuntimeName:
     raw = Prompt.ask(
         "backend",
@@ -683,7 +694,7 @@ def preview_cmd(
             profile_id=profile_id,
             runtime=model.runtime,
             gpu_ids=[int(p) for p in gpus.split(",") if p.strip().isdigit()],
-            gpu_mode=gpus if not gpus.replace(",", "").strip().isdigit() else "explicit",
+            gpu_mode=_resolve_gpu_mode(gpus),
             dry_run=True,
         )
         plan = SessionService(db).plan(request)

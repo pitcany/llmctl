@@ -71,10 +71,13 @@ class RegistryService:
         return self.list_models()
 
     def scan_discovered_only(self) -> list[Model]:
-        """Return adapter-discovered models without persisting them.
+        """Return *new* adapter-discovered models without persisting them.
 
         Used by ``llmctl scan`` (without ``--import``) so the user can review
-        candidates before committing them to the registry.
+        candidates before committing them. Filters out anything already in
+        the registry — matching the ``(runtime, source or name)`` upsert key
+        used by ``_upsert`` — so the dry-run preview shows only the diff,
+        not every model the adapter could find.
         """
         discovered: list[Model] = []
         for runtime in self.router.list_runtimes():
@@ -84,7 +87,17 @@ class RegistryService:
             except Exception:
                 results = []
             discovered.extend(results)
-        return discovered
+        existing = self.db.exec(
+            select(ModelRecord).where(ModelRecord.status != ModelStatus.DELETED)
+        ).all()
+        existing_keys = {
+            (record.runtime, record.source or record.name) for record in existing
+        }
+        return [
+            model
+            for model in discovered
+            if (model.runtime, model.source or model.name) not in existing_keys
+        ]
 
     def list_models(self, include_inactive: bool = False) -> list[Model]:
         """List non-deleted models. Inactive rows are hidden by default.
