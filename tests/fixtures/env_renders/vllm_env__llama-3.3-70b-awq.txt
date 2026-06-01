@@ -1,0 +1,17 @@
+CUDA_VISIBLE_DEVICES=0,1
+CUDA_DEVICE_ORDER=PCI_BUS_ID
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+LD_LIBRARY_PATH=/home/yannik/miniconda3/envs/vllm-serve/lib:/usr/local/cuda/lib64
+PATH=/home/yannik/miniconda3/envs/vllm-serve/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
+HF_HOME=/home/yannik/AI/cache/huggingface
+VLLM_MODEL=casperhansen/llama-3.3-70b-instruct-awq
+VLLM_SERVED_NAME=llama-3.3-70b
+VLLM_TP=2
+VLLM_PORT=8003
+VLLM_HOST=0.0.0.0
+VLLM_MAX_LEN=65536
+VLLM_GPU_MEM=0.85
+VLLM_QUANT=awq_marlin
+VLLM_KV_DTYPE=fp8
+VLLM_TOOL_PARSER=llama3_json
+VLLM_MAX_SEQS=64

@@ -42,15 +42,9 @@ dev = [
   "pytest>=8.3.0",
   "pytest-cov>=5.0.0",
   "ruff>=0.6.0",
-  # Test-only: byte-diff parity tests assert that llmctl's vllm-tp.env
-  # renderer produces the same output as gpu-models for every preset.
-  # Once gpu-models becomes a shim over llmctl (Phase 7), this dep
-  # flips direction.
-  "gpu-models",
 ]
 
 [tool.uv.sources]
-gpu-models = { workspace = true }
 llm-models-config = { workspace = true }
 
 [project.scripts]

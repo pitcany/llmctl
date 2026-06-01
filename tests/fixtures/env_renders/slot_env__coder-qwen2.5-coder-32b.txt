@@ -1,0 +1,26 @@
+# Auto-written by `gpu-models slot coder ...`. To override
+# knobs not exposed by a preset, edit this file directly and run
+# sudo -n systemctl restart vllm-coder.
+
+CUDA_VISIBLE_DEVICES=0
+CUDA_DEVICE_ORDER=PCI_BUS_ID
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+LD_LIBRARY_PATH=/home/yannik/miniconda3/envs/vllm-serve/lib:/usr/local/cuda/lib64
+PATH=/home/yannik/miniconda3/envs/vllm-serve/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
+HF_HOME=/home/yannik/AI/cache/huggingface
+
+NCCL_P2P_DISABLE=1
+NCCL_IB_DISABLE=1
+NCCL_SHM_DISABLE=0
+
+VLLM_MODEL=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
+VLLM_SERVED_NAME=coder
+VLLM_TP=1
+VLLM_PORT=8001
+VLLM_HOST=0.0.0.0
+VLLM_MAX_LEN=32768
+VLLM_GPU_MEM=0.85
+VLLM_QUANT=awq_marlin
+VLLM_KV_DTYPE=fp8
+VLLM_MAX_SEQS=32
+VLLM_TOOL_PARSER=hermes
