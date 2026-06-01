@@ -15,6 +15,7 @@ from llmctl.tui.screens_logs import LogsScreen
 from llmctl.tui.screens_models import ModelsScreen
 from llmctl.tui.screens_presets import PresetsScreen
 from llmctl.tui.screens_sessions import SessionsScreen
+from llmctl.tui.screens_units import UnitsScreen
 
 #: Seconds between automatic data refreshes of the active screen.
 REFRESH_INTERVAL = 3.0
@@ -58,6 +59,7 @@ class MissionControlApp(App[None]):
     BINDINGS = [
         Binding("d", "show_dashboard", "Dashboard", show=True),
         Binding("p", "show_presets", "Presets", show=True),
+        Binding("u", "show_units", "Units", show=True),
         Binding("m", "show_models", "Models", show=True),
         Binding("s", "show_sessions", "Sessions", show=True),
         Binding("g", "show_gpus", "GPUs", show=True),
@@ -77,6 +79,7 @@ class MissionControlApp(App[None]):
         """Install screens, show the dashboard, and start the refresh timer."""
         self.install_screen(DashboardScreen(), name="dashboard")
         self.install_screen(PresetsScreen(), name="presets")
+        self.install_screen(UnitsScreen(), name="units")
         self.install_screen(ModelsScreen(), name="models")
         self.install_screen(SessionsScreen(), name="sessions")
         self.install_screen(GPUScreen(), name="gpus")
@@ -115,6 +118,10 @@ class MissionControlApp(App[None]):
     def action_show_presets(self) -> None:
         """Show presets screen."""
         self._switch("presets")
+
+    def action_show_units(self) -> None:
+        """Show managed units screen."""
+        self._switch("units")
 
     def action_show_models(self) -> None:
         """Show models screen."""
