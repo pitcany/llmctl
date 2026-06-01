@@ -848,12 +848,12 @@ def slot_cmd(
 
 @app.command("presets")
 def presets_cmd() -> None:
-    """List preset aliases known to llmctl (from ~/.config/llm-models/)."""
+    """List preset aliases known to llmctl."""
     views = load_preset_views()
     if not views:
         console.print(
             "[yellow]No presets found.[/yellow] "
-            "Write one to ~/.config/llm-models/<alias>.yaml"
+            "Write one to ~/.config/llmctl/presets/<alias>.yaml"
         )
         return
     table = Table(title="Presets")

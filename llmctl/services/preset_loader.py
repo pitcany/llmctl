@@ -1,10 +1,9 @@
-"""Translate ``llm_models_config.Model`` presets into llmctl launch specs.
+"""Translate ``llmctl.presets.Model`` presets into llmctl launch specs.
 
-The canonical preset schema is owned by the ``llm_models_config`` package
-(``~/.config/llm-models/<alias>.yaml``). This module:
+The canonical preset schema is owned by :mod:`llmctl.presets`. This module:
 
-* Loads presets via :func:`llm_models_config.load_all`
-* Maps each :class:`~llm_models_config.schema.Model` to a
+* Loads presets via :func:`llmctl.presets.load_all`
+* Maps each :class:`~llmctl.presets.Model` to a
   :class:`~llmctl.integrations.vllm_env.VLLMLaunchSpec` by folding in
   the cross-preset defaults from ``settings.vllm.defaults``
 * Surfaces both the spec (for rendering) and a metadata view (for the
@@ -12,8 +11,8 @@ The canonical preset schema is owned by the ``llm_models_config`` package
 
 Per-preset overrides win over defaults; defaults fill in everything the
 preset doesn't pin. ``reasoning_parser`` is folded into ``extra_args``
-the same way ``llm_models_config.adapters.as_gpu_models_preset`` does,
-since the vLLM launcher script doesn't model it directly.
+the same way the legacy gpu-models preset adapter did, since the vLLM
+launcher script doesn't model it directly.
 """
 
 from __future__ import annotations
@@ -21,11 +20,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from llm_models_config.schema import Model
-
 from llmctl.config import VLLMDefaultsConfig
 from llmctl.integrations.vllm_env import VLLMLaunchSpec
-from llmctl.services.preset_store import PresetStore, default_store
+from llmctl.presets import Model, load_all
 
 
 @dataclass(frozen=True)
@@ -90,13 +87,21 @@ def model_to_launch_spec(
         tensor_parallel=model.tensor_parallel_size,
         gpus=defaults.gpus,
         port=port,
-        host=model.host,
+        host=model.host or defaults.host,
         max_model_len=model.max_model_len,
-        gpu_memory_utilization=model.gpu_memory_utilization,
+        gpu_memory_utilization=(
+            model.gpu_memory_utilization
+            if model.gpu_memory_utilization is not None
+            else defaults.gpu_memory_utilization
+        ),
         quantization=model.vllm_quantization_flag,
         kv_cache_type=kv_cache_type,
         tool_parser=model.tool_parser,
-        max_num_seqs=model.max_num_seqs,
+        max_num_seqs=(
+            model.max_num_seqs
+            if model.max_num_seqs is not None
+            else defaults.max_num_seqs
+        ),
         max_batched_tokens=defaults.max_batched_tokens,
         prefix_cache=defaults.prefix_cache,
         chunked_prefill=defaults.chunked_prefill,
@@ -109,29 +114,25 @@ def model_to_launch_spec(
 def load_presets(
     *,
     defaults: VLLMDefaultsConfig | None = None,
-    store: PresetStore | None = None,
+    config_dir: Path | None = None,
 ) -> dict[str, VLLMLaunchSpec]:
     """Load every preset on disk and return ``{alias: VLLMLaunchSpec}``.
 
     Args:
         defaults: Cross-preset defaults; uses :class:`VLLMDefaultsConfig`
             built-ins when omitted (matches the production posture).
-        store: Injectable preset source. Defaults to
-            :func:`~llmctl.services.preset_store.default_store` which
-            reads ``~/.config/llm-models/<alias>.yaml`` via
-            :func:`llm_models_config.load_all`. Tests pass an
-            :class:`~llmctl.services.preset_store.InMemoryPresetStore`.
+        config_dir: Optional preset directory override for tests and
+            one-off callers. ``None`` uses the standard llmctl path
+            resolution.
     """
-    store = store or default_store()
-    models = store.load()
+    models = load_all(config_dir=config_dir)
     defaults = defaults or VLLMDefaultsConfig()
     return {alias: model_to_launch_spec(model, defaults) for alias, model in models.items()}
 
 
-def load_preset_views(*, store: PresetStore | None = None) -> list[PresetView]:
+def load_preset_views(*, config_dir: Path | None = None) -> list[PresetView]:
     """Return a metadata view of every loaded preset for CLI/TUI listing."""
-    store = store or default_store()
-    models = store.load()
+    models = load_all(config_dir=config_dir)
     return [
         PresetView(
             alias=alias,
@@ -141,7 +142,7 @@ def load_preset_views(*, store: PresetStore | None = None) -> list[PresetView]:
             param_count_b=model.param_count_b,
             tensor_parallel=model.tensor_parallel_size,
             quantization=model.quantization,
-            source_path=model.path,
+            source_path=None,
         )
         for alias, model in sorted(models.items())
     ]

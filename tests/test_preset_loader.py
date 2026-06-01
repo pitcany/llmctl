@@ -1,6 +1,6 @@
 """End-to-end parity: preset YAML on disk -> rendered env file.
 
-Loads a real preset YAML (via :func:`llm_models_config.load_all`),
+Loads a real preset YAML (via :func:`llmctl.presets.load_all`),
 projects through :func:`model_to_launch_spec`, renders via
 :func:`render_vllm_env`, and asserts byte-equality against captured
 gpu-models fixtures at ``tests/fixtures/env_renders/``. After Phase 7
@@ -10,7 +10,6 @@ removed the gpu-models package, the fixtures are the source of truth
 
 from __future__ import annotations
 
-import importlib
 import textwrap
 from pathlib import Path
 
@@ -35,26 +34,11 @@ def _pin_launcher_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def isolated_preset_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point ``llm_models_config.user_config_dir`` at a temp directory.
-
-    Reloads the module on setup AND teardown so downstream tests
-    (test_tui in particular) don't inherit our temp config view.
-    """
-    xdg = tmp_path / "xdg"
-    preset_dir = xdg / "llm-models"
+    """Return a temp preset directory for config-dir-injected tests."""
+    preset_dir = tmp_path / "presets"
     preset_dir.mkdir(parents=True)
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
     monkeypatch.setenv("HOME", str(tmp_path))
-    import llm_models_config
-    import llm_models_config.paths
-    import llm_models_config.store
-    importlib.reload(llm_models_config.paths)
-    importlib.reload(llm_models_config.store)
-    importlib.reload(llm_models_config)
     yield preset_dir
-    importlib.reload(llm_models_config.paths)
-    importlib.reload(llm_models_config.store)
-    importlib.reload(llm_models_config)
 
 
 def _write_preset(preset_dir: Path, alias: str, body: str) -> Path:
@@ -191,7 +175,7 @@ def test_preset_loader_matches_frozen_fixture(
     """End-to-end parity for each shipped preset shape."""
     _write_preset(isolated_preset_dir, alias, body)
 
-    specs = load_presets(defaults=VLLMDefaultsConfig())
+    specs = load_presets(defaults=VLLMDefaultsConfig(), config_dir=isolated_preset_dir)
     assert alias in specs, f"loader missed {alias!r}; saw {sorted(specs)}"
     actual = render_vllm_env(specs[alias])
 
@@ -204,7 +188,7 @@ def test_preset_loader_matches_frozen_fixture(
 
 def test_loader_returns_empty_when_no_presets(isolated_preset_dir: Path) -> None:
     """Empty config dir -> empty mapping. No crash."""
-    assert load_presets() == {}
+    assert load_presets(config_dir=isolated_preset_dir) == {}
 
 
 def test_loader_skips_underscore_prefixed_files(
@@ -226,7 +210,7 @@ def test_loader_skips_underscore_prefixed_files(
         max_model_len: 32768
         """,
     )
-    specs = load_presets()
+    specs = load_presets(config_dir=isolated_preset_dir)
     assert list(specs.keys()) == ["real-preset"]
 
 
@@ -249,7 +233,7 @@ def test_reasoning_parser_routed_through_extra_args(
         reasoning_parser: deepseek_r1
         """,
     )
-    specs = load_presets()
+    specs = load_presets(config_dir=isolated_preset_dir)
     body = render_vllm_env(specs["deepseek-r1-70b"])
     assert "VLLM_EXTRA=--reasoning-parser deepseek_r1" in body
 
@@ -270,7 +254,7 @@ def test_kv_cache_auto_omitted_from_env(isolated_preset_dir: Path) -> None:
         kv_cache_dtype: auto
         """,
     )
-    specs = load_presets()
+    specs = load_presets(config_dir=isolated_preset_dir)
     body = render_vllm_env(specs["auto-kv"])
     assert "VLLM_KV_DTYPE" not in body
 
@@ -297,7 +281,7 @@ def test_user_defaults_override_built_in(isolated_preset_dir: Path) -> None:
         nccl_p2p_disable=True,
         max_batched_tokens=2048,
     )
-    specs = load_presets(defaults=custom)
+    specs = load_presets(defaults=custom, config_dir=isolated_preset_dir)
     body = render_vllm_env(specs["p"])
     assert "CUDA_VISIBLE_DEVICES=0\n" in body
     assert "VLLM_PORT=9000" in body
@@ -309,8 +293,7 @@ def test_user_defaults_override_built_in(isolated_preset_dir: Path) -> None:
 def test_port_override_wins_over_defaults(isolated_preset_dir: Path) -> None:
     """``port_override`` on :func:`model_to_launch_spec` lets a managed
     unit pin the port even when defaults say something different."""
-    from llm_models_config import load_all
-
+    from llmctl.presets import load_all
     from llmctl.services.preset_loader import model_to_launch_spec
 
     _write_preset(
@@ -326,7 +309,7 @@ def test_port_override_wins_over_defaults(isolated_preset_dir: Path) -> None:
         max_model_len: 32768
         """,
     )
-    models = load_all()
+    models = load_all(config_dir=isolated_preset_dir)
     spec = model_to_launch_spec(
         models["p"],
         VLLMDefaultsConfig(port=8003),

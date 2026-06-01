@@ -1,6 +1,6 @@
 """Presets screen — the daily-driver TUI surface for vLLM operators.
 
-Shows every preset alias from ``~/.config/llm-models/*.yaml``. Pressing
+Shows every preset alias from ``~/.config/llmctl/presets/*.yaml``. Pressing
 enter on a row pops a launch picker (TP fleet / coder slot / reasoner
 slot); confirming kicks off the appropriate orchestrator call in a
 worker thread so the UI stays responsive during the 1-3 minute vLLM
@@ -73,7 +73,7 @@ class PresetsScreen(DataScreen):
         if not views:
             table.add_row(
                 "[dim]No presets[/]",
-                "(write one to ~/.config/llm-models/<alias>.yaml)",
+                "(write one to ~/.config/llmctl/presets/<alias>.yaml)",
                 "-",
                 "-",
                 "-",

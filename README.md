@@ -7,8 +7,9 @@ systemd unit (e.g. `vllm-tp.service`), restarts the unit, polls
 `/v1/models` for readiness, and verifies that downstream consumers
 (Hermes, Open WebUI) still see the right served name. It owns the
 *how* of running a preset; presets themselves live at
-`~/.config/llm-models/<alias>.yaml` and are shared with the legacy
-ecosystem.
+`~/.config/llmctl/presets/<alias>.yaml`. Legacy presets in
+`~/.config/llm-models/` are symlinked into that directory on first
+load so existing installs keep working.
 
 This package replaced `gpu-models` in May 2026. The migration was
 non-disruptive — every legacy `gpu-models <verb>` still works via

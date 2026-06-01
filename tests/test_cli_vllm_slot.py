@@ -24,15 +24,13 @@ def _isolated_config(tmp_path, monkeypatch: pytest.MonkeyPatch):
     """Point llmctl at an empty config dir so tests don't read the user's.
 
     LLMCTL_CONFIG_DIR controls llmctl's settings.yaml lookup. We also
-    set XDG_CONFIG_HOME because the legacy ``llm_models_config.load_all``
-    (still wired in production via :class:`DefaultPresetStore`) reads
-    from ``$XDG_CONFIG_HOME/llm-models``; an unset value would let it
-    pick up the developer's real presets.
+    set XDG_CONFIG_HOME so preset discovery cannot pick up the
+    developer's real presets.
     """
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(tmp_path / "llmctl-cfg"))
     monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / "xdg" / "llm-models").mkdir(parents=True)
+    (tmp_path / "xdg" / "llmctl" / "presets").mkdir(parents=True)
 
 
 def test_vllm_help_lists_flags(runner: CliRunner) -> None:

@@ -1,18 +1,18 @@
 """Unit tests for :mod:`llmctl.services.vllm_orchestrator`.
 
-After Phase 5's PresetStore introduction, tests inject an
-:class:`InMemoryPresetStore` and never need importlib.reload or
-monkeypatched env vars to control what presets the orchestrator sees.
+Tests seed a real preset directory and inject ``Dependencies.config_dir``
+so preset parsing follows the production path without process-wide XDG
+patching.
 """
 
 from __future__ import annotations
 
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
-from llm_models_config.schema import Model
 
 from llmctl.adapters.vllm_systemd import ManagedRestartResult
 from llmctl.config import (
@@ -25,7 +25,6 @@ from llmctl.integrations.harbor import StopOutcome
 from llmctl.integrations.hermes import HermesStatus
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.integrations.vllm_env import VLLMLaunchSpec
-from llmctl.services.preset_store import InMemoryPresetStore
 from llmctl.services.vllm_orchestrator import (
     Dependencies,
     OrchestratorOptions,
@@ -35,28 +34,38 @@ from llmctl.services.vllm_orchestrator import (
 )
 
 
-def _model(
+def _write_preset(
+    config_dir: Path,
     alias: str = "llama-3.3-70b",
     *,
     model_id: str = "casperhansen/llama-3.3-70b-instruct-awq",
     tp: int = 2,
     kv: str = "fp8",
     reasoning_parser: str | None = None,
-) -> Model:
-    """Build a real :class:`Model` (validated by llm_models_config)."""
-    return Model(
-        alias=alias,
-        served_name=alias,
-        model_id=model_id,
-        quantization="awq",
-        vllm_quantization_flag="awq_marlin",
-        tensor_parallel_size=tp,
-        max_model_len=32768,
-        max_num_seqs=64,
-        kv_cache_dtype=kv,
-        tool_parser="llama3_json",
-        reasoning_parser=reasoning_parser,
+) -> Path:
+    """Write a preset YAML for orchestrator tests."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    reasoning_line = (
+        f"reasoning_parser: {reasoning_parser}\n"
+        if reasoning_parser
+        else "reasoning_parser: null\n"
     )
+    body = f"""
+    alias: {alias}
+    served_name: {alias}
+    model_id: {model_id}
+    quantization: awq
+    vllm_quantization_flag: awq_marlin
+    tensor_parallel_size: {tp}
+    max_model_len: 32768
+    max_num_seqs: 64
+    kv_cache_dtype: {kv}
+    tool_parser: llama3_json
+    {reasoning_line.rstrip()}
+    """
+    path = config_dir / f"{alias}.yaml"
+    path.write_text(textwrap.dedent(body).strip() + "\n")
+    return path
 
 
 @dataclass
@@ -101,7 +110,7 @@ class _AdapterStub:
 
 def _build_deps(
     *,
-    presets: dict[str, Model] | None = None,
+    config_dir: Path,
     adapter: _AdapterStub | None = None,
     harbor_outcome: StopOutcome = StopOutcome.NOT_RUNNING,
     hermes_status: HermesStatus = HermesStatus.OK,
@@ -139,7 +148,7 @@ def _build_deps(
         return hermes_status
 
     deps = Dependencies(
-        preset_store=InMemoryPresetStore(presets or {}),
+        config_dir=config_dir,
         adapter_factory=fake_adapter,
         systemctl=SystemctlRunner(runner=lambda argv: None),  # type: ignore[arg-type]
         harbor_stop=fake_harbor,
@@ -159,8 +168,8 @@ def _pin_launcher_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
 
 
-def test_unknown_preset_raises() -> None:
-    deps, _ = _build_deps(presets={})
+def test_unknown_preset_raises(tmp_path: Path) -> None:
+    deps, _ = _build_deps(config_dir=tmp_path)
     with pytest.raises(UnknownPresetError, match="unknown preset"):
         start_vllm_tp(
             "nonexistent",
@@ -169,10 +178,11 @@ def test_unknown_preset_raises() -> None:
         )
 
 
-def test_happy_path_lifecycle_order() -> None:
+def test_happy_path_lifecycle_order(tmp_path: Path) -> None:
     """Full lifecycle: preflight -> harbor -> adapter -> hermes."""
     adapter = _AdapterStub()
-    deps, log = _build_deps(presets={"llama-3.3-70b": _model()}, adapter=adapter)
+    _write_preset(tmp_path)
+    deps, log = _build_deps(config_dir=tmp_path, adapter=adapter)
 
     result = start_vllm_tp(
         "llama-3.3-70b",
@@ -192,8 +202,9 @@ def test_happy_path_lifecycle_order() -> None:
     assert adapter.spec_received.port == 8003
 
 
-def test_dry_run_skips_all_side_effects() -> None:
-    deps, log = _build_deps(presets={"llama-3.3-70b": _model()})
+def test_dry_run_skips_all_side_effects(tmp_path: Path) -> None:
+    _write_preset(tmp_path)
+    deps, log = _build_deps(config_dir=tmp_path)
 
     result = start_vllm_tp(
         "llama-3.3-70b",
@@ -210,9 +221,10 @@ def test_dry_run_skips_all_side_effects() -> None:
     assert log["adapters_built"] == []
 
 
-def test_failed_fleet_preflight_aborts_before_adapter() -> None:
+def test_failed_fleet_preflight_aborts_before_adapter(tmp_path: Path) -> None:
+    _write_preset(tmp_path)
     deps, log = _build_deps(
-        presets={"llama-3.3-70b": _model()},
+        config_dir=tmp_path,
         fleet_report=_FleetReport(
             stopped=["ollama"],
             skipped=[],
@@ -233,9 +245,10 @@ def test_failed_fleet_preflight_aborts_before_adapter() -> None:
     assert log["hermes_calls"] == []
 
 
-def test_tq_override_on_sets_turboquant_kv_dtype() -> None:
+def test_tq_override_on_sets_turboquant_kv_dtype(tmp_path: Path) -> None:
     adapter = _AdapterStub()
-    deps, _ = _build_deps(presets={"llama-3.3-70b": _model()}, adapter=adapter)
+    _write_preset(tmp_path)
+    deps, _ = _build_deps(config_dir=tmp_path, adapter=adapter)
 
     start_vllm_tp(
         "llama-3.3-70b",
@@ -249,9 +262,10 @@ def test_tq_override_on_sets_turboquant_kv_dtype() -> None:
     assert adapter.spec_received.kv_cache_type.startswith("turboquant_")
 
 
-def test_tq_override_off_clears_kv_dtype() -> None:
+def test_tq_override_off_clears_kv_dtype(tmp_path: Path) -> None:
     adapter = _AdapterStub()
-    deps, _ = _build_deps(presets={"llama-3.3-70b": _model()}, adapter=adapter)
+    _write_preset(tmp_path)
+    deps, _ = _build_deps(config_dir=tmp_path, adapter=adapter)
 
     start_vllm_tp(
         "llama-3.3-70b",
@@ -264,8 +278,9 @@ def test_tq_override_off_clears_kv_dtype() -> None:
     assert adapter.spec_received.kv_cache_type is None
 
 
-def test_disabling_integrations_skips_them() -> None:
-    deps, log = _build_deps(presets={"llama-3.3-70b": _model()})
+def test_disabling_integrations_skips_them(tmp_path: Path) -> None:
+    _write_preset(tmp_path)
+    deps, log = _build_deps(config_dir=tmp_path)
 
     start_vllm_tp(
         "llama-3.3-70b",
@@ -284,11 +299,15 @@ def test_disabling_integrations_skips_them() -> None:
     assert len(log["adapters_built"]) == 1
 
 
-def test_slot_uses_coder_role_and_provider() -> None:
+def test_slot_uses_coder_role_and_provider(tmp_path: Path) -> None:
     adapter = _AdapterStub()
-    coder_model = _model("qwen-coder", model_id="Qwen/Qwen2.5-Coder-32B-Instruct-AWQ")
+    _write_preset(
+        tmp_path,
+        "qwen-coder",
+        model_id="Qwen/Qwen2.5-Coder-32B-Instruct-AWQ",
+    )
     deps, log = _build_deps(
-        presets={"qwen-coder": coder_model},
+        config_dir=tmp_path,
         adapter=adapter,
     )
 
@@ -305,9 +324,10 @@ def test_slot_uses_coder_role_and_provider() -> None:
     assert adapter.spec_received.port == 8001
 
 
-def test_slot_reasoner_routes_to_reasoner_provider() -> None:
+def test_slot_reasoner_routes_to_reasoner_provider(tmp_path: Path) -> None:
+    _write_preset(tmp_path, "r1", model_id="org/r1", reasoning_parser="deepseek_r1")
     deps, log = _build_deps(
-        presets={"r1": _model("r1", model_id="org/r1", reasoning_parser="deepseek_r1")},
+        config_dir=tmp_path,
     )
 
     start_slot(
@@ -321,9 +341,10 @@ def test_slot_reasoner_routes_to_reasoner_provider() -> None:
     assert log["hermes_calls"][0]["provider"] == "vllm-reasoner"
 
 
-def test_wait_for_ready_false_skips_post_restart_polling() -> None:
+def test_wait_for_ready_false_skips_post_restart_polling(tmp_path: Path) -> None:
     adapter = _AdapterStub()
-    deps, _ = _build_deps(presets={"llama-3.3-70b": _model()}, adapter=adapter)
+    _write_preset(tmp_path)
+    deps, _ = _build_deps(config_dir=tmp_path, adapter=adapter)
 
     start_vllm_tp(
         "llama-3.3-70b",

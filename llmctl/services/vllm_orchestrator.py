@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 from llmctl.adapters.vllm_systemd import ManagedRestartResult, VLLMSystemdAdapter
@@ -46,8 +47,8 @@ from llmctl.integrations.vllm_env import (
     render_slot_env,
     render_vllm_env,
 )
+from llmctl.presets import load_all, load_one
 from llmctl.services.preset_loader import load_presets, model_to_launch_spec
-from llmctl.services.preset_store import PresetStore, default_store
 
 
 class UnknownPresetError(KeyError):
@@ -101,10 +102,7 @@ class Dependencies:
     """Injected dependencies. Production callers pass nothing; tests
     construct one with fakes for each external interface."""
 
-    # Single source of truth for presets. Everything else (presets_loader,
-    # _build_spec) routes through this so tests inject one stub instead
-    # of three.
-    preset_store: PresetStore = field(default_factory=default_store)
+    config_dir: Path | None = None
     adapter_factory: Callable[..., VLLMSystemdAdapter] = VLLMSystemdAdapter
     systemctl: SystemctlRunner | None = None
     harbor_stop: Callable[..., StopOutcome] = stop_ollama_container
@@ -220,10 +218,10 @@ def start_slot(
 def preset_choices(
     *,
     defaults: VLLMDefaultsConfig | None = None,
-    store: PresetStore | None = None,
+    config_dir: Path | None = None,
 ) -> list[str]:
     """Return sorted preset aliases (for CLI tab-completion)."""
-    return sorted(load_presets(defaults=defaults, store=store).keys())
+    return sorted(load_presets(defaults=defaults, config_dir=config_dir).keys())
 
 
 def _build_spec(
@@ -236,19 +234,21 @@ def _build_spec(
 ) -> VLLMLaunchSpec:
     """Resolve preset -> spec, applying TQ override if requested.
 
-    All preset access flows through ``deps.preset_store`` so the same
-    fixture seeds every code path in a test — no more separate hooks
-    for "list presets" vs "load one preset for rendering."
+    Preset access flows through ``deps.config_dir`` so tests can seed a
+    real directory without patching process-wide XDG state.
     """
-    models = deps.preset_store.load()
-    if preset_name not in models:
-        available = ", ".join(sorted(models)) or "(none — write one to ~/.config/llm-models/)"
+    model = load_one(preset_name, config_dir=deps.config_dir)
+    if model is None:
+        models = load_all(config_dir=deps.config_dir)
+        available = ", ".join(sorted(models)) or (
+            "(none - write one to ~/.config/llmctl/presets/)"
+        )
         raise UnknownPresetError(
             f"unknown preset {preset_name!r}. Available: {available}"
         )
 
     base = model_to_launch_spec(
-        models[preset_name], defaults, port_override=port_override
+        model, defaults, port_override=port_override
     ).model_dump()
     base = apply_to_spec_dict(base, override=tq_override)
     return VLLMLaunchSpec.model_validate(base)

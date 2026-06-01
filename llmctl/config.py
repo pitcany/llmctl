@@ -125,8 +125,8 @@ class ManagedUnitConfig(BaseModel):
 class VLLMDefaultsConfig(BaseModel):
     """Cross-preset launch defaults for the vLLM runtime.
 
-    The :class:`~llm_models_config.schema.Model` from
-    ``~/.config/llm-models/<alias>.yaml`` carries per-preset values
+    The :class:`~llmctl.presets.Model` from
+    ``~/.config/llmctl/presets/<alias>.yaml`` carries per-preset values
     (served name, model id, quantization, max sequences, etc.); this
     block carries the values that don't vary per preset (GPU layout,
     port, batching, NCCL flags).
