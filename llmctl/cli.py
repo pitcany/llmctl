@@ -13,7 +13,14 @@ from sqlmodel import Session
 
 from llmctl.api.app import create_app
 from llmctl.config import ManagedUnitConfig, load_settings
-from llmctl.db import RuntimeName, get_engine, init_db
+from llmctl.db import (
+    BenchmarkKind,
+    ModelRecord,
+    RuntimeName,
+    SessionRecord,
+    get_engine,
+    init_db,
+)
 from llmctl.schemas import BenchmarkRunRequest, ModelCreate, SessionStartRequest
 from llmctl.services.benchmarks import BenchmarkService
 from llmctl.services.preset_loader import load_preset_views
@@ -529,15 +536,67 @@ def health() -> None:
     console.print(table)
 
 
+def _resolve_bench_target(
+    target: str | None,
+    model_id: str | None,
+    session_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve the positional ``target`` to (model_id, session_id).
+
+    Lookup order: session_id (running takes precedence so live sessions are
+    convenient to bench) -> model_id. Returns the explicit flag values when
+    no positional ``target`` was supplied.
+    """
+    if target is None:
+        return model_id, session_id
+    if model_id or session_id:
+        raise typer.BadParameter(
+            "Pass a positional target OR --model-id/--session-id, not both."
+        )
+    with _session() as db:
+        if db.get(SessionRecord, target) is not None:
+            return None, target
+        if db.get(ModelRecord, target) is not None:
+            return target, None
+    raise typer.BadParameter(
+        f"Target '{target}' does not match any session or model ID."
+    )
+
+
 @app.command()
 def bench(
+    target: Annotated[
+        str | None,
+        typer.Argument(
+            help="Model ID or session ID to benchmark (auto-detected).",
+        ),
+    ] = None,
     name: Annotated[str, typer.Option(help="Benchmark name.")] = "smoke",
-    model_id: Annotated[str | None, typer.Option(help="Model ID to benchmark.")] = None,
-    session_id: Annotated[str | None, typer.Option(help="Running session ID to target.")] = None,
+    kind: Annotated[
+        BenchmarkKind,
+        typer.Option(
+            help="Benchmark kind: chat (default), completion, health, long_context.",
+            case_sensitive=False,
+        ),
+    ] = BenchmarkKind.CHAT,
+    profile: Annotated[
+        str | None,
+        typer.Option("--profile", "-p", help="Profile ID to associate with the run."),
+    ] = None,
+    model_id: Annotated[
+        str | None, typer.Option(help="Model ID (alternative to positional target).")
+    ] = None,
+    session_id: Annotated[
+        str | None, typer.Option(help="Session ID (alternative to positional target).")
+    ] = None,
     prompt: Annotated[
         list[str] | None, typer.Option(help="Prompt to send (repeatable).")
     ] = None,
-    max_tokens: Annotated[int, typer.Option(help="Max completion tokens per prompt.")] = 64,
+    max_tokens: Annotated[int, typer.Option(help="Max completion tokens per prompt.")] = 256,
+    context_length: Annotated[
+        int | None,
+        typer.Option(help="Target context length in tokens (long_context kind)."),
+    ] = None,
     concurrency: Annotated[
         int, typer.Option(help="Parallel in-flight requests (load level).")
     ] = 1,
@@ -549,18 +608,30 @@ def bench(
         bool,
         typer.Option(
             "--dry-run/--no-dry-run",
-            help="Synthetic mock run vs. real execution against a live endpoint.",
+            help="Force a synthetic mock run instead of hitting the live endpoint.",
         ),
-    ] = True,
+    ] = False,
 ) -> None:
-    """Benchmark a model: real execution when reachable, else a mock fallback."""
+    """Benchmark a model or session against the configured runtime.
+
+    Pass the positional ``TARGET`` as either a model ID or session ID --
+    llmctl will look it up automatically. On live failures the result is
+    persisted with ``success=False`` for inspection. Use ``--dry-run`` to
+    force a synthetic mock run (e.g. on CI hosts without a runtime).
+    """
+    resolved_model, resolved_session = _resolve_bench_target(
+        target, model_id, session_id
+    )
     sweep_levels = (
         [int(part) for part in sweep.split(",") if part.strip()] if sweep else []
     )
     payload = BenchmarkRunRequest(
         name=name,
-        model_id=model_id,
-        session_id=session_id,
+        kind=kind,
+        model_id=resolved_model,
+        session_id=resolved_session,
+        profile_id=profile,
+        context_length=context_length,
         prompts=list(prompt) if prompt else [],
         parameters={"max_tokens": max_tokens},
         concurrency=concurrency,
@@ -589,15 +660,30 @@ def bench(
         return
     with _session() as db:
         result = BenchmarkService(db).run(payload)
+    _print_benchmark_result(result)
+
+
+def _print_benchmark_result(result: object) -> None:
+    """Render a single benchmark result row-by-row."""
     mode = str(result.parameters.get("mode", "?"))
     reason = result.parameters.get("reason")
     table = Table(title=f"Benchmark: {result.name}", show_header=False)
     table.add_column("Field", style="cyan")
     table.add_column("Value")
+    success_color = "green" if result.success else "red"
+    table.add_row("Success", f"[{success_color}]{result.success}[/{success_color}]")
+    if result.error:
+        table.add_row("Error", f"[red]{result.error}[/red]")
     mode_color = "green" if mode == "live" else "yellow"
     table.add_row("Mode", f"[{mode_color}]{mode}[/{mode_color}]")
     if reason:
         table.add_row("Reason", str(reason))
+    if result.kind:
+        table.add_row("Kind", result.kind.value)
+    if result.backend:
+        table.add_row("Backend", result.backend)
+    if result.context_length:
+        table.add_row("Context length", str(result.context_length))
     table.add_row("Concurrency", str(result.parameters.get("concurrency", 1)))
     table.add_row("Prompt tokens", str(result.prompt_tokens))
     table.add_row("Completion tokens", str(result.completion_tokens))
@@ -612,12 +698,93 @@ def bench(
         else f"{result.time_to_first_token_ms:.1f} ms"
     )
     table.add_row("Time to first token", ttft)
+    if result.peak_vram_mb is not None:
+        table.add_row("Peak VRAM", f"{result.peak_vram_mb} MB")
+    if result.avg_gpu_util_pct is not None:
+        table.add_row(
+            "GPU util (avg / max)",
+            f"{result.avg_gpu_util_pct:.1f}% / {result.max_gpu_util_pct:.0f}%",
+        )
     console.print(table)
-    if mode == "mock":
+    if mode == "mock" and not result.error:
         console.print(
             "[yellow]Mock fallback used[/yellow] (no live runtime). "
-            "Run with [bold]--no-dry-run[/bold] against a started session for real metrics."
+            "Run against a started session for real metrics."
         )
+
+
+@app.command("benchmarks")
+def benchmarks_cmd(
+    benchmark_id: Annotated[
+        str | None,
+        typer.Argument(help="Show details for a single benchmark id."),
+    ] = None,
+    model: Annotated[
+        str | None, typer.Option("--model", help="Filter by model ID.")
+    ] = None,
+    session: Annotated[
+        str | None, typer.Option("--session", help="Filter by session ID.")
+    ] = None,
+    kind: Annotated[
+        BenchmarkKind | None,
+        typer.Option(help="Filter by kind.", case_sensitive=False),
+    ] = None,
+    limit: Annotated[int, typer.Option(help="Maximum rows to return.")] = 20,
+) -> None:
+    """List benchmark history (newest first) or show one benchmark in detail."""
+    with _session() as db:
+        service = BenchmarkService(db)
+        if benchmark_id:
+            result = service.get_result(benchmark_id)
+            if result is None:
+                raise typer.Exit(code=1)
+            _print_benchmark_result(result)
+            return
+        results = service.list_results(
+            model_id=model, session_id=session, kind=kind, limit=limit
+        )
+    if not results:
+        console.print("[yellow]No benchmarks recorded yet.[/yellow]")
+        return
+    table = Table(title=f"Benchmarks ({len(results)})")
+    table.add_column("ID", style="dim", no_wrap=True)
+    table.add_column("Name")
+    table.add_column("Kind")
+    table.add_column("Backend")
+    table.add_column("Tok/s", justify="right")
+    table.add_column("TTFT", justify="right")
+    table.add_column("Peak VRAM", justify="right")
+    table.add_column("GPU%", justify="right")
+    table.add_column("OK")
+    table.add_column("When")
+    for result in results:
+        tps = "-" if result.tokens_per_second is None else f"{result.tokens_per_second:.1f}"
+        ttft = (
+            "-"
+            if result.time_to_first_token_ms is None
+            else f"{result.time_to_first_token_ms:.0f} ms"
+        )
+        peak = "-" if result.peak_vram_mb is None else f"{result.peak_vram_mb}"
+        util = (
+            "-"
+            if result.max_gpu_util_pct is None
+            else f"{result.max_gpu_util_pct:.0f}"
+        )
+        when = result.created_at.strftime("%Y-%m-%d %H:%M") if result.created_at else "-"
+        ok_color = "green" if result.success else "red"
+        table.add_row(
+            (result.id or "")[:8],
+            result.name,
+            result.kind.value if result.kind else "-",
+            result.backend or "-",
+            tps,
+            ttft,
+            peak,
+            util,
+            f"[{ok_color}]{'y' if result.success else 'n'}[/{ok_color}]",
+            when,
+        )
+    console.print(table)
 
 
 @app.command()

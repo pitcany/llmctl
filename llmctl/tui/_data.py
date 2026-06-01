@@ -482,10 +482,14 @@ def get_doctor_summary() -> dict[str, Any]:
     }
 
 
-def get_benchmarks() -> list[BenchmarkResult]:
-    """Return all recorded benchmark results (oldest first)."""
+def get_benchmarks(*, model_id: str | None = None) -> list[BenchmarkResult]:
+    """Return recorded benchmark results, optionally filtered by model.
+
+    Results are returned in insertion order (oldest first) so the caller can
+    reverse to render newest-on-top.
+    """
     with db_session() as db:
-        return BenchmarkService(db).list_results()
+        return BenchmarkService(db).list_results(model_id=model_id)
 
 
 def rerun_benchmark(benchmark_id: str) -> BenchmarkResult | None:

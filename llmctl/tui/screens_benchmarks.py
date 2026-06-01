@@ -21,10 +21,16 @@ class BenchmarksScreen(DataScreen):
         Binding("x", "clear_baseline", "Clear baseline", show=True),
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, model_filter: str | None = None) -> None:
+        """Optionally constrain the screen to a single ``model_id``.
+
+        Used when the screen is reached by drilling in from the Models screen
+        so the operator sees only that model's history.
+        """
         super().__init__()
         self._ids: list[str] = []
         self._baseline_id: str | None = None
+        self._model_filter = model_filter
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Re-run the selected benchmark when a row is activated."""
@@ -33,22 +39,35 @@ class BenchmarksScreen(DataScreen):
     def compose(self) -> ComposeResult:
         """Compose the benchmarks history table with screen-scoped chrome."""
         yield Header()
-        yield Static(
+        chrome = (
             f"Benchmarks  -  [{C_MUTED}]enter = re-run, c = set baseline, "
-            f"x = clear baseline[/]",
-            classes="panel safe",
-            id="benchmarks-title",
+            f"x = clear baseline[/]"
         )
+        if self._model_filter:
+            chrome += f"  [{C_MUTED}]filter: model={self._model_filter}[/]"
+        yield Static(chrome, classes="panel safe", id="benchmarks-title")
         table: DataTable[str] = DataTable(id="benchmarks-table", cursor_type="row")
         table.add_columns(
-            "Name", "Mode", "Tokens", "Tok/s", "vs base", "TTFT", "vs base", "When"
+            "Name",
+            "Kind",
+            "Backend",
+            "Mode",
+            "Tokens",
+            "Tok/s",
+            "vs base",
+            "TTFT",
+            "vs base",
+            "Peak VRAM",
+            "GPU%",
+            "OK",
+            "When",
         )
         yield table
         yield Footer()
 
     def fetch(self) -> Any:
         """Return the recorded benchmark history (latest first)."""
-        return list(reversed(_data.get_benchmarks()))
+        return list(reversed(_data.get_benchmarks(model_id=self._model_filter)))
 
     def render_data(self, data: Any) -> None:
         """Render the benchmark history with optional baseline deltas."""
@@ -67,6 +86,16 @@ class BenchmarksScreen(DataScreen):
                 if result.time_to_first_token_ms is None
                 else f"{result.time_to_first_token_ms:.0f} ms"
             )
+            peak_vram = (
+                "-" if result.peak_vram_mb is None else f"{result.peak_vram_mb}"
+            )
+            gpu_pct = (
+                "-"
+                if result.max_gpu_util_pct is None
+                else f"{result.max_gpu_util_pct:.0f}"
+            )
+            ok_color = C_OK if result.success else C_ERR
+            ok = f"[{ok_color}]{'y' if result.success else 'n'}[/]"
             when = result.created_at.strftime("%H:%M:%S") if result.created_at else "-"
             name_cell = (
                 f"[{C_OK}]* {result.name}[/]" if is_baseline else result.name
@@ -74,16 +103,35 @@ class BenchmarksScreen(DataScreen):
             self._ids.append(result.id or "")
             table.add_row(
                 name_cell,
+                result.kind.value if result.kind else "-",
+                result.backend or "-",
                 f"[{color}]{mode}[/]",
                 str(result.total_tokens or 0),
                 tps,
                 self._delta_tps(result, baseline, is_baseline),
                 ttft,
                 self._delta_ttft(result, baseline, is_baseline),
+                peak_vram,
+                gpu_pct,
+                ok,
                 when,
             )
         if not data:
-            table.add_row("-", "No benchmarks yet", "-", "-", "-", "-", "-", "-")
+            table.add_row(
+                "-",
+                "No benchmarks yet",
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+            )
         if 0 <= cursor < len(self._ids):
             table.move_cursor(row=cursor)
 
