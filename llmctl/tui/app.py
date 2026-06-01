@@ -13,6 +13,7 @@ from llmctl.tui.screens_doctor import DoctorScreen
 from llmctl.tui.screens_gpu import GPUScreen
 from llmctl.tui.screens_logs import LogsScreen
 from llmctl.tui.screens_models import ModelsScreen
+from llmctl.tui.screens_presets import PresetsScreen
 from llmctl.tui.screens_sessions import SessionsScreen
 
 #: Seconds between automatic data refreshes of the active screen.
@@ -56,6 +57,7 @@ class MissionControlApp(App[None]):
     SUB_TITLE = "Live local runtime control"
     BINDINGS = [
         Binding("d", "show_dashboard", "Dashboard", show=True),
+        Binding("p", "show_presets", "Presets", show=True),
         Binding("m", "show_models", "Models", show=True),
         Binding("s", "show_sessions", "Sessions", show=True),
         Binding("g", "show_gpus", "GPUs", show=True),
@@ -74,6 +76,7 @@ class MissionControlApp(App[None]):
     def on_mount(self) -> None:
         """Install screens, show the dashboard, and start the refresh timer."""
         self.install_screen(DashboardScreen(), name="dashboard")
+        self.install_screen(PresetsScreen(), name="presets")
         self.install_screen(ModelsScreen(), name="models")
         self.install_screen(SessionsScreen(), name="sessions")
         self.install_screen(GPUScreen(), name="gpus")
@@ -108,6 +111,10 @@ class MissionControlApp(App[None]):
     def action_show_dashboard(self) -> None:
         """Show dashboard screen."""
         self._switch("dashboard")
+
+    def action_show_presets(self) -> None:
+        """Show presets screen."""
+        self._switch("presets")
 
     def action_show_models(self) -> None:
         """Show models screen."""
