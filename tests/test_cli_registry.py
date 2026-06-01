@@ -252,6 +252,55 @@ def test_export_and_import_registry_round_trip(cli_env: Path) -> None:
     assert "export-profile" in profile_names
 
 
+def test_import_registry_does_not_resync_yaml_per_profile(
+    cli_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Importing a bundle with N profiles must trigger at most one sync_from_yaml.
+
+    Previously ``get_by_name`` was called per profile and that helper
+    auto-synced on miss, so importing N new profiles caused N redundant
+    YAML reloads + 7N upserts.
+    """
+    runner = CliRunner()
+    bundle = {
+        "version": 1,
+        "models": [],
+        "profiles": [
+            {
+                "name": f"bundled-{i}",
+                "runtime": "vllm",
+                "description": f"profile {i}",
+                "parameters": {},
+            }
+            for i in range(5)
+        ],
+        "settings": {},
+    }
+    bundle_path = cli_env / "bundle.json"
+    bundle_path.write_text(json.dumps(bundle))
+
+    sync_calls = {"n": 0}
+    from llmctl.services import profiles as profile_module
+
+    original_sync = profile_module.ProfileService.sync_from_yaml
+
+    def counting_sync(self):
+        sync_calls["n"] += 1
+        return original_sync(self)
+
+    monkeypatch.setattr(
+        profile_module.ProfileService, "sync_from_yaml", counting_sync
+    )
+
+    result = runner.invoke(app, ["import-registry", str(bundle_path)])
+    assert result.exit_code == 0
+    # The CLI may call sync_from_yaml at most once (during list_profiles seed);
+    # certainly not N times.
+    assert sync_calls["n"] <= 1, (
+        f"sync_from_yaml ran {sync_calls['n']} times; should be at most 1"
+    )
+
+
 def test_resolve_gpu_mode_handles_spaces() -> None:
     """``--gpus "0, 1"`` must classify as explicit, not pass through as a mode."""
     from llmctl.cli_registry import _resolve_gpu_mode

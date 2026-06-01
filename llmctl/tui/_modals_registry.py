@@ -8,7 +8,6 @@ own the side effect of calling the service layer with the returned payload.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -363,9 +362,3 @@ __all__ = [
     "_optional_int",
     "_parse_tags",
 ]
-
-
-def _set_attrs(target: Any, **kwargs: Any) -> None:
-    """Helper retained for testing-only assignments without exposing private state."""
-    for key, value in kwargs.items():
-        setattr(target, key, value)

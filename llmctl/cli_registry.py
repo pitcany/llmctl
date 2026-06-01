@@ -327,7 +327,11 @@ def model_delete(
         service = RegistryService(db)
         resolved = _resolve_model_or_die(service, model_id)
         model = service.get_model(resolved)
-        assert model is not None
+        if model is None:
+            # Concurrent delete between _resolve_model_or_die and get_model.
+            # Don't ``assert`` — that gets stripped under ``python -O`` and the
+            # next line's attribute access would crash.
+            raise typer.BadParameter(f"Model not found: {model_id}")
         if delete_files and not yes:
             ok = Confirm.ask(
                 f"This will permanently delete files at {model.path!r}. Continue?",
@@ -548,7 +552,9 @@ def profile_edit(
             updated = service.update_profile(existing.id, update)
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
-    assert updated is not None
+    if updated is None:
+        # Concurrent delete between _resolve_profile_or_die and update_profile.
+        raise typer.BadParameter(f"Profile not found: {profile}")
     console.print(f"[green]Updated[/green] {updated.name} ({updated.id})")
 
 
@@ -679,7 +685,9 @@ def preview_cmd(
         prof_service = ProfileService(db)
         resolved_id = _resolve_model_or_die(reg, model_id)
         model = reg.get_model(resolved_id)
-        assert model is not None
+        if model is None:
+            # Concurrent delete between resolve and fetch.
+            raise typer.BadParameter(f"Model not found: {model_id}")
         profile_name_or_id = profile or model.default_profile_id
         profile_id: str | None = None
         if profile_name_or_id:
@@ -784,11 +792,17 @@ def import_registry_cmd(
                 )
             )
             added_models += 1
+        # Snapshot the existing profile names ONCE rather than calling
+        # get_by_name() per bundle entry — that helper falls back to
+        # sync_from_yaml() on miss, which would re-read profiles.yaml and
+        # upsert all seven defaults N times for a bundle of N new profiles.
+        existing_profile_names = {p.name for p in prof.list_profiles()}
         for profile in bundle.profiles:
-            existing = prof.get_by_name(profile.name)
-            if existing is not None and not replace_profiles:
+            already_present = profile.name in existing_profile_names
+            if already_present and not replace_profiles:
                 continue
             prof.import_from_dict(prof.export_to_dict(profile))
+            existing_profile_names.add(profile.name)
             added_profiles += 1
     console.print(
         f"[green]Imported[/green] {added_models} models, "
