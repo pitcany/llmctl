@@ -587,6 +587,20 @@ def profile_export(
     console.print(f"[green]Wrote profile[/green] {existing.name} -> {out_path}")
 
 
+@profile_app.command("sync")
+def profile_sync() -> None:
+    """Re-seed profiles from ``configs/profiles.yaml``.
+
+    Upserts the seven shipped defaults (fast/coding/reasoning/long-context/
+    quant/adtech/tutoring) into the database. Existing profiles with the
+    same name are updated in place; profiles you created locally and that
+    aren't in the YAML are untouched.
+    """
+    with _session() as db:
+        synced = ProfileService(db).sync_from_yaml()
+    console.print(f"[green]Synced[/green] {len(synced)} profiles from YAML.")
+
+
 @profile_app.command("import")
 def profile_import(
     in_path: Annotated[Path, typer.Argument(help="Input YAML file.")],
