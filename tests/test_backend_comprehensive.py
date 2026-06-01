@@ -41,11 +41,20 @@ class TestCLICommands:
             assert cmd in result.output
 
     def test_cli_scan(self):
-        """Test scan command."""
+        """Test scan command — both dry-run preview and --import path."""
         runner = CliRunner()
+        # Default is dry-run: outputs either a discovered-models table or
+        # the "No new models discovered" notice. Either is a successful run.
         result = runner.invoke(cli_app, ["scan"])
         assert result.exit_code == 0
-        assert "Scan scaffold complete" in result.output
+        assert (
+            "Discovered models" in result.output
+            or "No new models discovered" in result.output
+        )
+
+        result = runner.invoke(cli_app, ["scan", "--import"])
+        assert result.exit_code == 0
+        assert "Scan + import complete" in result.output
 
     def test_cli_models_list(self):
         """Test models list command."""

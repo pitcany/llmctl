@@ -34,6 +34,14 @@ app = typer.Typer(
 )
 console = Console()
 
+# Registry/profile management commands (CRUD, preview, export/import) live in
+# their own module to keep cli.py focused on launch/orchestration. ``register``
+# attaches sub-typers (``model``, ``profile``) plus top-level commands
+# (``profiles``, ``preview``, ``export-registry``, ``import-registry``).
+from llmctl import cli_registry  # noqa: E402
+
+cli_registry.register(app)
+
 
 def _parse_gpus(gpus: str | None, cpu: bool) -> tuple[list[int], str, bool]:
     """Parse a ``--gpus`` value into (gpu_ids, mode, allow_cpu).
@@ -58,13 +66,49 @@ def _session() -> Session:
 
 
 @app.command()
-def scan() -> None:
-    """Scan configured model directories and runtime registries."""
+def scan(
+    do_import: Annotated[
+        bool,
+        typer.Option(
+            "--import/--dry-run",
+            help="Persist discovered models (default: --dry-run only previews).",
+        ),
+    ] = False,
+) -> None:
+    """Scan configured model directories and runtime registries.
+
+    Default behavior is a dry run that lists discovered candidates without
+    touching the registry. Pass ``--import`` to register everything that was
+    found.
+    """
     with _session() as db:
-        models = RegistryService(db).scan()
+        service = RegistryService(db)
+        if do_import:
+            models = service.scan()
+            console.print(
+                f"[bold cyan]Scan + import complete.[/bold cyan] "
+                f"{len(models)} models currently registered."
+            )
+            return
+        discovered = service.scan_discovered_only()
+    if not discovered:
+        console.print("[yellow]No new models discovered.[/yellow]")
+        return
+    table = Table(title=f"Discovered models ({len(discovered)})")
+    table.add_column("Name", style="cyan")
+    table.add_column("Backend")
+    table.add_column("Path")
+    table.add_column("Format")
+    for model in discovered:
+        table.add_row(
+            model.name,
+            model.runtime.value,
+            model.path or "",
+            model.format or "",
+        )
+    console.print(table)
     console.print(
-        f"[bold cyan]Scan scaffold complete.[/bold cyan] "
-        f"{len(models)} models currently registered."
+        "[dim]Re-run with --import to register these into the registry.[/dim]"
     )
 
 
