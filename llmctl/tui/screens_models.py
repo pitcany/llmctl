@@ -11,6 +11,14 @@ from textual.widgets import DataTable, Footer, Header, Static
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, DataScreen
 from llmctl.tui._modals import LaunchPlanModal
+from llmctl.tui._modals_registry import (
+    CloneModal,
+    CloneRequest,
+    ConfirmDelete,
+    DeleteModal,
+    ModelFormModal,
+)
+from llmctl.schemas import ModelCreate, ModelUpdate
 
 
 class ModelsScreen(DataScreen):
@@ -19,6 +27,10 @@ class ModelsScreen(DataScreen):
     BINDINGS = [
         Binding("enter", "start_model", "Plan", show=True),
         Binding("ctrl+s", "scan", "Scan", show=True),
+        Binding("a", "add_model", "Add", show=True),
+        Binding("e", "edit_model", "Edit", show=True),
+        Binding("d", "delete_model", "Delete", show=True),
+        Binding("c", "clone_model", "Clone", show=True),
     ]
 
     def __init__(self) -> None:
@@ -135,4 +147,84 @@ class ModelsScreen(DataScreen):
     def _after_scan(self, found: Any) -> None:
         """Notify and refresh after a scan completes."""
         self.app.notify(f"Scan complete: {len(found)} models registered.")
+        self.refresh_data()
+
+    def _selected_model(self) -> Any:
+        """Return the full Model schema for the cursor row, if any."""
+        model_id = self._selected_id()
+        if not model_id:
+            return None
+        for model in _data.get_models():
+            if model.id == model_id:
+                return model
+        return None
+
+    def action_add_model(self) -> None:
+        """Open the add-model form."""
+
+        def _on_close(payload: ModelCreate | ModelUpdate | None) -> None:
+            if isinstance(payload, ModelCreate):
+                self.run_action_worker(
+                    lambda: _data.add_model(payload), self._after_mutation
+                )
+
+        self.app.push_screen(ModelFormModal(), _on_close)
+
+    def action_edit_model(self) -> None:
+        """Open the edit-model form for the cursor row."""
+        model = self._selected_model()
+        if model is None:
+            self.app.notify("No model selected.", severity="warning")
+            return
+
+        def _on_close(payload: ModelCreate | ModelUpdate | None) -> None:
+            if isinstance(payload, ModelUpdate):
+                self.run_action_worker(
+                    lambda: _data.update_model(model.id, payload),
+                    self._after_mutation,
+                )
+
+        self.app.push_screen(ModelFormModal(model), _on_close)
+
+    def action_clone_model(self) -> None:
+        """Clone the cursor-row model under a new name."""
+        model = self._selected_model()
+        if model is None:
+            self.app.notify("No model selected.", severity="warning")
+            return
+
+        def _on_close(payload: CloneRequest | None) -> None:
+            if payload is None:
+                return
+            self.run_action_worker(
+                lambda: _data.clone_model(payload.source_id, payload.new_name),
+                self._after_mutation,
+            )
+
+        self.app.push_screen(CloneModal(model.id, model.name), _on_close)
+
+    def action_delete_model(self) -> None:
+        """Confirm and delete the cursor-row model."""
+        model = self._selected_model()
+        if model is None:
+            self.app.notify("No model selected.", severity="warning")
+            return
+
+        def _on_close(payload: ConfirmDelete | None) -> None:
+            if payload is None:
+                return
+            self.run_action_worker(
+                lambda: _data.delete_model(
+                    model.id, delete_files=payload.delete_files
+                ),
+                self._after_mutation,
+            )
+
+        self.app.push_screen(
+            DeleteModal(f"model '{model.name}'", allow_file_delete=True),
+            _on_close,
+        )
+
+    def _after_mutation(self, _result: Any) -> None:
+        """Refresh the table after add/edit/delete/clone completes."""
         self.refresh_data()

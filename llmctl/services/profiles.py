@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from llmctl.config import load_profiles
@@ -331,7 +332,31 @@ class ProfileService:
             quantization=promoted.get("quantization"),
         )
         self.db.add(record)
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError:
+            # Concurrent sync_from_yaml: another thread inserted the same name
+            # between our SELECT and our COMMIT. Roll back and treat as an
+            # update against whatever the other thread persisted.
+            self.db.rollback()
+            existing = self.db.exec(
+                select(ProfileRecord).where(ProfileRecord.name == name)
+            ).first()
+            if existing is not None:
+                existing.runtime = runtime
+                existing.description = description
+                existing.parameters = parameters
+                existing.gpu_policy = gpu_policy
+                existing.safety = safety
+                existing.extra_args = extra_args
+                existing.environment_variables = environment_variables
+                existing.scheduler_preferences = scheduler_preferences
+                for key in _PROMOTED_FIELDS:
+                    if key in promoted:
+                        setattr(existing, key, promoted[key])
+                existing.updated_at = utcnow()
+                self.db.add(existing)
+                self.db.commit()
 
 
 def validate_profile(

@@ -13,6 +13,7 @@ from llmctl.tui.screens_gpu import GPUScreen
 from llmctl.tui.screens_logs import LogsScreen
 from llmctl.tui.screens_models import ModelsScreen
 from llmctl.tui.screens_presets import PresetsScreen
+from llmctl.tui.screens_profiles import ProfilesScreen
 from llmctl.tui.screens_sessions import SessionsScreen
 from llmctl.tui.screens_units import UnitsScreen
 
@@ -72,6 +73,7 @@ class MissionControlApp(App[None]):
         Binding("p", "show_presets", "Presets", show=True),
         Binding("u", "show_units", "Units", show=True),
         Binding("m", "show_models", "Models", show=True),
+        Binding("f", "show_profiles", "Profiles", show=True),
         Binding("s", "show_sessions", "Sessions", show=True),
         Binding("g", "show_gpus", "GPUs", show=True),
         Binding("l", "show_logs", "Logs", show=True),
@@ -99,6 +101,7 @@ class MissionControlApp(App[None]):
         self.install_screen(PresetsScreen(), name="presets")
         self.install_screen(UnitsScreen(), name="units")
         self.install_screen(ModelsScreen(), name="models")
+        self.install_screen(ProfilesScreen(), name="profiles")
         self.install_screen(SessionsScreen(), name="sessions")
         self.install_screen(GPUScreen(), name="gpus")
         self.install_screen(LogsScreen(), name="logs")
@@ -144,6 +147,10 @@ class MissionControlApp(App[None]):
     def action_show_models(self) -> None:
         """Show models screen."""
         self._switch("models")
+
+    def action_show_profiles(self) -> None:
+        """Show DB-backed profiles screen."""
+        self._switch("profiles")
 
     def action_show_sessions(self) -> None:
         """Show sessions screen."""

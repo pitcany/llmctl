@@ -8,7 +8,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session
 
-from llmctl.api import routes_benchmarks, routes_gpu, routes_models, routes_sessions
+from llmctl.api import (
+    routes_benchmarks,
+    routes_gpu,
+    routes_models,
+    routes_profiles,
+    routes_sessions,
+)
 from llmctl.api.deps import get_db_session
 from llmctl.config import Settings, load_settings
 from llmctl.db import SQLModel, apply_migrations, get_engine
@@ -69,6 +75,7 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
         }
 
     app.include_router(routes_models.router)
+    app.include_router(routes_profiles.router)
     app.include_router(routes_sessions.router)
     app.include_router(routes_gpu.router)
     app.include_router(routes_benchmarks.router)

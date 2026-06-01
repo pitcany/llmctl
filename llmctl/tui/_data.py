@@ -8,6 +8,7 @@ unit-test without instantiating Textual widgets.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -22,6 +23,11 @@ from llmctl.schemas import (
     GPUInfo,
     LaunchPlan,
     Model,
+    ModelCreate,
+    ModelUpdate,
+    Profile,
+    ProfileCreate,
+    ProfileUpdate,
     SessionStartRequest,
 )
 from llmctl.schemas import Session as RuntimeSession
@@ -36,12 +42,26 @@ from llmctl.services.sessions import SessionService
 from llmctl.telemetry.gpu import get_gpu_info, nvml_available
 
 
+# Each worker thread can open its own short-lived DB session, but only one
+# thread should run init_db() at a time — concurrent CREATE TABLE on SQLite
+# is not atomic (checkfirst inspects then creates, and a second thread can
+# beat the create). The cache below remembers which URL has already been
+# initialised so subsequent sessions skip the lock entirely.
+_init_lock = threading.Lock()
+_initialised_urls: set[str] = set()
+
+
 @contextmanager
 def db_session() -> Iterator[Session]:
     """Yield a short-lived database session with tables initialized."""
     settings = load_settings()
-    init_db(settings.database_url)
-    with Session(get_engine(settings.database_url)) as db:
+    url = settings.database_url
+    if url not in _initialised_urls:
+        with _init_lock:
+            if url not in _initialised_urls:
+                init_db(url)
+                _initialised_urls.add(url)
+    with Session(get_engine(url)) as db:
         yield db
 
 
@@ -97,6 +117,60 @@ def scan_models() -> list[Model]:
     """Run adapter discovery and return the refreshed model list."""
     with db_session() as db:
         return RegistryService(db).scan()
+
+
+def add_model(payload: ModelCreate) -> Model:
+    """Register a model from a TUI form."""
+    with db_session() as db:
+        return RegistryService(db).add_model(payload)
+
+
+def update_model(model_id: str, updates: ModelUpdate) -> Model | None:
+    """Apply a TUI edit to a model."""
+    with db_session() as db:
+        return RegistryService(db).update_model(model_id, updates)
+
+
+def clone_model(model_id: str, new_name: str) -> Model | None:
+    """Duplicate a model under a new name."""
+    with db_session() as db:
+        return RegistryService(db).clone_model(model_id, new_name)
+
+
+def delete_model(model_id: str, *, delete_files: bool = False) -> bool:
+    """Soft-delete a model; optionally remove the artifact."""
+    with db_session() as db:
+        return RegistryService(db).delete_model(model_id, delete_files=delete_files)
+
+
+def get_profiles() -> list[Profile]:
+    """Return all profiles, syncing from YAML when the table is empty."""
+    with db_session() as db:
+        return ProfileService(db).list_profiles()
+
+
+def create_profile(payload: ProfileCreate) -> Profile:
+    """Create a profile from a TUI form."""
+    with db_session() as db:
+        return ProfileService(db).create_profile(payload)
+
+
+def update_profile(profile_id: str, updates: ProfileUpdate) -> Profile | None:
+    """Update a profile from a TUI form."""
+    with db_session() as db:
+        return ProfileService(db).update_profile(profile_id, updates)
+
+
+def clone_profile(profile_id: str, new_name: str) -> Profile | None:
+    """Duplicate a profile."""
+    with db_session() as db:
+        return ProfileService(db).clone_profile(profile_id, new_name)
+
+
+def delete_profile(profile_id: str) -> bool:
+    """Delete a profile."""
+    with db_session() as db:
+        return ProfileService(db).delete_profile(profile_id)
 
 
 def get_sessions() -> list[RuntimeSession]:
