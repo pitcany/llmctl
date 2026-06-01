@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import time
 import urllib.error
 from pathlib import Path
@@ -23,12 +24,27 @@ def _no_vllm_http_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     vLLM is available. In CI that probe should fail; on the dev host
     (vllm-tp.service actually running) it would succeed and flip the
     "vllm should be missing in test" assertion. Pin the probe to fail
-    so test outcomes are host-independent."""
+    so test outcomes are host-independent.
+
+    Same goes for the binary-on-PATH check: the dev box's vllm-serve
+    conda env ships ``vllm`` (and other LLM CLIs) on PATH, while CI
+    has none. Pin ``shutil.which`` to None for every non-stdlib binary
+    so the "vllm should be missing" assertion holds on both."""
 
     def fail(url: str, timeout: float):
         raise urllib.error.URLError("test: vllm probe disabled")
 
     monkeypatch.setattr("llmctl.services.backends._default_http_get", fail)
+
+    _stdlib_allowlist = {"python", "python3", "sh", "bash"}
+    real_which = shutil.which
+
+    def fake_which(binary: str, *args: object, **kwargs: object) -> str | None:
+        if binary in _stdlib_allowlist:
+            return real_which(binary, *args, **kwargs)
+        return None
+
+    monkeypatch.setattr("llmctl.services.backends.shutil.which", fake_which)
 
 
 def test_detect_backends_reports_python_available() -> None:

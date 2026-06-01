@@ -236,6 +236,9 @@ def test_missing_binary_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         "get_gpu_info",
         lambda: [GPUInfo(index=0, name="a", memory_free_mb=24000)],
     )
+    # Force `vllm` to appear absent regardless of the host env (the dev box's
+    # vllm-serve conda env ships vllm on PATH; CI does not).
+    monkeypatch.setattr(scheduler_module.shutil, "which", lambda _binary: None)
     with _db(tmp_path) as db:
         model = ModelRecord(name="m", runtime=RuntimeName.VLLM, source="org/m")
         db.add(model)
