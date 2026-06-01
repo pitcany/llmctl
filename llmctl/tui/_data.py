@@ -21,7 +21,7 @@ import yaml
 from sqlmodel import Session
 
 from llmctl.config import load_settings
-from llmctl.db import get_engine, init_db
+from llmctl.db import BenchmarkKind, get_engine, init_db
 from llmctl.presets import (
     Model as PresetModel,
 )
@@ -502,12 +502,31 @@ def run_benchmark(
     name: str,
     model_id: str | None = None,
     *,
+    kind: BenchmarkKind = BenchmarkKind.CHAT,
+    context_length: int | None = None,
+    profile_id: str | None = None,
+    max_tokens: int | None = None,
     dry_run: bool = False,
 ) -> BenchmarkResult:
-    """Run a new benchmark for a model (real streaming with mock fallback)."""
+    """Run a new benchmark for a model.
+
+    Live failures persist as ``success=False`` records; the caller can
+    surface ``result.error`` in the UI to point at what broke.
+    """
+    parameters: dict[str, object] = {}
+    if max_tokens is not None:
+        parameters["max_tokens"] = max_tokens
     with db_session() as db:
         return BenchmarkService(db).run(
-            BenchmarkRunRequest(name=name, model_id=model_id, dry_run=dry_run)
+            BenchmarkRunRequest(
+                name=name,
+                model_id=model_id,
+                profile_id=profile_id,
+                kind=kind,
+                context_length=context_length,
+                parameters=parameters,
+                dry_run=dry_run,
+            )
         )
 
 

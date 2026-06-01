@@ -10,14 +10,16 @@ from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
+from llmctl.tui._modals_benchmarks import BenchmarkLaunch, BenchmarkLaunchModal
 
 
 class BenchmarksScreen(DataScreen):
     """Benchmark history: lists results, compares to a baseline, and re-runs."""
 
     BINDINGS = [
+        Binding("n", "new_benchmark", "New run", show=True),
         Binding("enter", "rerun", "Re-run", show=True),
-        Binding("c", "set_baseline", "Set baseline", show=True),
+        Binding("c", "set_baseline", "Baseline", show=True),
         Binding("x", "clear_baseline", "Clear baseline", show=True),
     ]
 
@@ -40,8 +42,8 @@ class BenchmarksScreen(DataScreen):
         """Compose the benchmarks history table with screen-scoped chrome."""
         yield Header()
         chrome = (
-            f"Benchmarks  -  [{C_MUTED}]enter = re-run, c = set baseline, "
-            f"x = clear baseline[/]"
+            f"Benchmarks  -  [{C_MUTED}]n = new run, enter = re-run, "
+            f"c = baseline, x = clear baseline[/]"
         )
         if self._model_filter:
             chrome += f"  [{C_MUTED}]filter: model={self._model_filter}[/]"
@@ -63,7 +65,16 @@ class BenchmarksScreen(DataScreen):
             "When",
         )
         yield table
+        yield Static("", classes="panel safe", id="benchmarks-hint")
         yield Footer()
+
+    def on_mount(self) -> None:
+        """Load data and focus the table so cursor keys work immediately."""
+        super().on_mount()
+        try:
+            self.query_one("#benchmarks-table", DataTable).focus()
+        except Exception:  # noqa: BLE001 — best-effort focus
+            pass
 
     def fetch(self) -> Any:
         """Return the recorded benchmark history (latest first)."""
@@ -116,24 +127,18 @@ class BenchmarksScreen(DataScreen):
                 ok,
                 when,
             )
+        hint = self.query_one("#benchmarks-hint", Static)
         if not data:
-            table.add_row(
-                "-",
-                "No benchmarks yet",
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
+            hint.update(
+                f"[{C_MUTED}]No benchmarks recorded yet. Press [b]n[/b] "
+                f"to launch one.[/]"
             )
+        else:
+            hint.update("")
         if 0 <= cursor < len(self._ids):
             table.move_cursor(row=cursor)
+        elif self._ids:
+            table.move_cursor(row=0)
 
     def _baseline_for(self, data: Any) -> Any | None:
         """Return the current baseline result if it is still present."""
@@ -186,7 +191,16 @@ class BenchmarksScreen(DataScreen):
         """Mark the selected benchmark as the comparison baseline."""
         benchmark_id = self._selected_id()
         if not benchmark_id:
-            self.app.notify("No benchmark selected.", severity="warning")
+            if not self._ids:
+                self.app.notify(
+                    "No benchmarks yet. Press 'n' to launch one.",
+                    severity="warning",
+                )
+            else:
+                self.app.notify(
+                    "Highlight a row with arrow keys, then press 'c'.",
+                    severity="warning",
+                )
             return
         self._baseline_id = benchmark_id
         self.app.notify("Baseline set; deltas are relative to it.", title="Compare")
@@ -219,6 +233,57 @@ class BenchmarksScreen(DataScreen):
             mode = result.parameters.get("mode", "?")
             self.app.notify(
                 f"Re-ran '{result.name}' ({mode}).",
+                title="Benchmark complete",
+            )
+        self.refresh_data()
+
+    def action_new_benchmark(self) -> None:
+        """Open the launch modal, then dispatch the selected run off-thread."""
+        models = _data.get_models()
+        modal = BenchmarkLaunchModal(
+            models, preselect_model_id=self._model_filter
+        )
+        self.app.push_screen(modal, self._on_launch_chosen)
+
+    def _on_launch_chosen(self, launch: BenchmarkLaunch | None) -> None:
+        """Dispatch the benchmark the operator picked from the modal."""
+        if launch is None:
+            return
+        self.app.notify(
+            f"Running '{launch.name}' ({launch.kind.value})...",
+            title="Benchmark queued",
+        )
+        self.run_action_worker(
+            lambda: _data.run_benchmark(
+                name=launch.name,
+                model_id=launch.model_id,
+                kind=launch.kind,
+                context_length=launch.context_length,
+                max_tokens=launch.max_tokens,
+                dry_run=launch.dry_run,
+            ),
+            self._after_launch,
+        )
+
+    def _after_launch(self, result: Any) -> None:
+        """Surface the outcome of a launched benchmark, then refresh."""
+        if result is None:
+            self.app.notify("Benchmark failed to start.", severity="error")
+        elif not result.success:
+            self.app.notify(
+                f"'{result.name}' failed: {result.error or 'unknown error'}",
+                severity="error",
+                title="Benchmark failed",
+            )
+        else:
+            mode = result.parameters.get("mode", "?")
+            tps = (
+                "n/a"
+                if result.tokens_per_second is None
+                else f"{result.tokens_per_second:.1f} tok/s"
+            )
+            self.app.notify(
+                f"'{result.name}' ({mode}): {tps}",
                 title="Benchmark complete",
             )
         self.refresh_data()
