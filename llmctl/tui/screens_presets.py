@@ -14,9 +14,12 @@ from __future__ import annotations
 from typing import Any
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.config import load_settings
+from llmctl.presets import Model as PresetModel
+from llmctl.presets import PresetSchemaError
 from llmctl.services.preset_loader import PresetView, load_preset_views
 from llmctl.services.vllm_orchestrator import (
     OrchestratorOptions,
@@ -24,16 +27,31 @@ from llmctl.services.vllm_orchestrator import (
     start_slot,
     start_vllm_tp,
 )
+from llmctl.tui import _data
 from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, DataScreen
-from llmctl.tui._modals_presets import PresetLaunchModal, PresetLaunchTarget
+from llmctl.tui._modals_presets import (
+    PresetFormModal,
+    PresetLaunchModal,
+    PresetLaunchTarget,
+)
+from llmctl.tui._modals_registry import (
+    CloneModal,
+    CloneRequest,
+    ConfirmDelete,
+    DeleteModal,
+)
 
 
 class PresetsScreen(DataScreen):
     """Live preset table with one-key launch into TP / coder / reasoner."""
 
     BINDINGS = [
-        ("enter", "launch_selected", "Launch"),
-        ("ctrl+r", "refresh_now", "Refresh"),
+        Binding("enter", "launch_selected", "Launch", show=True),
+        Binding("ctrl+r", "refresh_now", "Refresh", show=True),
+        Binding("a", "add_preset", "Add", show=True),
+        Binding("e", "edit_preset", "Edit", show=True),
+        Binding("c", "clone_preset", "Clone", show=True),
+        Binding("d", "delete_preset", "Delete", show=True),
     ]
 
     def __init__(self) -> None:
@@ -51,8 +69,8 @@ class PresetsScreen(DataScreen):
         """
         yield Header()
         yield Static(
-            f"Presets  -  [{C_MUTED}]enter = launch (TP / coder / reasoner), "
-            f"ctrl+r = refresh, see also: llmctl presets[/]",
+            f"Presets  -  [{C_MUTED}]enter = launch, a = add, e = edit, "
+            f"c = clone, d = delete, ctrl+r = refresh[/]",
             classes="panel safe",
             id="presets-title",
         )
@@ -171,6 +189,120 @@ class PresetsScreen(DataScreen):
 
         self.app.notify(f"Starting {label}...", title="Launch")
         self.run_action_worker(_run, lambda res: self._after_launch(label, res))
+
+    def action_add_preset(self) -> None:
+        """Open the add-preset form and persist on submit."""
+
+        def _on_close(model: PresetModel | None) -> None:
+            if model is None:
+                return
+            self.run_action_worker(
+                lambda: _data.add_preset(model), self._after_mutation
+            )
+
+        self.app.push_screen(PresetFormModal(), _on_close)
+
+    def action_edit_preset(self) -> None:
+        """Open the cursor-row preset's YAML in ``$EDITOR``.
+
+        Suspends Textual so the editor inherits the real TTY, then
+        revalidates the file on return. Preset YAMLs carry too many
+        knobs (and field-level comments worth preserving) for a TUI
+        form to win against a real editor; the form path remains for
+        ``a`` (add) where the user is starting from scratch.
+        """
+        alias = self._selected_alias()
+        if alias is None:
+            self.app.notify("No preset selected.", severity="warning")
+            return
+        view = self._views_by_alias.get(alias)
+        path = view.source_path if view else None
+        if path is None:
+            self.app.notify(
+                f"Preset {alias!r} has no resolved source path.",
+                severity="warning",
+            )
+            return
+        if not path.exists():
+            self.app.notify(
+                f"Preset file vanished: {path}", severity="error"
+            )
+            self.refresh_data()
+            return
+
+        try:
+            with self.app.suspend():
+                _data.run_editor_on_preset(path)
+        except PresetSchemaError as exc:
+            self.app.notify(
+                f"Preset YAML is invalid; on-disk file left as-is.\n{exc}",
+                severity="error",
+                title=f"Edit {alias}",
+            )
+            self.refresh_data()
+            return
+        except OSError as exc:
+            self.app.notify(
+                f"Failed to launch editor: {exc}",
+                severity="error",
+                title="Edit preset",
+            )
+            return
+
+        self.app.notify(f"Saved {alias} ({path}).", title="Edit preset")
+        self.refresh_data()
+
+    def action_clone_preset(self) -> None:
+        """Clone the cursor-row preset under a new alias."""
+        alias = self._selected_alias()
+        if alias is None:
+            self.app.notify("No preset selected.", severity="warning")
+            return
+
+        def _on_close(req: CloneRequest | None) -> None:
+            if req is None:
+                return
+            self.run_action_worker(
+                lambda: _data.clone_preset(req.source_id, req.new_name),
+                self._after_mutation,
+            )
+
+        self.app.push_screen(CloneModal(alias, alias), _on_close)
+
+    def action_delete_preset(self) -> None:
+        """Confirm and delete the cursor-row preset YAML file."""
+        alias = self._selected_alias()
+        if alias is None:
+            self.app.notify("No preset selected.", severity="warning")
+            return
+
+        def _on_close(payload: ConfirmDelete | None) -> None:
+            if payload is None:
+                return
+            self.run_action_worker(
+                lambda: _data.delete_preset(alias),
+                lambda removed: self._after_delete(alias, removed),
+            )
+
+        self.app.push_screen(
+            DeleteModal(f"preset '{alias}' YAML", allow_file_delete=False),
+            _on_close,
+        )
+
+    def _after_mutation(self, _result: object) -> None:
+        """Refresh the table after add/edit/clone completes."""
+        self.app.notify("Preset saved.", title="Presets")
+        self.refresh_data()
+
+    def _after_delete(self, alias: str, removed: list[object]) -> None:
+        """Refresh and notify after a delete completes."""
+        if removed:
+            self.app.notify(f"Deleted preset {alias!r}.", title="Presets")
+        else:
+            self.app.notify(
+                f"No on-disk file found for {alias!r}.", severity="warning"
+            )
+        self.refresh_data()
 
     def _after_launch(self, label: str, result: OrchestratorResult) -> None:
         """Surface success/failure as a notification."""

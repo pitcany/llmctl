@@ -48,11 +48,15 @@ def test_public_api_exports_expected_symbols() -> None:
     assert presets.__all__ == [
         "Model",
         "PresetSchemaError",
+        "PresetRecord",
         "CANONICAL_QUANTIZATIONS",
         "user_config_dir",
         "default_preset_dir",
         "load_all",
+        "load_all_records",
         "load_one",
+        "save_preset",
+        "delete_preset",
     ]
 
 
@@ -172,3 +176,102 @@ def test_migrate_legacy_presets_is_idempotent(
         assert migrate_legacy_presets() == 0
 
     assert "migrated" not in caplog.text
+
+
+def test_save_preset_writes_yaml_to_default_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """save_preset persists into the canonical llmctl directory."""
+    from llmctl.presets import save_preset
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    model = Model(**_valid_model_kwargs())
+    path = save_preset(model)
+    assert path == default_preset_dir() / "x.yaml"
+    assert load_one("x") is not None
+
+
+def test_save_preset_replaces_symlink_to_legacy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Editing a legacy-symlinked preset writes a real file and drops the legacy copy.
+
+    Without dropping the legacy copy, ``load_all`` (which lets user_dir
+    override default_dir) would keep returning the stale value.
+    """
+    from llmctl.presets import save_preset
+    from llmctl.presets.store import migrate_legacy_presets
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    legacy = _write_preset(user_config_dir(), "x")
+    migrate_legacy_presets()
+    symlinked = default_preset_dir() / "x.yaml"
+    assert symlinked.is_symlink()
+
+    updated = Model(**(_valid_model_kwargs() | {"model_id": "org/updated"}))
+    path = save_preset(updated)
+
+    assert path == symlinked
+    assert not symlinked.is_symlink()
+    assert not legacy.exists()
+    assert load_one("x").model_id == "org/updated"
+
+
+def test_save_preset_writes_back_to_legacy_when_canonical_is_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the user only has a legacy preset, save_preset edits the legacy copy."""
+    from llmctl.presets import save_preset
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    legacy = _write_preset(user_config_dir(), "x")
+
+    updated = Model(**(_valid_model_kwargs() | {"model_id": "org/updated"}))
+    path = save_preset(updated)
+
+    assert path == legacy
+    assert load_one("x").model_id == "org/updated"
+
+
+def test_delete_preset_removes_both_layers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """delete_preset purges the alias from default and legacy directories."""
+    from llmctl.presets import delete_preset
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    _write_preset(user_config_dir(), "x")
+    _write_preset(default_preset_dir(), "x")
+
+    removed = delete_preset("x")
+
+    assert {p.parent for p in removed} == {default_preset_dir(), user_config_dir()}
+    assert load_one("x") is None
+
+
+def test_delete_preset_returns_empty_when_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """delete_preset is a no-op when no file exists."""
+    from llmctl.presets import delete_preset
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    assert delete_preset("nope") == []
+
+
+def test_load_all_records_tracks_source_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """load_all_records exposes the on-disk path so the TUI can edit it."""
+    from llmctl.presets import load_all_records
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    written = _write_preset(default_preset_dir(), "x")
+    records = load_all_records()
+    assert records["x"].source_path == written

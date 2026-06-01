@@ -22,7 +22,7 @@ from pathlib import Path
 
 from llmctl.config import VLLMDefaultsConfig
 from llmctl.integrations.vllm_env import VLLMLaunchSpec
-from llmctl.presets import Model, load_all
+from llmctl.presets import Model, load_all, load_all_records
 
 
 @dataclass(frozen=True)
@@ -132,17 +132,17 @@ def load_presets(
 
 def load_preset_views(*, config_dir: Path | None = None) -> list[PresetView]:
     """Return a metadata view of every loaded preset for CLI/TUI listing."""
-    models = load_all(config_dir=config_dir)
+    records = load_all_records(config_dir=config_dir)
     return [
         PresetView(
             alias=alias,
-            served_name=model.served_name,
-            model_id=model.model_id,
-            family=model.family,
-            param_count_b=model.param_count_b,
-            tensor_parallel=model.tensor_parallel_size,
-            quantization=model.quantization,
-            source_path=None,
+            served_name=record.model.served_name,
+            model_id=record.model.model_id,
+            family=record.model.family,
+            param_count_b=record.model.param_count_b,
+            tensor_parallel=record.model.tensor_parallel_size,
+            quantization=record.model.quantization,
+            source_path=record.source_path,
         )
-        for alias, model in sorted(models.items())
+        for alias, record in sorted(records.items())
     ]

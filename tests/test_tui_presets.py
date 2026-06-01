@@ -227,3 +227,118 @@ def test_presets_install_in_app() -> None:
                 assert isinstance(app.screen, PresetsScreen)
 
     asyncio.run(_run())
+
+
+def test_presets_screen_a_opens_add_form(temp_db, fake_views) -> None:
+    """Pressing `a` on the Presets screen pushes the add form."""
+    from llmctl.tui._modals_presets import PresetFormModal
+
+    async def _attempt() -> bool:
+        with _patch_preset_loader(fake_views):
+            app = MissionControlApp()
+            async with app.run_test() as pilot:
+                await pilot.press("p")
+                for _ in range(150):
+                    await pilot.pause(0.05)
+                    if (
+                        isinstance(app.screen, PresetsScreen)
+                        and len(app.screen._row_aliases) >= 2
+                    ):
+                        break
+                if not isinstance(app.screen, PresetsScreen):
+                    return False
+                await pilot.press("a")
+                for _ in range(150):
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, PresetFormModal):
+                        return True
+                return False
+
+    for _ in range(3):
+        if asyncio.run(_attempt()):
+            return
+    raise AssertionError("add-preset form did not appear within budget")
+
+
+def test_resolve_editor_prefers_visual_then_editor_then_vi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """resolve_editor follows the POSIX VISUAL > EDITOR > vi fallback chain."""
+    from llmctl.tui._data import resolve_editor
+
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.delenv("EDITOR", raising=False)
+    assert resolve_editor() == ["vi"]
+
+    monkeypatch.setenv("EDITOR", "nano")
+    assert resolve_editor() == ["nano"]
+
+    monkeypatch.setenv("VISUAL", "code --wait")
+    assert resolve_editor() == ["code", "--wait"]
+
+
+def test_validate_preset_file_round_trips_yaml(tmp_path: Path) -> None:
+    """validate_preset_file returns the parsed Model when the YAML is good."""
+    from llmctl.tui._data import validate_preset_file
+
+    path = tmp_path / "x.yaml"
+    path.write_text(
+        "alias: x\n"
+        "served_name: x\n"
+        "model_id: org/x\n"
+        "quantization: awq\n"
+        "vllm_quantization_flag: awq_marlin\n"
+        "tensor_parallel_size: 2\n"
+        "max_model_len: 32768\n"
+    )
+    model = validate_preset_file(path)
+    assert model.alias == "x"
+
+
+def test_validate_preset_file_raises_on_schema_error(tmp_path: Path) -> None:
+    """A broken YAML surfaces as PresetSchemaError so the TUI can notify the user."""
+    from llmctl.presets import PresetSchemaError
+    from llmctl.tui._data import validate_preset_file
+
+    path = tmp_path / "x.yaml"
+    path.write_text("alias: BAD-UPPERCASE\nserved_name: x\n")
+    with pytest.raises(PresetSchemaError):
+        validate_preset_file(path)
+
+
+def test_run_editor_on_preset_invokes_editor_and_revalidates(
+    tmp_path: Path,
+) -> None:
+    """run_editor_on_preset shells out and re-reads the file on return."""
+    from llmctl.tui._data import run_editor_on_preset
+
+    target = tmp_path / "x.yaml"
+    target.write_text(
+        "alias: x\n"
+        "served_name: x\n"
+        "model_id: org/x\n"
+        "quantization: awq\n"
+        "vllm_quantization_flag: awq_marlin\n"
+        "tensor_parallel_size: 2\n"
+        "max_model_len: 32768\n"
+    )
+
+    # Fake editor: rewrites the file to flip a field, proving the
+    # function reads back what the editor wrote (not the original).
+    fake_editor = tmp_path / "fake-editor.sh"
+    fake_editor.write_text(
+        "#!/usr/bin/env bash\n"
+        "cat > \"$1\" <<'YAML'\n"
+        "alias: x\n"
+        "served_name: x\n"
+        "model_id: org/edited\n"
+        "quantization: awq\n"
+        "vllm_quantization_flag: awq_marlin\n"
+        "tensor_parallel_size: 2\n"
+        "max_model_len: 32768\n"
+        "YAML\n"
+    )
+    fake_editor.chmod(0o755)
+
+    model = run_editor_on_preset(target, editor=[str(fake_editor)])
+    assert model.model_id == "org/edited"

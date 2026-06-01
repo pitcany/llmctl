@@ -8,15 +8,35 @@ unit-test without instantiating Textual widgets.
 
 from __future__ import annotations
 
+import os
+import shlex
+import subprocess
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
+import yaml
 from sqlmodel import Session
 
 from llmctl.config import load_settings
 from llmctl.db import get_engine, init_db
+from llmctl.presets import (
+    Model as PresetModel,
+)
+from llmctl.presets import (
+    PresetSchemaError,
+)
+from llmctl.presets import (
+    delete_preset as _delete_preset_files,
+)
+from llmctl.presets import (
+    load_all_records as _load_preset_records,
+)
+from llmctl.presets import (
+    save_preset as _save_preset,
+)
 from llmctl.schemas import (
     BenchmarkResult,
     BenchmarkRunRequest,
@@ -40,7 +60,6 @@ from llmctl.services.profiles import ProfileService
 from llmctl.services.registry import RegistryService
 from llmctl.services.sessions import SessionService
 from llmctl.telemetry.gpu import get_gpu_info, nvml_available
-
 
 # Each worker thread can open its own short-lived DB session, but only one
 # thread should run init_db() at a time — concurrent CREATE TABLE on SQLite
@@ -141,6 +160,106 @@ def delete_model(model_id: str, *, delete_files: bool = False) -> bool:
     """Soft-delete a model; optionally remove the artifact."""
     with db_session() as db:
         return RegistryService(db).delete_model(model_id, delete_files=delete_files)
+
+
+class PresetValidationError(ValueError):
+    """Raised when the TUI submits a preset payload that fails the schema."""
+
+
+def get_preset(alias: str) -> PresetModel | None:
+    """Return the canonical preset for ``alias`` or None."""
+    record = _load_preset_records().get(alias)
+    return record.model if record else None
+
+
+def save_preset(model: PresetModel) -> Path:
+    """Persist a preset to the canonical llmctl directory.
+
+    The schema validation already ran when the form built the ``Model``;
+    this helper is a thin wrapper so the TUI worker has a single call
+    site analogous to ``add_model`` / ``update_model``.
+    """
+    return _save_preset(model)
+
+
+def add_preset(model: PresetModel) -> Path:
+    """Create a new preset; alias must not already exist."""
+    existing = _load_preset_records()
+    if model.alias in existing:
+        raise PresetValidationError(
+            f"preset {model.alias!r} already exists at {existing[model.alias].source_path}"
+        )
+    return _save_preset(model)
+
+
+def clone_preset(source_alias: str, new_alias: str) -> Path:
+    """Duplicate a preset under a new alias."""
+    records = _load_preset_records()
+    src = records.get(source_alias)
+    if src is None:
+        raise PresetValidationError(f"preset {source_alias!r} not found")
+    if new_alias in records:
+        raise PresetValidationError(f"preset {new_alias!r} already exists")
+    try:
+        clone = src.model.model_copy(update={"alias": new_alias, "served_name": new_alias})
+    except PresetSchemaError as exc:
+        raise PresetValidationError(str(exc)) from exc
+    return _save_preset(clone)
+
+
+def delete_preset(alias: str) -> list[Path]:
+    """Remove the preset's YAML file(s); returns the deleted paths."""
+    return _delete_preset_files(alias)
+
+
+def preset_source_path(alias: str) -> Path | None:
+    """Return the on-disk path the loader currently resolves ``alias`` to."""
+    record = _load_preset_records().get(alias)
+    return record.source_path if record else None
+
+
+def resolve_editor() -> list[str]:
+    """Return the argv to invoke for ``$EDITOR``.
+
+    Honours :envvar:`VISUAL` first, then :envvar:`EDITOR`, then falls
+    back to ``vi``. Shell-style argument splitting matches what the
+    shell would do with ``$EDITOR file`` so wrappers like
+    ``code --wait`` work as expected.
+    """
+    raw = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    parts = shlex.split(raw)
+    return parts or ["vi"]
+
+
+def validate_preset_file(path: Path) -> PresetModel:
+    """Re-read and validate a preset YAML, raising on schema errors.
+
+    Used after the TUI shells out to ``$EDITOR``: the loader would
+    silently drop a malformed file with a log warning, but the user
+    needs an in-TUI notification instead.
+    """
+    raw = yaml.safe_load(path.read_text())
+    if not isinstance(raw, dict):
+        raise PresetSchemaError(f"{path}: top-level YAML must be a mapping")
+    return PresetModel.model_validate(raw)
+
+
+def run_editor_on_preset(
+    path: Path,
+    *,
+    editor: list[str] | None = None,
+) -> PresetModel:
+    """Spawn ``$EDITOR`` synchronously on ``path`` and revalidate it.
+
+    The caller is responsible for releasing the terminal first (Textual
+    screens use :meth:`App.suspend`). On a non-zero exit code we still
+    revalidate — editors like ``nvim`` return non-zero on ``:cq`` and
+    users may legitimately want to discard, but the file on disk is
+    the source of truth either way.
+    """
+    argv = editor or resolve_editor()
+    subprocess.run([*argv, str(path)], check=False)
+    return validate_preset_file(path)
 
 
 def get_profiles() -> list[Profile]:
