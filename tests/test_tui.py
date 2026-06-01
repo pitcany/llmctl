@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import urllib.error
 from pathlib import Path
 
@@ -16,21 +17,37 @@ CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
 
 @pytest.fixture(autouse=True)
-def _no_vllm_http_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force the vLLM managed-unit HTTP probe to fail.
+def _no_vllm_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend vLLM is uninstalled regardless of host.
 
-    Phase A made ``detect_backends`` accept "managed unit serving" as
-    a sign that vLLM is available — which is correct in production but
-    breaks every test that assumed ``vllm`` would report unavailable
-    in CI (where no managed unit is running). On the dev host (with
-    vllm-tp.service actually running) the unmocked probe would succeed
-    and flip the assertion. Pin the probe to fail so test outcomes are
-    host-independent.
+    Two paths can otherwise flip vLLM to "available" depending on where
+    the suite runs:
+
+    1. The HTTP probe that accepts "managed unit serving" as a sign vLLM
+       is up. Correct in production, but assumes no vllm-tp.service in
+       tests.
+    2. ``shutil.which("vllm")`` finding the binary on PATH. Dev hosts
+       routinely have it installed in a conda env that's on PATH; CI
+       hosts don't.
+
+    Both are forced off here so every assertion about vLLM availability
+    works the same on a dev workstation and on GitHub Actions. Other
+    runtimes (ollama, lmstudio, llama-server) keep their real PATH
+    detection.
     """
     def fail(url: str, timeout: float):
         raise urllib.error.URLError("test: vllm probe disabled")
 
     monkeypatch.setattr("llmctl.services.backends._default_http_get", fail)
+
+    real_which = shutil.which
+
+    def which(name: str, *args: object, **kwargs: object) -> str | None:
+        if name == "vllm":
+            return None
+        return real_which(name, *args, **kwargs)
+
+    monkeypatch.setattr("llmctl.services.backends.shutil.which", which)
 
 
 @pytest.fixture
