@@ -86,6 +86,34 @@ def test_data_profile_crud_round_trip(temp_db: Settings) -> None:
     assert _data.delete_profile(created.id) is True
 
 
+def test_tui_create_profile_rejects_validation_errors(temp_db: Settings) -> None:
+    """TUI create must validate like the CLI and API do."""
+    bad = ProfileCreate(
+        name="bad-tui",
+        runtime="vllm",
+        gpu_memory_utilization=1.5,  # out of range — error severity
+    )
+    with pytest.raises(_data.ProfileValidationError) as excinfo:
+        _data.create_profile(bad)
+    assert any(issue.severity == "error" for issue in excinfo.value.issues)
+    # No row should be persisted.
+    assert all(p.name != "bad-tui" for p in _data.get_profiles())
+
+
+def test_tui_update_profile_rejects_validation_errors(temp_db: Settings) -> None:
+    """TUI update must also validate before writing."""
+    created = _data.create_profile(
+        ProfileCreate(name="ok-tui", runtime="vllm", max_model_len=4096)
+    )
+    with pytest.raises(_data.ProfileValidationError):
+        _data.update_profile(
+            created.id, ProfileUpdate(gpu_memory_utilization=-0.1)
+        )
+    # max_model_len unchanged.
+    refreshed = next(p for p in _data.get_profiles() if p.name == "ok-tui")
+    assert refreshed.max_model_len == 4096
+
+
 def test_profiles_screen_keybinding_mounts(temp_db: Settings) -> None:
     """Pressing ``f`` reaches ProfilesScreen and composes without crashing."""
     # Initialize the DB before the app boots so concurrent worker threads

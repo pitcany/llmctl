@@ -279,7 +279,13 @@ class ProfileService:
             return self.create_profile(payload)
         updates = ProfileUpdate(**payload.model_dump())
         result = self.update_profile(existing.id, updates)
-        assert result is not None
+        if result is None:
+            # Concurrent delete between our SELECT and the UPDATE inside
+            # update_profile. Don't ``assert`` (stripped under ``python -O``);
+            # raise a typed error the caller can translate to a 409/retry.
+            raise RuntimeError(
+                f"Profile '{payload.name}' was deleted concurrently during import"
+            )
         return result
 
     def _upsert(

@@ -483,22 +483,6 @@ def logs(
 
 
 @app.command()
-def profiles() -> None:
-    """List available launch profiles."""
-    from llmctl.services.profiles import ProfileService
-
-    with _session() as db:
-        items = ProfileService(db).list_profiles()
-    table = Table(title="Profiles")
-    table.add_column("Name")
-    table.add_column("Runtime")
-    table.add_column("Description")
-    for item in items:
-        table.add_row(item.name, item.runtime.value, item.description or "")
-    console.print(table)
-
-
-@app.command()
 def health() -> None:
     """Show overall and per-runtime health."""
     from llmctl.services.health import HealthService

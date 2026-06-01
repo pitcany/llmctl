@@ -149,3 +149,27 @@ def test_find_ambiguous_name_raises(tmp_path: Path) -> None:
         _make(service, name="dual", runtime=RuntimeName.LLAMA_CPP, source="/l")
         with pytest.raises(ValueError, match="ambiguous"):
             service.find("dual")
+
+
+def test_list_models_includes_null_active_rows(tmp_path: Path) -> None:
+    """Models migrated before the ``active`` column existed have NULL there.
+
+    ``apply_migrations`` adds the column without ``DEFAULT TRUE``, so old
+    rows keep NULL. The default listing must treat NULL as active — a strict
+    ``active != False`` filter would silently hide every pre-migration model.
+    """
+    import sqlite3
+
+    db_file = tmp_path / "reg.sqlite3"
+    with _db(tmp_path) as db:
+        model_id = _make(RegistryService(db), name="legacy")
+
+    # Simulate a pre-migration row by nulling ``active`` directly in SQLite.
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("UPDATE models SET active = NULL WHERE id = ?", (model_id,))
+    conn.commit()
+    conn.close()
+
+    with _db(tmp_path) as db:
+        visible_names = {m.name for m in RegistryService(db).list_models()}
+    assert "legacy" in visible_names

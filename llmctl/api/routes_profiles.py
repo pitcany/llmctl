@@ -80,7 +80,14 @@ def update_profile(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
         ) from exc
-    assert updated is not None
+    if updated is None:
+        # Concurrent delete between the SELECT above and update_profile's
+        # write — return 404 rather than ``assert`` (which gets stripped
+        # under ``python -O`` and would surface as a 500).
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Profile was deleted concurrently",
+        )
     return updated
 
 

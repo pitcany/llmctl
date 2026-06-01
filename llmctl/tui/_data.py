@@ -149,16 +149,50 @@ def get_profiles() -> list[Profile]:
         return ProfileService(db).list_profiles()
 
 
+class ProfileValidationError(ValueError):
+    """Raised when the TUI submits a profile payload that fails validation.
+
+    Carries the structured ``issues`` list so the calling screen can format a
+    user-facing notification with the offending fields. Matches the CLI/API
+    posture: ``severity="error"`` blocks the write; warnings are surfaced
+    separately but allowed through.
+    """
+
+    def __init__(self, message: str, issues: list[Any]) -> None:
+        super().__init__(message)
+        self.issues = issues
+
+
+def _check_profile_validation(service: ProfileService, payload: Any) -> None:
+    """Raise ProfileValidationError if the payload has any error-severity issues."""
+    issues = service.validate(payload)
+    errors = [issue for issue in issues if issue.severity == "error"]
+    if errors:
+        summary = "; ".join(
+            f"{issue.field or '?'}: {issue.message}" for issue in errors
+        )
+        raise ProfileValidationError(summary, issues)
+
+
 def create_profile(payload: ProfileCreate) -> Profile:
-    """Create a profile from a TUI form."""
+    """Create a profile from a TUI form, validating first.
+
+    Raises :class:`ProfileValidationError` on any error-severity issue so
+    the TUI surfaces the same guard the CLI and API enforce. Warnings are
+    not blocking and are not raised here.
+    """
     with db_session() as db:
-        return ProfileService(db).create_profile(payload)
+        service = ProfileService(db)
+        _check_profile_validation(service, payload)
+        return service.create_profile(payload)
 
 
 def update_profile(profile_id: str, updates: ProfileUpdate) -> Profile | None:
-    """Update a profile from a TUI form."""
+    """Update a profile from a TUI form, validating first."""
     with db_session() as db:
-        return ProfileService(db).update_profile(profile_id, updates)
+        service = ProfileService(db)
+        _check_profile_validation(service, updates)
+        return service.update_profile(profile_id, updates)
 
 
 def clone_profile(profile_id: str, new_name: str) -> Profile | None:

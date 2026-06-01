@@ -87,10 +87,20 @@ class RegistryService:
         return discovered
 
     def list_models(self, include_inactive: bool = False) -> list[Model]:
-        """List non-deleted models. Inactive rows are hidden by default."""
+        """List non-deleted models. Inactive rows are hidden by default.
+
+        ``apply_migrations`` adds the ``active`` column without a SQL
+        ``DEFAULT TRUE`` clause, so rows registered before this migration
+        keep ``active IS NULL``. SQL's three-valued logic makes
+        ``active != FALSE`` evaluate to NULL (falsy in WHERE) for those
+        rows, which would silently hide every pre-migration model. Filter
+        explicitly: include ``TRUE`` and ``NULL``, exclude only ``FALSE``.
+        """
         statement = select(ModelRecord).where(ModelRecord.status != ModelStatus.DELETED)
         if not include_inactive:
-            statement = statement.where(ModelRecord.active != False)  # noqa: E712
+            statement = statement.where(
+                (ModelRecord.active.is_(True)) | (ModelRecord.active.is_(None))
+            )
         records = self.db.exec(statement).all()
         return [record_to_model(record) for record in records]
 

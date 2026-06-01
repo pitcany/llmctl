@@ -96,7 +96,7 @@ class ProfilesScreen(DataScreen):
         def _on_close(payload: ProfileCreate | ProfileUpdate | None) -> None:
             if isinstance(payload, ProfileCreate):
                 self.run_action_worker(
-                    lambda: _data.create_profile(payload), self._after_mutation
+                    lambda: self._safe_create(payload), self._after_mutation
                 )
 
         self.app.push_screen(ProfileFormModal(), _on_close)
@@ -111,11 +111,32 @@ class ProfilesScreen(DataScreen):
         def _on_close(payload: ProfileCreate | ProfileUpdate | None) -> None:
             if isinstance(payload, ProfileUpdate):
                 self.run_action_worker(
-                    lambda: _data.update_profile(profile.id, payload),
+                    lambda: self._safe_update(profile.id, payload),
                     self._after_mutation,
                 )
 
         self.app.push_screen(ProfileFormModal(profile), _on_close)
+
+    @staticmethod
+    def _safe_create(payload: ProfileCreate) -> Any:
+        """Call create_profile, returning the exception on validation errors.
+
+        TUI worker results flow through ``_after_mutation`` on the UI thread.
+        Raising in the worker would manifest as ``WorkerFailed`` (no user
+        feedback); returning the exception lets the screen render an inline
+        notification instead.
+        """
+        try:
+            return _data.create_profile(payload)
+        except _data.ProfileValidationError as exc:
+            return exc
+
+    @staticmethod
+    def _safe_update(profile_id: str, updates: ProfileUpdate) -> Any:
+        try:
+            return _data.update_profile(profile_id, updates)
+        except _data.ProfileValidationError as exc:
+            return exc
 
     def action_clone_profile(self) -> None:
         """Clone the cursor-row profile under a new name."""
@@ -153,6 +174,13 @@ class ProfilesScreen(DataScreen):
             _on_close,
         )
 
-    def _after_mutation(self, _result: Any) -> None:
-        """Refresh the table after a service call completes."""
+    def _after_mutation(self, result: Any) -> None:
+        """Refresh the table after a service call completes, or surface errors."""
+        if isinstance(result, _data.ProfileValidationError):
+            self.app.notify(
+                f"Profile rejected: {result}",
+                severity="error",
+                title="Validation failed",
+            )
+            return
         self.refresh_data()
