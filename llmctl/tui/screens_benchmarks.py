@@ -6,7 +6,7 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
@@ -31,7 +31,8 @@ class BenchmarksScreen(DataScreen):
         self.action_rerun()
 
     def compose(self) -> ComposeResult:
-        """Compose the benchmarks history table."""
+        """Compose the benchmarks history table with screen-scoped chrome."""
+        yield Header()
         yield Static(
             f"Benchmarks  -  [{C_MUTED}]enter = re-run, c = set baseline, "
             f"x = clear baseline[/]",
@@ -43,6 +44,7 @@ class BenchmarksScreen(DataScreen):
             "Name", "Mode", "Tokens", "Tok/s", "vs base", "TTFT", "vs base", "When"
         )
         yield table
+        yield Footer()
 
     def fetch(self) -> Any:
         """Return the recorded benchmark history (latest first)."""

@@ -6,7 +6,7 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, DataScreen
@@ -32,7 +32,8 @@ class ModelsScreen(DataScreen):
         self.action_start_model()
 
     def compose(self) -> ComposeResult:
-        """Compose the models table."""
+        """Compose the models table with screen-scoped Header/Footer."""
+        yield Header()
         yield Static(
             f"Models Registry  -  [{C_MUTED}]enter = preview & plan, ctrl+s = scan[/]",
             classes="panel safe",
@@ -41,6 +42,7 @@ class ModelsScreen(DataScreen):
         table: DataTable[str] = DataTable(id="models-table", cursor_type="row")
         table.add_columns("ID", "Name", "Runtime", "Backend", "Status", "Quant", "Path")
         yield table
+        yield Footer()
 
     def fetch(self) -> Any:
         """Return the current model list plus backend availability."""

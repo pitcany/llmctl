@@ -6,29 +6,67 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Grid
-from textual.widgets import Static
+from textual.widgets import Footer, Header, Static
 
 from llmctl.tui import _data
 from llmctl.tui._base import C_ACCENT, C_MUTED, C_OK, C_WARN, DataScreen
 
 
 class StatCard(Static):
-    """A single labeled metric tile."""
+    """A single labeled metric tile.
+
+    Pre-renders the title + a placeholder in ``__init__`` so the card
+    is never visually empty before the first ``set_value`` call. Before
+    this, a fresh mount or any silent fetch failure left the user
+    staring at six unlabeled boxes — the original ``super().__init__()``
+    passed no renderable, and Textual's ``Static`` defaulted that to an
+    empty string that the panel-bordered card rendered as a bare frame.
+    """
+
+    _PLACEHOLDER = "..."
 
     def __init__(self, title: str, card_id: str) -> None:
-        super().__init__(id=card_id, classes="panel stat-card")
         self._title = title
+        # Set the renderable in the super constructor AND via on_mount so
+        # both paths produce visible content. Passing it only as a
+        # constructor arg leaves the widget rendering an empty body
+        # until update() is called — verified empirically by snapping
+        # the dashboard and finding the cards visually blank while
+        # ``.content`` reported the correct markup at the Python level.
+        self._placeholder_markup = self._compose_markup(self._PLACEHOLDER, C_MUTED)
+        super().__init__(
+            self._placeholder_markup,
+            id=card_id,
+            classes="panel stat-card",
+        )
+
+    def on_mount(self) -> None:
+        """Force-apply the placeholder markup once the widget is in the DOM."""
+        self.update(self._placeholder_markup)
+
+    def _compose_markup(self, value: str, color: str) -> str:
+        """Render the two-line markup body. Title on top, value below."""
+        return f"[b]{self._title}[/b]\n[{color}][b]{value}[/b][/]"
 
     def set_value(self, value: str, *, color: str = C_ACCENT) -> None:
-        """Render the card title and value."""
-        self.update(f"[b]{self._title}[/b]\n[{color}][b]{value}[/b][/]")
+        """Replace the placeholder with the live value."""
+        self.update(self._compose_markup(value, color))
 
 
 class DashboardScreen(DataScreen):
     """Mission-control dashboard with live counts and runtime health."""
 
     def compose(self) -> ComposeResult:
-        """Compose the dashboard layout."""
+        """Compose the dashboard layout.
+
+        Yields ``Header()`` and ``Footer()`` at screen scope. In Textual's
+        push_screen model, the App's own ``compose`` chrome is hidden when
+        a screen is pushed on top — so each screen must yield its own
+        chrome if it wants the keybinding hints visible at the bottom.
+        Otherwise the user sees the dashboard with no indication of what
+        keys do anything.
+        """
+        yield Header()
         yield Static(
             "LLM MISSION CONTROL  -  live overview",
             classes="panel safe",
@@ -42,6 +80,7 @@ class DashboardScreen(DataScreen):
             yield StatCard("GPUs", "card-gpus")
             yield StatCard("Safe mode", "card-safe")
         yield Static("", classes="panel muted", id="dashboard-runtimes")
+        yield Footer()
 
     def fetch(self) -> Any:
         """Return the overview snapshot."""
