@@ -99,10 +99,19 @@ def verify_provider(
 
 
 def _read_provider_url(config_path: Path, provider: str) -> str | None:
-    """Return the ``base_url`` for ``provider`` in ``config_path``.
+    """Return the endpoint URL for ``provider`` in ``config_path``.
 
-    Returns ``None`` for any failure (missing file, parse error, missing
-    provider, non-string value). Callers translate that into
+    Hermes accepts two on-disk shapes (both consumed by its own
+    ``get_compatible_custom_providers``):
+
+    * **Legacy** ``custom_providers`` — a list of ``{name, base_url}`` dicts.
+    * **v12+** ``providers`` — a map keyed by provider name whose entries
+      carry the URL under ``base_url``, ``url``, or ``api`` (Hermes resolves
+      them in that order; see ``_normalize_custom_provider_entry``).
+
+    Both are checked so llmctl's verification matches whatever Hermes itself
+    would route to. Returns ``None`` for any failure (missing file, parse
+    error, missing provider, non-string value). Callers translate that into
     :class:`HermesStatus.NO_PROVIDER`.
     """
     try:
@@ -110,8 +119,18 @@ def _read_provider_url(config_path: Path, provider: str) -> str | None:
             data = yaml.safe_load(f) or {}
     except (OSError, yaml.YAMLError):
         return None
+    # Legacy list form: custom_providers: [{name, base_url}, ...]
     for entry in data.get("custom_providers") or []:
         if isinstance(entry, dict) and entry.get("name") == provider:
             url = entry.get("base_url")
             return url if isinstance(url, str) else None
+    # v12+ keyed-map form: providers: {<name>: {api|url|base_url}}
+    providers = data.get("providers")
+    if isinstance(providers, dict):
+        entry = providers.get(provider)
+        if isinstance(entry, dict):
+            for key in ("base_url", "url", "api"):
+                url = entry.get(key)
+                if isinstance(url, str) and url.strip():
+                    return url.strip()
     return None
