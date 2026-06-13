@@ -59,7 +59,11 @@ class SchedulerService:
         model = self._get_model(request.model_id)
         profile = self._get_profile(request.profile_id)
 
-        parameters = dict(profile.parameters if profile else {})
+        # Promoted knobs (tp, quantization, ...) may live in typed columns
+        # (profile create) or the parameters dict (YAML import); honour both.
+        from llmctl.services.profiles import effective_parameters
+
+        parameters = effective_parameters(profile) if profile else {}
         parameters.update(request.parameters)
         tp = max(1, int(parameters.get("tensor_parallel_size", 1) or 1))
 

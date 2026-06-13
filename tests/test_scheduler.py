@@ -46,6 +46,52 @@ def test_vllm_command_includes_model_and_port(tmp_path: Path) -> None:
     assert plan.endpoint_url is not None and "http://" in plan.endpoint_url
 
 
+def test_vllm_command_honors_promoted_columns(tmp_path: Path) -> None:
+    """Profile knobs set as typed columns (e.g. via ``llmctl profile create``)
+    must reach the launch command, not only those nested in ``parameters``.
+
+    Regression: the scheduler read ``profile.parameters`` directly, so a profile
+    whose tensor_parallel_size/quantization lived only in the promoted columns
+    silently fell back to tp=1 with a bare ``vllm serve`` command.
+    """
+    with _db(tmp_path) as db:
+        model = ModelRecord(
+            name="llama70b",
+            runtime=RuntimeName.VLLM,
+            source="casperhansen/llama-3.3-70b-instruct-awq",
+        )
+        profile = ProfileRecord(
+            name="tp2-awq",
+            runtime=RuntimeName.VLLM,
+            tensor_parallel_size=2,
+            quantization="awq_marlin",
+            max_model_len=40960,
+            # parameters dict intentionally empty: values live only in columns.
+        )
+        db.add(model)
+        db.add(profile)
+        db.commit()
+        db.refresh(model)
+        db.refresh(profile)
+
+        scheduler = SchedulerService(db)
+        plan = scheduler.create_launch_plan(
+            SessionStartRequest(
+                model_id=model.id,
+                profile_id=profile.id,
+                runtime=RuntimeName.VLLM,
+                gpu_ids=[0, 1],
+                dry_run=False,
+            )
+        )
+    assert plan.tensor_parallel_size == 2
+    assert "--tensor-parallel-size" in plan.command
+    assert plan.command[plan.command.index("--tensor-parallel-size") + 1] == "2"
+    assert "--quantization" in plan.command
+    assert "awq_marlin" in plan.command
+    assert "--max-model-len" in plan.command
+
+
 def test_llama_cpp_command_uses_path(tmp_path: Path) -> None:
     with _db(tmp_path) as db:
         model = ModelRecord(
