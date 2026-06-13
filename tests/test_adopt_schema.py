@@ -89,7 +89,10 @@ def test_apply_migrations_adds_columns_to_pre_phase1_db(tmp_path: Path) -> None:
 
     with engine.begin() as conn:
         row = conn.execute(
-            text("SELECT kind, systemd_unit, served_name, adopted_at FROM sessions WHERE id = 'legacy-1'")
+            text(
+                "SELECT kind, systemd_unit, served_name, adopted_at "
+                "FROM sessions WHERE id = 'legacy-1'"
+            )
         ).one()
     assert row == (None, None, None, None)
 

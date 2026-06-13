@@ -46,7 +46,6 @@ from llmctl.services.profiles import ProfileService
 from llmctl.services.registry import RegistryService
 from llmctl.services.sessions import SessionService
 
-
 console = Console()
 
 model_app = typer.Typer(
