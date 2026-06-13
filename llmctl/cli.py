@@ -244,8 +244,18 @@ def _build_start_request(
     """Resolve model/profile and build a :class:`SessionStartRequest`."""
     from llmctl.db import ModelRecord
     from llmctl.services.profiles import ProfileService
+    from llmctl.services.registry import RegistryService
 
     gpu_ids, mode, allow_cpu = _parse_gpus(gpus, cpu)
+    # Resolve MODEL_ID by name OR id so `llmctl start/plan <name>` works, not
+    # just the UUID. Reuses the registry resolver (raises on ambiguous names).
+    try:
+        found = RegistryService(db).find(model_id)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if found is None or found.id is None:
+        raise typer.BadParameter(f"Model not found: {model_id}")
+    model_id = found.id
     model = db.get(ModelRecord, model_id)
     if model is None:
         raise typer.BadParameter(f"Model not found: {model_id}")
