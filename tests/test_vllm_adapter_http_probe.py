@@ -50,8 +50,6 @@ def _no_units() -> ManagedUnitsConfig:
     """Build a managed-units config where every probe will succeed if scripted."""
     return ManagedUnitsConfig(
         vllm_tp=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
-        vllm_coder=ManagedUnitConfig(unit_name="vllm-coder", default_port=8001),
-        vllm_reasoner=ManagedUnitConfig(unit_name="vllm-reasoner", default_port=8002),
     )
 
 
@@ -68,19 +66,18 @@ def test_health_ok_when_managed_unit_serves_models() -> None:
     assert status.details["served"]["vllm-tp"] == ["llama-3.3-70b"]
 
 
-def test_health_aggregates_multiple_serving_units() -> None:
-    """Coder + reasoner slots both serving -> both reported."""
+def test_health_reports_served_models_for_tp_unit() -> None:
+    """The TP unit serving multiple models -> all reported."""
     adapter = VLLMAdapter(
         managed_units=_no_units(),
         http_get=_http_responder(
-            by_port={8001: ["coder"], 8002: ["reasoner"]}
+            by_port={8003: ["llama-3.3-70b", "qwen"]}
         ),
     )
     status = asyncio.run(adapter.health_check())
     assert status.state is HealthState.OK
     served = status.details["served"]
-    assert served["vllm-coder"] == ["coder"]
-    assert served["vllm-reasoner"] == ["reasoner"]
+    assert served["vllm-tp"] == ["llama-3.3-70b", "qwen"]
 
 
 def test_health_falls_back_to_binary_check_when_no_units_respond(
@@ -131,15 +128,15 @@ def test_discover_models_returns_served_names_from_managed_units() -> None:
     assert m.metadata["discovered_via"] == "http"
 
 
-def test_discover_models_dedupes_across_units() -> None:
-    """Same served name on two units should appear once (TP wins by order)."""
+def test_discover_models_dedupes_within_unit() -> None:
+    """A repeated served name on the TP unit should appear once."""
     adapter = VLLMAdapter(
         managed_units=_no_units(),
-        http_get=_http_responder(by_port={8003: ["same"], 8001: ["same"]}),
+        http_get=_http_responder(by_port={8003: ["same", "same"]}),
     )
     models = asyncio.run(adapter.discover_models())
     assert len(models) == 1
-    assert models[0].metadata["managed_unit"] == "vllm-tp"  # probed first
+    assert models[0].metadata["managed_unit"] == "vllm-tp"
 
 
 def test_discover_models_returns_empty_when_no_units_serve(
@@ -186,7 +183,7 @@ def test_probe_passes_timeout_to_http_get() -> None:
     )
     asyncio.run(adapter.health_check())
     assert all(t == 2.5 for t in captured_timeout)
-    assert len(captured_timeout) == 3  # tp + coder + reasoner
+    assert len(captured_timeout) == 1  # tp
 
 
 def test_malformed_payload_treated_as_unreachable() -> None:

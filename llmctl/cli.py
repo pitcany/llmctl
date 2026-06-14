@@ -29,7 +29,6 @@ from llmctl.services.sessions import AdoptError, SessionService
 from llmctl.services.vllm_orchestrator import (
     OrchestratorOptions,
     UnknownPresetError,
-    start_slot,
     start_vllm_tp,
 )
 from llmctl.telemetry.gpu import get_gpu_info
@@ -1032,69 +1031,6 @@ def vllm_cmd(
     )
 
 
-@app.command("slot")
-def slot_cmd(
-    slot: Annotated[
-        str,
-        typer.Argument(help="Slot name (e.g. coder, reasoner)."),
-    ],
-    preset: Annotated[
-        str,
-        typer.Argument(help="Preset alias from ~/.config/llm-models/."),
-    ],
-    tq: Annotated[
-        bool,
-        typer.Option("--tq", help="Force TurboQuant KV cache on for this start."),
-    ] = False,
-    no_tq: Annotated[
-        bool,
-        typer.Option("--no-tq", help="Force TurboQuant KV cache off for this start."),
-    ] = False,
-    dry_run: Annotated[
-        bool,
-        typer.Option("--dry-run", help="Print the env file + planned actions, no changes."),
-    ] = False,
-    no_wait: Annotated[
-        bool,
-        typer.Option("--no-wait", help="Skip waiting for /v1/models readiness after restart."),
-    ] = False,
-) -> None:
-    """Apply PRESET to a per-GPU slot (replaces ``gpu-models slot``)."""
-    settings = load_settings()
-    slot_config = settings.managed_units.slots.get(slot)
-    if slot_config is None:
-        available = ", ".join(sorted(vars(settings.managed_units.slots)))
-        console.print(f"[red]unknown slot[/red] {slot!r}. Available: {available}")
-        raise typer.Exit(2)
-
-    options = _build_options(tq if tq else None, no_tq, dry_run, no_wait)
-    try:
-        result = start_slot(
-            slot,
-            preset,
-            slot_config=slot_config,
-            defaults=settings.vllm.defaults,
-            fleet=settings.managed_units.fleet,
-            options=options,
-        )
-    except UnknownPresetError as exc:
-        raise typer.Exit(2) from exc
-
-    if result.dry_run:
-        return
-    if not result.ok:
-        console.print(f"[red]Slot {slot} start did not complete cleanly.[/red]")
-        if result.fleet_failed:
-            console.print(f"  fleet preflight failed on: {', '.join(result.fleet_failed)}")
-        if result.restart is not None and result.restart.error:
-            console.print(f"  restart: {result.restart.error}")
-        raise typer.Exit(1)
-    console.print(
-        f"[green]Slot {slot} ready[/green] — serving as '{slot}' "
-        f"(model {result.spec.served_name}) on port {result.spec.port}"
-    )
-
-
 @app.command("presets")
 def presets_cmd() -> None:
     """List preset aliases known to llmctl."""
@@ -1137,8 +1073,6 @@ def status_cmd() -> None:
     table.add_column("default port", justify="right")
     for role, unit in (
         ("vllm-tp", settings.managed_units.vllm_tp),
-        ("vllm-coder", settings.managed_units.vllm_coder),
-        ("vllm-reasoner", settings.managed_units.vllm_reasoner),
     ):
         table.add_row(
             role,
@@ -1147,25 +1081,6 @@ def status_cmd() -> None:
             str(unit.default_port),
         )
     console.print(table)
-    slots = settings.managed_units.slots
-    slot_table = Table(title="Slots")
-    slot_table.add_column("name", style="cyan")
-    slot_table.add_column("gpu", justify="right")
-    slot_table.add_column("port", justify="right")
-    slot_table.add_column("unit name")
-    slot_table.add_column("env file")
-    for name in ("coder", "reasoner"):
-        cfg = slots.get(name)
-        if cfg is None:
-            continue
-        slot_table.add_row(
-            name,
-            cfg.gpu,
-            str(cfg.port),
-            cfg.unit_name,
-            str(cfg.resolve_env_file(name)),
-        )
-    console.print(slot_table)
 
 
 # ---------------------------------------------------------------------------
@@ -1346,8 +1261,6 @@ def set_alias_cmd(
 #: ``llmctl adopt-managed vllm-tp`` instead of ``vllm_tp``.
 _MANAGED_ROLES: dict[str, str] = {
     "vllm-tp": "vllm_tp",
-    "vllm-coder": "vllm_coder",
-    "vllm-reasoner": "vllm_reasoner",
 }
 
 
@@ -1427,7 +1340,7 @@ def adopt_managed_cmd(
     role: Annotated[
         str | None,
         typer.Argument(
-            help="Managed-unit role to adopt (vllm-tp, vllm-coder, vllm-reasoner). "
+            help="Managed-unit role to adopt (vllm-tp). "
             "Omit and pass --all to adopt every running role.",
         ),
     ] = None,
@@ -1442,7 +1355,7 @@ def adopt_managed_cmd(
 ) -> None:
     """Adopt one or all managed systemd units declared in settings.managed_units.*."""
     if role is None and not all_roles:
-        raise typer.BadParameter("Pass a role (vllm-tp|vllm-coder|vllm-reasoner) or --all.")
+        raise typer.BadParameter("Pass a role (vllm-tp) or --all.")
     if role is not None and all_roles:
         raise typer.BadParameter("Pass a role OR --all, not both.")
 

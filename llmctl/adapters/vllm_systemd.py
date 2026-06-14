@@ -109,10 +109,8 @@ class VLLMSystemdAdapter:
         # their own non-fatal warnings internally.
         self.pre_start_hooks: list[LifecycleHook] = list(pre_start_hooks or [])
         self.post_start_hooks: list[LifecycleHook] = list(post_start_hooks or [])
-        # Renderer is pluggable so the same adapter wraps both TP units
-        # (render_vllm_env) and slot units (functools.partial of
-        # render_slot_env with a bound VLLMSlotInfo). Default to the TP
-        # renderer for backward compatibility with Phase 1 callers.
+        # Renderer is pluggable so callers can supply a custom env-file
+        # renderer. Default to the TP renderer (render_vllm_env).
         self.renderer: EnvRenderer = renderer or render_vllm_env
 
     def ensure_launcher_unit(self) -> None:

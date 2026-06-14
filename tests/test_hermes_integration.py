@@ -150,25 +150,25 @@ def test_malformed_yaml_returns_no_provider(tmp_path: Path) -> None:
 
 
 def test_alternate_provider_names_supported(tmp_path: Path) -> None:
-    """Slot units use vllm-coder/vllm-reasoner — same machinery."""
+    """Arbitrary provider names route through the same machinery."""
     cfg = tmp_path / "hermes.yaml"
     cfg.write_text(
         _hermes_config(
             [
-                {"name": "vllm-coder", "base_url": "http://127.0.0.1:8001/v1"},
-                {"name": "vllm-reasoner", "base_url": "http://127.0.0.1:8002/v1"},
+                {"name": "vllm-tp", "base_url": "http://127.0.0.1:8003/v1"},
+                {"name": "vllm-alt", "base_url": "http://127.0.0.1:8004/v1"},
             ]
         )
     )
     which = lambda _name: "/usr/bin/hermes"  # noqa: E731 - inline shim is clearer than def
 
     assert (
-        verify_provider("vllm-coder", 8001, config_path=cfg, which=which, logger=lambda _: None)
+        verify_provider("vllm-tp", 8003, config_path=cfg, which=which, logger=lambda _: None)
         is HermesStatus.OK
     )
     assert (
         verify_provider(
-            "vllm-reasoner", 8002, config_path=cfg, which=which, logger=lambda _: None
+            "vllm-alt", 8004, config_path=cfg, which=which, logger=lambda _: None
         )
         is HermesStatus.OK
     )

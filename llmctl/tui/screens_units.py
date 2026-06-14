@@ -20,7 +20,7 @@ from typing import Any
 from textual.app import ComposeResult
 from textual.widgets import DataTable, Footer, Header, Static
 
-from llmctl.config import ManagedUnitConfig, SlotConfig, load_settings
+from llmctl.config import ManagedUnitConfig, load_settings
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
 
@@ -29,7 +29,7 @@ PROBE_TIMEOUT_S = 1.5
 
 @dataclass(frozen=True)
 class _UnitRow:
-    """One row to render: a managed unit OR a slot, with live status."""
+    """One row to render: a managed unit, with live status."""
 
     role: str
     unit_name: str
@@ -37,11 +37,11 @@ class _UnitRow:
     port: int
     is_active: bool
     served: list[str]
-    role_kind: str  # "managed" or "slot"
+    role_kind: str  # "managed"
 
 
 class UnitsScreen(DataScreen):
-    """Live table of managed units + slots with per-unit probes."""
+    """Live table of managed units with per-unit probes."""
 
     BINDINGS = [
         ("ctrl+r", "refresh_now", "Refresh"),
@@ -63,7 +63,7 @@ class UnitsScreen(DataScreen):
         """Compose the units table chrome with screen-scoped Header/Footer."""
         yield Header()
         yield Static(
-            f"Managed Units  -  [{C_MUTED}]probes vllm-tp/coder/reasoner every 3s; "
+            f"Managed Units  -  [{C_MUTED}]probes vllm-tp every 3s; "
             f"ctrl+r = refresh now[/]",
             classes="panel safe",
             id="units-title",
@@ -76,10 +76,10 @@ class UnitsScreen(DataScreen):
         yield Footer()
 
     def fetch(self) -> Any:
-        """Probe each managed unit + slot in a worker thread.
+        """Probe each managed unit in a worker thread.
 
         Returns a list of :class:`_UnitRow` ready to render. Per-port
-        probes use a 1.5s timeout so 6 down units add at most ~9s to
+        probes use a 1.5s timeout so a down unit adds at most ~1.5s to
         the refresh — well within the 3s auto-refresh cadence's
         tolerance (worker is exclusive so back-pressured refreshes
         replace prior ones).
@@ -88,23 +88,13 @@ class UnitsScreen(DataScreen):
         sysctl = self._systemctl or SystemctlRunner()
         rows: list[_UnitRow] = []
 
-        # Managed-unit roles (vllm-tp, vllm-coder, vllm-reasoner)
+        # Managed-unit roles (vllm-tp)
         managed = [
             ("vllm-tp", settings.managed_units.vllm_tp),
-            ("vllm-coder", settings.managed_units.vllm_coder),
-            ("vllm-reasoner", settings.managed_units.vllm_reasoner),
         ]
         for role, cfg in managed:
             rows.append(self._row_for_managed(role, cfg, sysctl))
 
-        # Slot definitions (typically alias the managed_units roles but
-        # surface the per-slot identity that gets baked into the env file)
-        slots = settings.managed_units.slots
-        for slot_name in ("coder", "reasoner"):
-            slot_cfg: SlotConfig | None = slots.get(slot_name)
-            if slot_cfg is None or not slot_cfg.enabled:
-                continue
-            rows.append(self._row_for_slot(slot_name, slot_cfg, sysctl))
         return rows
 
     def render_data(self, data: Any) -> None:
@@ -124,9 +114,8 @@ class UnitsScreen(DataScreen):
                 served_cell = f"[{C_WARN}]starting?[/]"
             else:
                 served_cell = f"[{C_MUTED}]-[/]"
-            role_prefix = "slot" if r.role_kind == "slot" else "unit"
             table.add_row(
-                f"[{C_MUTED}]{role_prefix}[/] {r.role}",
+                f"[{C_MUTED}]unit[/] {r.role}",
                 r.unit_name,
                 active_cell,
                 str(r.port),
@@ -161,26 +150,6 @@ class UnitsScreen(DataScreen):
             is_active=is_active,
             served=served,
             role_kind="managed",
-        )
-
-    def _row_for_slot(
-        self,
-        slot_name: str,
-        cfg: SlotConfig,
-        sysctl: SystemctlRunner,
-    ) -> _UnitRow:
-        """Build a row for one slot (overlaps the managed-unit row but
-        emphasises the stable served identity)."""
-        is_active = self._is_active_safe(cfg.unit_name, sysctl)
-        served = self._probe_served(cfg.port)
-        return _UnitRow(
-            role=slot_name,
-            unit_name=cfg.unit_name,
-            env_path=str(cfg.resolve_env_file(slot_name)),
-            port=cfg.port,
-            is_active=is_active,
-            served=served,
-            role_kind="slot",
         )
 
     def _is_active_safe(self, unit: str, sysctl: SystemctlRunner) -> bool:

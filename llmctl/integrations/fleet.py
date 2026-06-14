@@ -1,22 +1,16 @@
 """Fleet-aware preflight: stop competing units before starting a target.
 
 Multiple GPU-claiming services can't coexist on the same hardware. The
-TP-fleet unit (``vllm-tp``) and the per-GPU slot units
-(``vllm-coder``, ``vllm-reasoner``) both want the same GPUs, so
-starting one requires stopping the others first. The fleet target
-(``agents.target``) gates slot startup as a unit; stopping it tears
-down both slots in one call.
+TP-fleet unit (``vllm-tp``) and ``ollama`` both want the same GPUs, so
+starting one requires stopping the others first.
 
 This module formalises the preflight rules so the adapter and the CLI
 both see the same orchestration logic.
 
 Rules (matching gpu-models behaviour):
 
-* Starting **TP** stops: agents.target, coder, reasoner, ollama, then
-  TP itself (idempotent restart). Optionally also stops
-  ``harbor.ollama`` via the Harbor integration.
-* Starting **coder** or **reasoner** stops: TP, ollama. The sibling
-  slot keeps running (slots are designed to coexist).
+* Starting **TP** stops: ollama, then TP itself (idempotent restart).
+  Optionally also stops ``harbor.ollama`` via the Harbor integration.
 * The Harbor integration runs as a separate hook (see
   :mod:`llmctl.integrations.harbor`); this module covers systemd units
   only.
@@ -36,8 +30,6 @@ class FleetRole(StrEnum):
     """The unit you're about to start. Determines the stop list."""
 
     TP = "tp"
-    CODER = "coder"
-    REASONER = "reasoner"
 
 
 @dataclass(frozen=True)
@@ -62,11 +54,9 @@ class StopReport:
 def units_to_stop(target: FleetRole, fleet: FleetUnitsConfig) -> list[str]:
     """Return the ordered stop list for ``target``.
 
-    Order matters: the fleet target is stopped before the slot
-    services it gates so systemd doesn't immediately restart them
-    via the target's ``Wants=`` chain. TP is stopped last when
-    starting TP (the idempotent restart) so the caller can read its
-    new env file after preflight completes.
+    Order matters: TP is stopped last when starting TP (the idempotent
+    restart) so the caller can read its new env file after preflight
+    completes.
 
     Args:
         target: The unit you're about to start.
@@ -74,11 +64,7 @@ def units_to_stop(target: FleetRole, fleet: FleetUnitsConfig) -> list[str]:
             sudoers scope on yannik-desktop.
     """
     if target is FleetRole.TP:
-        return [fleet.fleet_target, fleet.coder, fleet.reasoner, fleet.ollama, fleet.tp]
-    if target is FleetRole.CODER:
-        return [fleet.tp, fleet.ollama]
-    if target is FleetRole.REASONER:
-        return [fleet.tp, fleet.ollama]
+        return [fleet.ollama, fleet.tp]
     raise ValueError(f"unknown target {target!r}")
 
 

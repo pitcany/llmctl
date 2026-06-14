@@ -1,8 +1,7 @@
 """Tests for :mod:`llmctl.integrations.fleet`.
 
-Pins the stop list for each target role, the ordering, and the
-typed report so the CLI can use ``not report.all_clean`` as an abort
-signal.
+Pins the stop list for the TP target, the ordering, and the typed
+report so the CLI can use ``not report.all_clean`` as an abort signal.
 """
 
 from __future__ import annotations
@@ -48,29 +47,11 @@ def _runner(active: set[str], *, fail_on: set[str] | None = None) -> SystemctlRu
     return runner
 
 
-def test_units_to_stop_for_tp_includes_fleet_target_first() -> None:
-    """Order matters: agents.target before its child services."""
+def test_units_to_stop_for_tp() -> None:
+    """Order matters: ollama before the TP restart."""
     cfg = FleetUnitsConfig()
     stops = units_to_stop(FleetRole.TP, cfg)
-    assert stops == [
-        cfg.fleet_target,
-        cfg.coder,
-        cfg.reasoner,
-        cfg.ollama,
-        cfg.tp,
-    ]
-
-
-def test_units_to_stop_for_slot_excludes_other_slot() -> None:
-    """Coder doesn't need reasoner stopped — they coexist by design."""
-    cfg = FleetUnitsConfig()
-    stops_coder = units_to_stop(FleetRole.CODER, cfg)
-    stops_reasoner = units_to_stop(FleetRole.REASONER, cfg)
-    assert cfg.coder not in stops_coder  # not in its own stop list
-    assert cfg.reasoner not in stops_coder  # sibling slot preserved
-    assert cfg.coder not in stops_reasoner  # mirror
-    assert cfg.tp in stops_coder
-    assert cfg.ollama in stops_coder
+    assert stops == [cfg.ollama, cfg.tp]
 
 
 def test_units_to_stop_rejects_unknown_role() -> None:
@@ -81,7 +62,7 @@ def test_units_to_stop_rejects_unknown_role() -> None:
 
 def test_preflight_stop_skips_inactive_units() -> None:
     """try_stop short-circuit: inactive units land in `skipped`, not `failed`."""
-    active = {"vllm-coder"}  # only one active
+    active = {"vllm-tp"}  # only one active
     runner = _runner(active)
     report = preflight_stop(
         FleetRole.TP,
@@ -89,16 +70,16 @@ def test_preflight_stop_skips_inactive_units() -> None:
         runner,
         logger=lambda _: None,
     )
-    assert report.stopped == ["vllm-coder"]
-    assert set(report.skipped) == {"agents.target", "vllm-reasoner", "ollama", "vllm-tp"}
+    assert report.stopped == ["vllm-tp"]
+    assert set(report.skipped) == {"ollama"}
     assert report.failed == []
     assert report.all_clean is True
 
 
 def test_preflight_stop_records_failures() -> None:
     """Failed stops surface in `failed` and flip all_clean to False."""
-    active = {"vllm-coder", "vllm-reasoner"}
-    runner = _runner(active, fail_on={"vllm-coder"})
+    active = {"ollama", "vllm-tp"}
+    runner = _runner(active, fail_on={"ollama"})
     logged: list[str] = []
     report = preflight_stop(
         FleetRole.TP,
@@ -106,42 +87,23 @@ def test_preflight_stop_records_failures() -> None:
         runner,
         logger=logged.append,
     )
-    assert "vllm-coder" in report.failed
-    assert "vllm-reasoner" in report.stopped
+    assert "ollama" in report.failed
+    assert "vllm-tp" in report.stopped
     assert report.all_clean is False
     # Failure was surfaced to the logger
-    assert any("FAILED to stop vllm-coder" in line for line in logged)
+    assert any("FAILED to stop ollama" in line for line in logged)
 
 
 def test_preflight_stop_uses_custom_unit_names() -> None:
     """A re-targeted FleetUnitsConfig is respected end-to-end."""
     cfg = FleetUnitsConfig(
         tp="my-tp",
-        coder="my-coder",
-        reasoner="my-reasoner",
         ollama="my-ollama",
-        fleet_target="my-fleet.target",
     )
-    active = {"my-coder", "my-tp"}
+    active = {"my-ollama", "my-tp"}
     runner = _runner(active)
     report = preflight_stop(FleetRole.TP, cfg, runner, logger=lambda _: None)
-    assert set(report.stopped) == {"my-coder", "my-tp"}
-    assert "my-fleet.target" in report.skipped
-
-
-def test_preflight_stop_for_coder_target() -> None:
-    """Starting coder doesn't stop the reasoner slot."""
-    active = {"vllm-tp", "vllm-coder", "vllm-reasoner"}
-    runner = _runner(active)
-    report = preflight_stop(
-        FleetRole.CODER,
-        FleetUnitsConfig(),
-        runner,
-        logger=lambda _: None,
-    )
-    assert "vllm-tp" in report.stopped
-    assert "vllm-reasoner" not in report.stopped  # left running
-    assert "vllm-reasoner" not in report.skipped  # not even checked
+    assert set(report.stopped) == {"my-ollama", "my-tp"}
 
 
 def test_preflight_logs_each_stopped_unit() -> None:
@@ -150,7 +112,7 @@ def test_preflight_logs_each_stopped_unit() -> None:
     runner = _runner(active)
     logged: list[str] = []
     preflight_stop(
-        FleetRole.CODER,
+        FleetRole.TP,
         FleetUnitsConfig(),
         runner,
         logger=logged.append,

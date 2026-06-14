@@ -1,4 +1,4 @@
-"""Modal: pick where to launch a preset (TP fleet / coder slot / reasoner slot).
+"""Modal: confirm launching a preset onto the TP fleet unit.
 
 Kept in its own module from :mod:`llmctl.tui._modals` because the latter
 is tied to :class:`~llmctl.schemas.LaunchPlan` (the original scheduler
@@ -25,22 +25,18 @@ class PresetLaunchTarget(StrEnum):
     """Which unit to apply the preset to."""
 
     TP = "tp"
-    CODER = "coder"
-    REASONER = "reasoner"
 
 
 class PresetLaunchModal(ModalScreen[PresetLaunchTarget | None]):
-    """Three-button picker: TP fleet / coder slot / reasoner slot.
+    """Launch confirmation picker for the TP fleet unit.
 
-    Resolves to the chosen :class:`PresetLaunchTarget`, or ``None`` if
-    the user dismisses with Escape.
+    Resolves to :attr:`PresetLaunchTarget.TP`, or ``None`` if the user
+    dismisses with Escape.
     """
 
     BINDINGS = [
         ("escape", "dismiss_cancel", "Cancel"),
         ("t", "pick_tp", "TP fleet"),
-        ("c", "pick_coder", "Coder slot"),
-        ("r", "pick_reasoner", "Reasoner slot"),
     ]
 
     def __init__(self, view: PresetView) -> None:
@@ -60,8 +56,7 @@ class PresetLaunchModal(ModalScreen[PresetLaunchTarget | None]):
             f"[{C_MUTED}]TP[/]       {v.tensor_parallel}",
             f"[{C_MUTED}]Quant[/]    {v.quantization}",
             "",
-            "Pick a target. Slot launches keep served_name=<slot> so",
-            "downstream client configs don't change.",
+            "Confirm to launch on the TP fleet unit (both GPUs).",
         ]
         with Vertical(id="plan-dialog", classes="panel"):
             yield Static("\n".join(lines))
@@ -71,24 +66,12 @@ class PresetLaunchModal(ModalScreen[PresetLaunchTarget | None]):
                     variant="primary",
                     id="pick-tp",
                 )
-                yield Button(
-                    "Coder slot (GPU 0, served as 'coder') — c",
-                    variant="success",
-                    id="pick-coder",
-                )
-                yield Button(
-                    "Reasoner slot (GPU 1, served as 'reasoner') — r",
-                    variant="success",
-                    id="pick-reasoner",
-                )
                 yield Button("Cancel — esc", variant="error", id="pick-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Map button id to a target, dismissing the modal with the result."""
         mapping: dict[str, PresetLaunchTarget | None] = {
             "pick-tp": PresetLaunchTarget.TP,
-            "pick-coder": PresetLaunchTarget.CODER,
-            "pick-reasoner": PresetLaunchTarget.REASONER,
             "pick-cancel": None,
         }
         self.dismiss(mapping.get(event.button.id))
@@ -96,14 +79,6 @@ class PresetLaunchModal(ModalScreen[PresetLaunchTarget | None]):
     def action_pick_tp(self) -> None:
         """Keyboard shortcut for TP."""
         self.dismiss(PresetLaunchTarget.TP)
-
-    def action_pick_coder(self) -> None:
-        """Keyboard shortcut for coder slot."""
-        self.dismiss(PresetLaunchTarget.CODER)
-
-    def action_pick_reasoner(self) -> None:
-        """Keyboard shortcut for reasoner slot."""
-        self.dismiss(PresetLaunchTarget.REASONER)
 
     def action_dismiss_cancel(self) -> None:
         """Escape -> dismiss with None."""
