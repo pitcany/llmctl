@@ -14,8 +14,9 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
-from llmctl.db import ModelRecord, ModelStatus, utcnow
-from llmctl.schemas import Model, ModelCreate, ModelUpdate
+from llmctl.adapters.base import RuntimeAdapter
+from llmctl.db import ModelRecord, ModelStatus, RuntimeName, utcnow
+from llmctl.schemas import HealthState, Model, ModelCreate, ModelUpdate
 from llmctl.services.router import RuntimeRouter
 
 
@@ -59,16 +60,63 @@ class RegistryService:
         return self._router
 
     def scan(self) -> list[Model]:
-        """Discover models from all runtime adapters and persist them."""
+        """Discover models from all runtime adapters, persist them, and reconcile.
+
+        For each runtime reachable this pass, any previously auto-discovered
+        model no longer reported is flagged ``MISSING``. Runtimes whose adapter
+        is not healthy are skipped entirely, so a down daemon never false-flags
+        its models.
+        """
         for runtime in self.router.list_runtimes():
             adapter = self.router.get_adapter(runtime)
             try:
-                discovered = asyncio.run(adapter.discover_models())
+                reachable, discovered = asyncio.run(self._probe(adapter))
             except Exception:
-                discovered = []
+                reachable, discovered = False, []
             for model in discovered:
                 self._upsert(model)
+            if reachable:
+                self._reconcile_missing(runtime, discovered)
         return self.list_models()
+
+    @staticmethod
+    async def _probe(adapter: RuntimeAdapter) -> tuple[bool, list[Model]]:
+        """Return ``(reachable, discovered)`` for a single adapter.
+
+        The health check and discovery run in the same coroutine. When the
+        adapter is not healthy, discovery is skipped entirely and ``[]`` is
+        returned, so an unhealthy or unreachable runtime never upserts partial
+        results or triggers reconcile.
+        """
+        health = await adapter.health_check()
+        if health.state != HealthState.OK:
+            return False, []
+        discovered = await adapter.discover_models()
+        return True, discovered
+
+    def _reconcile_missing(self, runtime: RuntimeName, discovered: list[Model]) -> None:
+        """Flag auto-discovered models of ``runtime`` absent from ``discovered``.
+
+        Only ``DISCOVERED`` rows are touched, so manually registered models
+        (``REGISTERED``) are never affected. Rediscovery later restores a row
+        via :meth:`_upsert` (``MISSING -> DISCOVERED``).
+        """
+        discovered_keys = {(runtime, m.source or m.name) for m in discovered}
+        stale = self.db.exec(
+            select(ModelRecord).where(
+                ModelRecord.runtime == runtime,
+                ModelRecord.status == ModelStatus.DISCOVERED,
+            )
+        ).all()
+        changed = False
+        for record in stale:
+            if (record.runtime, record.source or record.name) not in discovered_keys:
+                record.status = ModelStatus.MISSING
+                record.updated_at = utcnow()
+                self.db.add(record)
+                changed = True
+        if changed:
+            self.db.commit()
 
     def scan_discovered_only(self) -> list[Model]:
         """Return *new* adapter-discovered models without persisting them.
