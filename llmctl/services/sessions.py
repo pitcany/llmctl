@@ -18,12 +18,20 @@ from sqlmodel import Session as DBSession
 from sqlmodel import select
 
 from llmctl.config import Settings, load_settings
-from llmctl.db import EventLevel, RuntimeName, SessionKind, SessionRecord, SessionStatus, utcnow
+from llmctl.db import (
+    EventLevel,
+    RuntimeName,
+    SessionKind,
+    SessionRecord,
+    SessionStatus,
+    utcnow,
+)
 from llmctl.schemas import LaunchPlan, Session, SessionStartRequest
 from llmctl.services.backends import probe_openai_v1_models
 from llmctl.services.events import log_event
 from llmctl.services.router import RuntimeRouter
 from llmctl.services.scheduler import SchedulerService
+from llmctl.services.unit_gpus import unit_gpu_ids
 
 _ACTIVE_STATES = {SessionStatus.RUNNING, SessionStatus.STARTING}
 
@@ -56,6 +64,9 @@ class AdoptError(ValueError):
 
 #: Probe function signature: ``(base_url, timeout) -> list[str] | None``.
 ProbeFn = Callable[[str, float], list[str] | None]
+
+#: Resolves the GPU indices a systemd unit is pinned to: ``(unit_name) -> [int]``.
+GpuIdsFn = Callable[[str | None], list[int]]
 
 
 def record_to_session(record: SessionRecord) -> Session:
@@ -94,12 +105,16 @@ class SessionService:
         router: RuntimeRouter | None = None,
         *,
         probe: ProbeFn | None = None,
+        gpu_ids_for_unit: GpuIdsFn | None = None,
     ) -> None:
         self.db = db
         self.settings = settings or load_settings()
         self.router = router or RuntimeRouter(self.settings)
         self.scheduler = SchedulerService(db, self.settings)
-        self._probe: ProbeFn = probe or (lambda url, timeout: probe_openai_v1_models(url, timeout))
+        self._probe: ProbeFn = probe or (
+            lambda url, timeout: probe_openai_v1_models(url, timeout)
+        )
+        self._gpu_ids_for_unit: GpuIdsFn = gpu_ids_for_unit or unit_gpu_ids
 
     def list_sessions(self) -> list[Session]:
         """Return all known sessions as currently persisted.
@@ -199,12 +214,12 @@ class SessionService:
                 data={"endpoint_url": record.endpoint_url, "kind": "adopted"},
             )
             return 1
+        changed = False
         if record.status == SessionStatus.STOPPED and alive:
             record.status = SessionStatus.RUNNING
             record.stopped_at = None
             record.error = None
-            record.updated_at = now
-            self.db.add(record)
+            changed = True
             log_event(
                 self.db,
                 EventLevel.INFO,
@@ -215,8 +230,42 @@ class SessionService:
                 model_id=record.model_id,
                 data={"endpoint_url": record.endpoint_url, "kind": "adopted"},
             )
+
+        # While the endpoint is alive, keep the row's served_name + GPU pinning
+        # current. A managed unit can be re-pointed at a different preset (via
+        # `llmctl vllm <preset>`) with no re-adopt, so reconcile is the only
+        # place a model/GPU swap on the same endpoint becomes visible.
+        if alive and self._refresh_adopted_metadata(record, served):
+            changed = True
+
+        if changed:
+            record.updated_at = now
+            self.db.add(record)
             return 1
         return 0
+
+    def _refresh_adopted_metadata(
+        self, record: SessionRecord, served: list[str] | None
+    ) -> bool:
+        """Sync an alive adopted row's ``served_name`` + ``gpu_ids`` with reality.
+
+        Returns ``True`` when either field changed. GPU derivation is
+        best-effort: an empty result (the unit probe failed) leaves the stored
+        ids untouched rather than flapping the row to a CPU label on a transient
+        ``systemctl`` hiccup. Does not commit — :meth:`reconcile` commits once
+        per pass.
+        """
+        updated = False
+        new_name = served[0] if served else None
+        if new_name and record.served_name != new_name:
+            record.served_name = new_name
+            updated = True
+        if record.systemd_unit:
+            gpu_ids = self._gpu_ids_for_unit(record.systemd_unit)
+            if gpu_ids and gpu_ids != (record.gpu_ids or []):
+                record.gpu_ids = gpu_ids
+                updated = True
+        return updated
 
     def get_session(self, session_id: str) -> Session | None:
         """Return a single session by id."""
@@ -357,7 +406,11 @@ class SessionService:
                 "session will be revived on the next reconcile."
             )
         self._terminate_record(record)
-        plan = LaunchPlan.model_validate(record.launch_plan) if record.launch_plan else None
+        plan = (
+            LaunchPlan.model_validate(record.launch_plan)
+            if record.launch_plan
+            else None
+        )
         record.status = SessionStatus.PLANNED
         record.error = None
         record.pid = None
@@ -429,12 +482,17 @@ class SessionService:
 
         resolved_served_name = served_name or served_ids[0]
         port = self._extract_port(normalized)
+        # Adopted units run under systemd, so we can't read a launch plan for
+        # GPU placement — but the unit's MainPID environ exposes the
+        # CUDA_VISIBLE_DEVICES it was started with. Best-effort: [] when the
+        # unit isn't running or the host can't be introspected.
+        gpu_ids = self._gpu_ids_for_unit(systemd_unit) if systemd_unit else []
 
         plan = LaunchPlan(
             runtime=runtime,
             command=[],
             env={},
-            gpu_ids=[],
+            gpu_ids=gpu_ids,
             port=port,
             endpoint_url=normalized,
             health_url=f"{normalized}/v1/models",
@@ -454,6 +512,7 @@ class SessionService:
             port=port,
             endpoint_url=normalized,
             health_url=plan.health_url,
+            gpu_ids=gpu_ids,
             systemd_unit=systemd_unit,
             served_name=resolved_served_name,
             adopted_at=now,
