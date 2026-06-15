@@ -291,6 +291,23 @@ class RegistryService:
         self.db.commit()
         return True
 
+    def prune_missing(self, runtime: RuntimeName | None = None) -> int:
+        """Soft-delete (status ``DELETED``) every ``MISSING`` model.
+
+        Optionally restrict to a single ``runtime``. Returns the count pruned.
+        """
+        statement = select(ModelRecord).where(ModelRecord.status == ModelStatus.MISSING)
+        if runtime is not None:
+            statement = statement.where(ModelRecord.runtime == runtime)
+        records = self.db.exec(statement).all()
+        for record in records:
+            record.status = ModelStatus.DELETED
+            record.updated_at = utcnow()
+            self.db.add(record)
+        if records:
+            self.db.commit()
+        return len(records)
+
     def _set_active(self, model_id: str, value: bool) -> bool:
         record = self.db.get(ModelRecord, model_id)
         if not record or record.status == ModelStatus.DELETED:

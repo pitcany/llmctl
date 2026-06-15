@@ -101,3 +101,37 @@ def test_rediscovery_restores_missing_to_discovered(db: Session) -> None:
     assert _status(db, "b") == ModelStatus.MISSING
     _scan(db, healthy=True, models=[a, b])  # b reappears
     assert _status(db, "b") == ModelStatus.DISCOVERED
+
+
+def _seed_missing(db: Session, name: str, runtime: RuntimeName) -> None:
+    db.add(
+        ModelRecord(
+            name=name,
+            runtime=runtime,
+            source=name,
+            status=ModelStatus.MISSING,
+            active=True,
+        )
+    )
+    db.commit()
+
+
+def test_prune_missing_transitions_to_deleted_and_returns_count(db: Session) -> None:
+    _seed_missing(db, "g1", RuntimeName.OLLAMA)
+    _seed_missing(db, "g2", RuntimeName.OLLAMA)
+    count = RegistryService(db).prune_missing()
+    assert count == 2
+    assert _status(db, "g1") == ModelStatus.DELETED
+    assert _status(db, "g2") == ModelStatus.DELETED
+    # Pruned rows are hidden from the default listing.
+    names = {m.name for m in RegistryService(db).list_models()}
+    assert "g1" not in names and "g2" not in names
+
+
+def test_prune_missing_runtime_filter(db: Session) -> None:
+    _seed_missing(db, "oll", RuntimeName.OLLAMA)
+    _seed_missing(db, "lms", RuntimeName.LMSTUDIO)
+    count = RegistryService(db).prune_missing(RuntimeName.OLLAMA)
+    assert count == 1
+    assert _status(db, "oll") == ModelStatus.DELETED
+    assert _status(db, "lms") == ModelStatus.MISSING
