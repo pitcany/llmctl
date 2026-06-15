@@ -21,7 +21,7 @@ import yaml
 from sqlmodel import Session
 
 from llmctl.config import load_settings
-from llmctl.db import BenchmarkKind, get_engine, init_db
+from llmctl.db import BenchmarkKind, RuntimeName, get_engine, init_db
 from llmctl.presets import (
     Model as PresetModel,
 )
@@ -160,6 +160,13 @@ def delete_model(model_id: str, *, delete_files: bool = False) -> bool:
     """Soft-delete a model; optionally remove the artifact."""
     with db_session() as db:
         return RegistryService(db).delete_model(model_id, delete_files=delete_files)
+
+
+def prune_missing_models(runtime: str | None = None) -> int:
+    """Soft-delete all MISSING models; returns the count pruned."""
+    with db_session() as db:
+        rt = RuntimeName(runtime) if runtime else None
+        return RegistryService(db).prune_missing(rt)
 
 
 class PresetValidationError(ValueError):
