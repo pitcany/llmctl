@@ -31,7 +31,7 @@ from rich.table import Table
 from sqlmodel import Session
 
 from llmctl.config import load_settings
-from llmctl.db import RuntimeName, get_engine, init_db
+from llmctl.db import ModelStatus, RuntimeName, get_engine, init_db
 from llmctl.schemas import (
     ModelCreate,
     ModelUpdate,
@@ -344,6 +344,45 @@ def model_delete(
         console.print(f"[green]Soft-deleted model[/green] {model_id}{suffix}")
     else:
         raise typer.BadParameter(f"Model not found: {model_id}")
+
+
+@model_app.command("prune")
+def model_prune(
+    runtime: Annotated[
+        str | None,
+        typer.Option("--runtime", help="Only prune missing models for this runtime."),
+    ] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")
+    ] = False,
+) -> None:
+    """Soft-delete every model flagged MISSING by the last scan."""
+    rt: RuntimeName | None = None
+    if runtime is not None:
+        try:
+            rt = RuntimeName(runtime)
+        except ValueError as exc:
+            raise typer.BadParameter(
+                f"Unknown runtime {runtime!r}. Choices: {', '.join(_RUNTIME_CHOICES)}"
+            ) from exc
+    with _session() as db:
+        service = RegistryService(db)
+        missing = [
+            m
+            for m in service.list_models(include_inactive=True)
+            if m.status == ModelStatus.MISSING and (rt is None or m.runtime == rt)
+        ]
+        if not missing:
+            console.print("[green]No missing models to prune.[/green]")
+            return
+        for m in missing:
+            console.print(f"  [yellow]missing[/yellow] {m.name} ({m.runtime.value})")
+        if not yes and not Confirm.ask(
+            f"Soft-delete {len(missing)} missing model(s)?", default=False
+        ):
+            raise typer.Exit(code=1)
+        count = service.prune_missing(rt)
+    console.print(f"[green]Pruned[/green] {count} missing model(s).")
 
 
 @model_app.command("clone")
