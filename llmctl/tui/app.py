@@ -68,6 +68,12 @@ class MissionControlApp(App[None]):
     """
     TITLE = "LLM Mission Control"
     SUB_TITLE = "Live local runtime control"
+    # Textual's command palette defaults to ctrl+p, but that chord is widely
+    # intercepted upstream of the app (VS Code's "Quick Open", some terminals)
+    # so over SSH the keystroke never reaches Textual and the advertised
+    # "palette" footer entry does nothing. Rebind to ctrl+\ — a chord
+    # terminals reliably forward — so the palette is actually reachable.
+    COMMAND_PALETTE_BINDING = "ctrl+backslash"
     BINDINGS = [
         Binding("d", "show_dashboard", "Dashboard", show=True),
         Binding("p", "show_presets", "Presets", show=True),

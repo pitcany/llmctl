@@ -105,6 +105,30 @@ def test_app_compose_yields_nothing() -> None:
     assert composed == []
 
 
+def test_command_palette_rebound_off_ctrl_p() -> None:
+    """The command palette is bound to ctrl+\\, not Textual's default ctrl+p.
+
+    ctrl+p is widely intercepted before it reaches the app (VS Code's
+    Quick Open, some terminals over SSH), so the "palette" footer entry
+    silently did nothing. We rebind it to a chord terminals forward.
+    Pin the remap so it can't regress back to the stock binding.
+    """
+
+    async def _run() -> None:
+        app = MissionControlApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            palette_keys = [
+                key
+                for key, active in app.active_bindings.items()
+                if active.binding.action == "command_palette"
+            ]
+            assert palette_keys == ["ctrl+backslash"]
+            assert "ctrl+p" not in app.active_bindings
+
+    asyncio.run(_run())
+
+
 # --- vLLM backend availability via managed-unit HTTP probe --------------------
 
 
