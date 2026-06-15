@@ -41,9 +41,29 @@ def test_db_schema_creation(tmp_path: Path) -> None:
     assert {"models", "sessions", "profiles", "benchmarks", "events"}.issubset(tables)
 
 
+def _collect_route_paths(routes: object) -> set[str]:
+    """Collect endpoint paths from a FastAPI route list.
+
+    Newer FastAPI (>=0.137) stops flattening ``include_router`` routes into
+    ``app.routes``; it inserts a path-less ``_IncludedRouter`` whose
+    ``original_router`` holds the real routes. Older versions flatten them and
+    have no such wrapper. Recursing through ``original_router`` handles both,
+    so the assertion is version-agnostic.
+    """
+    paths: set[str] = set()
+    for route in routes:  # type: ignore[attr-defined]
+        path = getattr(route, "path", None)
+        if path is not None:
+            paths.add(path)
+        original = getattr(route, "original_router", None)
+        if original is not None and hasattr(original, "routes"):
+            paths |= _collect_route_paths(original.routes)
+    return paths
+
+
 def test_api_app_routes(tmp_path: Path) -> None:
     app = create_app(database_url=f"sqlite:///{tmp_path / 'api.sqlite3'}")
-    routes = {route.path for route in app.routes}
+    routes = _collect_route_paths(app.routes)
     assert "/health" in routes
     assert "/models" in routes
     assert "/models/{model_id}" in routes
