@@ -2,6 +2,13 @@
 
 Local-first Linux control plane for vLLM (and friends).
 
+> **Two homes, one package.** This lives in the `pitcany/AI` monorepo at
+> `packages/llmctl/` and is mirrored to the standalone repo
+> [`github.com/pitcany/llmctl`](https://github.com/pitcany/llmctl), whose CI is
+> the canonical lint/test gate. The copies drift — changes under
+> `packages/llmctl/` must be mirrored both ways. See the monorepo's
+> `docs/RELEASE-RUNBOOK.md` → "llmctl standalone mirror" for the procedure.
+
 `llmctl` writes the `EnvironmentFile` for an externally-installed
 systemd unit (e.g. `vllm-tp.service`), restarts the unit, polls
 `/v1/models` for readiness, and verifies that downstream consumers
