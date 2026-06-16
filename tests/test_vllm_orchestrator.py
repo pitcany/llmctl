@@ -18,7 +18,6 @@ from llmctl.adapters.vllm_systemd import ManagedRestartResult
 from llmctl.config import (
     FleetUnitsConfig,
     ManagedUnitConfig,
-    SlotConfig,
 )
 from llmctl.integrations.fleet import FleetRole
 from llmctl.integrations.harbor import StopOutcome
@@ -29,7 +28,6 @@ from llmctl.services.vllm_orchestrator import (
     Dependencies,
     OrchestratorOptions,
     UnknownPresetError,
-    start_slot,
     start_vllm_tp,
 )
 
@@ -228,7 +226,7 @@ def test_failed_fleet_preflight_aborts_before_adapter(tmp_path: Path) -> None:
         fleet_report=_FleetReport(
             stopped=["ollama"],
             skipped=[],
-            failed=["vllm-coder"],
+            failed=["vllm-tp"],
         ),
     )
 
@@ -239,7 +237,7 @@ def test_failed_fleet_preflight_aborts_before_adapter(tmp_path: Path) -> None:
     )
 
     assert result.ok is False
-    assert result.fleet_failed == ["vllm-coder"]
+    assert result.fleet_failed == ["vllm-tp"]
     assert log["harbor_calls"] == []
     assert log["adapters_built"] == []
     assert log["hermes_calls"] == []
@@ -297,48 +295,6 @@ def test_disabling_integrations_skips_them(tmp_path: Path) -> None:
     assert log["harbor_calls"] == []
     assert log["hermes_calls"] == []
     assert len(log["adapters_built"]) == 1
-
-
-def test_slot_uses_coder_role_and_provider(tmp_path: Path) -> None:
-    adapter = _AdapterStub()
-    _write_preset(
-        tmp_path,
-        "qwen-coder",
-        model_id="Qwen/Qwen2.5-Coder-32B-Instruct-AWQ",
-    )
-    deps, log = _build_deps(
-        config_dir=tmp_path,
-        adapter=adapter,
-    )
-
-    start_slot(
-        "coder",
-        "qwen-coder",
-        slot_config=SlotConfig(gpu="0", port=8001, unit_name="vllm-coder"),
-        deps=deps,
-    )
-
-    assert log["preflight_calls"][0]["role"] is FleetRole.CODER
-    assert log["hermes_calls"][0]["provider"] == "vllm-coder"
-    assert adapter.spec_received is not None
-    assert adapter.spec_received.port == 8001
-
-
-def test_slot_reasoner_routes_to_reasoner_provider(tmp_path: Path) -> None:
-    _write_preset(tmp_path, "r1", model_id="org/r1", reasoning_parser="deepseek_r1")
-    deps, log = _build_deps(
-        config_dir=tmp_path,
-    )
-
-    start_slot(
-        "reasoner",
-        "r1",
-        slot_config=SlotConfig(gpu="1", port=8002, unit_name="vllm-reasoner"),
-        deps=deps,
-    )
-
-    assert log["preflight_calls"][0]["role"] is FleetRole.REASONER
-    assert log["hermes_calls"][0]["provider"] == "vllm-reasoner"
 
 
 def test_wait_for_ready_false_skips_post_restart_polling(tmp_path: Path) -> None:

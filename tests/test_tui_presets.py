@@ -33,7 +33,7 @@ def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
 
 @pytest.fixture
 def fake_views() -> list[PresetView]:
-    """Three views — one TP-capable preset, one slot-capable, one tiny."""
+    """Two TP-capable preset views."""
     return [
         PresetView(
             alias="llama-3.3-70b",
@@ -171,14 +171,14 @@ def test_picker_modal_returns_chosen_target(fake_views) -> None:
                 await pilot.pause(0.02)
                 if isinstance(app.screen, PresetLaunchModal):
                     break
-            await pilot.press("c")  # coder shortcut
+            await pilot.press("t")  # TP shortcut
             for _ in range(50):
                 await pilot.pause(0.02)
                 if captured:
                     break
 
     asyncio.run(_run())
-    assert captured == [PresetLaunchTarget.CODER]
+    assert captured == [PresetLaunchTarget.TP]
 
 
 def test_picker_modal_escape_yields_none(fake_views) -> None:

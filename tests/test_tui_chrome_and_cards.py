@@ -152,8 +152,6 @@ def _settings_with_managed_units() -> Settings:
     s = Settings()
     s.managed_units = ManagedUnitsConfig(
         vllm_tp=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
-        vllm_coder=ManagedUnitConfig(unit_name="vllm-coder", default_port=8001),
-        vllm_reasoner=ManagedUnitConfig(unit_name="vllm-reasoner", default_port=8002),
     )
     return s
 

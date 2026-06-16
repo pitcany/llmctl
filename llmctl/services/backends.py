@@ -98,8 +98,6 @@ def _vllm_managed_unit_available(
     """
     candidates = [
         cfg.managed_units.vllm_tp,
-        cfg.managed_units.vllm_coder,
-        cfg.managed_units.vllm_reasoner,
     ]
     for unit in candidates:
         ids = _probe_managed_unit(unit, http_get)

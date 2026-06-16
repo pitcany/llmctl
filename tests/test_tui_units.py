@@ -67,19 +67,16 @@ def _http_responder(by_port: dict[int, list[str]]) -> Callable[[str, float], Any
     return get
 
 
-def test_fetch_returns_one_row_per_unit_and_slot(temp_settings) -> None:
-    """3 managed units + 2 slots = 5 rows in the default config."""
+def test_fetch_returns_one_row_per_unit(temp_settings) -> None:
+    """1 managed unit = 1 row in the default config."""
     screen = UnitsScreen(
         systemctl=_fake_systemctl(active_units=set()),
         http_get=_http_responder(by_port={}),
     )
     rows: list[_UnitRow] = screen.fetch()
-    assert len(rows) == 5
+    assert len(rows) == 1
     roles = [r.role for r in rows]
-    assert roles == [
-        "vllm-tp", "vllm-coder", "vllm-reasoner",  # managed
-        "coder", "reasoner",                       # slots
-    ]
+    assert roles == ["vllm-tp"]
 
 
 def test_fetch_marks_active_units_correctly(temp_settings) -> None:
@@ -90,9 +87,18 @@ def test_fetch_marks_active_units_correctly(temp_settings) -> None:
     )
     rows = screen.fetch()
     tp_row = next(r for r in rows if r.role == "vllm-tp" and r.role_kind == "managed")
-    coder_row = next(r for r in rows if r.role == "vllm-coder" and r.role_kind == "managed")
     assert tp_row.is_active is True
-    assert coder_row.is_active is False
+
+
+def test_fetch_marks_inactive_units_correctly(temp_settings) -> None:
+    """is-active=inactive maps to the row's is_active=False."""
+    screen = UnitsScreen(
+        systemctl=_fake_systemctl(active_units=set()),
+        http_get=_http_responder(by_port={}),
+    )
+    rows = screen.fetch()
+    tp_row = next(r for r in rows if r.role == "vllm-tp" and r.role_kind == "managed")
+    assert tp_row.is_active is False
 
 
 def test_fetch_picks_up_served_names_via_probe(temp_settings) -> None:
@@ -149,7 +155,7 @@ def test_fetch_handles_systemctl_oserror_gracefully(
 
 
 def test_fetch_default_ports_match_config(temp_settings) -> None:
-    """Default ports (8003/8001/8002) come from settings, not hardcoded."""
+    """Default port (8003) comes from settings, not hardcoded."""
     screen = UnitsScreen(
         systemctl=_fake_systemctl(active_units=set()),
         http_get=_http_responder(by_port={}),
@@ -157,10 +163,6 @@ def test_fetch_default_ports_match_config(temp_settings) -> None:
     rows = screen.fetch()
     ports = {(r.role, r.role_kind): r.port for r in rows}
     assert ports[("vllm-tp", "managed")] == 8003
-    assert ports[("vllm-coder", "managed")] == 8001
-    assert ports[("vllm-reasoner", "managed")] == 8002
-    assert ports[("coder", "slot")] == 8001
-    assert ports[("reasoner", "slot")] == 8002
 
 
 def test_units_screen_keybinding_present() -> None:

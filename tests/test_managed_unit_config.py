@@ -59,13 +59,11 @@ def test_unit_name_propagates_to_env_filename(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_settings_managed_units_defaults_carry_through() -> None:
-    """A fresh Settings() should expose all three managed unit configs
+    """A fresh Settings() should expose the managed unit config
     so callers don't need to special-case missing keys."""
     s = Settings()
     assert isinstance(s.managed_units, ManagedUnitsConfig)
     assert s.managed_units.vllm_tp.unit_name == "vllm-tp"
-    assert s.managed_units.vllm_coder.unit_name == "vllm-coder"
-    assert s.managed_units.vllm_reasoner.unit_name == "vllm-reasoner"
 
 
 def test_adapter_consumes_config_unit_name() -> None:

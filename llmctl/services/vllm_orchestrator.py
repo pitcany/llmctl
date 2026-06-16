@@ -1,32 +1,29 @@
 """High-level vLLM start orchestration.
 
-Glues the pieces from Phases 1–4 into the two operations the daily
+Glues the pieces from Phases 1–4 into the operation the daily
 driver actually wants:
 
 * :func:`start_vllm_tp` — start the TP-fleet unit on a preset.
-* :func:`start_slot` — start a per-GPU slot unit on a preset.
 
-Each composes: preset loading -> TQ override -> spec build ->
+It composes: preset loading -> TQ override -> spec build ->
 fleet preflight -> Harbor preflight -> adapter restart -> readiness
 poll -> Hermes verify. Everything is injectable so the CLI tests can
 substitute fakes without touching real systemd / docker / hermes.
 
-The CLI commands in ``llmctl/cli.py`` are thin wrappers around these
-two functions plus :func:`preset_choices` for tab-completion.
+The CLI commands in ``llmctl/cli.py`` are thin wrappers around this
+function plus :func:`preset_choices` for tab-completion.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 from llmctl.adapters.vllm_systemd import ManagedRestartResult, VLLMSystemdAdapter
 from llmctl.config import (
     ManagedUnitConfig,
-    SlotConfig,
     VLLMDefaultsConfig,
 )
 from llmctl.integrations.fleet import FleetRole, FleetUnitsConfig, preflight_stop
@@ -43,8 +40,6 @@ from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.integrations.turboquant import apply_to_spec_dict
 from llmctl.integrations.vllm_env import (
     VLLMLaunchSpec,
-    VLLMSlotInfo,
-    render_slot_env,
     render_vllm_env,
 )
 from llmctl.presets import load_all, load_one
@@ -127,7 +122,7 @@ def start_vllm_tp(
     1. Load presets -> build :class:`VLLMLaunchSpec` (port from
        ``managed_unit.default_port``).
     2. Apply TQ override if requested.
-    3. Stop competing systemd units (agents.target, slots, ollama).
+    3. Stop competing systemd units (ollama).
     4. Stop the Harbor Ollama container if running.
     5. Write the env file + restart the unit.
     6. Wait for ``/v1/models`` to respond.
@@ -155,63 +150,6 @@ def start_vllm_tp(
         options=options,
         deps=deps,
         renderer=render_vllm_env,
-    )
-
-
-def start_slot(
-    slot_name: str,
-    preset_name: str,
-    *,
-    slot_config: SlotConfig,
-    managed_unit: ManagedUnitConfig | None = None,
-    defaults: VLLMDefaultsConfig | None = None,
-    fleet: FleetUnitsConfig | None = None,
-    options: OrchestratorOptions | None = None,
-    deps: Dependencies | None = None,
-) -> OrchestratorResult:
-    """Start a per-GPU slot unit on ``preset_name``.
-
-    ``slot_name`` becomes the served name (downstream client configs
-    keep pointing at ``coder``/``reasoner`` regardless of the model
-    swap). The slot's GPU, port, and unit name come from
-    ``slot_config``.
-
-    The fleet role used for preflight is :attr:`FleetRole.CODER` for
-    the coder slot and :attr:`FleetRole.REASONER` otherwise — slots
-    are designed to coexist with their sibling slot but conflict with
-    the TP unit + ollama.
-    """
-    deps = deps or Dependencies()
-    options = options or OrchestratorOptions()
-    fleet = fleet or FleetUnitsConfig()
-    options = _slot_default_options(options)
-    managed_unit = managed_unit or ManagedUnitConfig(
-        unit_name=slot_config.unit_name,
-        env_file_path=slot_config.resolve_env_file(slot_name),
-        default_port=slot_config.port,
-    )
-
-    spec = _build_spec(
-        preset_name,
-        deps=deps,
-        defaults=defaults,
-        port_override=slot_config.port,
-        tq_override=options.tq_override,
-    )
-
-    role = FleetRole.CODER if slot_name == "coder" else FleetRole.REASONER
-    slot_info = VLLMSlotInfo(name=slot_name, gpu=slot_config.gpu, port=slot_config.port)
-    renderer = partial(render_slot_env, slot=slot_info)
-
-    return _run_lifecycle(
-        spec=spec,
-        managed_unit=managed_unit,
-        fleet=fleet,
-        fleet_role=role,
-        options=options,
-        deps=deps,
-        renderer=renderer,
-        hermes_provider_override=f"vllm-{slot_name}",
     )
 
 
@@ -265,7 +203,7 @@ def _run_lifecycle(
     renderer: Callable[[VLLMLaunchSpec], str],
     hermes_provider_override: str | None = None,
 ) -> OrchestratorResult:
-    """Shared start lifecycle for TP and slot units."""
+    """Start lifecycle for the TP unit."""
     result = OrchestratorResult(spec=spec, dry_run=options.dry_run)
     systemctl = deps.systemctl or SystemctlRunner()
 
@@ -319,10 +257,3 @@ def _run_lifecycle(
         )
 
     return result
-
-
-def _slot_default_options(options: OrchestratorOptions) -> OrchestratorOptions:
-    """Slot starts default to verifying the slot-specific provider name."""
-    if options.hermes_provider == "vllm":  # default — caller didn't override
-        options.hermes_provider = ""  # let _run_lifecycle pick the override
-    return options

@@ -150,25 +150,25 @@ def test_malformed_yaml_returns_no_provider(tmp_path: Path) -> None:
 
 
 def test_alternate_provider_names_supported(tmp_path: Path) -> None:
-    """Slot units use vllm-coder/vllm-reasoner — same machinery."""
+    """Arbitrary provider names route through the same machinery."""
     cfg = tmp_path / "hermes.yaml"
     cfg.write_text(
         _hermes_config(
             [
-                {"name": "vllm-coder", "base_url": "http://127.0.0.1:8001/v1"},
-                {"name": "vllm-reasoner", "base_url": "http://127.0.0.1:8002/v1"},
+                {"name": "vllm-tp", "base_url": "http://127.0.0.1:8003/v1"},
+                {"name": "vllm-alt", "base_url": "http://127.0.0.1:8004/v1"},
             ]
         )
     )
     which = lambda _name: "/usr/bin/hermes"  # noqa: E731 - inline shim is clearer than def
 
     assert (
-        verify_provider("vllm-coder", 8001, config_path=cfg, which=which, logger=lambda _: None)
+        verify_provider("vllm-tp", 8003, config_path=cfg, which=which, logger=lambda _: None)
         is HermesStatus.OK
     )
     assert (
         verify_provider(
-            "vllm-reasoner", 8002, config_path=cfg, which=which, logger=lambda _: None
+            "vllm-alt", 8004, config_path=cfg, which=which, logger=lambda _: None
         )
         is HermesStatus.OK
     )
@@ -212,6 +212,120 @@ def test_non_string_base_url_treated_as_missing(tmp_path: Path) -> None:
     # Non-string base_url is returned as None from _read_provider_url ->
     # treated as "no provider" (the user needs to fix it).
     assert result is HermesStatus.NO_PROVIDER
+
+
+def _hermes_config_map(providers: dict[str, dict]) -> str:
+    """Render a v12+ keyed-map ``providers`` config body for tests."""
+    import yaml
+
+    return yaml.safe_dump({"providers": providers})
+
+
+def test_providers_map_with_api_key_resolves_ok(tmp_path: Path) -> None:
+    """v12+ shape: providers map keyed by name, URL under ``api``.
+
+    This mirrors the real ~/.hermes/config.yaml that prompted the fix —
+    llmctl must read it the same way Hermes' own
+    ``providers_dict_to_custom_providers`` does.
+    """
+    cfg = tmp_path / "hermes.yaml"
+    cfg.write_text(
+        _hermes_config_map(
+            {
+                "vllm": {
+                    "api": "http://127.0.0.1:8003/v1",
+                    "name": "vllm",
+                    "transport": "chat_completions",
+                    "api_key": "dummy",
+                }
+            }
+        )
+    )
+    logged: list[str] = []
+    result = verify_provider(
+        "vllm",
+        expected_port=8003,
+        config_path=cfg,
+        which=lambda _name: "/usr/bin/hermes",
+        logger=logged.append,
+    )
+    assert result is HermesStatus.OK
+    assert any("verified" in line for line in logged)
+
+
+@pytest.mark.parametrize("url_key", ["base_url", "url", "api"])
+def test_providers_map_url_key_resolution_order(url_key: str, tmp_path: Path) -> None:
+    """Hermes accepts base_url/url/api on map entries — all must resolve."""
+    cfg = tmp_path / "hermes.yaml"
+    cfg.write_text(
+        _hermes_config_map({"vllm": {url_key: "http://127.0.0.1:8003/v1"}})
+    )
+    result = verify_provider(
+        "vllm",
+        expected_port=8003,
+        config_path=cfg,
+        which=lambda _name: "/usr/bin/hermes",
+        logger=lambda _: None,
+    )
+    assert result is HermesStatus.OK
+
+
+def test_providers_map_url_mismatch_returns_drift(tmp_path: Path) -> None:
+    """Drift detection works for the map form too."""
+    cfg = tmp_path / "hermes.yaml"
+    cfg.write_text(
+        _hermes_config_map({"vllm": {"api": "http://127.0.0.1:9999/v1"}})
+    )
+    result = verify_provider(
+        "vllm",
+        expected_port=8003,
+        config_path=cfg,
+        which=lambda _name: "/usr/bin/hermes",
+        logger=lambda _: None,
+    )
+    assert result is HermesStatus.URL_MISMATCH
+
+
+def test_providers_map_missing_provider_returns_no_provider(tmp_path: Path) -> None:
+    """Name absent from the providers map -> NO_PROVIDER."""
+    cfg = tmp_path / "hermes.yaml"
+    cfg.write_text(
+        _hermes_config_map({"ollama-fast": {"api": "http://127.0.0.1:11434/v1"}})
+    )
+    result = verify_provider(
+        "vllm",
+        expected_port=8003,
+        config_path=cfg,
+        which=lambda _name: "/usr/bin/hermes",
+        logger=lambda _: None,
+    )
+    assert result is HermesStatus.NO_PROVIDER
+
+
+def test_legacy_custom_providers_wins_over_map(tmp_path: Path) -> None:
+    """When both shapes are present, the legacy list is checked first —
+    matching Hermes' own precedence (custom_providers then providers)."""
+    import yaml
+
+    cfg = tmp_path / "hermes.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "custom_providers": [
+                    {"name": "vllm", "base_url": "http://127.0.0.1:8003/v1"}
+                ],
+                "providers": {"vllm": {"api": "http://127.0.0.1:9999/v1"}},
+            }
+        )
+    )
+    result = verify_provider(
+        "vllm",
+        expected_port=8003,
+        config_path=cfg,
+        which=lambda _name: "/usr/bin/hermes",
+        logger=lambda _: None,
+    )
+    assert result is HermesStatus.OK
 
 
 @pytest.mark.parametrize("port,expected_url", [

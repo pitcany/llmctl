@@ -58,6 +58,25 @@ def _extract_promoted(parameters: dict[str, Any]) -> dict[str, Any]:
     return {key: parameters[key] for key in _PROMOTED_FIELDS if key in parameters}
 
 
+def effective_parameters(profile: Profile | ProfileRecord) -> dict[str, Any]:
+    """Return the authoritative launch parameters for a profile.
+
+    Promoted knobs (``tensor_parallel_size``, ``quantization``, ...) exist both
+    as typed columns and inside ``parameters``. Profiles created via
+    ``llmctl profile create`` populate only the columns; profiles synced or
+    imported from YAML populate the dict. Any consumer that launches a model
+    must honour both — the dict takes precedence on conflict. This mirrors the
+    merge used by :meth:`ProfileService.export_to_dict` so the config shown by
+    ``profile show``/``export`` matches what actually gets launched.
+    """
+    merged = dict(getattr(profile, "parameters", None) or {})
+    for field_name in _PROMOTED_FIELDS:
+        value = getattr(profile, field_name, None)
+        if value is not None and field_name not in merged:
+            merged[field_name] = value
+    return merged
+
+
 class ProfileService:
     """Service for profile persistence, sync, lookup, and CRUD."""
 
@@ -230,11 +249,7 @@ class ProfileService:
         set on the Profile but missing from the blob, e.g. for profiles built
         through ``create_profile`` rather than synced from YAML.
         """
-        merged_parameters = dict(profile.parameters)
-        for field_name in _PROMOTED_FIELDS:
-            value = getattr(profile, field_name)
-            if value is not None and field_name not in merged_parameters:
-                merged_parameters[field_name] = value
+        merged_parameters = effective_parameters(profile)
         return {
             "name": profile.name,
             "runtime": profile.runtime.value,

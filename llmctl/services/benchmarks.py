@@ -706,7 +706,9 @@ class BenchmarkService:
         when reviewing the benchmark history.
         """
         endpoint_url = (
-            target.chat_url if request.kind != BenchmarkKind.HEALTH else target.models_url
+            target.chat_url
+            if request.kind != BenchmarkKind.HEALTH
+            else target.models_url
         )
         return {
             "prompt_tokens": 0,

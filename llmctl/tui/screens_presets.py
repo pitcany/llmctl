@@ -1,10 +1,9 @@
 """Presets screen — the daily-driver TUI surface for vLLM operators.
 
 Shows every preset alias from ``~/.config/llmctl/presets/*.yaml``. Pressing
-enter on a row pops a launch picker (TP fleet / coder slot / reasoner
-slot); confirming kicks off the appropriate orchestrator call in a
-worker thread so the UI stays responsive during the 1-3 minute vLLM
-cold-start.
+enter on a row pops a launch picker (TP fleet); confirming kicks off the
+orchestrator call in a worker thread so the UI stays responsive during
+the 1-3 minute vLLM cold-start.
 
 Bound to ``p`` from any screen — see :class:`MissionControlApp`.
 """
@@ -24,7 +23,6 @@ from llmctl.services.preset_loader import PresetView
 from llmctl.services.vllm_orchestrator import (
     OrchestratorOptions,
     OrchestratorResult,
-    start_slot,
     start_vllm_tp,
 )
 from llmctl.tui import _data
@@ -61,7 +59,7 @@ def _format_link_cell(view: PresetView) -> str:
 
 
 class PresetsScreen(DataScreen):
-    """Live preset table with one-key launch into TP / coder / reasoner."""
+    """Live preset table with one-key launch into the TP fleet unit."""
 
     BINDINGS = [
         Binding("enter", "launch_selected", "Launch", show=True),
@@ -185,34 +183,16 @@ class PresetsScreen(DataScreen):
         """Kick off the orchestrator call in a worker thread."""
         settings = load_settings()
         options = OrchestratorOptions(dry_run=False)
-        if target is PresetLaunchTarget.TP:
-            label = f"vLLM TP: {alias}"
+        label = f"vLLM TP: {alias}"
 
-            def _run() -> OrchestratorResult:
-                return start_vllm_tp(
-                    alias,
-                    managed_unit=settings.managed_units.vllm_tp,
-                    defaults=settings.vllm.defaults,
-                    fleet=settings.managed_units.fleet,
-                    options=options,
-                )
-        else:
-            slot_name = target.value  # "coder" or "reasoner"
-            slot_config = settings.managed_units.slots.get(slot_name)
-            if slot_config is None:
-                self.app.notify(f"Slot {slot_name!r} not configured.", severity="error")
-                return
-            label = f"slot {slot_name}: {alias}"
-
-            def _run() -> OrchestratorResult:
-                return start_slot(
-                    slot_name,
-                    alias,
-                    slot_config=slot_config,
-                    defaults=settings.vllm.defaults,
-                    fleet=settings.managed_units.fleet,
-                    options=options,
-                )
+        def _run() -> OrchestratorResult:
+            return start_vllm_tp(
+                alias,
+                managed_unit=settings.managed_units.vllm_tp,
+                defaults=settings.vllm.defaults,
+                fleet=settings.managed_units.fleet,
+                options=options,
+            )
 
         self.app.notify(f"Starting {label}...", title="Launch")
         self.run_action_worker(_run, lambda res: self._after_launch(label, res))
