@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 from sqlmodel import Session, select
 
 from llmctl.db import RuntimeName, SessionKind, SessionRecord, SessionStatus, get_engine, init_db
+from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.services.sessions import AdoptError, SessionService
 
 
@@ -17,12 +19,13 @@ def _make_service(
     probe: Callable[[str, float], list[str] | None],
     *,
     db_name: str = "adopt.sqlite3",
+    systemctl: SystemctlRunner | None = None,
 ) -> tuple[Session, SessionService]:
     """Wire up an isolated DB-backed SessionService with the supplied probe."""
     url = f"sqlite:///{tmp_path / db_name}"
     init_db(url)
     db = Session(get_engine(url))
-    service = SessionService(db, probe=probe)
+    service = SessionService(db, probe=probe, systemctl=systemctl)
     return db, service
 
 
@@ -181,6 +184,68 @@ def test_restart_adopted_refuses(tmp_path: Path) -> None:
         session = service.adopt(RuntimeName.VLLM, "http://127.0.0.1:8003")
         with pytest.raises(AdoptError, match="adopted"):
             service.restart(session.id)
+    finally:
+        db.close()
+
+
+def _recording_systemctl(
+    returncode: int = 0, stderr: str = ""
+) -> tuple[list[list[str]], SystemctlRunner]:
+    """A SystemctlRunner whose subprocess calls are captured, not executed."""
+    calls: list[list[str]] = []
+
+    def fake(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, returncode, "", stderr)
+
+    return calls, SystemctlRunner(runner=fake)
+
+
+def test_stop_adopted_with_unit_and_flag_stops_unit(tmp_path: Path) -> None:
+    calls, runner = _recording_systemctl()
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        session = service.adopt(
+            RuntimeName.VLLM, "http://127.0.0.1:8003", systemd_unit="vllm-tp"
+        )
+        result = service.stop(session.id, stop_unit=True)
+        assert result is not None
+        assert result.status == SessionStatus.STOPPED
+        # the row is kept (detach deletes; stop marks stopped)
+        refreshed = service.get_session(session.id)
+        assert refreshed is not None
+        assert refreshed.status == SessionStatus.STOPPED
+        # exactly one `systemctl stop vllm-tp` was issued
+        assert any("stop" in argv and "vllm-tp" in argv for argv in calls)
+    finally:
+        db.close()
+
+
+def test_stop_adopted_flag_without_unit_still_refuses(tmp_path: Path) -> None:
+    calls, runner = _recording_systemctl()
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        session = service.adopt(RuntimeName.VLLM, "http://127.0.0.1:8003")  # no unit
+        with pytest.raises(AdoptError, match="adopted"):
+            service.stop(session.id, stop_unit=True)
+        assert calls == []  # never shelled out to systemctl
+    finally:
+        db.close()
+
+
+def test_stop_adopted_systemctl_failure_raises(tmp_path: Path) -> None:
+    _calls, runner = _recording_systemctl(returncode=1, stderr="Failed to stop")
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        session = service.adopt(
+            RuntimeName.VLLM, "http://127.0.0.1:8003", systemd_unit="vllm-tp"
+        )
+        with pytest.raises(AdoptError, match="failed"):
+            service.stop(session.id, stop_unit=True)
+        # the failed stop must not have flipped the row to STOPPED
+        refreshed = service.get_session(session.id)
+        assert refreshed is not None
+        assert refreshed.status == SessionStatus.RUNNING
     finally:
         db.close()
 

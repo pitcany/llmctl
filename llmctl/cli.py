@@ -456,11 +456,21 @@ def reconcile() -> None:
 
 
 @app.command()
-def stop(session_id: Annotated[str, typer.Argument(help="Session ID to stop.")]) -> None:
+def stop(
+    session_id: Annotated[str, typer.Argument(help="Session ID to stop.")],
+    systemd: Annotated[
+        bool,
+        typer.Option(
+            "--systemd",
+            "-s",
+            help="For an adopted session, stop its backing systemd unit (sudo).",
+        ),
+    ] = False,
+) -> None:
     """Mark a session stopped safely."""
     with _session() as db:
         try:
-            session = SessionService(db).stop(session_id)
+            session = SessionService(db).stop(session_id, stop_unit=systemd)
         except AdoptError as exc:
             console.print(f"[red]Stop refused:[/red] {exc}")
             raise typer.Exit(1) from exc

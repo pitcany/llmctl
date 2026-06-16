@@ -26,6 +26,7 @@ from llmctl.db import (
     SessionStatus,
     utcnow,
 )
+from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.schemas import LaunchPlan, Session, SessionStartRequest
 from llmctl.services.backends import probe_openai_v1_models
 from llmctl.services.events import log_event
@@ -106,6 +107,7 @@ class SessionService:
         *,
         probe: ProbeFn | None = None,
         gpu_ids_for_unit: GpuIdsFn | None = None,
+        systemctl: SystemctlRunner | None = None,
     ) -> None:
         self.db = db
         self.settings = settings or load_settings()
@@ -115,6 +117,7 @@ class SessionService:
             lambda url, timeout: probe_openai_v1_models(url, timeout)
         )
         self._gpu_ids_for_unit: GpuIdsFn = gpu_ids_for_unit or unit_gpu_ids
+        self._systemctl = systemctl or SystemctlRunner()
 
     def list_sessions(self) -> list[Session]:
         """Return all known sessions as currently persisted.
@@ -355,22 +358,52 @@ class SessionService:
         self.db.refresh(record)
         return self._launch_record(record, plan)
 
-    def stop(self, session_id: str) -> Session | None:
+    def stop(self, session_id: str, *, stop_unit: bool = False) -> Session | None:
         """Stop a session, terminating its process when applicable.
 
-        Refuses for ``ADOPTED`` sessions: their lifecycle belongs to
-        systemd, not llmctl. The caller should use ``systemctl stop
-        <unit>`` or ``llmctl detach`` instead.
+        For ``ADOPTED`` sessions llmctl never spawned the upstream, so by
+        default it refuses — the lifecycle belongs to systemd. When
+        ``stop_unit`` is set *and* the session records a ``systemd_unit``,
+        llmctl delegates to ``systemctl stop <unit>`` and marks the row
+        ``STOPPED`` (the row is kept; ``detach`` is the verb that deletes).
+        An adopted session without a known unit still refuses.
         """
         record = self.db.get(SessionRecord, session_id)
         if not record:
             return None
         if record.kind == SessionKind.ADOPTED:
-            raise AdoptError(
-                f"Session {record.id} is adopted ({record.systemd_unit or record.endpoint_url}); "
-                "llmctl does not manage its lifecycle. Use `systemctl stop <unit>` to stop the "
-                "upstream, or `llmctl detach <session_id>` to remove it from tracking."
+            where = record.systemd_unit or record.endpoint_url
+            if not (stop_unit and record.systemd_unit):
+                raise AdoptError(
+                    f"Session {record.id} is adopted ({where}); llmctl does not manage its "
+                    "lifecycle. Use `systemctl stop <unit>` or "
+                    f"`llmctl stop {record.id} --systemd` to stop the backing unit, or "
+                    "`llmctl detach <session_id>` to remove it from tracking."
+                )
+            result = self._systemctl.stop(record.systemd_unit)
+            if not result.ok:
+                raise AdoptError(
+                    f"`systemctl stop {record.systemd_unit}` failed "
+                    f"(exit {result.returncode}): {result.stderr.strip()}"
+                )
+            # Keep the row — the next reconcile probes the now-down endpoint
+            # and keeps it STOPPED (or revives it if the unit is restarted).
+            record.status = SessionStatus.STOPPED
+            record.stopped_at = utcnow()
+            record.pid = None
+            record.updated_at = utcnow()
+            self.db.add(record)
+            self.db.commit()
+            self.db.refresh(record)
+            log_event(
+                self.db,
+                EventLevel.INFO,
+                "session",
+                f"Adopted session {record.id} stopped via systemctl ({record.systemd_unit}).",
+                session_id=record.id,
+                model_id=record.model_id,
             )
+            return record_to_session(record)
         self._terminate_record(record)
         record.status = SessionStatus.STOPPED
         record.stopped_at = utcnow()
