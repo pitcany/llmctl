@@ -21,7 +21,7 @@ import yaml
 from sqlmodel import Session
 
 from llmctl.config import load_settings
-from llmctl.db import BenchmarkKind, RuntimeName, get_engine, init_db
+from llmctl.db import BenchmarkKind, ModelStatus, RuntimeName, get_engine, init_db
 from llmctl.presets import (
     Model as PresetModel,
 )
@@ -130,6 +130,18 @@ def get_models() -> list[Model]:
     """Return all non-deleted registered/discovered models."""
     with db_session() as db:
         return RegistryService(db).list_models()
+
+
+def get_missing_count() -> int:
+    """Return the count of MISSING models (active or inactive).
+
+    Matches the scope of :func:`prune_missing_models`, which soft-deletes every
+    MISSING row regardless of the active flag, so the TUI confirm count never
+    disagrees with what prune actually removes.
+    """
+    with db_session() as db:
+        models = RegistryService(db).list_models(include_inactive=True)
+    return sum(1 for model in models if model.status == ModelStatus.MISSING)
 
 
 def scan_models() -> list[Model]:

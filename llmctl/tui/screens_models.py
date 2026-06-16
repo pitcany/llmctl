@@ -74,12 +74,16 @@ class ModelsScreen(DataScreen):
             "models": _data.get_models(),
             "availability": _data.get_backend_map(),
             "preset_counts": _data.get_preset_count_by_model(),
+            "missing_count": _data.get_missing_count(),
         }
 
     def render_data(self, data: Any) -> None:
         """Render the models table, dimming models with a missing backend."""
         models = data["models"]
-        self._missing_count = sum(1 for m in models if m.status == ModelStatus.MISSING)
+        self._missing_count = data.get(
+            "missing_count",
+            sum(1 for m in models if m.status == ModelStatus.MISSING),
+        )
         availability = data["availability"]
         preset_counts: dict[str, int] = data.get("preset_counts", {})
         table = self.query_one("#models-table", DataTable)
