@@ -21,7 +21,7 @@ import yaml
 from sqlmodel import Session
 
 from llmctl.config import load_settings
-from llmctl.db import BenchmarkKind, get_engine, init_db
+from llmctl.db import BenchmarkKind, ModelStatus, RuntimeName, get_engine, init_db
 from llmctl.presets import (
     Model as PresetModel,
 )
@@ -132,6 +132,18 @@ def get_models() -> list[Model]:
         return RegistryService(db).list_models()
 
 
+def get_missing_count() -> int:
+    """Return the count of MISSING models (active or inactive).
+
+    Matches the scope of :func:`prune_missing_models`, which soft-deletes every
+    MISSING row regardless of the active flag, so the TUI confirm count never
+    disagrees with what prune actually removes.
+    """
+    with db_session() as db:
+        models = RegistryService(db).list_models(include_inactive=True)
+    return sum(1 for model in models if model.status == ModelStatus.MISSING)
+
+
 def scan_models() -> list[Model]:
     """Run adapter discovery and return the refreshed model list."""
     with db_session() as db:
@@ -160,6 +172,13 @@ def delete_model(model_id: str, *, delete_files: bool = False) -> bool:
     """Soft-delete a model; optionally remove the artifact."""
     with db_session() as db:
         return RegistryService(db).delete_model(model_id, delete_files=delete_files)
+
+
+def prune_missing_models(runtime: str | None = None) -> int:
+    """Soft-delete all MISSING models; returns the count pruned."""
+    with db_session() as db:
+        rt = RuntimeName(runtime) if runtime else None
+        return RegistryService(db).prune_missing(rt)
 
 
 class PresetValidationError(ValueError):

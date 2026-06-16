@@ -49,6 +49,7 @@ class HttpRuntimeAdapter(RuntimeAdapter):
         self.health_path = health_path
         self.timeout = timeout
         self._client_factory = client_factory
+        self._last_discovery_ok = True
 
     def _client(self) -> httpx.AsyncClient:
         """Return an HTTP client, honoring an injected factory for tests."""
@@ -75,9 +76,21 @@ class HttpRuntimeAdapter(RuntimeAdapter):
     async def discover_models(self) -> list[Model]:
         """Discover models exposed by the HTTP runtime; empty when unavailable."""
         ok, data, _ = await self._get_json(self.models_path)
+        self._last_discovery_ok = ok
         if not ok or data is None:
             return []
         return self._parse_models(data)
+
+    @property
+    def last_discovery_ok(self) -> bool:
+        """Whether the most recent ``discover_models`` HTTP call succeeded.
+
+        ``discover_models`` returns ``[]`` both when the listing endpoint is
+        unreachable/errors and when the catalog is genuinely empty. Callers
+        that must not treat a failed listing as an empty catalog (the scan
+        reconcile pass) consult this flag.
+        """
+        return self._last_discovery_ok
 
     @property
     def models_path(self) -> str:  # pragma: no cover - overridden

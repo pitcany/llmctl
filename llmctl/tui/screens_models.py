@@ -8,9 +8,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Header, Static
 
+from llmctl.db import ModelStatus
 from llmctl.schemas import ModelCreate, ModelUpdate
 from llmctl.tui import _data
-from llmctl.tui._base import C_ERR, C_MUTED, C_OK, DataScreen
+from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
 from llmctl.tui._modals import LaunchPlanModal
 from llmctl.tui._modals_registry import (
     CloneModal,
@@ -30,6 +31,7 @@ class ModelsScreen(DataScreen):
         Binding("a", "add_model", "Add", show=True),
         Binding("e", "edit_model", "Edit", show=True),
         Binding("d", "delete_model", "Delete", show=True),
+        Binding("x", "prune_missing", "Prune missing", show=True),
         Binding("c", "clone_model", "Clone", show=True),
     ]
 
@@ -38,6 +40,7 @@ class ModelsScreen(DataScreen):
         self._ids: list[str] = []
         #: model id -> (runtime_value, backend_available)
         self._meta: dict[str, tuple[str, bool]] = {}
+        self._missing_count: int = 0
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Open the launch-plan preview when a row is activated (enter/click)."""
@@ -71,11 +74,16 @@ class ModelsScreen(DataScreen):
             "models": _data.get_models(),
             "availability": _data.get_backend_map(),
             "preset_counts": _data.get_preset_count_by_model(),
+            "missing_count": _data.get_missing_count(),
         }
 
     def render_data(self, data: Any) -> None:
         """Render the models table, dimming models with a missing backend."""
         models = data["models"]
+        self._missing_count = data.get(
+            "missing_count",
+            sum(1 for m in models if m.status == ModelStatus.MISSING),
+        )
         availability = data["availability"]
         preset_counts: dict[str, int] = data.get("preset_counts", {})
         table = self.query_one("#models-table", DataTable)
@@ -87,14 +95,17 @@ class ModelsScreen(DataScreen):
             mid = model.id or ""
             runtime = model.runtime.value
             available = availability.get(runtime, True)
+            is_missing = model.status == ModelStatus.MISSING
             self._ids.append(mid)
             self._meta[mid] = (runtime, available)
-            if available:
-                backend_cell = f"[{C_OK}]ready[/]"
+            backend_cell = f"[{C_OK}]ready[/]" if available else f"[{C_ERR}]no binary[/]"
+            if available and not is_missing:
                 name_cell = model.name
             else:
-                backend_cell = f"[{C_ERR}]no binary[/]"
                 name_cell = f"[{C_MUTED}]{model.name}[/]"
+            status_cell = (
+                f"[{C_WARN}]{model.status.value}[/]" if is_missing else model.status.value
+            )
             count = preset_counts.get(mid, 0)
             preset_cell = str(count) if count else f"[{C_MUTED}]-[/]"
             table.add_row(
@@ -102,7 +113,7 @@ class ModelsScreen(DataScreen):
                 name_cell,
                 runtime,
                 backend_cell,
-                model.status.value,
+                status_cell,
                 model.quantization or "-",
                 (model.path or "-")[-32:],
                 preset_cell,
@@ -166,6 +177,30 @@ class ModelsScreen(DataScreen):
     def _after_scan(self, found: Any) -> None:
         """Notify and refresh after a scan completes."""
         self.app.notify(f"Scan complete: {len(found)} models registered.")
+        self.refresh_data()
+
+    def action_prune_missing(self) -> None:
+        """Confirm and soft-delete all models flagged MISSING."""
+        if not self._missing_count:
+            self.app.notify("No missing models to prune.", severity="information")
+            return
+
+        def _on_close(payload: ConfirmDelete | None) -> None:
+            if payload is None:
+                return
+            self.run_action_worker(
+                lambda: _data.prune_missing_models(),
+                self._after_prune,
+            )
+
+        self.app.push_screen(
+            DeleteModal(f"{self._missing_count} missing model(s)", allow_file_delete=False),
+            _on_close,
+        )
+
+    def _after_prune(self, count: Any) -> None:
+        """Notify and refresh after a prune completes."""
+        self.app.notify(f"Pruned {count} missing model(s).")
         self.refresh_data()
 
     def _selected_model(self) -> Any:
