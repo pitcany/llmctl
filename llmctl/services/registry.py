@@ -83,15 +83,20 @@ class RegistryService:
     async def _probe(adapter: RuntimeAdapter) -> tuple[bool, list[Model]]:
         """Return ``(reachable, discovered)`` for a single adapter.
 
-        The health check and discovery run in the same coroutine. When the
-        adapter is not healthy, discovery is skipped entirely and ``[]`` is
-        returned, so an unhealthy or unreachable runtime never upserts partial
-        results or triggers reconcile.
+        Health check and discovery run in the same coroutine. A runtime counts
+        as reachable only when health is OK *and* the discovery call itself
+        succeeded: HTTP adapters return ``[]`` on a failed listing just as for
+        an empty catalog, so treating a failed listing as "empty" would let
+        reconcile wrongly flag every model MISSING. When not reachable,
+        discovery results are discarded and ``[]`` is returned so reconcile is
+        skipped entirely.
         """
         health = await adapter.health_check()
         if health.state != HealthState.OK:
             return False, []
         discovered = await adapter.discover_models()
+        if getattr(adapter, "last_discovery_ok", True) is False:
+            return False, []
         return True, discovered
 
     def _reconcile_missing(self, runtime: RuntimeName, discovered: list[Model]) -> None:

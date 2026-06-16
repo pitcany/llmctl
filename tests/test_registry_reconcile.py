@@ -13,10 +13,18 @@ from llmctl.services.registry import RegistryService
 class FakeAdapter:
     """Adapter stub with controllable health and discovery."""
 
-    def __init__(self, runtime: RuntimeName, *, healthy: bool, models: list[Model]) -> None:
+    def __init__(
+        self,
+        runtime: RuntimeName,
+        *,
+        healthy: bool,
+        models: list[Model],
+        discovery_ok: bool = True,
+    ) -> None:
         self._runtime = runtime
         self._healthy = healthy
         self._models = models
+        self._discovery_ok = discovery_ok
 
     async def health_check(self) -> AdapterStatus:
         state = HealthState.OK if self._healthy else HealthState.UNAVAILABLE
@@ -24,6 +32,10 @@ class FakeAdapter:
 
     async def discover_models(self) -> list[Model]:
         return list(self._models)
+
+    @property
+    def last_discovery_ok(self) -> bool:
+        return self._discovery_ok
 
 
 class FakeRouter:
@@ -62,8 +74,10 @@ def _status(db: Session, name: str) -> ModelStatus:
     return record.status
 
 
-def _scan(db: Session, *, healthy: bool, models: list[Model]) -> None:
-    adapter = FakeAdapter(RuntimeName.OLLAMA, healthy=healthy, models=models)
+def _scan(db: Session, *, healthy: bool, models: list[Model], discovery_ok: bool = True) -> None:
+    adapter = FakeAdapter(
+        RuntimeName.OLLAMA, healthy=healthy, models=models, discovery_ok=discovery_ok
+    )
     router = FakeRouter({RuntimeName.OLLAMA: adapter})
     RegistryService(db, router).scan()
 
@@ -82,6 +96,16 @@ def test_scan_skips_reconcile_when_adapter_unhealthy(db: Session) -> None:
     a, b = _model("a"), _model("b")
     _scan(db, healthy=True, models=[a, b])
     _scan(db, healthy=False, models=[])  # daemon down -> discover empty
+    assert _status(db, "a") == ModelStatus.DISCOVERED
+    assert _status(db, "b") == ModelStatus.DISCOVERED
+
+
+def test_scan_skips_reconcile_when_discovery_call_failed(db: Session) -> None:
+    a, b = _model("a"), _model("b")
+    _scan(db, healthy=True, models=[a, b])
+    # Daemon healthy (version OK) but the tags/list call failed -> discover() returns []
+    # but last_discovery_ok is False, so reconcile must be skipped (no false MISSING).
+    _scan(db, healthy=True, models=[], discovery_ok=False)
     assert _status(db, "a") == ModelStatus.DISCOVERED
     assert _status(db, "b") == ModelStatus.DISCOVERED
 
