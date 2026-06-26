@@ -101,9 +101,12 @@ def model_to_launch_spec(
       own ``port`` is treated as a stale template default and ignored.
     * ``kv_cache_type`` — preset's ``kv_cache_dtype`` wins when not
       ``"auto"``; otherwise omitted.
-    * ``prefix_cache``, ``chunked_prefill``, ``nccl_p2p_disable``,
-      ``max_batched_tokens`` — defaults supply these (the canonical
-      ``Model`` doesn't carry them).
+    * ``prefix_cache``, ``chunked_prefill``, ``nccl_p2p_disable`` —
+      defaults supply these (the canonical ``Model`` doesn't carry them).
+    * ``max_batched_tokens`` — preset's ``max_num_batched_tokens`` wins
+      when set; otherwise ``defaults.max_batched_tokens``. Hybrid-Mamba
+      models (qwen3_5_moe) must raise it above the chunked-prefill
+      default.
     * ``reasoning_parser`` — folded into ``extra_args`` as
       ``--reasoning-parser <name>``, matching gpu-models behaviour.
     * ``tq`` — ignored here; TurboQuant override is wired in Phase 4
@@ -142,7 +145,11 @@ def model_to_launch_spec(
             if model.max_num_seqs is not None
             else defaults.max_num_seqs
         ),
-        max_batched_tokens=defaults.max_batched_tokens,
+        max_batched_tokens=(
+            model.max_num_batched_tokens
+            if model.max_num_batched_tokens is not None
+            else defaults.max_batched_tokens
+        ),
         prefix_cache=defaults.prefix_cache,
         chunked_prefill=defaults.chunked_prefill,
         spec_config=None,
