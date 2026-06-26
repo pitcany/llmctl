@@ -290,6 +290,35 @@ def test_user_defaults_override_built_in(isolated_preset_dir: Path) -> None:
     assert "VLLM_TP=2" in body
 
 
+def test_preset_max_batched_tokens_wins_over_defaults(
+    isolated_preset_dir: Path,
+) -> None:
+    """A preset's ``max_num_batched_tokens`` overrides the defaults value.
+
+    Hybrid-Mamba models (e.g. ``qwen3_5_moe``) have a Mamba cache
+    ``block_size`` that must fit inside one prefill batch, exceeding the
+    chunked-prefill default of 2048; the preset must be able to raise it.
+    """
+    _write_preset(
+        isolated_preset_dir,
+        "ornith",
+        """
+        alias: ornith
+        served_name: ornith
+        model_id: org/ornith
+        quantization: compressed-tensors
+        vllm_quantization_flag: compressed-tensors
+        tensor_parallel_size: 2
+        max_model_len: 131072
+        max_num_batched_tokens: 8192
+        """,
+    )
+    custom = VLLMDefaultsConfig(max_batched_tokens=2048)
+    specs = load_presets(defaults=custom, config_dir=isolated_preset_dir)
+    body = render_vllm_env(specs["ornith"])
+    assert "VLLM_MAX_BATCHED_TOKENS=8192" in body
+
+
 def test_port_override_wins_over_defaults(isolated_preset_dir: Path) -> None:
     """``port_override`` on :func:`model_to_launch_spec` lets a managed
     unit pin the port even when defaults say something different."""

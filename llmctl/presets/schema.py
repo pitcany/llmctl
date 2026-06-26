@@ -40,6 +40,15 @@ class Model(BaseModel):
         default=None,
         description="Maximum concurrent sequences; None falls back to renderer defaults.",
     )
+    max_num_batched_tokens: int | None = Field(
+        default=None,
+        description=(
+            "vLLM --max-num-batched-tokens; None falls back to renderer "
+            "defaults. Hybrid-Mamba models (e.g. qwen3_5_moe) must raise "
+            "this above the chunked-prefill default so the Mamba cache "
+            "block_size fits inside one prefill batch."
+        ),
+    )
     gpu_memory_utilization: float | None = Field(
         default=None,
         description="vLLM GPU memory fraction; None falls back to renderer defaults.",
