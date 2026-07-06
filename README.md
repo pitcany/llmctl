@@ -14,7 +14,7 @@ load so existing installs keep working.
 This package replaced `gpu-models` in May 2026. The migration was
 non-disruptive — every legacy `gpu-models <verb>` still works via
 `bin/gpu-models` shim, the env file output is byte-identical
-(verified by 14 fixture files at
+(verified by 12 fixture files at
 `tests/fixtures/env_renders/`), and no production restart was
 required.
 
@@ -33,9 +33,8 @@ routing, Harbor services, Tailscale exposure, etc.), see the
 
 ```bash
 llmctl presets                       # list available presets
-llmctl vllm llama-3.3-70b            # restart vllm-tp with this preset
-llmctl slot coder qwen2.5-coder-32b  # restart vllm-coder slot (GPU 0)
-llmctl status                        # managed units + slots overview
+llmctl vllm ornith-35b               # restart vllm-tp with this preset
+llmctl status                        # managed unit overview
 llmctl tui                           # interactive TUI
 ```
 
@@ -176,9 +175,10 @@ Out-of-the-box, llmctl knows about:
 
 | Role | systemd unit | Port | GPUs |
 |------|--------------|------|------|
-| TP fleet | `vllm-tp` | 8003 | 0,1 (TP=2) |
-| Coder slot | `vllm-coder` | 8001 | 0 (TP=1) |
-| Reasoner slot | `vllm-reasoner` | 8002 | 1 (TP=1) |
+| TP serving | `vllm-tp` | 8003 | 0,1 (TP=2) |
+
+(The per-GPU coder/reasoner slots were decommissioned 2026-06-14; only the
+single `vllm-tp` unit remains, model swapped per preset.)
 
 Every default is overridable in `~/.config/llmctl/settings.yaml` so
 llmctl runs on hosts that don't share yannik-desktop's layout. See
@@ -192,6 +192,6 @@ uv run pytest -q
 uv run ruff check .
 ```
 
-383 tests, ~70–80s wall time. Tests marked `requires_gpu`,
+~470 tests, ~70–80s wall time. Tests marked `requires_gpu`,
 `requires_systemd`, `live_hf`, or `bench_live` are skipped in CI; run
 them locally on the appropriate host.
