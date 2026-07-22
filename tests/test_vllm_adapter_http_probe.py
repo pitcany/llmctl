@@ -200,6 +200,68 @@ def test_malformed_payload_treated_as_unreachable() -> None:
     assert status.state in (HealthState.UNAVAILABLE, HealthState.OK)  # depends on $PATH
 
 
+def test_discover_models_records_checkpoint_path_from_root() -> None:
+    """`root` is the checkpoint the served name resolves to -> Model.path.
+
+    The motivating confusion: `/v1/models` reports id `ornith-35b` while
+    the loaded weights are the `-refusal-v6` directory. Without `root`,
+    `llmctl models` shows the alias and nothing about which checkpoint
+    is live.
+    """
+    def fake_get(url: str, timeout: float) -> Any:
+        return io.BytesIO(
+            json.dumps(
+                {
+                    "data": [
+                        {
+                            "id": "ornith-35b",
+                            "root": "/home/yannik/models/refusal/Ornith-35B-refusal-v6",
+                        }
+                    ]
+                }
+            ).encode()
+        )
+
+    adapter = VLLMAdapter(managed_units=_no_units(), http_get=fake_get)
+    models = asyncio.run(adapter.discover_models())
+    assert len(models) == 1
+    assert models[0].name == "ornith-35b"
+    assert models[0].path == "/home/yannik/models/refusal/Ornith-35B-refusal-v6"
+
+
+def test_discover_models_leaves_path_none_without_root() -> None:
+    """Servers that omit `root` must not fabricate a path."""
+    adapter = VLLMAdapter(
+        managed_units=_no_units(),
+        http_get=_http_responder(by_port={8003: ["llama-3.3-70b"]}),
+    )
+    models = asyncio.run(adapter.discover_models())
+    assert models[0].path is None
+
+
+def test_non_string_root_ignored() -> None:
+    """A malformed `root` is dropped, not coerced into the path field."""
+    def fake_get(url: str, timeout: float) -> Any:
+        return io.BytesIO(json.dumps({"data": [{"id": "m", "root": 17}]}).encode())
+
+    adapter = VLLMAdapter(managed_units=_no_units(), http_get=fake_get)
+    models = asyncio.run(adapter.discover_models())
+    assert models[0].path is None
+
+
+def test_health_details_still_report_plain_id_strings() -> None:
+    """The `details["served"]` shape is public; `root` must not leak into it."""
+    def fake_get(url: str, timeout: float) -> Any:
+        return io.BytesIO(
+            json.dumps({"data": [{"id": "ornith-35b", "root": "/models/v6"}]}).encode()
+        )
+
+    adapter = VLLMAdapter(managed_units=_no_units(), http_get=fake_get)
+    status = asyncio.run(adapter.health_check())
+    assert status.details["served"]["vllm-tp"] == ["ornith-35b"]
+    assert "ornith-35b" in status.message
+
+
 def test_non_dict_data_entries_skipped() -> None:
     """Malformed list entries don't crash discovery."""
     def fake_get(url: str, timeout: float) -> Any:

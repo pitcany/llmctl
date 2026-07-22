@@ -111,7 +111,24 @@ Used by `vllm` and `slot`:
 | `llmctl gpus` | NVML telemetry: VRAM, util, temp, power, processes |
 | `llmctl doctor` | Backend binary diagnostics + GPU + scheduler config |
 | `llmctl models` | Registered model rows (Ollama tags + filesystem scans + live vLLM probe) |
+| `llmctl validate` | Find drift between the records and the disk/network (exits 1 on findings) |
 | `llmctl logs [SESSION_ID]` | Tail a session log, or show recent events |
+
+`llmctl validate` does four read-only checks:
+
+| Check | What it finds |
+|-------|---------------|
+| `preset-model-missing` | A preset `model_id` path that is not on the disk. A symlink that does not resolve gives the same result. |
+| `registry-path-missing` | A registry row with a `path` that is not on the disk. |
+| `broken-symlink` | A symlink in a model root from `model_dirs.yaml` that does not resolve. Only this check finds orphans. |
+| `port-drift` | A managed unit that systemd reports as active, but that serves nothing on its registered port. |
+
+The checks skip values that are Hugging Face repository ids
+(`org/model`). Such a value is a valid `model_id`, but it is not a
+statement about the disk.
+
+The `port-drift` check gives no result if the host has no `systemctl`,
+or if the unit is not active. A unit that is stopped is not drift.
 
 ### Sessions and scheduler
 

@@ -68,6 +68,33 @@ llmctl scan --import   # persist discovered models into the registry
 `scan` covers `*.gguf` (llama.cpp + LM Studio), Hugging Face caches
 (directories with `config.json`), and Ollama manifests.
 
+For vLLM, `scan` records the checkpoint that each served name resolves
+to. It reads the `root` field of `/v1/models` into the model `path`. A
+served name that is an alias thus stays traceable to its weights.
+
+## Validation
+
+`llmctl validate` compares the records against the disk and the
+network. It is read-only. It exits 1 if it finds anything.
+
+```bash
+llmctl validate
+```
+
+It does four checks:
+
+| Check | What it finds |
+|-------|---------------|
+| `preset-model-missing` | A preset `model_id` path that is not on the disk |
+| `registry-path-missing` | A registry row with a `path` that is not on the disk |
+| `broken-symlink` | A symlink in a configured model root that does not resolve |
+| `port-drift` | A managed unit that is active, but that serves nothing on its registered port |
+
+A value such as `org/model` is a Hugging Face repository id, not a
+path. The path checks ignore it. The `port-drift` check uses systemd
+as its gate: it ignores units that are not active, and it gives no
+result on a host that has no `systemctl`.
+
 ## Profile management
 
 Profiles are reusable launch configurations (TP layout, context length,

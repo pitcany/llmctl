@@ -18,7 +18,7 @@ import json
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from llmctl.adapters._common import ProcessRuntimeAdapter
 from llmctl.config import (
@@ -30,6 +30,22 @@ from llmctl.config import (
 from llmctl.db import ModelStatus, RuntimeName
 from llmctl.schemas import AdapterStatus, HealthState, Model
 from llmctl.telemetry.process import ProcessSupervisor
+
+
+class ServedModel(NamedTuple):
+    """One entry of a vLLM ``/v1/models`` response.
+
+    ``id`` is the served name clients call (vLLM's ``--served-model-name``,
+    falling back to the ``--model`` value). ``root`` is what ``--model``
+    was actually set to — normally the checkpoint directory on disk, but
+    a Hugging Face repo id when the server was pointed at the hub. The
+    two differ exactly when a served name is aliased over a checkpoint,
+    which is the case worth surfacing: ``ornith-35b`` the served name vs.
+    the ``-refusal-v6`` directory it really loads.
+    """
+
+    id: str
+    root: str | None = None
 
 
 class VLLMAdapter(ProcessRuntimeAdapter):
@@ -76,12 +92,13 @@ class VLLMAdapter(ProcessRuntimeAdapter):
             self.managed_units.vllm_tp,
         ]
 
-    def _probe_unit(self, unit: ManagedUnitConfig) -> list[str] | None:
+    def _probe_unit(self, unit: ManagedUnitConfig) -> list[ServedModel] | None:
         """Probe ``http://localhost:<port>/v1/models``.
 
-        Returns the served model IDs on success, ``None`` on failure
-        (unit not running, port not bound, network blip — all treated
-        the same).
+        Returns the served models on success, ``None`` on failure (unit
+        not running, port not bound, network blip — all treated the
+        same). Entries without a usable ``id`` are skipped; ``root`` is
+        optional and left ``None`` when the server omits it.
         """
         url = f"http://localhost:{unit.default_port}/v1/models"
         try:
@@ -89,14 +106,16 @@ class VLLMAdapter(ProcessRuntimeAdapter):
             payload = json.loads(resp.read().decode("utf-8", errors="replace"))
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
             return None
-        ids: list[str] = []
+        served: list[ServedModel] = []
         for m in payload.get("data", []):
             if not isinstance(m, dict):
                 continue  # tolerate malformed entries without crashing the probe
             mid = m.get("id")
-            if isinstance(mid, str):
-                ids.append(mid)
-        return ids
+            if not isinstance(mid, str):
+                continue
+            root = m.get("root")
+            served.append(ServedModel(id=mid, root=root if isinstance(root, str) else None))
+        return served
 
     async def health_check(self) -> AdapterStatus:
         """Report OK when any managed-unit port serves models.
@@ -108,9 +127,9 @@ class VLLMAdapter(ProcessRuntimeAdapter):
         """
         live: dict[str, list[str]] = {}
         for unit in self._candidate_units():
-            ids = self._probe_unit(unit)
-            if ids:
-                live[unit.unit_name] = ids
+            served = self._probe_unit(unit)
+            if served:
+                live[unit.unit_name] = [m.id for m in served]
 
         if live:
             served_summary = ", ".join(
@@ -131,26 +150,30 @@ class VLLMAdapter(ProcessRuntimeAdapter):
 
         Each served model is registered with ``runtime=vllm``,
         ``status=DISCOVERED``, and metadata recording which unit
-        serves it + what port. Filesystem discovery (config.json sweep)
-        is then appended for unscheduled local checkpoints; duplicates
-        by ``source`` are dropped, HTTP-discovered models win.
+        serves it + what port. ``path`` carries the ``/v1/models``
+        ``root`` field so the registry records *which checkpoint* a
+        served name resolves to, not just the name. Filesystem
+        discovery (config.json sweep) is then appended for unscheduled
+        local checkpoints; duplicates by ``source`` are dropped,
+        HTTP-discovered models win.
         """
         seen_source: set[str] = set()
         models: list[Model] = []
 
         for unit in self._candidate_units():
-            ids = self._probe_unit(unit)
-            if not ids:
+            served_models = self._probe_unit(unit)
+            if not served_models:
                 continue
-            for served in ids:
-                if served in seen_source:
+            for served in served_models:
+                if served.id in seen_source:
                     continue
-                seen_source.add(served)
+                seen_source.add(served.id)
                 models.append(
                     Model(
-                        name=served,
+                        name=served.id,
                         runtime=RuntimeName.VLLM,
-                        source=served,
+                        source=served.id,
+                        path=served.root,
                         status=ModelStatus.DISCOVERED,
                         metadata={
                             "managed_unit": unit.unit_name,

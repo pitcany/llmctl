@@ -1093,6 +1093,44 @@ def status_cmd() -> None:
     console.print(table)
 
 
+@app.command("validate")
+def validate_cmd() -> None:
+    """Check that everything llmctl records still exists where it records it.
+
+    Four read-only checks: preset ``model_id`` targets, registry row
+    paths, dangling symlinks in the configured model roots, and managed
+    units that are active but serve nothing on their registered port.
+    Exits non-zero when anything is found, so it can gate a script.
+    """
+    from llmctl.config import load_model_dirs
+    from llmctl.presets.store import load_all as load_all_presets
+    from llmctl.services import validate as validate_svc
+
+    settings = load_settings()
+    with _session() as db:
+        models = RegistryService(db).list_models(include_inactive=True)
+
+    findings = [
+        *validate_svc.check_preset_model_ids(load_all_presets()),
+        *validate_svc.check_registry_paths(models),
+        *validate_svc.check_model_root_symlinks(load_model_dirs()),
+        *validate_svc.check_managed_unit_ports([settings.managed_units.vllm_tp]),
+    ]
+
+    if not findings:
+        console.print("[green]Validation passed.[/green] No drift found.")
+        return
+
+    table = Table(title=f"Validation findings ({len(findings)})")
+    table.add_column("Check", style="yellow")
+    table.add_column("Target", style="cyan")
+    table.add_column("Detail")
+    for finding in findings:
+        table.add_row(finding.check, finding.target, finding.detail)
+    console.print(table)
+    raise typer.Exit(code=1)
+
+
 # ---------------------------------------------------------------------------
 # OpenAI-compatible router/gateway commands.
 #

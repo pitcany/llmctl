@@ -206,3 +206,51 @@ def test_cli_reconcile_reports_no_changes_on_empty_db(tmp_path, monkeypatch) -> 
     result = runner.invoke(app, ["reconcile"])
     assert result.exit_code == 0
     assert "no changes" in result.output.lower()
+
+
+def _isolate_validate(tmp_path, monkeypatch) -> str:
+    """Point every source `validate` reads at a temp dir; return the DB url.
+
+    Covers presets (XDG), settings + model_dirs (LLMCTL_CONFIG_DIR), the
+    registry DB, and systemd — the port check must not probe the live
+    stack from a unit test.
+    """
+    from llmctl.db import init_db
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(tmp_path / "config" / "llmctl"))
+    monkeypatch.setattr(
+        "llmctl.integrations.systemctl.SystemctlRunner.available", lambda self: False
+    )
+    db_url = f"sqlite:///{tmp_path / 'validate.sqlite3'}"
+    init_db(db_url)
+    _patch_session(monkeypatch, db_url)
+    return db_url
+
+
+def test_cli_validate_passes_on_a_clean_host(tmp_path, monkeypatch) -> None:
+    """Nothing configured means nothing broken — exit 0, not a false alarm."""
+    _isolate_validate(tmp_path, monkeypatch)
+    result = CliRunner().invoke(app, ["validate"])
+    assert result.exit_code == 0
+    assert "validation passed" in result.output.lower()
+
+
+def test_cli_validate_reports_findings_and_exits_nonzero(tmp_path, monkeypatch) -> None:
+    """A preset pointing at a deleted checkpoint must fail the command."""
+    _isolate_validate(tmp_path, monkeypatch)
+    presets = tmp_path / "config" / "llmctl" / "presets"
+    presets.mkdir(parents=True)
+    (presets / "stale.yaml").write_text(
+        "alias: stale\n"
+        "served_name: stale\n"
+        f"model_id: {tmp_path / 'deleted-checkpoint'}\n"
+        "quantization: fp8\n"
+        "vllm_quantization_flag: fp8\n"
+        "tensor_parallel_size: 2\n"
+        "max_model_len: 4096\n"
+    )
+    result = CliRunner().invoke(app, ["validate"])
+    assert result.exit_code == 1
+    assert "preset-model-missing" in result.output
+    assert "stale" in result.output
