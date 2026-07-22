@@ -77,8 +77,10 @@ def render_vllm_env(spec: VLLMLaunchSpec) -> str:
     1. CUDA_VISIBLE_DEVICES
     2. CUDA_DEVICE_ORDER (constant)
     3. PYTORCH_CUDA_ALLOC_CONF (constant)
-    4. LD_LIBRARY_PATH, PATH, HF_HOME (from ``launcher_env_lines``,
-       rooted at ``spec.python_root`` when set)
+    4. LD_LIBRARY_PATH, PATH, HF_HOME (all from ``launcher_env_lines``).
+       The first two are rooted at ``spec.python_root`` when it is set,
+       and resolved from the environment otherwise; HF_HOME comes from
+       ``resolve_hf_home`` either way and ignores ``python_root``.
     5. NCCL_P2P_DISABLE (optional, only when ``nccl_p2p_disable=True``),
        then VLLM_PYTHON (optional, only when ``python_root`` is set)
     6. VLLM_MODEL, VLLM_SERVED_NAME, VLLM_TP, VLLM_PORT, VLLM_HOST,
