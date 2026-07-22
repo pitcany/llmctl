@@ -42,6 +42,23 @@ def _iter_files(root: Path, max_depth: int, follow_symlinks: bool) -> list[Path]
     return results
 
 
+def iter_broken_symlinks(root: Path, max_depth: int = _DEFAULT_MAX_DEPTH) -> list[Path]:
+    """Return symlinks under ``root`` whose target does not resolve.
+
+    Depth-limited exactly like the discovery sweep so a deep cache tree
+    cannot stall the caller, and never follows symlinks, so a
+    self-referential link cannot loop. A missing or unreadable ``root``
+    yields an empty list.
+    """
+    if not root.is_dir():
+        return []
+    return [
+        path
+        for path in _iter_files(root, max_depth, follow_symlinks=False)
+        if path.is_symlink() and not path.exists()
+    ]
+
+
 def _size_bytes(path: Path) -> int | None:
     """Return file size in bytes, or None when unavailable."""
     try:
