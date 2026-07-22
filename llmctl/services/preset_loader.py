@@ -109,6 +109,8 @@ def model_to_launch_spec(
       default.
     * ``reasoning_parser`` — folded into ``extra_args`` as
       ``--reasoning-parser <name>``, matching gpu-models behaviour.
+    * ``python_root``, ``spec_config`` — passed straight through; both
+      are preset-only concerns the defaults have no opinion on.
     * ``tq`` — ignored here; TurboQuant override is wired in Phase 4
       via a separate CLI flag and resolves to ``kv_cache_type``.
     """
@@ -140,6 +142,7 @@ def model_to_launch_spec(
         quantization=model.vllm_quantization_flag,
         kv_cache_type=kv_cache_type,
         tool_parser=model.tool_parser,
+        python_root=model.python_root,
         max_num_seqs=(
             model.max_num_seqs
             if model.max_num_seqs is not None
@@ -152,7 +155,7 @@ def model_to_launch_spec(
         ),
         prefix_cache=defaults.prefix_cache,
         chunked_prefill=defaults.chunked_prefill,
-        spec_config=None,
+        spec_config=model.spec_config,
         extra_args=extra_args,
         nccl_p2p_disable=defaults.nccl_p2p_disable,
     )
