@@ -77,6 +77,24 @@ class Model(BaseModel):
     tool_parser: str | None = None
     reasoning_parser: str | None = None
 
+    python_root: str | None = Field(
+        default=None,
+        description=(
+            "Python prefix to serve this preset from, for models that "
+            "cannot run under the default interpreter (e.g. one needing a "
+            "newer vLLM than the deployed env pins). Sets VLLM_PYTHON plus "
+            "LD_LIBRARY_PATH/PATH. None uses the caller's environment."
+        ),
+    )
+    spec_config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "vLLM --speculative-config as a mapping, e.g. "
+            '{"model": "...", "num_speculative_tokens": 7, '
+            '"method": "dflash"}. None disables speculative decoding.'
+        ),
+    )
+
     model_ref: str | None = Field(
         default=None,
         description=(
