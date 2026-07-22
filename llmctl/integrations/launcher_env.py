@@ -91,7 +91,7 @@ def resolve_hf_home() -> str:
     return str(Path.home() / _DEFAULT_HF_CACHE)
 
 
-def launcher_env_lines() -> list[str]:
+def launcher_env_lines(python_root: str | None = None) -> list[str]:
     """Return ``LD_LIBRARY_PATH`` / ``PATH`` / ``HF_HOME`` lines.
 
     Resolved from the running environment at call time so the same
@@ -99,8 +99,15 @@ def launcher_env_lines() -> list[str]:
     value composition match ``gpu_models._launcher_env.launcher_env_lines``
     byte-for-byte — both produce the EnvironmentFile body that
     ``scripts/vllm-launcher.sh`` reads.
+
+    ``python_root`` overrides that resolution for presets that must run
+    under a different interpreter than the caller's (see
+    :class:`~llmctl.integrations.vllm_env.VLLMLaunchSpec`). Because the
+    launcher ``exec``s the interpreter directly, this is also what puts
+    that env's ``bin/`` first on ``PATH`` — flashinfer's JIT shells out
+    to ``ninja`` and fails the engine if it isn't there.
     """
-    python_root = resolve_python_root()
+    python_root = python_root or resolve_python_root()
     cuda_root = resolve_cuda_root()
     hf_home = resolve_hf_home()
     return [
