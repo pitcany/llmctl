@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -130,7 +131,9 @@ def test_serve_refuses_auth_required_without_token(
     )
     result = runner.invoke(cli_app, ["serve"])
     assert result.exit_code == 2
-    # Rich wraps the error box mid-phrase, so strip the borders and
+    # Newer click/typer embed ANSI color codes in captured output, and Rich
+    # wraps the error box mid-phrase: strip escapes and borders, then
     # normalize whitespace before matching.
-    plain = " ".join(result.output.replace("│", " ").split())
+    no_ansi = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    plain = " ".join(no_ansi.replace("│", " ").split())
     assert "no token is configured" in plain
