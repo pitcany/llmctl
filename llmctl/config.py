@@ -38,6 +38,11 @@ class APISettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8088
     cors_origins: list[str] = Field(default_factory=list)
+    # Bearer token the control-plane API demands when
+    # ``scheduler.require_auth_token`` is on. The ``LLMCTL_API_TOKEN``
+    # environment variable overrides this, so systemd units can keep the
+    # secret out of settings.yaml.
+    auth_token: str | None = None
 
 
 class TelemetrySettings(BaseModel):
@@ -433,6 +438,15 @@ def load_settings(path: Path | None = None) -> Settings:
     """Load application settings from YAML and environment variables."""
     data = _read_yaml(settings_file_path(path))
     return Settings.model_validate(data)
+
+
+def resolve_api_auth_token(settings: Settings) -> str | None:
+    """Return the control-plane API bearer token, or ``None`` when unset.
+
+    The ``LLMCTL_API_TOKEN`` environment variable beats ``api.auth_token``
+    from settings.yaml so units/scripts can inject the secret at runtime.
+    """
+    return os.environ.get("LLMCTL_API_TOKEN") or settings.api.auth_token
 
 
 def load_model_dirs(path: Path | None = None) -> ModelDirsConfig:
