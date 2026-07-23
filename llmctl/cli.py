@@ -1069,6 +1069,14 @@ def serve(
             "routes are unauthenticated. Set scheduler.allow_public_bind=true in "
             "settings.yaml to override, or expose it via a reverse proxy instead."
         )
+    if settings.scheduler.require_auth_token:
+        from llmctl.config import resolve_api_auth_token
+
+        if not resolve_api_auth_token(settings):
+            raise typer.BadParameter(
+                "scheduler.require_auth_token is on but no token is configured. "
+                "Set api.auth_token in settings.yaml or export LLMCTL_API_TOKEN."
+            )
     uvicorn.run(
         create_app(settings),
         host=bind_host,
