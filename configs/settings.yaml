@@ -7,10 +7,15 @@ database:
   # Override with LLMCTL_DB_URL. Default is computed with platformdirs.
   url: null
 
+# `auth_token` is the bearer token the control-plane API demands when
+# scheduler.require_auth_token is true (all routes except /health and
+# the docs). The LLMCTL_API_TOKEN environment variable overrides it, so
+# you can keep the secret out of this file.
 api:
   host: 127.0.0.1
   port: 8088
   cors_origins: []
+  auth_token: null
 
 telemetry:
   gpu_poll_interval_seconds: 2.0

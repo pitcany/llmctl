@@ -21,7 +21,12 @@ from llmctl.db import (
     get_engine,
     init_db,
 )
-from llmctl.schemas import BenchmarkRunRequest, ModelCreate, SessionStartRequest
+from llmctl.schemas import (
+    BenchmarkRunRequest,
+    HealthState,
+    ModelCreate,
+    SessionStartRequest,
+)
 from llmctl.services.benchmarks import BenchmarkService
 from llmctl.services.preset_loader import load_preset_views
 from llmctl.services.registry import RegistryService
@@ -567,6 +572,47 @@ def restart(session_id: Annotated[str, typer.Argument(help="Session ID to restar
 
 
 @app.command()
+def pull(
+    model: Annotated[str, typer.Argument(help="Ollama model tag, e.g. qwen3:32b.")],
+) -> None:
+    """Pull a model into the local Ollama library (streaming progress)."""
+    import asyncio
+
+    from llmctl.adapters.ollama import OllamaAdapter
+    from llmctl.services.router import RuntimeRouter
+
+    settings = load_settings()
+    adapter = RuntimeRouter(settings).get_adapter(RuntimeName.OLLAMA)
+    if not isinstance(adapter, OllamaAdapter):  # stripped asserts can't guard
+        console.print("[red]The ollama runtime adapter does not support pull.[/red]")
+        raise typer.Exit(1)
+
+    # Print each phase once, then byte progress at most every 10% so long
+    # pulls stay readable in scripts and terminals alike.
+    progress_state: dict[str, object] = {"status": None, "decade": -1}
+
+    def on_progress(status: str, completed: int | None, total: int | None) -> None:
+        if status and status != progress_state["status"]:
+            progress_state["status"] = status
+            progress_state["decade"] = -1
+            console.print(f"[cyan]{status}[/cyan]")
+        if total and completed is not None:
+            decade = min(10, completed * 10 // total)
+            if decade > progress_state["decade"]:  # type: ignore[operator]
+                progress_state["decade"] = decade
+                gib = 1024**3
+                console.print(
+                    f"  {completed / gib:.2f}/{total / gib:.2f} GiB ({decade * 10}%)"
+                )
+
+    status = asyncio.run(adapter.pull_model(model, on_progress=on_progress))
+    if status.state != HealthState.OK:
+        console.print(f"[red]{status.message}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]{status.message}[/green] Run `llmctl scan` to register it.")
+
+
+@app.command()
 def logs(
     session_id: Annotated[
         str | None, typer.Argument(help="Session ID to tail logs for.")
@@ -1069,6 +1115,14 @@ def serve(
             "routes are unauthenticated. Set scheduler.allow_public_bind=true in "
             "settings.yaml to override, or expose it via a reverse proxy instead."
         )
+    if settings.scheduler.require_auth_token:
+        from llmctl.config import resolve_api_auth_token
+
+        if not resolve_api_auth_token(settings):
+            raise typer.BadParameter(
+                "scheduler.require_auth_token is on but no token is configured. "
+                "Set api.auth_token in settings.yaml or export LLMCTL_API_TOKEN."
+            )
     uvicorn.run(
         create_app(settings),
         host=bind_host,
@@ -1628,7 +1682,11 @@ def adopt_cmd(
         str,
         typer.Option(
             "--runtime", "-r",
-            help="Runtime adapter id (vllm, llama_cpp, lmstudio, ollama, python_script).",
+            help=(
+                "Runtime adapter id (vllm, llama_cpp, lmstudio, ollama, "
+                "python_script), or 'openai' for a generic OpenAI-compatible "
+                "endpoint llmctl routes to but does not manage."
+            ),
         ),
     ] = "vllm",
     unit: Annotated[

@@ -71,6 +71,17 @@ class SchedulerService:
         refusals: list[str] = []
         notes: list[str] = []
 
+        if runtime == RuntimeName.OPENAI:
+            # Adopt-only: there is no local process to plan. Recorded as a
+            # refusal (not a raise) so `llmctl plan`/`preview` and
+            # POST /sessions/plan preview it gracefully like every other
+            # refusal; only validate() raises.
+            refusals.append(
+                "Runtime 'openai' is adopt-only (an external OpenAI-compatible "
+                "endpoint). Use `llmctl adopt --endpoint <url> --runtime openai` "
+                "instead of start."
+            )
+
         if profile is not None and profile.runtime != runtime:
             refusals.append(
                 f"Profile '{profile.name}' targets {profile.runtime.value}, "

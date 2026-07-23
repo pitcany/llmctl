@@ -123,6 +123,9 @@ def get_backend_map() -> dict[str, bool]:
         backend = str(entry["backend"])
         runtime = reverse.get(backend, backend)
         result[runtime] = bool(entry["available"])
+    # Adopt-only runtime: no local backend can ever launch it, so never
+    # show it as "ready" (the Models screen defaults unknown keys to True).
+    result["openai"] = False
     return result
 
 

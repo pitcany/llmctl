@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import Generator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlmodel import Session
 
 from llmctl.api import (
@@ -16,9 +18,15 @@ from llmctl.api import (
     routes_sessions,
 )
 from llmctl.api.deps import get_db_session
-from llmctl.config import Settings, load_settings
+from llmctl.config import Settings, load_settings, resolve_api_auth_token
 from llmctl.db import SQLModel, apply_migrations, get_engine
 from llmctl.services.health import HealthService
+
+#: Paths that stay reachable without a bearer token when
+#: ``scheduler.require_auth_token`` is on: liveness probing plus the
+#: interactive API docs. Everything else (including /doctor, which leaks
+#: host configuration) demands the token.
+AUTH_EXEMPT_PATHS = frozenset({"/health", "/docs", "/redoc", "/openapi.json"})
 
 
 def create_app(settings: Settings | None = None, database_url: str | None = None) -> FastAPI:
@@ -33,6 +41,40 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
         version="0.1.0",
         description="Local-first LLM runtime control plane scaffold.",
     )
+
+    if effective_settings.scheduler.require_auth_token:
+        expected_token = resolve_api_auth_token(effective_settings)
+
+        @app.middleware("http")
+        async def require_bearer_token(request: Request, call_next) -> Response:
+            if request.url.path in AUTH_EXEMPT_PATHS:
+                return await call_next(request)
+            if expected_token is None:
+                # Fail closed: auth is demanded but no token exists, so no
+                # request can legitimately authenticate. `llmctl serve`
+                # refuses this configuration before binding; this branch
+                # covers embedded/uvicorn-direct deployments.
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": (
+                            "scheduler.require_auth_token is on but no token is "
+                            "configured. Set api.auth_token in settings.yaml or "
+                            "export LLMCTL_API_TOKEN."
+                        )
+                    },
+                )
+            header = request.headers.get("authorization", "")
+            scheme, _, provided = header.partition(" ")
+            if scheme.lower() != "bearer" or not secrets.compare_digest(
+                provided.strip(), expected_token
+            ):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Missing or invalid bearer token."},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            return await call_next(request)
 
     if effective_settings.api.cors_origins:
         app.add_middleware(
