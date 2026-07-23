@@ -34,7 +34,7 @@ from llmctl.services.router import RuntimeRouter
 from llmctl.services.scheduler import SchedulerService
 from llmctl.services.unit_gpus import unit_gpu_ids
 
-_ACTIVE_STATES = {SessionStatus.RUNNING, SessionStatus.STARTING}
+_ACTIVE_STATES = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
 
 #: Statuses that block a new adopt at the same endpoint URL. Anything except
 #: ``FAILED`` and (for OWNED rows) ``STOPPED`` reserves the endpoint enough
@@ -45,6 +45,7 @@ _ADOPT_BLOCKING_STATES = {
     SessionStatus.PLANNED,
     SessionStatus.STARTING,
     SessionStatus.RUNNING,
+    SessionStatus.DEGRADED,
     SessionStatus.STOPPING,
     SessionStatus.UNKNOWN,
 }
@@ -173,32 +174,83 @@ class SessionService:
             if record.kind == SessionKind.ADOPTED:
                 changed += self._reconcile_adopted(record)
             elif record.status in _ACTIVE_STATES:
-                if record.pid and not self.router.supervisor.is_running(record.pid):
-                    record.status = SessionStatus.STOPPED
-                    record.stopped_at = utcnow()
-                    record.error = "Process exited unexpectedly."
-                    record.updated_at = utcnow()
-                    record.pid = None
-                    self.db.add(record)
-                    changed += 1
-                    log_event(
-                        self.db,
-                        EventLevel.WARNING,
-                        "session",
-                        f"Session {record.id} marked dead; process is no longer running.",
-                        session_id=record.id,
-                        model_id=record.model_id,
-                    )
+                changed += self._reconcile_owned(record)
         if changed:
             self.db.commit()
         return changed
+
+    def _reconcile_owned(self, record: SessionRecord) -> int:
+        """Reconcile one active OWNED record; return 1 if it changed.
+
+        - PID dead → ``FAILED`` when it died while ``STARTING`` (startup never
+          completed), otherwise ``STOPPED``.
+        - PID alive + endpoint responding → ``RUNNING`` (promotes ``STARTING``
+          once the model finishes loading, recovers ``DEGRADED``).
+        - PID alive + endpoint dead on a previously ``RUNNING`` row →
+          ``DEGRADED`` (process is up but serving nothing; excluded from
+          gateway routing until it recovers). ``STARTING`` rows are left
+          alone — large models legitimately take minutes to load.
+        """
+        now = utcnow()
+        if record.pid and not self.router.supervisor.is_running(record.pid):
+            died_starting = record.status == SessionStatus.STARTING
+            record.status = SessionStatus.FAILED if died_starting else SessionStatus.STOPPED
+            record.stopped_at = now
+            record.error = (
+                "Process exited before becoming ready."
+                if died_starting
+                else "Process exited unexpectedly."
+            )
+            record.updated_at = now
+            record.pid = None
+            self.db.add(record)
+            log_event(
+                self.db,
+                EventLevel.WARNING,
+                "session",
+                f"Session {record.id} marked dead; process is no longer running.",
+                session_id=record.id,
+                model_id=record.model_id,
+            )
+            return 1
+        if not record.endpoint_url:
+            return 0
+        alive = self._probe(record.endpoint_url, _ADOPT_PROBE_TIMEOUT_S) is not None
+        new_status: SessionStatus | None = None
+        if alive and record.status in {SessionStatus.STARTING, SessionStatus.DEGRADED}:
+            new_status = SessionStatus.RUNNING
+        elif not alive and record.status == SessionStatus.RUNNING:
+            new_status = SessionStatus.DEGRADED
+        if new_status is None:
+            return 0
+        record.status = new_status
+        record.error = (
+            None
+            if new_status == SessionStatus.RUNNING
+            else f"Process {record.pid} is alive but {record.endpoint_url} is not responding."
+        )
+        record.updated_at = now
+        self.db.add(record)
+        log_event(
+            self.db,
+            EventLevel.INFO if new_status == SessionStatus.RUNNING else EventLevel.WARNING,
+            "session",
+            f"Session {record.id} transitioned to {new_status.value} "
+            f"(endpoint {'responding' if alive else 'unresponsive'}).",
+            session_id=record.id,
+            model_id=record.model_id,
+            data={"endpoint_url": record.endpoint_url, "pid": record.pid},
+        )
+        return 1
 
     def _reconcile_adopted(self, record: SessionRecord) -> int:
         """Update one adopted record based on a fresh probe; return 1 if changed."""
         if not record.endpoint_url:
             return 0
         served = self._probe(record.endpoint_url, _ADOPT_PROBE_TIMEOUT_S)
-        alive = served is not None and len(served) > 0
+        # Reachable-but-empty is alive: a unit mid preset-swap can briefly
+        # serve an empty model list; only an unreachable endpoint is down.
+        alive = served is not None
         now = utcnow()
         if record.status in _ACTIVE_STATES and not alive:
             record.status = SessionStatus.STOPPED
@@ -683,6 +735,17 @@ class SessionService:
                 EventLevel.INFO,
                 "session",
                 f"Started session {record.id} ({record.runtime.value}) pid={record.pid}.",
+                session_id=record.id,
+                model_id=record.model_id,
+                data={"pid": record.pid, "endpoint": record.endpoint_url},
+            )
+        elif result.status == SessionStatus.STARTING:
+            log_event(
+                self.db,
+                EventLevel.INFO,
+                "session",
+                f"Launched session {record.id} ({record.runtime.value}) pid={record.pid}; "
+                "endpoint not ready yet (still starting).",
                 session_id=record.id,
                 model_id=record.model_id,
                 data={"pid": record.pid, "endpoint": record.endpoint_url},

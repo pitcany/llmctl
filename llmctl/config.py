@@ -150,6 +150,11 @@ class RuntimeConfig(BaseModel):
     port_range: list[int] = Field(default_factory=lambda: [8000, 8099])
     extra_args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    #: How long a non-dry-run start waits for the launched endpoint to answer
+    #: before returning the session as still ``STARTING`` (reconcile promotes
+    #: it to ``RUNNING`` later). Only applies to plans with an endpoint.
+    readiness_timeout_s: float = 90.0
+    readiness_poll_interval_s: float = 1.0
 
 
 class ManagedUnitConfig(BaseModel):

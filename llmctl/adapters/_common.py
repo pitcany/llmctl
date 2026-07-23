@@ -14,8 +14,11 @@ control plane stays responsive on hosts without GPUs or installed runtimes.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
+import time
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 
@@ -27,6 +30,23 @@ from llmctl.schemas import AdapterStatus, HealthState, LaunchPlan, Model, Sessio
 from llmctl.telemetry.process import ProcessSupervisor
 
 ClientFactory = Callable[[], httpx.AsyncClient]
+
+
+def _tail_log(log_path: str | None, lines: int = 5, max_bytes: int = 8192) -> str | None:
+    """Return the last ``lines`` lines of a launch log, or ``None`` if unreadable."""
+    if not log_path:
+        return None
+    try:
+        path = Path(log_path)
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(size - max_bytes, 0))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    tail = [line for line in text.splitlines() if line.strip()][-lines:]
+    return "\n".join(tail) if tail else None
 
 
 class HttpRuntimeAdapter(RuntimeAdapter):
@@ -170,6 +190,12 @@ class HttpRuntimeAdapter(RuntimeAdapter):
 class ProcessRuntimeAdapter(RuntimeAdapter):
     """Base adapter for process-launch runtimes."""
 
+    #: Whether a non-dry-run start blocks on endpoint readiness. True for
+    #: runtimes that are HTTP servers by construction (vLLM, llama.cpp);
+    #: False where serving is optional (arbitrary python scripts may be
+    #: batch jobs that never open the port the scheduler reserved).
+    readiness_gated = True
+
     def __init__(
         self,
         runtime: RuntimeName,
@@ -255,7 +281,7 @@ class ProcessRuntimeAdapter(RuntimeAdapter):
                 launch_plan=plan,
                 error=f"Failed to launch {self.display_name}: {exc}",
             )
-        return Session(
+        session = Session(
             model_id=plan.model_id,
             profile_id=plan.profile_id,
             runtime=self.runtime,
@@ -267,6 +293,46 @@ class ProcessRuntimeAdapter(RuntimeAdapter):
             launch_plan=plan,
             started_at=result.started_at,
         )
+        if plan.endpoint_url and self.readiness_gated:
+            session = await self._await_readiness(session, plan)
+        return session
+
+    async def _await_readiness(self, session: Session, plan: LaunchPlan) -> Session:
+        """Wait for the launched endpoint to answer before declaring RUNNING.
+
+        Success is a real readiness signal, not a spawned PID. Three outcomes:
+
+        * endpoint answers → ``RUNNING``;
+        * process dies while waiting → ``FAILED`` with a log-tail excerpt;
+        * timeout with the process still alive → ``STARTING`` (large models
+          legitimately load for minutes; reconcile promotes the session once
+          the endpoint responds).
+        """
+        deadline = time.monotonic() + max(self.config.readiness_timeout_s, 0.0)
+        interval = max(self.config.readiness_poll_interval_s, 0.05)
+        while True:
+            if session.pid and not self.supervisor.is_running(session.pid):
+                session.status = SessionStatus.FAILED
+                session.error = self._startup_failure_message(session)
+                session.started_at = None
+                return session
+            if await self._endpoint_alive(plan.endpoint_url):
+                session.status = SessionStatus.RUNNING
+                session.error = None
+                return session
+            if time.monotonic() >= deadline:
+                session.status = SessionStatus.STARTING
+                session.error = None
+                return session
+            await asyncio.sleep(interval)
+
+    def _startup_failure_message(self, session: Session) -> str:
+        """Describe a startup death, including a short log tail when available."""
+        message = f"{self.display_name} process exited before becoming ready."
+        tail = _tail_log(session.log_path)
+        if tail:
+            message += f" Last log lines:\n{tail}"
+        return message
 
     async def stop(self, session: Session) -> AdapterStatus:
         """Terminate the supervised process for ``session``."""
