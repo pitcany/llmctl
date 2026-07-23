@@ -2,16 +2,25 @@
 
 Talks to a local Ollama daemon over its native HTTP API. Discovery uses
 ``GET /api/tags`` and health uses ``GET /api/version``. Model deletion maps to
-``DELETE /api/delete``.
+``DELETE /api/delete`` and pulling to a streaming ``POST /api/pull``.
 """
 
 from __future__ import annotations
+
+import json
+from collections.abc import Callable
+
+import httpx
 
 from llmctl.adapters._common import ClientFactory, HttpRuntimeAdapter
 from llmctl.db import ModelStatus, RuntimeName
 from llmctl.schemas import AdapterStatus, HealthState, Model
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:11434"
+
+#: Pull progress callback: ``(status, completed_bytes, total_bytes)``.
+#: Sizes are ``None`` for phases that don't report them (manifest, verify).
+PullProgress = Callable[[str, int | None, int | None], None]
 
 
 class OllamaAdapter(HttpRuntimeAdapter):
@@ -87,6 +96,62 @@ class OllamaAdapter(HttpRuntimeAdapter):
                 )
             )
         return models
+
+    async def pull_model(
+        self, name: str, *, on_progress: PullProgress | None = None
+    ) -> AdapterStatus:
+        """Pull ``name`` into the Ollama library via streaming ``POST /api/pull``.
+
+        Emits one ``on_progress`` call per NDJSON event. Pulls run
+        minutes-to-hours, so the read timeout is unbounded while connect
+        keeps the adapter's normal budget. Never raises — errors (daemon
+        down, unknown tag, mid-pull failure event) come back as a
+        ``DEGRADED`` :class:`AdapterStatus`.
+        """
+        timeout = httpx.Timeout(self.timeout, read=None)
+        try:
+            async with self._client() as client:
+                async with client.stream(
+                    "POST",
+                    "/api/pull",
+                    json={"name": name, "stream": True},
+                    timeout=timeout,
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except ValueError:
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        if event.get("error"):
+                            return AdapterStatus(
+                                runtime=self.runtime,
+                                state=HealthState.DEGRADED,
+                                message=f"Ollama pull of '{name}' failed: {event['error']}",
+                            )
+                        if on_progress is not None:
+                            completed = event.get("completed")
+                            total = event.get("total")
+                            on_progress(
+                                str(event.get("status") or ""),
+                                completed if isinstance(completed, int) else None,
+                                total if isinstance(total, int) else None,
+                            )
+        except Exception as exc:
+            return AdapterStatus(
+                runtime=self.runtime,
+                state=HealthState.DEGRADED,
+                message=f"Ollama pull of '{name}' failed: {exc}",
+            )
+        return AdapterStatus(
+            runtime=self.runtime,
+            state=HealthState.OK,
+            message=f"Pulled Ollama model '{name}'.",
+        )
 
     async def delete_model(self, model: Model) -> AdapterStatus:
         """Delete a model from the Ollama library via ``DELETE /api/delete``."""
