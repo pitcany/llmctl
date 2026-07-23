@@ -26,7 +26,7 @@ class ModelsScreen(DataScreen):
     """Model registry screen: lists models and plans sessions."""
 
     BINDINGS = [
-        Binding("enter", "start_model", "Plan", show=True),
+        Binding("enter", "start_model", "Plan/Launch", show=True),
         Binding("ctrl+s", "scan", "Scan", show=True),
         Binding("a", "add_model", "Add", show=True),
         Binding("e", "edit_model", "Edit", show=True),
@@ -50,7 +50,7 @@ class ModelsScreen(DataScreen):
         """Compose the models table with screen-scoped Header/Footer."""
         yield Header()
         yield Static(
-            f"Models Registry  -  [{C_MUTED}]enter = preview & plan, ctrl+s = scan[/]",
+            f"Models Registry  -  [{C_MUTED}]enter = preview / plan / launch, ctrl+s = scan[/]",
             classes="panel safe",
             id="models-title",
         )
@@ -151,23 +151,41 @@ class ModelsScreen(DataScreen):
         )
 
     def _show_plan(self, model_id: str, plan: Any) -> None:
-        """Push the launch-plan modal and start the session on confirmation."""
+        """Push the launch-plan modal; plan or launch based on the choice."""
 
-        def _on_close(confirmed: bool | None) -> None:
-            if confirmed:
-                self.run_action_worker(
-                    lambda: _data.start_model(model_id),
-                    self._after_start,
-                )
+        def _on_close(outcome: str | None) -> None:
+            if outcome not in ("plan", "launch"):
+                return
+            dry_run = outcome == "plan"
+            self.run_action_worker(
+                lambda: _data.start_model(model_id, dry_run=dry_run, force=dry_run),
+                self._after_start,
+            )
 
         self.app.push_screen(LaunchPlanModal(plan), _on_close)
 
     def _after_start(self, session: Any) -> None:
-        """Notify and refresh after a session is planned."""
-        self.app.notify(
-            f"Planned session {(session.id or '')[:8]} ({session.runtime.value}).",
-            title="Session planned",
-        )
+        """Notify with the real outcome (planned / started / failed) and refresh."""
+        short_id = (session.id or "")[:8]
+        status = session.status.value
+        if status == "planned":
+            self.app.notify(
+                f"Planned session {short_id} ({session.runtime.value}); no process launched.",
+                title="Session planned",
+            )
+        elif status in ("running", "starting"):
+            detail = f" at {session.endpoint_url}" if session.endpoint_url else ""
+            self.app.notify(
+                f"Session {short_id} {status}{detail}.",
+                title="Session launched",
+            )
+        else:
+            self.app.notify(
+                f"Session {short_id} {status}: {session.error or 'unknown error'}",
+                title="Launch failed",
+                severity="error",
+                timeout=10,
+            )
         self.refresh_data()
 
     def action_scan(self) -> None:

@@ -601,6 +601,74 @@ def logs(
     console.print(table)
 
 
+config_app = typer.Typer(name="config", help="Show and validate llmctl configuration.")
+app.add_typer(config_app, name="config")
+
+
+def _settings_file_path() -> Path:
+    """Return the settings.yaml path llmctl reads (may not exist yet)."""
+    import os
+
+    from platformdirs import user_config_dir
+
+    config_dir = Path(os.getenv("LLMCTL_CONFIG_DIR") or user_config_dir("llmctl"))
+    return config_dir / "settings.yaml" if config_dir.is_dir() else config_dir
+
+
+@config_app.command("path")
+def config_path() -> None:
+    """Print the settings file path (whether or not it exists)."""
+    path = _settings_file_path()
+    exists = "" if path.exists() else "  (not present; defaults in effect)"
+    print(f"{path}{exists}")
+
+
+def _redact_secrets(value: object) -> object:
+    """Return a copy of ``value`` with secret-looking fields masked."""
+    sensitive = ("token", "secret", "password", "api_key", "apikey")
+    if isinstance(value, dict):
+        return {
+            key: (
+                "********"
+                if any(marker in key.lower() for marker in sensitive) and val
+                else _redact_secrets(val)
+            )
+            for key, val in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_secrets(item) for item in value]
+    return value
+
+
+@config_app.command("show")
+def config_show(json_out: _JSON_OPT = False) -> None:
+    """Show the fully-resolved settings (defaults + file + env overrides).
+
+    Secret-looking fields (tokens, keys, passwords) are redacted.
+    """
+    settings = load_settings()
+    payload = _redact_secrets(settings.model_dump(mode="json"))
+    if json_out:
+        _emit_json(payload)
+        return
+    import yaml
+
+    console.print(f"[dim]# resolved from {_settings_file_path()}[/dim]")
+    print(yaml.safe_dump(payload, sort_keys=False))
+
+
+@config_app.command("validate")
+def config_validate() -> None:
+    """Validate the settings file; exit 1 with the offending field on error."""
+    try:
+        load_settings()
+    except Exception as exc:
+        console.print(f"[red]Configuration invalid:[/red] {_settings_file_path()}")
+        console.print(str(exc))
+        raise typer.Exit(code=1) from exc
+    console.print(f"[green]Configuration valid.[/green] ({_settings_file_path()})")
+
+
 runtimes_app = typer.Typer(
     name="runtimes",
     help="Inspect configured runtimes: install state, version, capabilities.",
