@@ -583,7 +583,9 @@ def pull(
 
     settings = load_settings()
     adapter = RuntimeRouter(settings).get_adapter(RuntimeName.OLLAMA)
-    assert isinstance(adapter, OllamaAdapter)
+    if not isinstance(adapter, OllamaAdapter):  # stripped asserts can't guard
+        console.print("[red]The ollama runtime adapter does not support pull.[/red]")
+        raise typer.Exit(1)
 
     # Print each phase once, then byte progress at most every 10% so long
     # pulls stay readable in scripts and terminals alike.
