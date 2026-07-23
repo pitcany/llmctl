@@ -90,12 +90,23 @@ class SystemctlRunner:
         if self._runner is not None:
             completed = self._runner(argv)  # type: ignore[misc]
         else:
-            completed = subprocess.run(  # noqa: S603 - argv built from constants + unit name
-                argv,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            try:
+                completed = subprocess.run(  # noqa: S603 - argv from constants + unit name
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    # Bounded so a wedged systemd/D-Bus can't hang callers
+                    # (doctor, validate, the API) forever. Generous enough for
+                    # slow unit stops (TimeoutStopSec defaults to 90s).
+                    timeout=120.0,
+                )
+            except subprocess.TimeoutExpired:
+                return SystemctlResult(
+                    returncode=124,
+                    stdout="",
+                    stderr=f"systemctl {verb.value} {unit} timed out after 120s",
+                )
         return SystemctlResult(
             returncode=completed.returncode,
             stdout=completed.stdout or "",

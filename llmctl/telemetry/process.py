@@ -13,6 +13,7 @@ invoke them based on ``dry_run``/``safe_mode`` policy.
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
@@ -185,12 +186,54 @@ class ProcessSupervisor:
             return True
         assert pid is not None  # for type-checkers; guarded above
 
+        children = self._live_children(pid)
         self._signal(pid, signal.SIGTERM, kill_group)
         if self._wait_for_exit(pid, timeout):
+            self._reap_orphans(children)
             return True
 
         self._signal(pid, signal.SIGKILL, kill_group)
-        return self._wait_for_exit(pid, timeout=5.0)
+        stopped = self._wait_for_exit(pid, timeout=5.0)
+        self._reap_orphans(children)
+        return stopped
+
+    @staticmethod
+    def _live_children(pid: int) -> list[psutil.Process]:
+        """Snapshot the child tree before signalling, for orphan cleanup."""
+        try:
+            return psutil.Process(pid).children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return []
+
+    @staticmethod
+    def _reap_orphans(children: list[psutil.Process], timeout: float = 5.0) -> None:
+        """Kill children that survived the group signal (e.g. after setsid).
+
+        Group signalling covers the normal case; this catches workers that
+        detached into their own process group and would otherwise be orphaned
+        holding GPU memory.
+        """
+        survivors = [child for child in children if child.is_running()]
+        if not survivors:
+            return
+        for child in survivors:
+            try:
+                child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        _, alive = psutil.wait_procs(survivors, timeout=timeout)
+        for child in alive:
+            try:
+                child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        _, still_alive = psutil.wait_procs(alive, timeout=2.0)
+        for child in still_alive:
+            logging.getLogger(__name__).warning(
+                "Orphaned child process %s survived SIGTERM/SIGKILL; "
+                "it may still hold GPU memory.",
+                child.pid,
+            )
 
     @staticmethod
     def _signal(pid: int, sig: signal.Signals, kill_group: bool) -> None:

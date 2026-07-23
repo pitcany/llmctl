@@ -16,6 +16,7 @@ _STATUS_COLOR = {
     "running": C_OK,
     "planned": C_WARN,
     "starting": C_WARN,
+    "degraded": C_ERR,
     "stopping": C_WARN,
     "stopped": C_MUTED,
     "failed": C_ERR,

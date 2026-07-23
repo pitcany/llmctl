@@ -372,3 +372,47 @@ def test_benchmarks_set_and_clear_baseline(temp_db: Settings) -> None:
             assert screen._baseline_id is None
 
     asyncio.run(_run())
+
+
+def test_launch_plan_modal_offers_launch_and_plan(temp_db: Settings) -> None:
+    """The plan modal returns 'launch'/'plan'/None and hides Launch on refusal."""
+    from textual.app import App
+    from textual.widgets import Button
+
+    from llmctl.db import RuntimeName
+    from llmctl.schemas import LaunchPlan
+    from llmctl.tui._modals import LaunchPlanModal
+
+    allowed = LaunchPlan(runtime=RuntimeName.PYTHON_SCRIPT, command=["echo"], dry_run=True)
+    refused = LaunchPlan(
+        runtime=RuntimeName.PYTHON_SCRIPT,
+        command=["echo"],
+        dry_run=True,
+        refusal_reasons=["not enough VRAM"],
+    )
+
+    async def _run() -> None:
+        outcomes: list[str | None] = []
+
+        class Harness(App[None]):
+            pass
+
+        app = Harness()
+        async with app.run_test() as pilot:
+            app.push_screen(LaunchPlanModal(allowed), outcomes.append)
+            await pilot.pause()
+            ids = {b.id for b in app.screen.query(Button)}
+            assert {"plan-launch", "plan-confirm", "plan-cancel"} <= ids
+            app.screen.query_one("#plan-launch", Button).press()
+            await pilot.pause()
+            assert outcomes == ["launch"]
+
+            app.push_screen(LaunchPlanModal(refused), outcomes.append)
+            await pilot.pause()
+            ids = {b.id for b in app.screen.query(Button)}
+            assert "plan-launch" not in ids
+            app.screen.query_one("#plan-confirm", Button).press()
+            await pilot.pause()
+            assert outcomes == ["launch", "plan"]
+
+    asyncio.run(_run())

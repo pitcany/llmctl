@@ -16,6 +16,10 @@ from llmctl.telemetry.process import ProcessSupervisor
 class PythonScriptAdapter(ProcessRuntimeAdapter):
     """Adapter for arbitrary Python launch scripts."""
 
+    # Scripts may be batch jobs that never serve HTTP; don't block a start
+    # on endpoint readiness (reconcile still tracks liveness afterwards).
+    readiness_gated = False
+
     def __init__(
         self,
         config: RuntimeConfig | None = None,

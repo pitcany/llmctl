@@ -37,6 +37,13 @@ class LMStudioAdapter(HttpRuntimeAdapter):
         """OpenAI-compatible model listing endpoint."""
         return "/v1/models"
 
+    async def list_loaded_models(self) -> list[Model] | None:
+        """LM Studio's ``/v1/models`` lists what the server has loaded."""
+        ok, data, _ = await self._get_json(self.models_path)
+        if not ok or data is None:
+            return None
+        return self._parse_models(data)
+
     def _parse_models(self, data: object) -> list[Model]:
         """Parse an OpenAI-style ``/v1/models`` payload into models."""
         if not isinstance(data, dict):

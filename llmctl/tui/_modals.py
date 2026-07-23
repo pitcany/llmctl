@@ -11,8 +11,13 @@ from llmctl.schemas import LaunchPlan
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN
 
 
-class LaunchPlanModal(ModalScreen[bool]):
-    """Confirmation dialog that previews a launch plan before starting."""
+class LaunchPlanModal(ModalScreen[str | None]):
+    """Preview a launch plan, then plan it or actually launch it.
+
+    Dismisses with ``"launch"`` (real start), ``"plan"`` (record a dry-run
+    PLANNED session), or ``None`` (cancel). A refused plan only offers
+    "plan" — forcing past a refusal is CLI-only (``llmctl start --force``).
+    """
 
     BINDINGS = [("escape", "dismiss_cancel", "Cancel")]
 
@@ -43,7 +48,8 @@ class LaunchPlanModal(ModalScreen[bool]):
             lines.append(f"[{C_ERR}]refusal:[/] {reason}")
         if plan.refusal_reasons:
             lines.append(
-                f"\n[{C_WARN}]This launch is refused; confirming will force a planned session.[/]"
+                f"\n[{C_WARN}]This launch is refused; only a planned session can be "
+                "recorded here. Use `llmctl start --force` to override.[/]"
             )
         else:
             lines.append(f"\n[{C_OK}]This launch is allowed.[/]")
@@ -51,13 +57,16 @@ class LaunchPlanModal(ModalScreen[bool]):
         with Vertical(id="plan-dialog", classes="panel"):
             yield Static("\n".join(lines), id="plan-body")
             with Vertical(id="plan-buttons"):
-                yield Button("Confirm (plan session)", variant="success", id="plan-confirm")
+                if not plan.refusal_reasons:
+                    yield Button("Launch now", variant="success", id="plan-launch")
+                yield Button("Plan only (no process)", variant="primary", id="plan-confirm")
                 yield Button("Cancel", variant="error", id="plan-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Resolve the modal based on the pressed button."""
-        self.dismiss(event.button.id == "plan-confirm")
+        outcome = {"plan-launch": "launch", "plan-confirm": "plan"}.get(event.button.id or "")
+        self.dismiss(outcome)
 
     def action_dismiss_cancel(self) -> None:
         """Dismiss the modal as cancelled."""
-        self.dismiss(False)
+        self.dismiss(None)

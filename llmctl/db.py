@@ -45,6 +45,7 @@ class SessionStatus(StrEnum):
     PLANNED = "planned"
     STARTING = "starting"
     RUNNING = "running"
+    DEGRADED = "degraded"
     STOPPING = "stopping"
     STOPPED = "stopped"
     FAILED = "failed"
@@ -252,9 +253,27 @@ def get_engine(database_url: str | None = None):
             Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
     engine_kwargs: dict[str, Any] = {"connect_args": connect_args}
-    if url in {"sqlite:///:memory:", "sqlite://"}:
+    in_memory = url == "sqlite://" or (url.startswith("sqlite") and ":memory:" in url)
+    if in_memory:
         engine_kwargs["poolclass"] = StaticPool
-    return create_engine(url, **engine_kwargs)
+    engine = create_engine(url, **engine_kwargs)
+    if url.startswith("sqlite") and not in_memory:
+        # The CLI, TUI, control-plane API, and gateway reconcile loop all open
+        # this file independently. WAL lets readers proceed during a write and
+        # busy_timeout makes writers wait instead of failing with
+        # "database is locked".
+        from sqlalchemy import event
+
+        @event.listens_for(engine, "connect")
+        def _sqlite_concurrency_pragmas(dbapi_connection, _record) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+            finally:
+                cursor.close()
+
+    return engine
 
 
 def apply_migrations(engine) -> None:

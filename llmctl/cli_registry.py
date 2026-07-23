@@ -337,7 +337,8 @@ def model_delete(
                 default=False,
             )
             if not ok:
-                raise typer.Exit(code=1)
+                console.print("[yellow]Aborted; nothing changed.[/yellow]")
+                raise typer.Exit(code=0)
         deleted = service.delete_model(resolved, delete_files=delete_files)
     if deleted:
         suffix = " (files removed)" if delete_files else ""
@@ -380,7 +381,8 @@ def model_prune(
         if not yes and not Confirm.ask(
             f"Soft-delete {len(missing)} missing model(s)?", default=False
         ):
-            raise typer.Exit(code=1)
+            console.print("[yellow]Aborted; nothing changed.[/yellow]")
+            raise typer.Exit(code=0)
         count = service.prune_missing(rt)
     console.print(f"[green]Pruned[/green] {count} missing model(s).")
 

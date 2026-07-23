@@ -36,7 +36,7 @@ HTTP_SERVER_RUNTIMES = {RuntimeName.OLLAMA, RuntimeName.LMSTUDIO}
 GPU_REQUIRED_RUNTIMES = {RuntimeName.VLLM}
 LOCAL_FILE_RUNTIMES = {RuntimeName.LLAMA_CPP, RuntimeName.PYTHON_SCRIPT}
 VALID_GPU_MODES = {"auto", "balanced", "most-free", "least-used"}
-_ACTIVE_STATES = {SessionStatus.RUNNING, SessionStatus.STARTING}
+_ACTIVE_STATES = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
 
 
 class SchedulerError(ValueError):

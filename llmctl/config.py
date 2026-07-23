@@ -150,6 +150,11 @@ class RuntimeConfig(BaseModel):
     port_range: list[int] = Field(default_factory=lambda: [8000, 8099])
     extra_args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    #: How long a non-dry-run start waits for the launched endpoint to answer
+    #: before returning the session as still ``STARTING`` (reconcile promotes
+    #: it to ``RUNNING`` later). Only applies to plans with an endpoint.
+    readiness_timeout_s: float = 90.0
+    readiness_poll_interval_s: float = 1.0
 
 
 class ManagedUnitConfig(BaseModel):
@@ -300,7 +305,17 @@ class Settings(BaseModel):
         if override is None:
             return base
         merged = base.model_dump()
-        merged.update({k: v for k, v in override.model_dump().items() if v not in (None, [], {})})
+        # exclude_unset: only keys the user actually wrote in YAML override the
+        # per-runtime defaults. A full dump would re-apply RuntimeConfig class
+        # defaults (e.g. port_range [8000, 8099]) over runtime-specific ones
+        # whenever the user sets any single field.
+        merged.update(
+            {
+                k: v
+                for k, v in override.model_dump(exclude_unset=True).items()
+                if v not in (None, [], {})
+            }
+        )
         return RuntimeConfig.model_validate(merged)
 
     @property
@@ -398,11 +413,25 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+def settings_file_path(path: Path | None = None) -> Path:
+    """Resolve the settings.yaml path llmctl reads (which may not exist yet).
+
+    ``LLMCTL_CONFIG_DIR`` may point at a directory (settings.yaml inside it)
+    or directly at a YAML file. A path that does not exist yet is treated as
+    a directory unless it carries a YAML suffix — so on a fresh install this
+    still names the file the user should create, not the bare directory.
+    """
+    target = Path(os.getenv("LLMCTL_CONFIG_DIR") or path or user_config_dir(APP_NAME))
+    if target.is_file():
+        return target
+    if target.is_dir():
+        return target / "settings.yaml"
+    return target if target.suffix in {".yaml", ".yml"} else target / "settings.yaml"
+
+
 def load_settings(path: Path | None = None) -> Settings:
     """Load application settings from YAML and environment variables."""
-    config_dir = Path(os.getenv("LLMCTL_CONFIG_DIR") or path or user_config_dir(APP_NAME))
-    settings_file = config_dir / "settings.yaml" if config_dir.is_dir() else config_dir
-    data = _read_yaml(settings_file)
+    data = _read_yaml(settings_file_path(path))
     return Settings.model_validate(data)
 
 

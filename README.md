@@ -32,13 +32,47 @@ routing, Harbor services, Tailscale exposure, etc.), see the
 ## Quick taste
 
 ```bash
+llmctl runtimes                      # what runtimes exist, versions, loaded models
+llmctl runtimes inspect ollama       # one runtime's capabilities in detail
 llmctl presets                       # list available presets
 llmctl vllm ornith-35b               # restart vllm-tp with this preset
-llmctl status                        # managed unit overview
+llmctl status                        # managed units + what they serve right now
+llmctl doctor                        # pass/warn/fail environment report
 llmctl tui                           # interactive TUI
 ```
 
-Add `--dry-run` to render and inspect without changing anything.
+Add `--dry-run` to render and inspect without changing anything. Most
+read commands accept `--json` for stable, script-friendly output.
+
+## Control-plane semantics
+
+- **Runtime inventory.** `llmctl runtimes` shows every configured
+  runtime with health, version, endpoint, currently *loaded* models
+  (distinct from installed), and honest capability flags — an operation
+  a runtime cannot do (e.g. deleting an LM Studio model remotely) is
+  reported as unsupported instead of silently no-opping.
+- **Readiness-gated starts.** A non-dry-run `llmctl start` of a server
+  runtime is only `running` once its endpoint actually answers. If the
+  process dies during startup the session is `failed` (with the last
+  log lines in the error); if the model is still loading when the wait
+  budget (`runtimes.<name>.readiness_timeout_s`, default 90s) runs out
+  the session stays `starting` and `reconcile` promotes it later.
+- **Degraded detection.** `reconcile` (and `llmctl sessions`, which
+  reconciles by default; `--no-fresh` skips it) probes each owned
+  session's endpoint: process alive but endpoint dead → `degraded`,
+  excluded from gateway routing until it recovers.
+- **Confirmations.** `scheduler.require_confirmation_for_start/stop/
+  delete` are honored by `vllm`, `stop`, and `delete-model`: llmctl
+  prompts when run interactively (never when scripted — prompts are
+  TTY-gated) and `--yes/-y` skips the prompt. Declining exits 0.
+- **JSON output.** `models`, `sessions`, `gpus`, `status`, `health`,
+  `presets`, `validate`, `doctor`, `runtimes`, and `config show` accept
+  `--json`: plain JSON on stdout, no ANSI, stable keys.
+- **Exit codes.** 0 = success (or a declined confirmation), 1 =
+  operational failure / findings (`validate`, `doctor`), 2 = usage
+  errors and unknown ids.
+- **Config.** `llmctl config path|show|validate` — `show` prints the
+  fully-resolved settings with secret-looking fields redacted.
 
 ## Model registry
 
@@ -158,15 +192,28 @@ DELETE /profiles/{id_or_name}
 POST   /profiles/{id}/validate  # preview warnings before PUT
 ```
 
+Also served (same app): `GET /health`, `GET /doctor` (structured
+pass/warn/fail report), `GET /sessions`, `POST /sessions/plan|start|
+cleanup`, `POST /sessions/{id}/stop|restart`, `GET /gpus`, and the
+`/benchmarks` CRUD. The API binds loopback by default; `llmctl serve`
+refuses a public bind unless `scheduler.allow_public_bind` is set
+(its mutating routes are unauthenticated).
+
 ## TUI keybindings
 
-| Key | Action |
-|-----|--------|
-| `m` | Models screen — `a` add, `e` edit, `c` clone, `d` delete |
-| `f` | Profiles screen — `a` create, `e` edit, `c` clone, `d` delete |
-| `p` | Preset aliases (orchestrator-level, distinct from profiles) |
-| `enter` | On a model row: preview launch plan and start session |
-| `ctrl+s` | Scan model directories |
+Global: `d` dashboard, `p` presets, `u` units, `m` models, `f`
+profiles, `s` sessions, `g` GPUs, `l` logs, `o` doctor, `b`
+benchmarks, `r` refresh, `q` quit, `ctrl+\` command palette. The TUI
+auto-refreshes every 3s and never blocks the UI on probes.
+
+| Screen | Keys |
+|--------|------|
+| Models (`m`) | `enter` preview → *Plan only* or *Launch now* (real start; hidden when the plan is refused), `ctrl+s` scan, `a` add, `e` edit, `c` clone, `d` delete, `x` prune missing |
+| Profiles (`f`) | `a` create, `e` edit, `c` clone, `d` delete |
+| Presets (`p`) | `enter`/`t` launch preset (restarts the managed unit after confirm), `a` add, `e` edit in `$EDITOR`, `c` clone, `d` delete |
+| Sessions (`s`) | `x` stop, `ctrl+r` restart, `c` cleanup; row-highlight tails the log. Failures (e.g. stopping an adopted session) surface as notifications |
+| Benchmarks (`b`) | `n` new, `enter` re-run, `c` set baseline, `x` clear baseline, `d` delete |
+| Doctor (`o`) | `c` copy install command |
 
 ## Best practices
 
@@ -219,6 +266,6 @@ uv run pytest -q
 uv run ruff check .
 ```
 
-~470 tests, ~70–80s wall time. Tests marked `requires_gpu`,
+~580 tests, ~80–90s wall time. Tests marked `requires_gpu`,
 `requires_systemd`, `live_hf`, or `bench_live` are skipped in CI; run
 them locally on the appropriate host.

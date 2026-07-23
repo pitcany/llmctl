@@ -14,6 +14,7 @@ don't run vLLM under systemd at all (e.g. a developer laptop).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import urllib.error
 import urllib.request
@@ -117,6 +118,57 @@ class VLLMAdapter(ProcessRuntimeAdapter):
             served.append(ServedModel(id=mid, root=root if isinstance(root, str) else None))
         return served
 
+    def capabilities(self) -> dict[str, bool]:
+        caps = super().capabilities()
+        caps.update({"list_loaded_models": True, "version": True})
+        return caps
+
+    async def version(self) -> str | None:
+        """Return the serving vLLM version from a managed unit's ``/version``."""
+
+        def fetch(unit: ManagedUnitConfig) -> str | None:
+            url = f"http://localhost:{unit.default_port}/version"
+            try:
+                resp = self._http_get(url, self._probe_timeout_s)
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+                return None
+            version = payload.get("version") if isinstance(payload, dict) else None
+            return version if isinstance(version, str) else None
+
+        for unit in self._candidate_units():
+            # The probe is sync urllib; off-thread it so concurrent inventory
+            # probes of other runtimes aren't stalled behind this timeout.
+            version = await asyncio.to_thread(fetch, unit)
+            if version is not None:
+                return version
+        return None
+
+    async def list_loaded_models(self) -> list[Model] | None:
+        """Return the models the managed unit(s) are actually serving now."""
+        loaded: list[Model] = []
+        any_answered = False
+        for unit in self._candidate_units():
+            served = await asyncio.to_thread(self._probe_unit, unit)
+            if served is None:
+                continue
+            any_answered = True
+            for model in served:
+                loaded.append(
+                    Model(
+                        name=model.id,
+                        runtime=RuntimeName.VLLM,
+                        source=model.id,
+                        path=model.root,
+                        status=ModelStatus.DISCOVERED,
+                        metadata={
+                            "managed_unit": unit.unit_name,
+                            "port": unit.default_port,
+                        },
+                    )
+                )
+        return loaded if any_answered else None
+
     async def health_check(self) -> AdapterStatus:
         """Report OK when any managed-unit port serves models.
 
@@ -127,7 +179,7 @@ class VLLMAdapter(ProcessRuntimeAdapter):
         """
         live: dict[str, list[str]] = {}
         for unit in self._candidate_units():
-            served = self._probe_unit(unit)
+            served = await asyncio.to_thread(self._probe_unit, unit)
             if served:
                 live[unit.unit_name] = [m.id for m in served]
 
@@ -161,7 +213,7 @@ class VLLMAdapter(ProcessRuntimeAdapter):
         models: list[Model] = []
 
         for unit in self._candidate_units():
-            served_models = self._probe_unit(unit)
+            served_models = await asyncio.to_thread(self._probe_unit, unit)
             if not served_models:
                 continue
             for served in served_models:

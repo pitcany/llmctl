@@ -71,6 +71,39 @@ def _session() -> Session:
     return Session(get_engine(settings.database_url))
 
 
+def _confirm_state_change(action: str, *, required: bool, assume_yes: bool) -> None:
+    """TTY-gated confirmation for a state-changing action.
+
+    Prompts only when the matching ``scheduler.require_confirmation_for_*``
+    setting is on, ``--yes`` was not passed, and stdin is a TTY (scripts and
+    pipelines are never blocked by a prompt). Declining is a clean exit 0 —
+    the user saying "no" is not an error.
+    """
+    import sys
+
+    if not required or assume_yes or not sys.stdin.isatty():
+        return
+    if not typer.confirm(f"{action} — continue?"):
+        console.print("[yellow]Aborted; nothing changed.[/yellow]")
+        raise typer.Exit(0)
+
+
+def _emit_json(payload: object) -> None:
+    """Print machine-readable JSON to stdout with no decoration.
+
+    Uses plain ``print`` (not Rich) so output is stable for pipes/scripts:
+    no ANSI codes, no wrapping, keys straight from the schemas.
+    """
+    import json
+
+    print(json.dumps(payload, indent=2, default=str, sort_keys=False))
+
+
+_JSON_OPT = Annotated[
+    bool, typer.Option("--json", help="Emit machine-readable JSON instead of a table.")
+]
+
+
 @app.command()
 def scan(
     do_import: Annotated[
@@ -119,10 +152,13 @@ def scan(
 
 
 @app.command("models")
-def models_cmd() -> None:
+def models_cmd(json_out: _JSON_OPT = False) -> None:
     """List registered models."""
     with _session() as db:
         models = RegistryService(db).list_models()
+    if json_out:
+        _emit_json([model.model_dump(mode="json") for model in models])
+        return
     table = Table(title="Models")
     table.add_column("ID")
     table.add_column("Name")
@@ -134,9 +170,12 @@ def models_cmd() -> None:
 
 
 @app.command()
-def gpus() -> None:
+def gpus(json_out: _JSON_OPT = False) -> None:
     """Show NVIDIA GPU telemetry."""
     gpus_info = get_gpu_info()
+    if json_out:
+        _emit_json([gpu.model_dump(mode="json") for gpu in gpus_info])
+        return
     if not gpus_info:
         console.print(
             "[yellow]No NVIDIA GPU telemetry available or "
@@ -175,10 +214,25 @@ def gpus() -> None:
 
 
 @app.command("sessions")
-def sessions_cmd() -> None:
+def sessions_cmd(
+    fresh: Annotated[
+        bool,
+        typer.Option(
+            "--fresh/--no-fresh",
+            help="Reconcile liveness (PID + endpoint probes) before listing.",
+        ),
+    ] = True,
+    json_out: _JSON_OPT = False,
+) -> None:
     """List runtime sessions."""
     with _session() as db:
-        sessions = SessionService(db).list_sessions()
+        service = SessionService(db)
+        if fresh:
+            service.reconcile()
+        sessions = service.list_sessions()
+    if json_out:
+        _emit_json([session.model_dump(mode="json") for session in sessions])
+        return
     table = Table(title="Sessions")
     table.add_column("ID")
     table.add_column("Runtime")
@@ -221,8 +275,19 @@ def add_model(
 
 
 @app.command("delete-model")
-def delete_model(model_id: Annotated[str, typer.Argument(help="Model ID to soft-delete.")]) -> None:
+def delete_model(
+    model_id: Annotated[str, typer.Argument(help="Model ID to soft-delete.")],
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
+    ] = False,
+) -> None:
     """Soft-delete a model record."""
+    settings = load_settings()
+    _confirm_state_change(
+        f"Soft-delete model {model_id}",
+        required=settings.scheduler.require_confirmation_for_delete,
+        assume_yes=yes,
+    )
     with _session() as db:
         deleted = RegistryService(db).delete_model(model_id)
     if deleted:
@@ -324,6 +389,12 @@ def start(
             f"[cyan]Planned session[/cyan] {session.id} "
             f"({session.runtime.value}); no process launched."
         )
+    elif session.status.value == "starting":
+        console.print(
+            f"[yellow]Session {session.id} is starting[/yellow] pid={session.pid}; "
+            "the endpoint is not ready yet (large models load for minutes). "
+            "`llmctl sessions` will show it running once it responds."
+        )
     else:
         console.print(
             f"[red]Session {session.id} {session.status.value}[/red]: {session.error}"
@@ -378,43 +449,36 @@ def plan(
 
 
 @app.command()
-def doctor() -> None:
-    """Report backend binaries, GPU telemetry, and scheduler configuration."""
-    from llmctl.services.backends import detect_backends
-    from llmctl.telemetry.gpu import nvml_available
+def doctor(json_out: _JSON_OPT = False) -> None:
+    """Inspect the environment: storage, runtimes, GPUs, sessions, drift.
 
-    settings = load_settings()
-    backends = detect_backends(settings)
-    table = Table(title="Backend Binaries")
-    table.add_column("Backend")
-    table.add_column("Binary")
-    table.add_column("Available")
-    table.add_column("Path")
-    for entry in backends:
-        available = "[green]yes[/green]" if entry["available"] else "[red]no[/red]"
-        table.add_row(
-            str(entry["backend"]),
-            str(entry["binary"]),
-            available,
-            str(entry["path"] or "-"),
-        )
-    console.print(table)
+    Read-only. Groups results into passed checks, warnings, and failures
+    with suggested remediation. Exits 1 when any check fails outright.
+    """
+    from llmctl.services.doctor import run_doctor
 
-    gpus_info = get_gpu_info()
+    report = run_doctor(load_settings())
+    if json_out:
+        _emit_json(report)
+        if not report["ok"]:
+            raise typer.Exit(code=1)
+        return
+
+    for verdict, style, entries in (
+        ("PASS", "green", report["passed"]),
+        ("WARN", "yellow", report["warnings"]),
+        ("FAIL", "red", report["failures"]),
+    ):
+        for check in entries:
+            console.print(f"[{style}]{verdict}[/{style}] {check['name']}: {check['detail']}")
+            if check.get("remediation") and verdict != "PASS":
+                console.print(f"       ↳ {check['remediation']}")
     console.print(
-        f"[bold]GPUs:[/bold] {len(gpus_info)}  "
-        f"[bold]NVML:[/bold] {nvml_available()}  "
-        f"[bold]Safe mode:[/bold] {settings.app.safe_mode}"
+        f"\n{len(report['passed'])} passed, {len(report['warnings'])} warning(s), "
+        f"{len(report['failures'])} failure(s)."
     )
-    sched = settings.scheduler
-    console.print(
-        f"[bold]Scheduler:[/bold] policy={sched.gpu_policy} "
-        f"safety_margin={sched.safety_margin_gb}GB "
-        f"public_bind={sched.allow_public_bind} default_host={sched.default_host}"
-    )
-    missing = [b["backend"] for b in backends if not b["available"]]
-    if missing:
-        console.print(f"[yellow]Missing backends:[/yellow] {', '.join(missing)}")
+    if not report["ok"]:
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -466,8 +530,17 @@ def stop(
             help="For an adopted session, stop its backing systemd unit (sudo).",
         ),
     ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
+    ] = False,
 ) -> None:
     """Mark a session stopped safely."""
+    settings = load_settings()
+    _confirm_state_change(
+        f"Stop session {session_id}" + (" and its systemd unit" if systemd else ""),
+        required=settings.scheduler.require_confirmation_for_stop,
+        assume_yes=yes,
+    )
     with _session() as db:
         try:
             session = SessionService(db).stop(session_id, stop_unit=systemd)
@@ -534,12 +607,180 @@ def logs(
     console.print(table)
 
 
+config_app = typer.Typer(name="config", help="Show and validate llmctl configuration.")
+app.add_typer(config_app, name="config")
+
+
+def _settings_file_path() -> Path:
+    """Return the settings.yaml path llmctl reads (may not exist yet)."""
+    from llmctl.config import settings_file_path
+
+    return settings_file_path()
+
+
+@config_app.command("path")
+def config_path() -> None:
+    """Print the settings file path (whether or not it exists)."""
+    path = _settings_file_path()
+    exists = "" if path.exists() else "  (not present; defaults in effect)"
+    print(f"{path}{exists}")
+
+
+def _redact_secrets(value: object) -> object:
+    """Return a copy of ``value`` with secret-looking fields masked."""
+    sensitive = (
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "api_key",
+        "apikey",
+        "auth",
+        "bearer",
+        "credential",
+        "private_key",
+        "cookie",
+    )
+    if isinstance(value, dict):
+        return {
+            key: (
+                "********"
+                if any(marker in key.lower() for marker in sensitive)
+                and val
+                and not isinstance(val, bool)
+                else _redact_secrets(val)
+            )
+            for key, val in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_secrets(item) for item in value]
+    return value
+
+
+@config_app.command("show")
+def config_show(json_out: _JSON_OPT = False) -> None:
+    """Show the fully-resolved settings (defaults + file + env overrides).
+
+    Secret-looking fields (tokens, keys, passwords) are redacted.
+    """
+    settings = load_settings()
+    payload = _redact_secrets(settings.model_dump(mode="json"))
+    if json_out:
+        _emit_json(payload)
+        return
+    import yaml
+
+    console.print(f"[dim]# resolved from {_settings_file_path()}[/dim]")
+    print(yaml.safe_dump(payload, sort_keys=False))
+
+
+@config_app.command("validate")
+def config_validate() -> None:
+    """Validate the settings file; exit 1 with the offending field on error."""
+    try:
+        load_settings()
+    except Exception as exc:
+        console.print(f"[red]Configuration invalid:[/red] {_settings_file_path()}")
+        console.print(str(exc))
+        raise typer.Exit(code=1) from exc
+    console.print(f"[green]Configuration valid.[/green] ({_settings_file_path()})")
+
+
+runtimes_app = typer.Typer(
+    name="runtimes",
+    help="Inspect configured runtimes: install state, version, capabilities.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+app.add_typer(runtimes_app, name="runtimes")
+
+
+@runtimes_app.callback()
+def runtimes_main(ctx: typer.Context, json_out: _JSON_OPT = False) -> None:
+    """List every runtime with health, version, endpoint, and loaded models."""
+    if ctx.invoked_subcommand is not None:
+        # `llmctl runtimes --json inspect X`: carry the group-level flag into
+        # the subcommand instead of silently dropping it.
+        ctx.obj = {"json": json_out}
+        return
+    from llmctl.services.runtimes import runtime_inventory
+
+    inventory = runtime_inventory(load_settings())
+    if json_out:
+        _emit_json(inventory)
+        return
+    table = Table(title="Runtimes")
+    table.add_column("runtime", style="cyan")
+    table.add_column("state")
+    table.add_column("version")
+    table.add_column("endpoint")
+    table.add_column("loaded models")
+    for row in table_rows_from_inventory(inventory):
+        table.add_row(*row)
+    console.print(table)
+    console.print("[dim]Details: llmctl runtimes inspect <runtime>[/dim]")
+
+
+def table_rows_from_inventory(inventory: list[dict]) -> list[tuple[str, ...]]:
+    """Format inventory rows for the runtimes table (split out for tests)."""
+    styles = {"ok": "green", "degraded": "yellow"}
+    rows: list[tuple[str, ...]] = []
+    for entry in inventory:
+        style = styles.get(entry["state"], "red")
+        loaded = entry["loaded"]
+        rows.append(
+            (
+                entry["runtime"],
+                f"[{style}]{entry['state']}[/{style}]",
+                entry["version"] or "-",
+                entry["endpoint"] or "-",
+                "n/a" if loaded is None else (", ".join(loaded) or "(none)"),
+            )
+        )
+    return rows
+
+
+@runtimes_app.command("inspect")
+def runtimes_inspect(
+    ctx: typer.Context,
+    runtime: Annotated[str, typer.Argument(help="Runtime name (e.g. ollama, vllm).")],
+    json_out: _JSON_OPT = False,
+) -> None:
+    """Show one runtime's full record, including its capability flags."""
+    from llmctl.services.runtimes import runtime_inventory
+
+    json_out = json_out or bool(ctx.obj and ctx.obj.get("json"))
+    inventory = runtime_inventory(load_settings())
+    match = next((row for row in inventory if row["runtime"] == runtime), None)
+    if match is None:
+        known = ", ".join(row["runtime"] for row in inventory)
+        raise typer.BadParameter(f"Unknown runtime '{runtime}'. Known: {known}")
+    if json_out:
+        _emit_json(match)
+        return
+    console.print(f"[bold]{match['display_name']}[/bold] ({match['runtime']})")
+    console.print(f"  state:    {match['state']} — {match['message']}")
+    console.print(f"  version:  {match['version'] or 'unknown'}")
+    console.print(f"  endpoint: {match['endpoint'] or '-'}")
+    loaded = match["loaded"]
+    console.print(
+        "  loaded:   " + ("n/a" if loaded is None else (", ".join(loaded) or "(none)"))
+    )
+    console.print("  capabilities:")
+    for key, supported in match["capabilities"].items():
+        mark = "[green]yes[/green]" if supported else "[dim]no[/dim]"
+        console.print(f"    {key}: {mark}")
+
+
 @app.command()
-def health() -> None:
+def health(json_out: _JSON_OPT = False) -> None:
     """Show overall and per-runtime health."""
     from llmctl.services.health import HealthService
 
     data = HealthService(load_settings()).get_health()
+    if json_out:
+        _emit_json(data)
+        return
     console.print(
         f"[bold]State:[/bold] {data['state']}  "
         f"[bold]Safe mode:[/bold] {data['safe_mode']}  "
@@ -821,9 +1062,16 @@ def serve(
 ) -> None:
     """Serve the FastAPI scaffold."""
     settings = load_settings()
+    bind_host = host or settings.api.host
+    if bind_host not in ("127.0.0.1", "localhost") and not settings.scheduler.allow_public_bind:
+        raise typer.BadParameter(
+            f"Refusing to bind the control-plane API to {bind_host}: its mutating "
+            "routes are unauthenticated. Set scheduler.allow_public_bind=true in "
+            "settings.yaml to override, or expose it via a reverse proxy instead."
+        )
     uvicorn.run(
         create_app(settings),
-        host=host or settings.api.host,
+        host=bind_host,
         port=port or settings.api.port,
     )
 
@@ -905,7 +1153,7 @@ def install_systemd(
             console.print(f"  [cyan]{message}[/cyan]")
 
     if all_sessions:
-        active_states = {"running", "starting", "planned"}
+        active_states = {"running", "starting", "degraded", "planned"}
         with _session() as db:
             sessions = SessionService(db).list_sessions()
         active = [s for s in sessions if s.status.value in active_states]
@@ -1011,9 +1259,19 @@ def vllm_cmd(
         bool,
         typer.Option("--no-wait", help="Skip waiting for /v1/models readiness after restart."),
     ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
+    ] = False,
 ) -> None:
     """Start the TP-fleet vLLM unit on PRESET (replaces ``gpu-models vllm``)."""
     settings = load_settings()
+    if not dry_run:
+        _confirm_state_change(
+            f"Restart {settings.managed_units.vllm_tp.unit_name} with preset '{preset}' "
+            "(interrupts whatever it is currently serving)",
+            required=settings.scheduler.require_confirmation_for_start,
+            assume_yes=yes,
+        )
     options = _build_options(tq if tq else None, no_tq, dry_run, no_wait)
     try:
         result = start_vllm_tp(
@@ -1042,9 +1300,14 @@ def vllm_cmd(
 
 
 @app.command("presets")
-def presets_cmd() -> None:
+def presets_cmd(json_out: _JSON_OPT = False) -> None:
     """List preset aliases known to llmctl."""
     views = load_preset_views()
+    if json_out:
+        import dataclasses
+
+        _emit_json([dataclasses.asdict(v) for v in views])
+        return
     if not views:
         console.print(
             "[yellow]No presets found.[/yellow] "
@@ -1073,28 +1336,49 @@ def presets_cmd() -> None:
 
 
 @app.command("status")
-def status_cmd() -> None:
-    """Quick overview of managed units and the presets they could serve."""
+def status_cmd(json_out: _JSON_OPT = False) -> None:
+    """Quick overview of managed units: config, live state, and served models."""
+    from llmctl.services.backends import probe_openai_v1_models
+
     settings = load_settings()
+    rows = []
+    for role, unit in (
+        ("vllm-tp", settings.managed_units.vllm_tp),
+    ):
+        served = probe_openai_v1_models(f"http://127.0.0.1:{unit.default_port}", 1.5)
+        rows.append(
+            {
+                "role": role,
+                "unit_name": unit.unit_name,
+                "env_file": str(unit.resolve_env_file()),
+                "port": unit.default_port,
+                "serving": served is not None,
+                "served_models": served or [],
+            }
+        )
+    if json_out:
+        _emit_json(rows)
+        return
     table = Table(title="Managed units")
     table.add_column("role", style="cyan")
     table.add_column("unit name")
     table.add_column("env file")
-    table.add_column("default port", justify="right")
-    for role, unit in (
-        ("vllm-tp", settings.managed_units.vllm_tp),
-    ):
+    table.add_column("port", justify="right")
+    table.add_column("serving")
+    for row in rows:
+        serving = (
+            f"[green]{', '.join(row['served_models'])}[/green]"
+            if row["serving"] and row["served_models"]
+            else ("[green]yes (empty list)[/green]" if row["serving"] else "[red]no[/red]")
+        )
         table.add_row(
-            role,
-            unit.unit_name,
-            str(unit.resolve_env_file()),
-            str(unit.default_port),
+            row["role"], row["unit_name"], row["env_file"], str(row["port"]), serving
         )
     console.print(table)
 
 
 @app.command("validate")
-def validate_cmd() -> None:
+def validate_cmd(json_out: _JSON_OPT = False) -> None:
     """Check that everything llmctl records still exists where it records it.
 
     Four read-only checks: preset ``model_id`` targets, registry row
@@ -1116,6 +1400,17 @@ def validate_cmd() -> None:
         *validate_svc.check_model_root_symlinks(load_model_dirs()),
         *validate_svc.check_managed_unit_ports([settings.managed_units.vllm_tp]),
     ]
+
+    if json_out:
+        _emit_json(
+            [
+                {"check": f.check, "target": f.target, "detail": f.detail}
+                for f in findings
+            ]
+        )
+        if findings:
+            raise typer.Exit(code=1)
+        return
 
     if not findings:
         console.print("[green]Validation passed.[/green] No drift found.")
