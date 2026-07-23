@@ -21,13 +21,19 @@ from llmctl.config import load_settings
 
 
 class RuntimeName(StrEnum):
-    """Supported runtime adapter identifiers."""
+    """Supported runtime adapter identifiers.
+
+    ``OPENAI`` is adopt-only: a generic OpenAI-compatible endpoint llmctl
+    routes to but cannot launch, stop, or inventory (no adapter, no launch
+    plan). Everything else is a local runtime with a full adapter.
+    """
 
     VLLM = "vllm"
     LLAMA_CPP = "llama_cpp"
     LMSTUDIO = "lmstudio"
     OLLAMA = "ollama"
     PYTHON_SCRIPT = "python_script"
+    OPENAI = "openai"
 
 
 class ModelStatus(StrEnum):

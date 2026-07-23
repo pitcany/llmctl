@@ -1628,7 +1628,11 @@ def adopt_cmd(
         str,
         typer.Option(
             "--runtime", "-r",
-            help="Runtime adapter id (vllm, llama_cpp, lmstudio, ollama, python_script).",
+            help=(
+                "Runtime adapter id (vllm, llama_cpp, lmstudio, ollama, "
+                "python_script), or 'openai' for a generic OpenAI-compatible "
+                "endpoint llmctl routes to but does not manage."
+            ),
         ),
     ] = "vllm",
     unit: Annotated[
