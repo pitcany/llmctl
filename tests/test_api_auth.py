@@ -77,6 +77,21 @@ def test_enabled_without_token_fails_closed(tmp_path: Path) -> None:
     assert client.get("/health").status_code == 200
 
 
+def test_empty_string_token_fails_closed_like_none(tmp_path: Path) -> None:
+    """`auth_token: ""` must NOT become a token that `Bearer ` matches."""
+    client = _client(tmp_path, require=True, token="")
+    assert client.get("/models").status_code == 503
+    # The empty-credential probe that would pass compare_digest("", "").
+    assert client.get("/models", headers={"Authorization": "Bearer "}).status_code == 503
+
+
+def test_whitespace_padded_token_is_normalized(tmp_path: Path) -> None:
+    """A YAML block scalar's trailing newline must not lock out clean headers."""
+    client = _client(tmp_path, require=True, token="tok-123\n")
+    response = client.get("/models", headers={"Authorization": "Bearer tok-123"})
+    assert response.status_code == 200
+
+
 def test_env_var_token_overrides_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

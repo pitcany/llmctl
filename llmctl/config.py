@@ -445,8 +445,14 @@ def resolve_api_auth_token(settings: Settings) -> str | None:
 
     The ``LLMCTL_API_TOKEN`` environment variable beats ``api.auth_token``
     from settings.yaml so units/scripts can inject the secret at runtime.
+    Falsy and whitespace-only values collapse to ``None`` — an empty token
+    must read as "unset" (fail closed), never as a token every
+    ``Authorization: Bearer`` header trivially matches.
     """
-    return os.environ.get("LLMCTL_API_TOKEN") or settings.api.auth_token
+    token = os.environ.get("LLMCTL_API_TOKEN") or settings.api.auth_token
+    if token is None:
+        return None
+    return token.strip() or None
 
 
 def load_model_dirs(path: Path | None = None) -> ModelDirsConfig:
