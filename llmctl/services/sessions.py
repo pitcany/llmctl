@@ -26,6 +26,7 @@ from llmctl.db import (
     SessionStatus,
     utcnow,
 )
+from llmctl.integrations.journalctl import JournalctlRunner
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.schemas import LaunchPlan, Session, SessionStartRequest
 from llmctl.services.backends import probe_openai_v1_models
@@ -118,6 +119,7 @@ class SessionService:
         probe: ProbeFn | None = None,
         gpu_ids_for_unit: GpuIdsFn | None = None,
         systemctl: SystemctlRunner | None = None,
+        journalctl: JournalctlRunner | None = None,
     ) -> None:
         self.db = db
         self.settings = settings or load_settings()
@@ -128,6 +130,7 @@ class SessionService:
         )
         self._gpu_ids_for_unit: GpuIdsFn = gpu_ids_for_unit or unit_gpu_ids
         self._systemctl = systemctl or SystemctlRunner()
+        self._journalctl = journalctl or JournalctlRunner()
 
     def list_sessions(self) -> list[Session]:
         """Return all known sessions as currently persisted.
@@ -430,21 +433,53 @@ class SessionService:
         }
 
     def tail_log(self, session_id: str, lines: int = 50) -> str | None:
-        """Return the last ``lines`` of a session's log file.
+        """Return the last ``lines`` of a session's log surface.
+
+        OWNED sessions read their llmctl-written log file. ADOPTED sessions
+        have no such file — their externally managed unit's journal is the
+        log surface, so records that name a ``systemd_unit`` fall back to
+        ``journalctl -u <unit>`` (journalctl problems are reported inline as
+        a one-line message rather than raised, so the CLI/TUI always render
+        something actionable).
 
         Returns ``None`` when the session does not exist, and an empty string
-        when no log file is present yet.
+        when no log output is available yet.
         """
         record = self.db.get(SessionRecord, session_id)
         if record is None:
             return None
-        if not record.log_path:
-            return ""
-        path = Path(record.log_path)
-        if not path.exists():
-            return ""
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            return "".join(handle.readlines()[-lines:])
+        if record.log_path:
+            path = Path(record.log_path)
+            if path.exists():
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    return "".join(handle.readlines()[-lines:])
+        if record.kind == SessionKind.ADOPTED and record.systemd_unit:
+            return self._journal_tail(record.systemd_unit, lines)
+        return ""
+
+    def _journal_tail(self, unit: str, lines: int) -> str:
+        """Tail ``unit``'s journal, trying the system scope then user scope.
+
+        Returns log text, an empty string when neither journal has entries,
+        or a one-line diagnostic when journalctl itself is unusable.
+        """
+        if not self._journalctl.available():
+            return (
+                f"journalctl not found on this host; cannot read logs for "
+                f"adopted unit {unit}."
+            )
+        result = self._journalctl.tail_unit(unit, lines=lines)
+        if not result.ok:
+            detail = result.stderr.strip() or f"exit {result.returncode}"
+            return f"journalctl -u {unit} failed: {detail}"
+        if result.has_entries:
+            return result.stdout
+        # Nothing in the system journal — the unit may run under
+        # `systemctl --user`, whose logs live in the user-scope journal.
+        user_result = self._journalctl.tail_unit(unit, lines=lines, user=True)
+        if user_result.has_entries:
+            return user_result.stdout
+        return ""
 
     def start(self, request: SessionStartRequest) -> Session:
         """Plan and (when not dry-run) launch a runtime session."""
