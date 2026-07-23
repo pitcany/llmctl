@@ -66,15 +66,60 @@ def test_openai_adopted_reconcile_probe_lifecycle(tmp_path: Path) -> None:
         db.close()
 
 
-def test_scheduler_refuses_openai_launch_plan(tmp_path: Path) -> None:
+def test_scheduler_records_openai_refusal_without_raising(tmp_path: Path) -> None:
+    """The refusal rides on the plan (plan/preview stay graceful); only
+    validate() raises, and force/dry-run bypass it like any other refusal."""
     url = f"sqlite:///{tmp_path / 'sched.sqlite3'}"
     init_db(url)
     with Session(get_engine(url)) as db:
         scheduler = SchedulerService(db, Settings())
+        plan = scheduler.create_launch_plan(
+            SessionStartRequest(model_id="whatever", runtime=RuntimeName.OPENAI)
+        )
+        assert any("adopt-only" in reason for reason in plan.refusal_reasons)
         with pytest.raises(SchedulerError, match="adopt-only"):
-            scheduler.create_launch_plan(
-                SessionStartRequest(model_id="whatever", runtime=RuntimeName.OPENAI)
+            scheduler.validate(plan, force=False, dry_run=False)
+        scheduler.validate(plan, force=True, dry_run=False)  # must not raise
+
+
+def test_api_plan_route_previews_openai_refusal(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from llmctl.api.app import create_app
+
+    client = TestClient(
+        create_app(database_url=f"sqlite:///{tmp_path / 'planapi.sqlite3'}")
+    )
+    response = client.post(
+        "/sessions/plan",
+        json={"model_id": "whatever", "runtime": "openai"},
+    )
+    assert response.status_code == 200
+    assert any("adopt-only" in r for r in response.json()["refusal_reasons"])
+
+
+def test_forced_openai_start_fails_cleanly(tmp_path: Path) -> None:
+    """--force past the refusal must record FAILED, not crash on KeyError."""
+    from llmctl.db import ModelRecord
+
+    url = f"sqlite:///{tmp_path / 'forced.sqlite3'}"
+    init_db(url)
+    with Session(get_engine(url)) as db:
+        model = ModelRecord(name="remote", runtime=RuntimeName.OPENAI, source="remote")
+        db.add(model)
+        db.commit()
+        db.refresh(model)
+        service = SessionService(db)
+        session = service.start(
+            SessionStartRequest(
+                model_id=model.id,
+                runtime=RuntimeName.OPENAI,
+                dry_run=False,
+                force=True,
             )
+        )
+        assert session.status == SessionStatus.FAILED
+        assert session.error is not None and "no launch adapter" in session.error
 
 
 def test_gateway_routes_to_openai_adopted_session(tmp_path: Path) -> None:

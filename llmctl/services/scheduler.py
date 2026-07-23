@@ -55,14 +55,6 @@ class SchedulerService:
     def create_launch_plan(self, request: SessionStartRequest) -> LaunchPlan:
         """Build a fully populated, inspectable launch plan. Never launches."""
         runtime = request.runtime
-        if runtime == RuntimeName.OPENAI:
-            # Adopt-only: there is no local process to plan, so even a
-            # dry-run plan would be a lie.
-            raise SchedulerError(
-                "Runtime 'openai' is adopt-only (an external OpenAI-compatible "
-                "endpoint). Use `llmctl adopt --endpoint <url> --runtime openai` "
-                "instead of start."
-            )
         runtime_config = self.settings.runtime_config(runtime.value)
         model = self._get_model(request.model_id)
         profile = self._get_profile(request.profile_id)
@@ -78,6 +70,17 @@ class SchedulerService:
         warnings: list[str] = []
         refusals: list[str] = []
         notes: list[str] = []
+
+        if runtime == RuntimeName.OPENAI:
+            # Adopt-only: there is no local process to plan. Recorded as a
+            # refusal (not a raise) so `llmctl plan`/`preview` and
+            # POST /sessions/plan preview it gracefully like every other
+            # refusal; only validate() raises.
+            refusals.append(
+                "Runtime 'openai' is adopt-only (an external OpenAI-compatible "
+                "endpoint). Use `llmctl adopt --endpoint <url> --runtime openai` "
+                "instead of start."
+            )
 
         if profile is not None and profile.runtime != runtime:
             refusals.append(

@@ -808,7 +808,31 @@ class SessionService:
         self.db.add(record)
         self.db.commit()
 
-        adapter = self.router.get_adapter(record.runtime)
+        try:
+            adapter = self.router.get_adapter(record.runtime)
+        except KeyError:
+            # Adapterless runtime (e.g. adopt-only 'openai') reached launch —
+            # possible via --force past the scheduler refusal. Fail the
+            # session cleanly instead of crashing with a raw KeyError.
+            record.status = SessionStatus.FAILED
+            record.error = (
+                f"Runtime '{record.runtime.value}' has no launch adapter; "
+                "it cannot be started by llmctl."
+            )
+            record.updated_at = utcnow()
+            self.db.add(record)
+            self.db.commit()
+            self.db.refresh(record)
+            log_event(
+                self.db,
+                EventLevel.ERROR,
+                "session",
+                f"Failed to start session {record.id}: {record.error}",
+                session_id=record.id,
+                model_id=record.model_id,
+                data={"error": record.error},
+            )
+            return record_to_session(record)
 
         def _on_spawn(pid: int, log_path: str | None) -> None:
             # Persist the pid BEFORE any readiness wait: if this process is
