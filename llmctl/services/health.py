@@ -34,20 +34,30 @@ class HealthService:
         return self._router
 
     def _runtime_health(self) -> dict[str, dict[str, Any]]:
-        """Return per-runtime adapter health states."""
+        """Return per-runtime adapter health states (probed concurrently)."""
+        order = list(self.router.list_runtimes())
+
+        async def probe_all() -> list[Any]:
+            return await asyncio.gather(
+                *(self.router.get_adapter(runtime).health_check() for runtime in order),
+                return_exceptions=True,
+            )
+
         runtimes: dict[str, dict[str, Any]] = {}
-        for runtime in self.router.list_runtimes():
-            adapter = self.router.get_adapter(runtime)
-            try:
-                status = asyncio.run(adapter.health_check())
-                runtimes[runtime.value] = {
-                    "state": status.state.value,
-                    "message": status.message,
-                }
-            except Exception as exc:
+        try:
+            results = asyncio.run(probe_all())
+        except Exception as exc:  # event-loop level failure; report on every runtime
+            results = [exc] * len(order)
+        for runtime, result in zip(order, results, strict=True):
+            if isinstance(result, BaseException):
                 runtimes[runtime.value] = {
                     "state": HealthState.UNKNOWN.value,
-                    "message": f"Health check error: {exc}",
+                    "message": f"Health check error: {result}",
+                }
+            else:
+                runtimes[runtime.value] = {
+                    "state": result.state.value,
+                    "message": result.message,
                 }
         return runtimes
 

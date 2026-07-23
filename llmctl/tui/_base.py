@@ -51,10 +51,23 @@ class DataScreen(Screen[None]):
         self.app.call_from_thread(self.render_data, data)
 
     def run_action_worker(self, func: Any, after: Any) -> None:
-        """Run a blocking action ``func`` off-thread, then ``after(result)``."""
+        """Run a blocking action ``func`` off-thread, then ``after(result)``.
+
+        Action failures (e.g. stopping an adopted session, which the service
+        layer refuses with ``AdoptError``) surface as an error notification
+        instead of crashing the worker.
+        """
 
         def _worker() -> None:
-            result = func()
+            try:
+                result = func()
+            except Exception as exc:
+                self.app.call_from_thread(self._notify_action_error, exc)
+                return
             self.app.call_from_thread(after, result)
 
         self.run_worker(_worker, thread=True)
+
+    def _notify_action_error(self, exc: Exception) -> None:
+        """Show a persistent, visible error for a failed action."""
+        self.notify(str(exc), title="Action failed", severity="error", timeout=10)

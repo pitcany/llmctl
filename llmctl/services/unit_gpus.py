@@ -108,9 +108,41 @@ def unit_gpu_ids(
         return []
     raw_environ = read_environ(pid)
     if raw_environ is None:
-        return []
+        # Root-owned units make /proc/<pid>/environ unreadable to non-root
+        # llmctl. Fall back to the unit's EnvironmentFile (which llmctl
+        # itself writes for managed units) so adopted sessions don't
+        # silently show "no GPUs" on the common production posture.
+        return _gpu_ids_from_environment_file(unit_name, run=run)
     for entry in raw_environ.split("\0"):
         key, sep, value = entry.partition("=")
         if sep and key == _CUDA_VISIBLE_DEVICES:
             return parse_cuda_visible_devices(value)
+    return []
+
+
+def _gpu_ids_from_environment_file(unit_name: str, *, run: RunFn) -> list[int]:
+    """Read ``CUDA_VISIBLE_DEVICES`` from the unit's EnvironmentFile(s)."""
+    try:
+        proc = run(
+            ["systemctl", "show", unit_name, "--property=EnvironmentFiles", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=_SYSTEMCTL_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    for line in (proc.stdout or "").splitlines():
+        # Format: "/path/to/file (ignore_errors=no)"
+        path_str = line.split(" (", 1)[0].strip()
+        if not path_str:
+            continue
+        try:
+            content = Path(path_str).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for env_line in content.splitlines():
+            key, sep, value = env_line.strip().partition("=")
+            if sep and key == _CUDA_VISIBLE_DEVICES:
+                return parse_cuda_visible_devices(value.strip().strip('"'))
     return []

@@ -71,6 +71,23 @@ def _session() -> Session:
     return Session(get_engine(settings.database_url))
 
 
+def _confirm_state_change(action: str, *, required: bool, assume_yes: bool) -> None:
+    """TTY-gated confirmation for a state-changing action.
+
+    Prompts only when the matching ``scheduler.require_confirmation_for_*``
+    setting is on, ``--yes`` was not passed, and stdin is a TTY (scripts and
+    pipelines are never blocked by a prompt). Declining is a clean exit 0 —
+    the user saying "no" is not an error.
+    """
+    import sys
+
+    if not required or assume_yes or not sys.stdin.isatty():
+        return
+    if not typer.confirm(f"{action} — continue?"):
+        console.print("[yellow]Aborted; nothing changed.[/yellow]")
+        raise typer.Exit(0)
+
+
 @app.command()
 def scan(
     do_import: Annotated[
@@ -221,8 +238,19 @@ def add_model(
 
 
 @app.command("delete-model")
-def delete_model(model_id: Annotated[str, typer.Argument(help="Model ID to soft-delete.")]) -> None:
+def delete_model(
+    model_id: Annotated[str, typer.Argument(help="Model ID to soft-delete.")],
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
+    ] = False,
+) -> None:
     """Soft-delete a model record."""
+    settings = load_settings()
+    _confirm_state_change(
+        f"Soft-delete model {model_id}",
+        required=settings.scheduler.require_confirmation_for_delete,
+        assume_yes=yes,
+    )
     with _session() as db:
         deleted = RegistryService(db).delete_model(model_id)
     if deleted:
@@ -466,8 +494,17 @@ def stop(
             help="For an adopted session, stop its backing systemd unit (sudo).",
         ),
     ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
+    ] = False,
 ) -> None:
     """Mark a session stopped safely."""
+    settings = load_settings()
+    _confirm_state_change(
+        f"Stop session {session_id}" + (" and its systemd unit" if systemd else ""),
+        required=settings.scheduler.require_confirmation_for_stop,
+        assume_yes=yes,
+    )
     with _session() as db:
         try:
             session = SessionService(db).stop(session_id, stop_unit=systemd)
@@ -821,9 +858,16 @@ def serve(
 ) -> None:
     """Serve the FastAPI scaffold."""
     settings = load_settings()
+    bind_host = host or settings.api.host
+    if bind_host not in ("127.0.0.1", "localhost") and not settings.scheduler.allow_public_bind:
+        raise typer.BadParameter(
+            f"Refusing to bind the control-plane API to {bind_host}: its mutating "
+            "routes are unauthenticated. Set scheduler.allow_public_bind=true in "
+            "settings.yaml to override, or expose it via a reverse proxy instead."
+        )
     uvicorn.run(
         create_app(settings),
-        host=host or settings.api.host,
+        host=bind_host,
         port=port or settings.api.port,
     )
 
@@ -1011,9 +1055,19 @@ def vllm_cmd(
         bool,
         typer.Option("--no-wait", help="Skip waiting for /v1/models readiness after restart."),
     ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
+    ] = False,
 ) -> None:
     """Start the TP-fleet vLLM unit on PRESET (replaces ``gpu-models vllm``)."""
     settings = load_settings()
+    if not dry_run:
+        _confirm_state_change(
+            f"Restart {settings.managed_units.vllm_tp.unit_name} with preset '{preset}' "
+            "(interrupts whatever it is currently serving)",
+            required=settings.scheduler.require_confirmation_for_start,
+            assume_yes=yes,
+        )
     options = _build_options(tq if tq else None, no_tq, dry_run, no_wait)
     try:
         result = start_vllm_tp(
