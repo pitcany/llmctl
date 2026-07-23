@@ -56,23 +56,32 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
 
     @app.get("/doctor", tags=["health"])
     def doctor() -> dict[str, object]:
-        """Return backend availability, GPU telemetry, and scheduler config."""
+        """Return the structured doctor report (same checks as `llmctl doctor`).
+
+        Legacy summary keys (backends/gpu_count/...) are kept so existing
+        dashboards don't break; the pass/warn/fail report is authoritative.
+        """
         from llmctl.services.backends import detect_backends
+        from llmctl.services.doctor import run_doctor
         from llmctl.telemetry.gpu import get_gpu_info, nvml_available
 
         sched = effective_settings.scheduler
-        return {
-            "backends": detect_backends(effective_settings),
-            "gpu_count": len(get_gpu_info()),
-            "nvml_available": nvml_available(),
-            "safe_mode": effective_settings.app.safe_mode,
-            "scheduler": {
-                "gpu_policy": sched.gpu_policy,
-                "safety_margin_gb": sched.safety_margin_gb,
-                "allow_public_bind": sched.allow_public_bind,
-                "default_host": sched.default_host,
-            },
-        }
+        report = run_doctor(effective_settings)
+        report.update(
+            {
+                "backends": detect_backends(effective_settings),
+                "gpu_count": len(get_gpu_info()),
+                "nvml_available": nvml_available(),
+                "safe_mode": effective_settings.app.safe_mode,
+                "scheduler": {
+                    "gpu_policy": sched.gpu_policy,
+                    "safety_margin_gb": sched.safety_margin_gb,
+                    "allow_public_bind": sched.allow_public_bind,
+                    "default_host": sched.default_host,
+                },
+            }
+        )
+        return report
 
     app.include_router(routes_models.router)
     app.include_router(routes_profiles.router)

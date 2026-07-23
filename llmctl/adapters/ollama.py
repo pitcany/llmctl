@@ -38,6 +38,26 @@ class OllamaAdapter(HttpRuntimeAdapter):
         """Ollama model listing endpoint."""
         return "/api/tags"
 
+    def capabilities(self) -> dict[str, bool]:
+        """Ollama additionally supports remote deletion and version reporting."""
+        caps = super().capabilities()
+        caps.update({"delete_model": True, "version": True})
+        return caps
+
+    async def version(self) -> str | None:
+        """Return the daemon version from ``GET /api/version``."""
+        ok, data, _ = await self._get_json("/api/version")
+        if ok and isinstance(data, dict) and isinstance(data.get("version"), str):
+            return data["version"]
+        return None
+
+    async def list_loaded_models(self) -> list[Model] | None:
+        """Return models currently loaded into memory (``GET /api/ps``)."""
+        ok, data, _ = await self._get_json("/api/ps")
+        if not ok or not isinstance(data, dict):
+            return None
+        return self._parse_models(data)
+
     def _parse_models(self, data: object) -> list[Model]:
         """Parse the ``/api/tags`` payload into models."""
         if not isinstance(data, dict):

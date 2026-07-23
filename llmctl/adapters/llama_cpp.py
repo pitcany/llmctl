@@ -7,6 +7,9 @@ is delegated to the shared supervisor.
 
 from __future__ import annotations
 
+import asyncio
+import shutil
+
 from llmctl.adapters._common import ProcessRuntimeAdapter
 from llmctl.config import RuntimeConfig, default_runtime_configs
 from llmctl.db import RuntimeName
@@ -28,3 +31,29 @@ class LlamaCppAdapter(ProcessRuntimeAdapter):
             supervisor,
             filesystem_discovery=True,
         )
+
+    def capabilities(self) -> dict[str, bool]:
+        caps = super().capabilities()
+        caps["version"] = True
+        return caps
+
+    async def version(self) -> str | None:
+        """Return ``llama-server --version`` output (first line), if runnable."""
+        binary = self.config.binary or "llama-server"
+        resolved = shutil.which(binary)
+        if not resolved:
+            return None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                resolved,
+                "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        except (TimeoutError, OSError):
+            return None
+        for line in out.decode("utf-8", errors="replace").splitlines():
+            if line.strip():
+                return line.strip()
+        return None

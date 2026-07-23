@@ -117,6 +117,12 @@ class HttpRuntimeAdapter(RuntimeAdapter):
         """Path to the runtime model-listing endpoint."""
         raise NotImplementedError
 
+    def capabilities(self) -> dict[str, bool]:
+        """HTTP runtimes: discovery + health; no process control from llmctl."""
+        caps = super().capabilities()
+        caps["list_loaded_models"] = True
+        return caps
+
     async def health_check(self) -> AdapterStatus:
         """Return OK when the runtime endpoint is reachable."""
         ok, _, error = await self._get_json(self.health_path)
@@ -211,6 +217,19 @@ class ProcessRuntimeAdapter(RuntimeAdapter):
         self.config = config
         self.supervisor = supervisor or ProcessSupervisor()
         self.filesystem_discovery = filesystem_discovery
+
+    def capabilities(self) -> dict[str, bool]:
+        """Process runtimes: full local process control + supervised logs."""
+        caps = super().capabilities()
+        caps.update(
+            {
+                "discover_models": self.filesystem_discovery,
+                "launch_process": True,
+                "stop_process": True,
+                "logs": True,
+            }
+        )
+        return caps
 
     async def discover_models(self) -> list[Model]:
         """Discover on-disk models when this runtime is filesystem-backed."""

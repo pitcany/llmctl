@@ -117,6 +117,50 @@ class VLLMAdapter(ProcessRuntimeAdapter):
             served.append(ServedModel(id=mid, root=root if isinstance(root, str) else None))
         return served
 
+    def capabilities(self) -> dict[str, bool]:
+        caps = super().capabilities()
+        caps.update({"list_loaded_models": True, "version": True})
+        return caps
+
+    async def version(self) -> str | None:
+        """Return the serving vLLM version from a managed unit's ``/version``."""
+        for unit in self._candidate_units():
+            url = f"http://localhost:{unit.default_port}/version"
+            try:
+                resp = self._http_get(url, self._probe_timeout_s)
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+                continue
+            version = payload.get("version") if isinstance(payload, dict) else None
+            if isinstance(version, str):
+                return version
+        return None
+
+    async def list_loaded_models(self) -> list[Model] | None:
+        """Return the models the managed unit(s) are actually serving now."""
+        loaded: list[Model] = []
+        any_answered = False
+        for unit in self._candidate_units():
+            served = self._probe_unit(unit)
+            if served is None:
+                continue
+            any_answered = True
+            for model in served:
+                loaded.append(
+                    Model(
+                        name=model.id,
+                        runtime=RuntimeName.VLLM,
+                        source=model.id,
+                        path=model.root,
+                        status=ModelStatus.DISCOVERED,
+                        metadata={
+                            "managed_unit": unit.unit_name,
+                            "port": unit.default_port,
+                        },
+                    )
+                )
+        return loaded if any_answered else None
+
     async def health_check(self) -> AdapterStatus:
         """Report OK when any managed-unit port serves models.
 
