@@ -90,10 +90,12 @@ class JournalctlRunner:
                     timeout=_TIMEOUT_S,
                 )
             except subprocess.TimeoutExpired:
+                # Bare phrase, no command echo: callers prefix their own
+                # "journalctl -u <unit> failed:" context when reporting.
                 return JournalResult(
                     returncode=124,
                     stdout="",
-                    stderr=f"journalctl -u {unit} timed out after {int(_TIMEOUT_S)}s",
+                    stderr=f"timed out after {int(_TIMEOUT_S)}s",
                 )
         return JournalResult(
             returncode=completed.returncode,

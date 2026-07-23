@@ -127,6 +127,28 @@ def test_tail_unit_clamps_lines_to_at_least_one() -> None:
     assert calls[0][calls[0].index("-n") + 1] == "1"
 
 
+def test_tail_unit_times_out_cleanly(monkeypatch) -> None:
+    def slow_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 0))
+
+    monkeypatch.setattr(subprocess, "run", slow_run)
+    result = JournalctlRunner().tail_unit("vllm-tp", lines=5)
+    assert result.returncode == 124
+    assert "timed out" in result.stderr
+    assert not result.has_entries
+
+
+def test_journal_timeout_diagnostic_is_not_doubled(tmp_path: Path) -> None:
+    """The service-level message must not repeat the journalctl command echo."""
+    journal = _StubJournal([(124, "", "timed out after 30s")])
+    db, service, sid = _adopted_service(tmp_path, journal)
+    try:
+        content = service.tail_log(sid)
+        assert content == "journalctl -u vllm-tp failed: timed out after 30s"
+    finally:
+        db.close()
+
+
 def test_journal_result_has_entries_semantics() -> None:
     assert JournalResult(0, "real log line\n", "").has_entries
     assert not JournalResult(0, "-- No entries --\n", "").has_entries
