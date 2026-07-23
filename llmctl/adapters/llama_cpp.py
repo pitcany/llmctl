@@ -43,6 +43,7 @@ class LlamaCppAdapter(ProcessRuntimeAdapter):
         resolved = shutil.which(binary)
         if not resolved:
             return None
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 resolved,
@@ -52,6 +53,11 @@ class LlamaCppAdapter(ProcessRuntimeAdapter):
             )
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
         except (TimeoutError, OSError):
+            if proc is not None and proc.returncode is None:
+                # wait_for only cancels the await; kill the child so a binary
+                # that ignores --version doesn't linger as an untracked process.
+                proc.kill()
+                await proc.wait()
             return None
         for line in out.decode("utf-8", errors="replace").splitlines():
             if line.strip():

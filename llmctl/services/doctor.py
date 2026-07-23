@@ -40,12 +40,30 @@ def run_doctor(settings: Settings | None = None) -> dict[str, Any]:
     """
     cfg = settings or load_settings()
     checks: list[DoctorCheck] = []
-    checks.extend(_check_storage(cfg))
-    checks.extend(_check_backends(cfg))
-    checks.extend(_check_gpu())
-    checks.extend(_check_sessions(cfg))
-    checks.extend(_check_drift(cfg))
-    checks.extend(_check_gateway(cfg))
+    named_checks = (
+        ("storage", lambda: _check_storage(cfg)),
+        ("backends", lambda: _check_backends(cfg)),
+        ("gpu", _check_gpu),
+        ("sessions", lambda: _check_sessions(cfg)),
+        ("drift", lambda: _check_drift(cfg)),
+        ("gateway", lambda: _check_gateway(cfg)),
+    )
+    for name, check in named_checks:
+        # A diagnostic must degrade one broken check (e.g. malformed YAML in
+        # model_dirs.yaml crashing the drift scan) into a failure entry, not
+        # take down the whole report.
+        try:
+            checks.extend(check())
+        except Exception as exc:
+            checks.append(
+                DoctorCheck(
+                    f"doctor:{name}",
+                    "fail",
+                    f"check crashed: {exc}",
+                    "This usually means a malformed config/state file; the error "
+                    "message above names the culprit.",
+                )
+            )
 
     report = {
         "passed": [asdict(c) for c in checks if c.verdict == "pass"],

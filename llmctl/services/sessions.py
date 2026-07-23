@@ -53,6 +53,15 @@ _ADOPT_BLOCKING_STATES = {
 #: Default per-call timeout (seconds) for HTTP probes against adopted endpoints.
 _ADOPT_PROBE_TIMEOUT_S = 1.5
 
+#: Timeout for probing OWNED session endpoints during reconcile. Longer than
+#: the adopt probe: a vLLM instance under heavy generation load can be slow to
+#: answer /v1/models, and a false RUNNING->DEGRADED demotion pulls a healthy
+#: model out of gateway routing.
+_OWNED_PROBE_TIMEOUT_S = 3.0
+
+#: Concurrency cap for reconcile endpoint probes.
+_PROBE_MAX_WORKERS = 8
+
 
 class AdoptError(ValueError):
     """Raised when an adopt request cannot be honored.
@@ -169,17 +178,67 @@ class SessionService:
                 )
             )
         ).all()
+        probes = self._probe_endpoints(records)
         changed = 0
         for record in records:
             if record.kind == SessionKind.ADOPTED:
-                changed += self._reconcile_adopted(record)
+                changed += self._reconcile_adopted(record, probes.get(record.id))
             elif record.status in _ACTIVE_STATES:
-                changed += self._reconcile_owned(record)
+                changed += self._reconcile_owned(record, probes.get(record.id))
         if changed:
             self.db.commit()
         return changed
 
-    def _reconcile_owned(self, record: SessionRecord) -> int:
+    def _probe_endpoints(self, records: list[SessionRecord]) -> dict[str, list[str] | None]:
+        """Probe candidate endpoints, concurrently when there are several.
+
+        Probing serially at up to a few seconds per dead endpoint made
+        ``reconcile`` (and therefore ``llmctl sessions``) scale badly with
+        the number of tracked sessions. Owned records whose PID is already
+        dead are skipped — the dead-pid branch decides without a probe.
+        """
+        candidates: list[SessionRecord] = []
+        for record in records:
+            if not record.endpoint_url:
+                continue
+            if record.kind != SessionKind.ADOPTED:
+                if record.status not in _ACTIVE_STATES:
+                    continue
+                if record.pid and not self.router.supervisor.is_running(record.pid):
+                    continue
+            candidates.append(record)
+        if not candidates:
+            return {}
+        if len(candidates) == 1:
+            record = candidates[0]
+            return {record.id: self._probe_record_endpoint(record)}
+        from concurrent.futures import ThreadPoolExecutor
+
+        results: dict[str, list[str] | None] = {}
+        with ThreadPoolExecutor(max_workers=min(_PROBE_MAX_WORKERS, len(candidates))) as pool:
+            futures = {
+                pool.submit(self._probe_record_endpoint, record): record.id
+                for record in candidates
+            }
+            for future, record_id in futures.items():
+                try:
+                    results[record_id] = future.result()
+                except Exception:
+                    results[record_id] = None
+        return results
+
+    def _probe_record_endpoint(self, record: SessionRecord) -> list[str] | None:
+        """Probe one record's endpoint with kind-appropriate timeout/debounce."""
+        if record.kind == SessionKind.ADOPTED:
+            return self._probe(record.endpoint_url, _ADOPT_PROBE_TIMEOUT_S)
+        served = self._probe(record.endpoint_url, _OWNED_PROBE_TIMEOUT_S)
+        if served is None and record.status == SessionStatus.RUNNING:
+            # Debounce: one slow/failed answer under load must not demote a
+            # healthy RUNNING session; only two consecutive failures do.
+            served = self._probe(record.endpoint_url, _OWNED_PROBE_TIMEOUT_S)
+        return served
+
+    def _reconcile_owned(self, record: SessionRecord, served: list[str] | None) -> int:
         """Reconcile one active OWNED record; return 1 if it changed.
 
         - PID dead → ``FAILED`` when it died while ``STARTING`` (startup never
@@ -215,7 +274,7 @@ class SessionService:
             return 1
         if not record.endpoint_url:
             return 0
-        alive = self._probe(record.endpoint_url, _ADOPT_PROBE_TIMEOUT_S) is not None
+        alive = served is not None
         new_status: SessionStatus | None = None
         if alive and record.status in {SessionStatus.STARTING, SessionStatus.DEGRADED}:
             new_status = SessionStatus.RUNNING
@@ -243,11 +302,10 @@ class SessionService:
         )
         return 1
 
-    def _reconcile_adopted(self, record: SessionRecord) -> int:
-        """Update one adopted record based on a fresh probe; return 1 if changed."""
+    def _reconcile_adopted(self, record: SessionRecord, served: list[str] | None) -> int:
+        """Update one adopted record from its fresh probe result; return 1 if changed."""
         if not record.endpoint_url:
             return 0
-        served = self._probe(record.endpoint_url, _ADOPT_PROBE_TIMEOUT_S)
         # Reachable-but-empty is alive: a unit mid preset-swap can briefly
         # serve an empty model list; only an unreachable endpoint is down.
         alive = served is not None
@@ -716,7 +774,26 @@ class SessionService:
         self.db.commit()
 
         adapter = self.router.get_adapter(record.runtime)
-        result = asyncio.run(adapter.start(plan))
+
+        def _on_spawn(pid: int, log_path: str | None) -> None:
+            # Persist the pid BEFORE any readiness wait: if this process is
+            # interrupted mid-wait (Ctrl-C, request timeout), reconcile can
+            # still find and stop the child instead of orphaning it on a GPU.
+            record.pid = pid
+            record.log_path = log_path
+            record.updated_at = utcnow()
+            self.db.add(record)
+            self.db.commit()
+
+        result = asyncio.run(adapter.start(plan, on_spawn=_on_spawn))
+
+        # The readiness wait can take up to readiness_timeout_s, during which
+        # a concurrent reconcile pass (gateway loop) may have already promoted
+        # this row to RUNNING. Don't downgrade a fresher RUNNING to STARTING.
+        if result.status == SessionStatus.STARTING:
+            self.db.refresh(record)
+            if record.status == SessionStatus.RUNNING:
+                result.status = SessionStatus.RUNNING
 
         record.status = result.status
         record.pid = result.pid

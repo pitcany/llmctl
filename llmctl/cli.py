@@ -389,6 +389,12 @@ def start(
             f"[cyan]Planned session[/cyan] {session.id} "
             f"({session.runtime.value}); no process launched."
         )
+    elif session.status.value == "starting":
+        console.print(
+            f"[yellow]Session {session.id} is starting[/yellow] pid={session.pid}; "
+            "the endpoint is not ready yet (large models load for minutes). "
+            "`llmctl sessions` will show it running once it responds."
+        )
     else:
         console.print(
             f"[red]Session {session.id} {session.status.value}[/red]: {session.error}"
@@ -607,12 +613,9 @@ app.add_typer(config_app, name="config")
 
 def _settings_file_path() -> Path:
     """Return the settings.yaml path llmctl reads (may not exist yet)."""
-    import os
+    from llmctl.config import settings_file_path
 
-    from platformdirs import user_config_dir
-
-    config_dir = Path(os.getenv("LLMCTL_CONFIG_DIR") or user_config_dir("llmctl"))
-    return config_dir / "settings.yaml" if config_dir.is_dir() else config_dir
+    return settings_file_path()
 
 
 @config_app.command("path")
@@ -625,12 +628,26 @@ def config_path() -> None:
 
 def _redact_secrets(value: object) -> object:
     """Return a copy of ``value`` with secret-looking fields masked."""
-    sensitive = ("token", "secret", "password", "api_key", "apikey")
+    sensitive = (
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "api_key",
+        "apikey",
+        "auth",
+        "bearer",
+        "credential",
+        "private_key",
+        "cookie",
+    )
     if isinstance(value, dict):
         return {
             key: (
                 "********"
-                if any(marker in key.lower() for marker in sensitive) and val
+                if any(marker in key.lower() for marker in sensitive)
+                and val
+                and not isinstance(val, bool)
                 else _redact_secrets(val)
             )
             for key, val in value.items()
@@ -682,6 +699,9 @@ app.add_typer(runtimes_app, name="runtimes")
 def runtimes_main(ctx: typer.Context, json_out: _JSON_OPT = False) -> None:
     """List every runtime with health, version, endpoint, and loaded models."""
     if ctx.invoked_subcommand is not None:
+        # `llmctl runtimes --json inspect X`: carry the group-level flag into
+        # the subcommand instead of silently dropping it.
+        ctx.obj = {"json": json_out}
         return
     from llmctl.services.runtimes import runtime_inventory
 
@@ -722,12 +742,14 @@ def table_rows_from_inventory(inventory: list[dict]) -> list[tuple[str, ...]]:
 
 @runtimes_app.command("inspect")
 def runtimes_inspect(
+    ctx: typer.Context,
     runtime: Annotated[str, typer.Argument(help="Runtime name (e.g. ollama, vllm).")],
     json_out: _JSON_OPT = False,
 ) -> None:
     """Show one runtime's full record, including its capability flags."""
     from llmctl.services.runtimes import runtime_inventory
 
+    json_out = json_out or bool(ctx.obj and ctx.obj.get("json"))
     inventory = runtime_inventory(load_settings())
     match = next((row for row in inventory if row["runtime"] == runtime), None)
     if match is None:
@@ -1131,7 +1153,7 @@ def install_systemd(
             console.print(f"  [cyan]{message}[/cyan]")
 
     if all_sessions:
-        active_states = {"running", "starting", "planned"}
+        active_states = {"running", "starting", "degraded", "planned"}
         with _session() as db:
             sessions = SessionService(db).list_sessions()
         active = [s for s in sessions if s.status.value in active_states]

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import httpx
 
-from llmctl.adapters.base import RuntimeAdapter
+from llmctl.adapters.base import RuntimeAdapter, SpawnCallback
 from llmctl.config import RuntimeConfig
 from llmctl.db import RuntimeName, SessionStatus, utcnow
 from llmctl.discovery import discover_filesystem_models
@@ -140,10 +140,11 @@ class HttpRuntimeAdapter(RuntimeAdapter):
             details={"endpoint": self.endpoint, "error": error},
         )
 
-    async def start(self, plan: LaunchPlan) -> Session:
+    async def start(self, plan: LaunchPlan, on_spawn: SpawnCallback | None = None) -> Session:
         """Attach a session to the shared server endpoint.
 
-        HTTP runtimes manage their own processes, so no child process is spawned.
+        HTTP runtimes manage their own processes, so no child process is
+        spawned and ``on_spawn`` is never invoked.
         """
         if plan.dry_run:
             return Session(
@@ -261,7 +262,7 @@ class ProcessRuntimeAdapter(RuntimeAdapter):
             details={"binary": binary},
         )
 
-    async def start(self, plan: LaunchPlan) -> Session:
+    async def start(self, plan: LaunchPlan, on_spawn: SpawnCallback | None = None) -> Session:
         """Launch the planned command as a supervised child process."""
         if plan.dry_run:
             return Session(
@@ -300,6 +301,8 @@ class ProcessRuntimeAdapter(RuntimeAdapter):
                 launch_plan=plan,
                 error=f"Failed to launch {self.display_name}: {exc}",
             )
+        if on_spawn is not None:
+            on_spawn(result.pid, result.log_path)
         session = Session(
             model_id=plan.model_id,
             profile_id=plan.profile_id,
@@ -334,6 +337,7 @@ class ProcessRuntimeAdapter(RuntimeAdapter):
                 session.status = SessionStatus.FAILED
                 session.error = self._startup_failure_message(session)
                 session.started_at = None
+                session.pid = None  # dead; a stale pid would invite killing a reused one
                 return session
             if await self._endpoint_alive(plan.endpoint_url):
                 session.status = SessionStatus.RUNNING

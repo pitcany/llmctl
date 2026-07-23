@@ -8,8 +8,14 @@ the service layer. Adapters never persist database state themselves.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 from llmctl.schemas import AdapterStatus, LaunchPlan, Model, Session
+
+#: Callback invoked the moment a child process exists: ``(pid, log_path)``.
+#: Lets the service layer persist the pid *before* any readiness wait, so an
+#: interrupted start never orphans a process the control plane can't find.
+SpawnCallback = Callable[[int, str | None], None]
 
 #: Stable capability keys every adapter reports. Values are booleans; a key
 #: that is False means the operation is *unsupported by the runtime*, not
@@ -58,12 +64,14 @@ class RuntimeAdapter(ABC):
         """Discover models known to this runtime."""
 
     @abstractmethod
-    async def start(self, plan: LaunchPlan) -> Session:
+    async def start(self, plan: LaunchPlan, on_spawn: SpawnCallback | None = None) -> Session:
         """Start a runtime session from a launch plan.
 
         When ``plan.dry_run`` is True the adapter must not launch any process and
         should return a ``PLANNED`` session. Otherwise it performs real control.
-        The returned :class:`Session` is not persisted by the adapter.
+        Adapters that spawn a child process MUST call ``on_spawn(pid, log_path)``
+        as soon as the process exists, before any readiness wait. The returned
+        :class:`Session` is not persisted by the adapter.
         """
 
     @abstractmethod

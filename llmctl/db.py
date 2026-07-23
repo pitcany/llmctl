@@ -253,7 +253,7 @@ def get_engine(database_url: str | None = None):
             Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
     engine_kwargs: dict[str, Any] = {"connect_args": connect_args}
-    in_memory = url in {"sqlite:///:memory:", "sqlite://"}
+    in_memory = url == "sqlite://" or (url.startswith("sqlite") and ":memory:" in url)
     if in_memory:
         engine_kwargs["poolclass"] = StaticPool
     engine = create_engine(url, **engine_kwargs)

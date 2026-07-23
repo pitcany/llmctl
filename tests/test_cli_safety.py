@@ -63,7 +63,19 @@ def test_confirm_accept_proceeds(monkeypatch: pytest.MonkeyPatch) -> None:
     _confirm_state_change("x", required=True, assume_yes=False)
 
 
-def test_serve_refuses_public_bind() -> None:
+def test_serve_refuses_public_bind(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from pathlib import Path
+
+    import uvicorn
+
+    # Isolate from the invoking user's real config, and make an (incorrect)
+    # fall-through into a real bind fail loudly instead of hanging the suite.
+    configs = Path(__file__).resolve().parents[1] / "configs"
+    monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(configs))
+    monkeypatch.setenv("LLMCTL_DB_URL", f"sqlite:///{tmp_path / 'serve.sqlite3'}")
+    monkeypatch.setattr(
+        uvicorn, "run", lambda *a, **k: pytest.fail("guard must fire before binding")
+    )
     result = runner.invoke(app, ["serve", "--host", "0.0.0.0"])
     assert result.exit_code == 2
     assert "Refusing to bind" in result.output

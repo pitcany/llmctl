@@ -13,6 +13,7 @@ invoke them based on ``dry_run``/``safe_mode`` policy.
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
@@ -226,6 +227,13 @@ class ProcessSupervisor:
                 child.kill()
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
+        _, still_alive = psutil.wait_procs(alive, timeout=2.0)
+        for child in still_alive:
+            logging.getLogger(__name__).warning(
+                "Orphaned child process %s survived SIGTERM/SIGKILL; "
+                "it may still hold GPU memory.",
+                child.pid,
+            )
 
     @staticmethod
     def _signal(pid: int, sig: signal.Signals, kill_group: bool) -> None:

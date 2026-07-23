@@ -69,4 +69,4 @@ class LaunchPlanModal(ModalScreen[str | None]):
 
     def action_dismiss_cancel(self) -> None:
         """Dismiss the modal as cancelled."""
-        self.dismiss(False)
+        self.dismiss(None)

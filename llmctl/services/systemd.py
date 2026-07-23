@@ -15,6 +15,7 @@ Generation is pure string rendering: nothing is written to disk or enabled here.
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass, field
@@ -85,7 +86,14 @@ def render_api_unit(settings: Settings | None = None, *, user: bool = True) -> S
         "[Install]\n"
         f"WantedBy={_wanted_by(user)}\n"
     )
-    return SystemdUnit(name="llm-mission-control.service", content=content, user=user)
+    unit = SystemdUnit(name="llm-mission-control.service", content=content, user=user)
+    if cfg.api.host not in ("127.0.0.1", "localhost") and not cfg.scheduler.allow_public_bind:
+        unit.warnings.append(
+            f"api.host is {cfg.api.host} but scheduler.allow_public_bind is off: "
+            "`llmctl serve` will refuse this bind and the unit will fail to "
+            "start. Set scheduler.allow_public_bind=true or use a loopback host."
+        )
+    return unit
 
 
 def render_session_unit(
@@ -135,7 +143,9 @@ def render_session_unit(
         )
         exec_start = f"llmctl start {session.model_id} --no-dry-run"
 
-    cwd = working_dir or str(Path.home())
+    # Generation-time cwd, not $HOME: relative script/model paths in the
+    # stored launch command were validated against this cwd.
+    cwd = working_dir or os.getcwd()
     name = f"llmctl-session-{short_id}.service"
     env_block = ("".join(f"{line}\n" for line in env_lines)) if env_lines else ""
     content = (

@@ -14,6 +14,7 @@ don't run vLLM under systemd at all (e.g. a developer laptop).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import urllib.error
 import urllib.request
@@ -124,15 +125,22 @@ class VLLMAdapter(ProcessRuntimeAdapter):
 
     async def version(self) -> str | None:
         """Return the serving vLLM version from a managed unit's ``/version``."""
-        for unit in self._candidate_units():
+
+        def fetch(unit: ManagedUnitConfig) -> str | None:
             url = f"http://localhost:{unit.default_port}/version"
             try:
                 resp = self._http_get(url, self._probe_timeout_s)
                 payload = json.loads(resp.read().decode("utf-8", errors="replace"))
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
-                continue
+                return None
             version = payload.get("version") if isinstance(payload, dict) else None
-            if isinstance(version, str):
+            return version if isinstance(version, str) else None
+
+        for unit in self._candidate_units():
+            # The probe is sync urllib; off-thread it so concurrent inventory
+            # probes of other runtimes aren't stalled behind this timeout.
+            version = await asyncio.to_thread(fetch, unit)
+            if version is not None:
                 return version
         return None
 
@@ -141,7 +149,7 @@ class VLLMAdapter(ProcessRuntimeAdapter):
         loaded: list[Model] = []
         any_answered = False
         for unit in self._candidate_units():
-            served = self._probe_unit(unit)
+            served = await asyncio.to_thread(self._probe_unit, unit)
             if served is None:
                 continue
             any_answered = True
@@ -171,7 +179,7 @@ class VLLMAdapter(ProcessRuntimeAdapter):
         """
         live: dict[str, list[str]] = {}
         for unit in self._candidate_units():
-            served = self._probe_unit(unit)
+            served = await asyncio.to_thread(self._probe_unit, unit)
             if served:
                 live[unit.unit_name] = [m.id for m in served]
 
@@ -205,7 +213,7 @@ class VLLMAdapter(ProcessRuntimeAdapter):
         models: list[Model] = []
 
         for unit in self._candidate_units():
-            served_models = self._probe_unit(unit)
+            served_models = await asyncio.to_thread(self._probe_unit, unit)
             if not served_models:
                 continue
             for served in served_models:
