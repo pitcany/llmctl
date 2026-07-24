@@ -105,6 +105,12 @@ class RegistryService:
         Only ``DISCOVERED`` rows are touched, so manually registered models
         (``REGISTERED``) are never affected. Rediscovery later restores a row
         via :meth:`_upsert` (``MISSING -> DISCOVERED``).
+
+        Rows whose recorded ``path`` still exists on local disk are exempt:
+        single-model servers (the vllm-tp unit) report only the currently
+        served model, so absence from one scan means the unit rotated to
+        another model, not that the checkpoint vanished. ``MISSING`` is
+        reserved for artifacts that are actually gone.
         """
         discovered_keys = {(runtime, m.source or m.name) for m in discovered}
         stale = self.db.exec(
@@ -115,11 +121,14 @@ class RegistryService:
         ).all()
         changed = False
         for record in stale:
-            if (record.runtime, record.source or record.name) not in discovered_keys:
-                record.status = ModelStatus.MISSING
-                record.updated_at = utcnow()
-                self.db.add(record)
-                changed = True
+            if (record.runtime, record.source or record.name) in discovered_keys:
+                continue
+            if record.path and Path(record.path).expanduser().exists():
+                continue
+            record.status = ModelStatus.MISSING
+            record.updated_at = utcnow()
+            self.db.add(record)
+            changed = True
         if changed:
             self.db.commit()
 

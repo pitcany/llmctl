@@ -152,6 +152,34 @@ def test_discover_models_returns_empty_when_no_units_serve(
     assert models == []
 
 
+def test_last_discovery_ok_false_when_no_data_source(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No unit answered + empty filesystem sweep -> discovery 'failed'.
+
+    The registry reconcile pass consults ``last_discovery_ok`` so a down
+    vllm-tp unit does not read as an empty catalog and false-flag every
+    previously discovered model MISSING.
+    """
+    monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(tmp_path))
+    adapter = VLLMAdapter(
+        managed_units=_no_units(),
+        http_get=_http_responder(by_port={}),  # all probes fail
+    )
+    asyncio.run(adapter.discover_models())
+    assert adapter.last_discovery_ok is False
+
+
+def test_last_discovery_ok_true_when_unit_answers() -> None:
+    """A live managed unit is a real listing -> reconcile may run."""
+    adapter = VLLMAdapter(
+        managed_units=_no_units(),
+        http_get=_http_responder(by_port={8003: ["ornith-35b"]}),
+    )
+    asyncio.run(adapter.discover_models())
+    assert adapter.last_discovery_ok is True
+
+
 def test_probe_timeout_is_short_by_default() -> None:
     """Tail-latency safety: the default per-port timeout is sub-2s.
 

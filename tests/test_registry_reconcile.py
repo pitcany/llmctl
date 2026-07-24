@@ -110,6 +110,42 @@ def test_scan_skips_reconcile_when_discovery_call_failed(db: Session) -> None:
     assert _status(db, "b") == ModelStatus.DISCOVERED
 
 
+def test_scan_keeps_row_whose_path_still_exists_on_disk(db: Session, tmp_path) -> None:
+    """A row whose recorded checkpoint is still on disk is never MISSING.
+
+    Single-model servers (the vllm-tp unit) report only the currently
+    served model, so absence from one scan means rotation, not
+    disappearance. MISSING is reserved for artifacts that vanished.
+    """
+    ckpt = tmp_path / "ornith-ckpt"
+    ckpt.mkdir()
+    on_disk = Model(
+        name="ornith",
+        runtime=RuntimeName.OLLAMA,
+        source="ornith",
+        path=str(ckpt),
+        status=ModelStatus.DISCOVERED,
+    )
+    other = _model("other")
+    _scan(db, healthy=True, models=[on_disk, other])
+    _scan(db, healthy=True, models=[other])  # ornith rotated out, still on disk
+    assert _status(db, "ornith") == ModelStatus.DISCOVERED
+
+
+def test_scan_flags_row_whose_path_vanished(db: Session, tmp_path) -> None:
+    """A recorded path that no longer exists does not shield the row."""
+    gone = Model(
+        name="gone",
+        runtime=RuntimeName.OLLAMA,
+        source="gone",
+        path=str(tmp_path / "never-created"),
+        status=ModelStatus.DISCOVERED,
+    )
+    _scan(db, healthy=True, models=[gone])
+    _scan(db, healthy=True, models=[])
+    assert _status(db, "gone") == ModelStatus.MISSING
+
+
 def test_scan_does_not_touch_registered_models(db: Session) -> None:
     RegistryService(db).add_model(
         ModelCreate(name="manual", runtime=RuntimeName.OLLAMA, source="manual")
