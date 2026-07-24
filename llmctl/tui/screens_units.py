@@ -22,7 +22,7 @@ from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.config import ManagedUnitConfig, load_settings
 from llmctl.integrations.systemctl import SystemctlRunner
-from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
+from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 
 PROBE_TIMEOUT_S = 1.5
 
@@ -108,19 +108,19 @@ class UnitsScreen(DataScreen):
                 f"[{C_OK}]active[/]" if r.is_active else f"[{C_MUTED}]inactive[/]"
             )
             if r.served:
-                served_cell = f"[{C_ACCENT}]{', '.join(r.served)}[/]"
+                served_cell = f"[{C_ACCENT}]{esc(', '.join(r.served))}[/]"
             elif r.is_active:
                 # Unit running but no /v1/models — likely starting up
                 served_cell = f"[{C_WARN}]starting?[/]"
             else:
                 served_cell = f"[{C_MUTED}]-[/]"
             table.add_row(
-                f"[{C_MUTED}]unit[/] {r.role}",
-                r.unit_name,
+                f"[{C_MUTED}]unit[/] {esc(r.role)}",
+                esc(r.unit_name),
                 active_cell,
                 str(r.port),
                 served_cell,
-                r.env_path,
+                esc(r.env_path),
             )
         if not rows:
             table.add_row(

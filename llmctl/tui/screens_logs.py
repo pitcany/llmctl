@@ -8,7 +8,7 @@ from textual.app import ComposeResult
 from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
-from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
+from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 
 _LEVEL_COLOR = {
     "debug": C_MUTED,
@@ -42,10 +42,10 @@ class LogsScreen(DataScreen):
         for event in data:
             color = _LEVEL_COLOR.get(event["level"], C_MUTED)
             table.add_row(
-                event["time"],
-                f"[{color}]{event['level']}[/]",
-                event["category"],
-                event["message"],
+                esc(event["time"]),
+                f"[{color}]{esc(event['level'])}[/]",
+                esc(event["category"]),
+                esc(event["message"]),
             )
         if not data:
             table.add_row("-", "-", "-", "No events recorded yet.")

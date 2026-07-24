@@ -23,6 +23,7 @@ from llmctl.schemas import (
     ProfileCreate,
     ProfileUpdate,
 )
+from llmctl.tui._base import esc
 
 _RUNTIME_OPTIONS = [(r.value, r.value) for r in RuntimeName]
 
@@ -289,7 +290,7 @@ class CloneModal(ModalScreen[CloneRequest | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="clone-dialog", classes="panel"):
-            yield Static(f"[b]Clone {self._current_name}[/b]", id="clone-title")
+            yield Static(f"[b]Clone {esc(self._current_name)}[/b]", id="clone-title")
             yield Label("New name")
             yield Input(value=f"{self._current_name}-copy", id="clone-name")
             with Horizontal(id="clone-buttons"):
@@ -322,7 +323,7 @@ class DeleteModal(ModalScreen[ConfirmDelete | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="delete-dialog", classes="panel"):
-            yield Static(f"[b]Delete {self._label}?[/b]", id="delete-title")
+            yield Static(f"[b]Delete {esc(self._label)}?[/b]", id="delete-title")
             yield Static(
                 "Soft-delete only — the registry row will be hidden, but on-disk "
                 "files are preserved unless you tick the box below.",

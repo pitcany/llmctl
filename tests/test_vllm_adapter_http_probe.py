@@ -180,6 +180,41 @@ def test_last_discovery_ok_true_when_unit_answers() -> None:
     assert adapter.last_discovery_ok is True
 
 
+def test_filesystem_hits_do_not_vouch_for_a_down_unit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A filesystem sweep must not mark discovery OK when no unit answered.
+
+    HTTP discovery keys rows by served name; the filesystem sweep keys them by
+    path. They are different key spaces, so on-disk checkpoints are no evidence
+    about what the (down) unit would have served — letting them set
+    ``last_discovery_ok`` lets reconcile flag every served-name row MISSING.
+    """
+    root = tmp_path / "roots" / "local-ckpt"
+    root.mkdir(parents=True)
+    (root / "config.json").write_text('{"architectures": ["X"]}')
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    (cfg / "model_dirs.yaml").write_text(
+        "model_roots:\n"
+        "  - name: r\n"
+        f"    default_path: {tmp_path / 'roots'}\n"
+        "    runtimes: [vllm]\n"
+        "scan:\n"
+        "  max_depth: 4\n"
+        "  follow_symlinks: false\n"
+    )
+    monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(cfg))
+
+    adapter = VLLMAdapter(
+        managed_units=_no_units(),
+        http_get=_http_responder(by_port={}),  # unit down
+    )
+    models = asyncio.run(adapter.discover_models())
+    assert [m.name for m in models] == ["local-ckpt"], "fs sweep should still run"
+    assert adapter.last_discovery_ok is False
+
+
 def test_probe_timeout_is_short_by_default() -> None:
     """Tail-latency safety: the default per-port timeout is sub-2s.
 

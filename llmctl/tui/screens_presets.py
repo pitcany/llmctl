@@ -26,7 +26,7 @@ from llmctl.services.vllm_orchestrator import (
     start_vllm_tp,
 )
 from llmctl.tui import _data
-from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, DataScreen
+from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, DataScreen, esc
 from llmctl.tui._modals_presets import (
     PresetFormModal,
     PresetLaunchModal,
@@ -55,7 +55,7 @@ def _format_link_cell(view: PresetView) -> str:
     glyph = "●" if state == "explicit" else "○"
     color = C_OK if state == "explicit" else C_ACCENT
     label = view.linked_model_name or (view.linked_model_id or "")
-    return f"[{color}]{glyph}[/] {label}"
+    return f"[{color}]{glyph}[/] {esc(label)}"
 
 
 class PresetsScreen(DataScreen):
@@ -132,13 +132,13 @@ class PresetsScreen(DataScreen):
 
         for v in views:
             table.add_row(
-                f"[{C_ACCENT}]{v.alias}[/]",
-                v.served_name,
-                v.model_id,
-                v.family or "-",
+                f"[{C_ACCENT}]{esc(v.alias)}[/]",
+                esc(v.served_name),
+                esc(v.model_id),
+                esc(v.family or "-"),
                 f"{v.param_count_b:.0f}" if v.param_count_b else "-",
                 str(v.tensor_parallel),
-                v.quantization,
+                esc(v.quantization),
                 _format_link_cell(v),
             )
         if 0 <= cursor < len(self._row_aliases):

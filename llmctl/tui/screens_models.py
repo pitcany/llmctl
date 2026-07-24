@@ -11,7 +11,7 @@ from textual.widgets import DataTable, Footer, Header, Static
 from llmctl.db import ModelStatus
 from llmctl.schemas import ModelCreate, ModelUpdate
 from llmctl.tui import _data
-from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
+from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 from llmctl.tui._modals import LaunchPlanModal
 from llmctl.tui._modals_registry import (
     CloneModal,
@@ -100,9 +100,9 @@ class ModelsScreen(DataScreen):
             self._meta[mid] = (runtime, available)
             backend_cell = f"[{C_OK}]ready[/]" if available else f"[{C_ERR}]no binary[/]"
             if available and not is_missing:
-                name_cell = model.name
+                name_cell = esc(model.name)
             else:
-                name_cell = f"[{C_MUTED}]{model.name}[/]"
+                name_cell = f"[{C_MUTED}]{esc(model.name)}[/]"
             status_cell = (
                 f"[{C_WARN}]{model.status.value}[/]" if is_missing else model.status.value
             )
@@ -114,8 +114,10 @@ class ModelsScreen(DataScreen):
                 runtime,
                 backend_cell,
                 status_cell,
-                model.quantization or "-",
-                (model.path or "-")[-32:],
+                esc(model.quantization or "-"),
+                # Truncate first, then escape: slicing a balanced path can
+                # strand a closing tag that only escaping renders harmless.
+                esc((model.path or "-")[-32:]),
                 preset_cell,
             )
         if not models:
@@ -174,14 +176,14 @@ class ModelsScreen(DataScreen):
                 title="Session planned",
             )
         elif status in ("running", "starting"):
-            detail = f" at {session.endpoint_url}" if session.endpoint_url else ""
+            detail = f" at {esc(session.endpoint_url)}" if session.endpoint_url else ""
             self.app.notify(
                 f"Session {short_id} {status}{detail}.",
                 title="Session launched",
             )
         else:
             self.app.notify(
-                f"Session {short_id} {status}: {session.error or 'unknown error'}",
+                f"Session {short_id} {status}: {esc(session.error or 'unknown error')}",
                 title="Launch failed",
                 severity="error",
                 timeout=10,
