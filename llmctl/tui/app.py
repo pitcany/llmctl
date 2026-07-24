@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.screen import Screen
 
 from llmctl.tui.screens_benchmarks import BenchmarksScreen
 from llmctl.tui.screens_dashboard import DashboardScreen
@@ -144,10 +143,6 @@ class MissionControlApp(App[None]):
     def _switch(self, name: str) -> None:
         """Switch to a named screen and refresh it immediately."""
         self.switch_screen(name)
-
-    def on_screen_resume(self, event: Screen.ScreenResume) -> None:  # type: ignore[name-defined]
-        """Refresh a screen whenever it becomes active."""
-        self.action_refresh()
 
     def action_show_dashboard(self) -> None:
         """Show dashboard screen."""
