@@ -147,6 +147,17 @@ def get_missing_count() -> int:
     return sum(1 for model in models if model.status == ModelStatus.MISSING)
 
 
+def get_missing_model_ids() -> list[str]:
+    """Return the ids of every MISSING model, in the scope prune acts on.
+
+    The prune action binds this list at keypress so the confirmed count and
+    the deleted set cannot drift apart.
+    """
+    with db_session() as db:
+        models = RegistryService(db).list_models(include_inactive=True)
+    return [m.id for m in models if m.status == ModelStatus.MISSING and m.id]
+
+
 def scan_models() -> list[Model]:
     """Run adapter discovery and return the refreshed model list."""
     with db_session() as db:
@@ -177,11 +188,18 @@ def delete_model(model_id: str, *, delete_files: bool = False) -> bool:
         return RegistryService(db).delete_model(model_id, delete_files=delete_files)
 
 
-def prune_missing_models(runtime: str | None = None) -> int:
-    """Soft-delete all MISSING models; returns the count pruned."""
+def prune_missing_models(
+    runtime: str | None = None, *, ids: list[str] | None = None
+) -> int:
+    """Soft-delete MISSING models; returns the count pruned.
+
+    ``ids`` restricts the prune to an explicit allow-list, so the TUI can bind
+    the set at keypress and guarantee the confirm dialog's count is exactly
+    what gets removed.
+    """
     with db_session() as db:
         rt = RuntimeName(runtime) if runtime else None
-        return RegistryService(db).prune_missing(rt)
+        return RegistryService(db).prune_missing(rt, ids=ids)
 
 
 class PresetValidationError(ValueError):

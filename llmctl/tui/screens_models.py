@@ -12,7 +12,7 @@ from llmctl.db import ModelStatus
 from llmctl.schemas import ModelCreate, ModelUpdate
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
-from llmctl.tui._modals import LaunchPlanModal
+from llmctl.tui._modals import ConfirmActionModal, LaunchPlanModal
 from llmctl.tui._modals_registry import (
     CloneModal,
     CloneRequest,
@@ -191,17 +191,48 @@ class ModelsScreen(DataScreen):
         self.refresh_data()
 
     def action_scan(self) -> None:
-        """Run adapter discovery and refresh the table."""
-        self.run_action_worker(_data.scan_models, self._after_scan)
+        """Confirm, then run adapter discovery and persist the results.
+
+        This is ``scan --import``, not the CLI's non-persisting preview: it
+        upserts every discovered model and flags absent ones MISSING, which
+        the prune action then removes irreversibly. Worth a gate on a chord
+        that everywhere else means "save".
+        """
+
+        def _on_close(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            self.run_action_worker(_data.scan_models, self._after_scan)
+
+        self.app.push_screen(
+            ConfirmActionModal(
+                "Scan runtimes and import?",
+                "Discovered models are written to the registry. Models a "
+                "reachable runtime no longer reports are flagged MISSING, "
+                "which prune (x) then removes irreversibly.",
+                confirm_label="Scan",
+            ),
+            _on_close,
+        )
 
     def _after_scan(self, found: Any) -> None:
-        """Notify and refresh after a scan completes."""
-        self.app.notify(f"Scan complete: {len(found)} models registered.")
+        """Notify and refresh after a scan completes.
+
+        ``scan()`` returns the whole registry, not just this pass's finds, so
+        report it as a total rather than implying a discovery count.
+        """
+        self.app.notify(f"Scan complete. Registry now holds {len(found)} models.")
         self.refresh_data()
 
     def action_prune_missing(self) -> None:
-        """Confirm and soft-delete all models flagged MISSING."""
-        if not self._missing_count:
+        """Confirm and soft-delete the models flagged MISSING right now.
+
+        The ids are captured here, before the dialog opens, and the prune acts
+        on exactly that set. Re-deriving it at confirm time let a scan landing
+        in between widen the deletion past the number the operator agreed to.
+        """
+        ids = _data.get_missing_model_ids()
+        if not ids:
             self.app.notify("No missing models to prune.", severity="information")
             return
 
@@ -209,12 +240,16 @@ class ModelsScreen(DataScreen):
             if payload is None:
                 return
             self.run_action_worker(
-                lambda: _data.prune_missing_models(),
+                lambda: _data.prune_missing_models(ids=ids),
                 self._after_prune,
             )
 
         self.app.push_screen(
-            DeleteModal(f"{self._missing_count} missing model(s)", allow_file_delete=False),
+            DeleteModal(
+                f"{len(ids)} missing model(s)",
+                "Each row is hidden from listings. llmctl has no undelete and "
+                "a rescan will not revive them. Files on disk are untouched.",
+            ),
             _on_close,
         )
 
@@ -295,7 +330,13 @@ class ModelsScreen(DataScreen):
             )
 
         self.app.push_screen(
-            DeleteModal(f"model '{model.name}'", allow_file_delete=True),
+            DeleteModal(
+                f"model '{model.name}'",
+                "The registry row is hidden from listings. llmctl has no undelete "
+                "and a rescan will not revive it.",
+                allow_file_delete=True,
+                file_delete_target=model.path,
+            ),
             _on_close,
         )
 

@@ -65,6 +65,12 @@ class MissionControlApp(App[None]):
     #plan-dialog { width: 80; height: auto; max-height: 90%; background: #0c1a1c; }
     #plan-buttons { height: auto; margin-top: 1; }
     #plan-buttons Button { width: 100%; margin-bottom: 1; }
+
+    ConfirmActionModal { align: center middle; }
+    #confirm-dialog { width: 70; height: auto; max-height: 90%; background: #0c1a1c; }
+    #confirm-consequence { margin-top: 1; color: #d8f3f0; }
+    #confirm-buttons { height: auto; margin-top: 1; }
+    #confirm-buttons Button { margin-right: 2; }
     """
     TITLE = "LLM Mission Control"
     SUB_TITLE = "Live local runtime control"

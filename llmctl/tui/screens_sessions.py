@@ -11,6 +11,7 @@ from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
+from llmctl.tui._modals import ConfirmActionModal
 
 _STATUS_COLOR = {
     "running": C_OK,
@@ -117,25 +118,58 @@ class SessionsScreen(DataScreen):
         return None
 
     def action_stop_session(self) -> None:
-        """Stop the selected session."""
-        session_id = self._selected_id()
-        if not session_id:
-            self.app.notify("No session selected.", severity="warning")
-            return
-        self.run_action_worker(
-            lambda: _data.stop_session(session_id),
-            lambda result: self._after_lifecycle(result, session_id, "Stopped"),
+        """Confirm, then stop the selected session."""
+        self._confirm_lifecycle(
+            verb="Stop",
+            consequence=(
+                "The session process is terminated. Any in-flight request "
+                "against its endpoint fails."
+            ),
+            run=_data.stop_session,
+            past="Stopped",
         )
 
     def action_restart_session(self) -> None:
-        """Restart the selected session."""
+        """Confirm, then restart the selected session.
+
+        Gated even though ``ctrl+r`` is merely "refresh" on the Presets and
+        Units screens — that collision is precisely why this needs a gate: the
+        harmless meaning is the one an operator's fingers learn first.
+        """
+        self._confirm_lifecycle(
+            verb="Restart",
+            consequence=(
+                "The session process is terminated and relaunched. It is "
+                "unavailable while it reloads."
+            ),
+            run=_data.restart_session,
+            past="Restarted",
+        )
+
+    def _confirm_lifecycle(
+        self, *, verb: str, consequence: str, run: Any, past: str
+    ) -> None:
+        """Shared confirm-then-dispatch for the process lifecycle actions."""
         session_id = self._selected_id()
         if not session_id:
             self.app.notify("No session selected.", severity="warning")
             return
-        self.run_action_worker(
-            lambda: _data.restart_session(session_id),
-            lambda result: self._after_lifecycle(result, session_id, "Restarted"),
+
+        def _on_close(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            self.run_action_worker(
+                lambda: run(session_id),
+                lambda result: self._after_lifecycle(result, session_id, past),
+            )
+
+        self.app.push_screen(
+            ConfirmActionModal(
+                f"{verb} session {session_id[:8]}?",
+                consequence,
+                confirm_label=verb,
+            ),
+            _on_close,
         )
 
     def action_cleanup(self) -> None:

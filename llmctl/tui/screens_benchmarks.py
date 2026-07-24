@@ -33,6 +33,10 @@ class BenchmarksScreen(DataScreen):
         """
         super().__init__()
         self._ids: list[str] = []
+        #: benchmark id -> display name, so confirm dialogs can
+        #: name a row the operator can actually see (the table
+        #: has no ID column).
+        self._names: dict[str, str] = {}
         self._baseline_id: str | None = None
         self._model_filter = model_filter
 
@@ -88,6 +92,7 @@ class BenchmarksScreen(DataScreen):
         cursor = table.cursor_row
         table.clear()
         self._ids = []
+        self._names = {}
         baseline = self._baseline_for(data)
         for result in data:
             mode = str(result.parameters.get("mode", "?"))
@@ -114,6 +119,7 @@ class BenchmarksScreen(DataScreen):
                 f"[{C_OK}]* {esc(result.name)}[/]" if is_baseline else esc(result.name)
             )
             self._ids.append(result.id or "")
+            self._names[result.id or ""] = result.name
             table.add_row(
                 name_cell,
                 result.kind.value if result.kind else "-",
@@ -255,6 +261,8 @@ class BenchmarksScreen(DataScreen):
                 )
             return
 
+        label = self._names.get(benchmark_id) or benchmark_id
+
         def _on_close(payload: ConfirmDelete | None) -> None:
             if payload is None:
                 return
@@ -262,11 +270,15 @@ class BenchmarksScreen(DataScreen):
                 self._baseline_id = None
             self.run_action_worker(
                 lambda: _data.delete_benchmark(benchmark_id),
-                lambda removed: self._after_delete(benchmark_id, removed),
+                lambda removed: self._after_delete(label, removed),
             )
 
         self.app.push_screen(
-            DeleteModal(f"benchmark run '{benchmark_id}'", allow_file_delete=False),
+            DeleteModal(
+                f"benchmark run '{label}'",
+                "The benchmark row is permanently removed from the database. "
+                "This is a hard delete, not a soft-delete.",
+            ),
             _on_close,
         )
 
