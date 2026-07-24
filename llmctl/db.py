@@ -120,6 +120,13 @@ class ModelRecord(SQLModel, table=True):
         description="Path, runtime ID, or remote-like source URI.",
     )
     path: str | None = Field(default=None, description="Optional local filesystem path.")
+    # Device the model lives on: the LM Link device name for LM Studio models
+    # (e.g. ``yannik-desktop``, ``macbookpro.lan``), the local hostname for
+    # loopback runtimes. Nullable for forward-compat with databases created
+    # before this column existed; the service layer treats NULL as the local
+    # host. Part of the discovery identity key, so the same model on two
+    # devices is two rows.
+    host: str | None = Field(default=None, index=True)
     format: str | None = None
     quantization: str | None = None
     size_bytes: int | None = None
