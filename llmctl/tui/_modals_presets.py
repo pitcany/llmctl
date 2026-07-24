@@ -18,7 +18,7 @@ from textual.widgets import Button, Input, Label, Select, Static
 
 from llmctl.presets import CANONICAL_QUANTIZATIONS, Model, PresetSchemaError
 from llmctl.services.preset_loader import PresetView
-from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED
+from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_WARN, esc
 
 
 class PresetLaunchTarget(StrEnum):
@@ -28,45 +28,82 @@ class PresetLaunchTarget(StrEnum):
 
 
 class PresetLaunchModal(ModalScreen[PresetLaunchTarget | None]):
-    """Launch confirmation picker for the TP fleet unit.
+    """Launch confirmation for the TP fleet unit, with its blast radius.
 
     Resolves to :attr:`PresetLaunchTarget.TP`, or ``None`` if the user
     dismisses with Escape.
+
+    This is the widest-reaching action in the TUI: confirming it takes down
+    every inference backend on the machine before bringing one back. The
+    dialog therefore enumerates what the orchestrator will do rather than
+    describing itself as a picker — and ``AUTO_FOCUS`` targets Cancel, so a
+    reflexive Enter never restarts the shared unit.
     """
 
+    AUTO_FOCUS = "#pick-cancel"
     BINDINGS = [
         ("escape", "dismiss_cancel", "Cancel"),
         ("t", "pick_tp", "TP fleet"),
     ]
 
-    def __init__(self, view: PresetView) -> None:
+    def __init__(
+        self,
+        view: PresetView,
+        *,
+        currently_served: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self._view = view
+        #: What the unit is serving right now, so the operator knows what
+        #: they are terminating. ``None`` when the probe was not attempted
+        #: or failed; ``[]`` when the unit answered with nothing loaded.
+        self._currently_served = currently_served
+
+    def _replacing_line(self) -> str:
+        """Describe what the restart will terminate."""
+        if self._currently_served is None:
+            return f"[{C_MUTED}]Replaces[/] (could not reach the unit to check)"
+        if not self._currently_served:
+            return f"[{C_MUTED}]Replaces[/] nothing — the unit is not serving now"
+        return (
+            f"[{C_MUTED}]Replaces[/] [{C_WARN}]"
+            f"{esc(', '.join(self._currently_served))}[/] (terminated)"
+        )
 
     def compose(self) -> ComposeResult:
-        """Compose the picker dialog."""
+        """Compose the confirmation dialog with the full effect list."""
         v = self._view
         size = f"{v.param_count_b:.0f}B" if v.param_count_b else "?"
         lines = [
-            f"[b]Launch preset[/b] [{C_ACCENT}]{v.alias}[/]",
+            f"[b]Launch preset[/b] [{C_ACCENT}]{esc(v.alias)}[/]",
             "",
-            f"[{C_MUTED}]Model[/]    {v.model_id}",
-            f"[{C_MUTED}]Served[/]   {v.served_name}",
-            f"[{C_MUTED}]Family[/]   {v.family or '-'} ({size})",
-            f"[{C_MUTED}]TP[/]       {v.tensor_parallel}",
-            f"[{C_MUTED}]Quant[/]    {v.quantization}",
+            f"[{C_MUTED}]Model[/]    {esc(v.model_id)}",
+            f"[{C_MUTED}]Served[/]   {esc(v.served_name)}",
+            f"[{C_MUTED}]Family[/]   {esc(v.family or '-')} ({size})",
+            f"[{C_MUTED}]TP[/]       {v.tensor_parallel}  (both GPUs)",
+            f"[{C_MUTED}]Quant[/]    {esc(v.quantization)}",
             "",
-            "Confirm to launch on the TP fleet unit (both GPUs).",
+            self._replacing_line(),
+            "",
+            f"[{C_WARN}]This affects the whole machine:[/]",
+            "  1. stops the ollama service",
+            "  2. stops the Harbor ollama container",
+            "  3. rewrites vllm-tp.env and restarts vllm-tp",
+            "  4. waits up to 5 min for the model to load",
+            "  5. repoints the Hermes 'vllm' provider",
+            "",
+            f"[{C_MUTED}]In-flight requests fail. If step 3 or 4 fails, ollama "
+            f"and Harbor stay stopped.[/]",
         ]
         with Vertical(id="plan-dialog", classes="panel"):
             yield Static("\n".join(lines))
             with Vertical(id="plan-buttons"):
                 yield Button(
-                    "TP fleet (vllm-tp, both GPUs) — t",
-                    variant="primary",
+                    "Launch on vllm-tp — t",
+                    variant="error",
                     id="pick-tp",
                 )
-                yield Button("Cancel — esc", variant="error", id="pick-cancel")
+                yield Button("Cancel — esc", variant="primary", id="pick-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Map button id to a target, dismissing the modal with the result."""
