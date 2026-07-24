@@ -159,7 +159,12 @@ class PresetsScreen(DataScreen):
         self.refresh_data()
 
     def action_launch_selected(self) -> None:
-        """Open the launch-target picker for the selected preset."""
+        """Probe what is serving now, then open the launch confirmation.
+
+        The probe runs in a worker: it is a 1.5s-timeout HTTP call and must
+        not block the UI thread. Its result tells the operator which model
+        the restart is about to terminate.
+        """
         alias = self._selected_alias()
         if alias is None:
             self.app.notify("No preset selected.", severity="warning")
@@ -173,7 +178,12 @@ class PresetsScreen(DataScreen):
                 return
             self._launch(alias, target)
 
-        self.app.push_screen(PresetLaunchModal(view), _on_pick)
+        def _show(served: list[str] | None) -> None:
+            self.app.push_screen(
+                PresetLaunchModal(view, currently_served=served), _on_pick
+            )
+
+        self.run_action_worker(_data.get_served_on_tp_unit, _show)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Treat row activation (enter/click) the same as the bound action."""
@@ -329,8 +339,17 @@ class PresetsScreen(DataScreen):
                 reason = f"fleet preflight failed: {', '.join(result.fleet_failed)}"
             elif result.restart is not None and result.restart.error:
                 reason = result.restart.error
+            # Preflight stops ollama and Harbor before the restart is tried,
+            # and nothing rolls that back. Saying only "launch failed" leaves
+            # the operator believing the box is as they left it.
+            aftermath = ""
+            if result.fleet_stopped:
+                aftermath = (
+                    f"\nStill stopped: {esc(', '.join(result.fleet_stopped))}"
+                    " — restart them or retry the launch."
+                )
             self.app.notify(
-                f"[{C_ERR}]{label} failed[/]: {reason}",
+                f"[{C_ERR}]{label} failed[/]: {esc(reason)}{aftermath}",
                 severity="error",
                 title="Launch failed",
             )

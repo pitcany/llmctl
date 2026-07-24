@@ -158,6 +158,29 @@ def get_missing_model_ids() -> list[str]:
     return [m.id for m in models if m.status == ModelStatus.MISSING and m.id]
 
 
+def get_served_on_tp_unit() -> list[str] | None:
+    """Return the served-model names the TP unit reports right now.
+
+    ``[]`` means the unit answered with nothing loaded; ``None`` means it
+    could not be reached, which the launch dialog renders differently — an
+    idle unit and an unreachable one are not the same fact, and confusing
+    them is what the operator would pay for.
+    """
+    import asyncio
+
+    from llmctl.adapters.vllm import VLLMAdapter
+
+    settings = load_settings()
+    adapter = VLLMAdapter(managed_units=settings.managed_units)
+    try:
+        loaded = asyncio.run(adapter.list_loaded_models())
+    except Exception:
+        return None
+    if loaded is None:
+        return None
+    return [m.name for m in loaded]
+
+
 def scan_models() -> list[Model]:
     """Run adapter discovery and return the refreshed model list."""
     with db_session() as db:
