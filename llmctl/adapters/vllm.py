@@ -82,6 +82,19 @@ class VLLMAdapter(ProcessRuntimeAdapter):
         self.managed_units = managed_units or ManagedUnitsConfig()
         self._http_get = http_get or _default_http_get
         self._probe_timeout_s = probe_timeout_s
+        self._last_discovery_ok = True
+
+    @property
+    def last_discovery_ok(self) -> bool:
+        """Whether the last ``discover_models`` had a live data source.
+
+        False when no managed unit answered the HTTP probe *and* the
+        filesystem sweep produced nothing — the catalog is unknowable,
+        not empty. The scan reconcile pass consults this so a down
+        vllm-tp unit never false-flags its models MISSING (same contract
+        as :attr:`HttpRuntimeAdapter.last_discovery_ok`).
+        """
+        return self._last_discovery_ok
 
     def _candidate_units(self) -> list[ManagedUnitConfig]:
         """Return all configured managed units to probe.
@@ -211,11 +224,13 @@ class VLLMAdapter(ProcessRuntimeAdapter):
         """
         seen_source: set[str] = set()
         models: list[Model] = []
+        any_unit_answered = False
 
         for unit in self._candidate_units():
             served_models = await asyncio.to_thread(self._probe_unit, unit)
-            if not served_models:
+            if served_models is None:
                 continue
+            any_unit_answered = True
             for served in served_models:
                 if served.id in seen_source:
                     continue
@@ -245,6 +260,7 @@ class VLLMAdapter(ProcessRuntimeAdapter):
             seen_source.add(key)
             models.append(fs_model)
 
+        self._last_discovery_ok = any_unit_answered or bool(models)
         return models
 
 
