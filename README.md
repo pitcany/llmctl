@@ -18,6 +18,68 @@ non-disruptive — every legacy `gpu-models <verb>` still works via
 `tests/fixtures/env_renders/`), and no production restart was
 required.
 
+## What it does
+
+In plain terms: `llmctl` is a control panel for the model servers on one
+machine. It does not serve models itself — it manages the programs that do
+(Ollama, vLLM, LM Studio, llama.cpp) and gives you one consistent way to drive
+all of them, from the CLI or a full-screen dashboard (`llmctl tui`).
+
+One fact explains most of the design: **the GPUs run one big model at a time.**
+vLLM is a single systemd unit spanning every card, so "switching models" means
+reconfiguring and restarting that unit — a 1–3 minute operation that also stops
+Ollama first to free VRAM. Ollama is the opposite: many smaller models, loaded
+on demand. Much of `llmctl` exists to manage that split safely.
+
+**Knowing what you have.** `llmctl` keeps a catalog of every model it knows
+about — where the files are, which runtime serves it, how big it is.
+`llmctl scan` asks each runtime what it has and records the answers;
+`llmctl models` lists them; `llmctl model add|edit|clone|delete` maintains them
+by hand. `llmctl validate` checks that everything the catalog claims still
+exists where it says.
+
+**Getting models.** `llmctl pull <name>` downloads a model into the local
+Ollama library with streaming progress. This is Ollama-only — the other
+runtimes expect files already on disk, which `scan` then discovers.
+
+**Running models.** Two paths, for two different situations:
+
+| Command | For | What happens |
+| --- | --- | --- |
+| `llmctl vllm <preset>` | The big shared model on the GPUs | Rewrites the unit's env file and restarts it; stops Ollama first; waits for readiness |
+| `llmctl start <model>` | A one-off session for one model | Launches a process, tracks it, and reports `running` only once the endpoint answers |
+
+A **preset** is a recipe at `~/.config/llmctl/presets/<alias>.yaml` — which
+checkpoint, how many GPUs, which quantization, how much context — so
+`llmctl vllm ornith-35b` means "make the shared unit be Ornith". A **profile**
+is the lighter-weight equivalent for the `start` path. Both have a dry run
+(`llmctl plan`, `llmctl preview`, or `--dry-run`) that shows the exact command
+and VRAM estimate without touching anything.
+
+**Watching it.** `llmctl status` for an overview, `llmctl health` per runtime,
+`llmctl gpus` for VRAM and temperature, `llmctl sessions` for what is running,
+`llmctl logs` to tail output, and `llmctl doctor` for a pass/warn/fail
+environment report.
+
+**Cleaning up after crashes.** When records and reality disagree,
+`llmctl reconcile` re-syncs them, `llmctl cleanup` finds dead sessions and
+frees the ports they were holding, and `llmctl model prune` clears catalog rows
+for models that are genuinely gone.
+
+**Serving it to clients.** `llmctl gateway` runs an OpenAI-compatible endpoint
+that downstream apps point at, with aliases (`llmctl aliases`,
+`llmctl set-alias`) mapping friendly names onto whatever is actually serving —
+so clients need no rewiring when the checkpoint underneath changes.
+
+**Measuring.** `llmctl bench` runs a timed test and records tokens/second,
+time-to-first-token and peak VRAM; `llmctl benchmarks` shows the history and
+compares runs against a baseline.
+
+**Adopting what it did not start.** `llmctl adopt` brings an
+already-running endpoint under management without restarting it, and
+`llmctl detach` lets go again — `llmctl` is a layer over an existing setup, not
+a replacement for it.
+
 ## Docs
 
 - **[Quickstart](docs/QUICKSTART.md)** — install + first command in 5
@@ -243,7 +305,7 @@ auto-refreshes every 3s and never blocks the UI on probes.
   manually under a different name, `--import` is a no-op for that
   path.
 
-## What it does
+## Managed units (defaults)
 
 Out-of-the-box, llmctl knows about:
 
@@ -266,6 +328,6 @@ uv run pytest -q
 uv run ruff check .
 ```
 
-~580 tests, ~80–90s wall time. Tests marked `requires_gpu`,
+~655 tests, ~90–115s wall time. Tests marked `requires_gpu`,
 `requires_systemd`, `live_hf`, or `bench_live` are skipped in CI; run
 them locally on the appropriate host.
