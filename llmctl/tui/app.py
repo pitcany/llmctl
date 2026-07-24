@@ -5,6 +5,7 @@ from __future__ import annotations
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 
+from llmctl.tui._modals import ConfirmActionModal
 from llmctl.tui.screens_benchmarks import BenchmarksScreen
 from llmctl.tui.screens_dashboard import DashboardScreen
 from llmctl.tui.screens_doctor import DoctorScreen
@@ -22,6 +23,11 @@ REFRESH_INTERVAL = 3.0
 
 class MissionControlApp(App[None]):
     """Terminal mission-control UI with live backend data binding."""
+
+    #: Action workers currently running, across every screen. Screen-level
+    #: ``_action_busy`` only knows about its own screen, but a launch started
+    #: on Presets must still be announced if the operator quits from Models.
+    _actions_in_flight: int = 0
 
     CSS = """
     Screen { background: #071113; color: #d8f3f0; }
@@ -143,6 +149,34 @@ class MissionControlApp(App[None]):
     def _switch(self, name: str) -> None:
         """Switch to a named screen and refresh it immediately."""
         self.switch_screen(name)
+
+    async def action_quit(self) -> None:
+        """Quit, but confirm first if an action is still running.
+
+        Action workers are daemon threads, so quitting is immediate and does
+        *not* wait for them — which is the point, but it also means a launch
+        can be abandoned part-way. One that has already stopped ollama but not
+        yet brought vLLM up would leave the machine serving nothing, so say so
+        before letting the operator walk away from it.
+        """
+        if self._actions_in_flight:
+
+            def _on_close(confirmed: bool | None) -> None:
+                if confirmed:
+                    self.exit()
+
+            self.push_screen(
+                ConfirmActionModal(
+                    "Quit while an action is running?",
+                    "It will be abandoned part-way. A preset launch that has "
+                    "already stopped ollama but not finished starting vLLM "
+                    "would leave the machine with nothing serving.",
+                    confirm_label="Quit anyway",
+                ),
+                _on_close,
+            )
+            return
+        await super().action_quit()
 
     def action_show_dashboard(self) -> None:
         """Show dashboard screen."""
