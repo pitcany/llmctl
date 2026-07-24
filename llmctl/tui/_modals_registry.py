@@ -312,32 +312,51 @@ class CloneModal(ModalScreen[CloneRequest | None]):
 
 
 class DeleteModal(ModalScreen[ConfirmDelete | None]):
-    """Confirm deletion of a model. Offers --delete-files toggle."""
+    """Confirm a deletion, stating what the deletion actually does.
 
+    ``consequence`` is supplied by the caller and is the only description the
+    operator sees. It is not defaulted: the dialog used to hard-code a
+    "soft-delete only, files preserved" explainer that was false on the
+    Presets screen (which unlinks YAML) and on Benchmarks (which hard-deletes
+    the row), and that referred to a checkbox those call sites never render.
+
+    ``AUTO_FOCUS`` targets Cancel. Textual otherwise focuses the first control
+    in DOM order — the file-deletion checkbox when it exists — so the same
+    ``d``, ``Enter`` reflex that completes a delete elsewhere silently armed
+    recursive on-disk deletion here.
+    """
+
+    AUTO_FOCUS = "#delete-cancel"
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, label: str, *, allow_file_delete: bool = True) -> None:
+    def __init__(
+        self,
+        label: str,
+        consequence: str,
+        *,
+        allow_file_delete: bool = False,
+        file_delete_target: str | None = None,
+    ) -> None:
         super().__init__()
         self._label = label
+        self._consequence = consequence
         self._allow_file_delete = allow_file_delete
+        self._file_delete_target = file_delete_target
 
     def compose(self) -> ComposeResult:
         with Vertical(id="delete-dialog", classes="panel"):
             yield Static(f"[b]Delete {esc(self._label)}?[/b]", id="delete-title")
-            yield Static(
-                "Soft-delete only — the registry row will be hidden, but on-disk "
-                "files are preserved unless you tick the box below.",
-                id="delete-explainer",
-            )
+            yield Static(esc(self._consequence), id="delete-explainer")
             if self._allow_file_delete:
+                target = self._file_delete_target or "(no path recorded)"
                 yield Checkbox(
-                    "Also delete files on disk (irreversible)",
+                    f"Also delete files on disk, irreversibly: {target}",
                     value=False,
                     id="delete-files-cb",
                 )
             with Horizontal(id="delete-buttons"):
                 yield Button("Delete", variant="error", id="delete-confirm")
-                yield Button("Cancel", variant="default", id="delete-cancel")
+                yield Button("Cancel", variant="primary", id="delete-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "delete-cancel":

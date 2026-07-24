@@ -170,7 +170,11 @@ class ProfilesScreen(DataScreen):
             )
 
         self.app.push_screen(
-            DeleteModal(f"profile '{profile.name}'", allow_file_delete=False),
+            DeleteModal(
+                f"profile '{profile.name}'",
+                "The profile row is removed from the registry. Profiles defined "
+                "in profiles.yaml are re-imported on the next sync.",
+            ),
             _on_close,
         )
 

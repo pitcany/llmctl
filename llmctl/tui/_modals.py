@@ -3,12 +3,51 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from llmctl.schemas import LaunchPlan
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, esc
+
+
+class ConfirmActionModal(ModalScreen[bool | None]):
+    """Gate a state-changing action behind an explicit yes.
+
+    Dismisses with ``True`` on confirm and ``None`` on cancel or escape.
+    ``AUTO_FOCUS`` targets Cancel so a reflexive Enter is always the safe
+    answer — Textual otherwise focuses the first control in DOM order, which
+    would be the button that performs the action.
+    """
+
+    AUTO_FOCUS = "#confirm-cancel"
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(
+        self,
+        title: str,
+        consequence: str,
+        *,
+        confirm_label: str = "Confirm",
+    ) -> None:
+        super().__init__()
+        self._title = title
+        self._consequence = consequence
+        self._confirm_label = confirm_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-dialog", classes="panel"):
+            yield Static(f"[b]{esc(self._title)}[/b]", id="confirm-title")
+            yield Static(esc(self._consequence), id="confirm-consequence")
+            with Horizontal(id="confirm-buttons"):
+                yield Button(self._confirm_label, variant="error", id="confirm-ok")
+                yield Button("Cancel", variant="primary", id="confirm-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(True if event.button.id == "confirm-ok" else None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class LaunchPlanModal(ModalScreen[str | None]):

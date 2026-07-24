@@ -328,14 +328,24 @@ class RegistryService:
         self.db.commit()
         return True
 
-    def prune_missing(self, runtime: RuntimeName | None = None) -> int:
+    def prune_missing(
+        self,
+        runtime: RuntimeName | None = None,
+        *,
+        ids: list[str] | None = None,
+    ) -> int:
         """Soft-delete (status ``DELETED``) every ``MISSING`` model.
 
-        Optionally restrict to a single ``runtime``. Returns the count pruned.
+        Optionally restrict to a single ``runtime``, or to an explicit ``ids``
+        allow-list. The allow-list lets a caller bind the set it showed the
+        user, so a concurrent scan flagging new rows cannot widen the prune
+        beyond what was confirmed. Returns the count pruned.
         """
         statement = select(ModelRecord).where(ModelRecord.status == ModelStatus.MISSING)
         if runtime is not None:
             statement = statement.where(ModelRecord.runtime == runtime)
+        if ids is not None:
+            statement = statement.where(ModelRecord.id.in_(ids))  # type: ignore[attr-defined]
         records = self.db.exec(statement).all()
         for record in records:
             record.status = ModelStatus.DELETED

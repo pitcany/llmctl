@@ -292,7 +292,12 @@ class PresetsScreen(DataScreen):
             )
 
         self.app.push_screen(
-            DeleteModal(f"preset '{alias}' YAML", allow_file_delete=False),
+            DeleteModal(
+                f"preset '{alias}'",
+                "The preset YAML file is unlinked from disk (both the canonical "
+                "and legacy preset directories). There is no registry row and no "
+                "soft-delete: this cannot be undone from llmctl.",
+            ),
             _on_close,
         )
 
