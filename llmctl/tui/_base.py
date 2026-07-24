@@ -37,6 +37,10 @@ def esc(value: object) -> str:
 class DataScreen(Screen[None]):
     """Screen that fetches data off-thread and renders on the UI thread."""
 
+    #: True while an action worker is in flight. A class-level default so
+    #: subclasses that never call ``DataScreen.__init__`` still read False.
+    _action_busy: bool = False
+
     def on_mount(self) -> None:
         """Mount hook, kept so subclasses can extend it via ``super()``.
 
@@ -100,18 +104,43 @@ class DataScreen(Screen[None]):
         layer refuses with ``AdoptError``) surface as an error notification
         instead of crashing the worker. The ``after`` callback is guarded too:
         it runs on the UI thread but its exception propagates back here.
+
+        Only one action runs per screen at a time. A second attempt is
+        *refused*, not queued and not cancelled: a preset launch rewrites
+        ``vllm-tp.env`` and issues ``systemctl restart`` over 1-3 minutes, and
+        two of those interleave into a corrupt env file and competing
+        restarts. Refusing is also the only honest option — Textual thread
+        workers run on the event loop's default executor and cannot be
+        interrupted, so "cancelling" a launch would leave it driving systemctl
+        while the UI reported it stopped.
+
+        Data refreshes are deliberately not covered: they use their own
+        worker group, so the screen keeps updating while an action runs.
         """
+        if self._action_busy:
+            self.notify(
+                "An action is already running on this screen. Wait for it to "
+                "finish.",
+                title="Busy",
+                severity="warning",
+            )
+            return
+        self._action_busy = True
 
         def _worker() -> None:
             try:
-                result = func()
-            except Exception as exc:
-                self.app.call_from_thread(self._notify_error, exc, "Action failed")
-                return
-            try:
-                self.app.call_from_thread(after, result)
-            except Exception as exc:
-                self.app.call_from_thread(self._notify_error, exc, "Action failed")
+                try:
+                    result = func()
+                except Exception as exc:
+                    self.app.call_from_thread(self._notify_error, exc, "Action failed")
+                    return
+                try:
+                    self.app.call_from_thread(after, result)
+                except Exception as exc:
+                    self.app.call_from_thread(self._notify_error, exc, "Action failed")
+            finally:
+                # Must clear on every path, or the screen is inert until restart.
+                self._action_busy = False
 
         self.run_worker(_worker, thread=True)
 
