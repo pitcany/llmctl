@@ -106,11 +106,11 @@ class RegistryService:
         (``REGISTERED``) are never affected. Rediscovery later restores a row
         via :meth:`_upsert` (``MISSING -> DISCOVERED``).
 
-        Rows whose recorded ``path`` still exists on local disk are exempt:
-        single-model servers (the vllm-tp unit) report only the currently
-        served model, so absence from one scan means the unit rotated to
-        another model, not that the checkpoint vanished. ``MISSING`` is
-        reserved for artifacts that are actually gone.
+        Rows are additionally exempt unless the on-disk artifact is provably
+        gone — see :meth:`_artifact_is_gone`. Single-model servers (the
+        vllm-tp unit) report only the currently served model, so absence from
+        one scan means the unit rotated, not that the checkpoint vanished.
+        ``MISSING`` is reserved for artifacts that are actually gone.
         """
         discovered_keys = {(runtime, m.source or m.name) for m in discovered}
         stale = self.db.exec(
@@ -123,7 +123,7 @@ class RegistryService:
         for record in stale:
             if (record.runtime, record.source or record.name) in discovered_keys:
                 continue
-            if record.path and Path(record.path).expanduser().exists():
+            if not self._artifact_is_gone(record):
                 continue
             record.status = ModelStatus.MISSING
             record.updated_at = utcnow()
@@ -131,6 +131,29 @@ class RegistryService:
             changed = True
         if changed:
             self.db.commit()
+
+    @staticmethod
+    def _artifact_is_gone(record: ModelRecord) -> bool:
+        """Whether ``record``'s artifact is provably absent from local disk.
+
+        Three cases, and only the last is a disappearance:
+
+        * **No path** — nothing to check, so the runtime's own report decides
+          (ollama and LM Studio rows carry no path; this is their normal path).
+        * **Non-absolute path** — not a local filesystem artifact at all.
+          vLLM reports ``root`` as the ``--model`` value, which is a Hugging
+          Face repo id (``org/name``) whenever the server was pointed at the
+          hub. ``Path("org/name").exists()`` answers a question about the
+          process working directory, not about the model, so never judge on it.
+        * **Absolute path** — a real location; its absence is real evidence.
+        """
+        raw = (record.path or "").strip()
+        if not raw:
+            return True
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            return False
+        return not candidate.exists()
 
     def scan_discovered_only(self) -> list[Model]:
         """Return *new* adapter-discovered models without persisting them.

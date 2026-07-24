@@ -114,10 +114,15 @@ class MissionControlApp(App[None]):
         self.install_screen(DoctorScreen(), name="doctor")
         self.install_screen(BenchmarksScreen(), name="benchmarks")
         self.push_screen("dashboard")
-        self.set_interval(REFRESH_INTERVAL, self._auto_refresh)
+        self.set_interval(REFRESH_INTERVAL, self._tick_refresh)
 
-    def _auto_refresh(self) -> None:
-        """Refresh the active screen's data if it supports it."""
+    def _tick_refresh(self) -> None:
+        """Refresh the active screen's data if it supports it.
+
+        Not named ``_auto_refresh``: Textual's ``DOMNode.__init__`` assigns an
+        instance attribute of that name, which shadows the method and silently
+        registers the interval timer with a ``None`` callback.
+        """
         self.action_refresh()
 
     def action_refresh(self) -> None:

@@ -10,7 +10,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
-from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
+from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 
 _STATUS_COLOR = {
     "running": C_OK,
@@ -82,7 +82,7 @@ class SessionsScreen(DataScreen):
                 str(session.pid or "-"),
                 str(session.port or "-"),
                 gpus,
-                (session.endpoint_url or "-"),
+                esc(session.endpoint_url or "-"),
             )
         if not sessions:
             table.add_row("-", "-", "no sessions yet", "-", "-", "-", "-")
@@ -95,7 +95,9 @@ class SessionsScreen(DataScreen):
         elif not data["tail"]:
             log.update(f"[{C_MUTED}]No log output for this session yet.[/]")
         else:
-            log.update(data["tail"])
+            # Process output is not markup: '[/INST]' templates and '[rank0]:'
+            # torch prefixes appear routinely and would crash or vanish.
+            log.update(esc(data["tail"]))
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         """Track the highlighted session and refresh its log tail."""

@@ -86,13 +86,15 @@ class VLLMAdapter(ProcessRuntimeAdapter):
 
     @property
     def last_discovery_ok(self) -> bool:
-        """Whether the last ``discover_models`` had a live data source.
+        """Whether a managed unit answered the last ``discover_models``.
 
-        False when no managed unit answered the HTTP probe *and* the
-        filesystem sweep produced nothing — the catalog is unknowable,
-        not empty. The scan reconcile pass consults this so a down
-        vllm-tp unit never false-flags its models MISSING (same contract
-        as :attr:`HttpRuntimeAdapter.last_discovery_ok`).
+        Only the HTTP probe counts. The filesystem sweep keys models by
+        *path* while HTTP discovery keys them by *served name*, so on-disk
+        checkpoints are no evidence about what a down unit would have
+        served; letting them vouch for the probe lets reconcile flag every
+        served-name row MISSING. When this is False the scan reconcile pass
+        skips vLLM entirely (same contract as
+        :attr:`HttpRuntimeAdapter.last_discovery_ok`).
         """
         return self._last_discovery_ok
 
@@ -260,7 +262,7 @@ class VLLMAdapter(ProcessRuntimeAdapter):
             seen_source.add(key)
             models.append(fs_model)
 
-        self._last_discovery_ok = any_unit_answered or bool(models)
+        self._last_discovery_ok = any_unit_answered
         return models
 
 

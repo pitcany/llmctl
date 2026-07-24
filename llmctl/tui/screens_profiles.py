@@ -16,7 +16,7 @@ from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.schemas import ProfileCreate, ProfileUpdate
 from llmctl.tui import _data
-from llmctl.tui._base import C_MUTED, DataScreen
+from llmctl.tui._base import C_MUTED, DataScreen, esc
 from llmctl.tui._modals_registry import (
     CloneModal,
     CloneRequest,
@@ -67,11 +67,11 @@ class ProfilesScreen(DataScreen):
             self._ids.append(pid)
             table.add_row(
                 pid[:8],
-                profile.name,
+                esc(profile.name),
                 profile.runtime.value,
                 str(profile.tensor_parallel_size or "-"),
                 str(profile.max_model_len or "-"),
-                profile.description or "-",
+                esc(profile.description or "-"),
             )
         if not data:
             table.add_row("-", "No profiles yet (a = create)", "-", "-", "-", "-")

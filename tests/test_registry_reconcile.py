@@ -132,6 +132,34 @@ def test_scan_keeps_row_whose_path_still_exists_on_disk(db: Session, tmp_path) -
     assert _status(db, "ornith") == ModelStatus.DISCOVERED
 
 
+def test_scan_keeps_row_whose_path_is_not_a_local_filesystem_path(
+    db: Session, tmp_path, monkeypatch
+) -> None:
+    """A non-absolute ``path`` (an HF repo id) is not judgeable from disk.
+
+    vLLM reports ``root`` as the ``--model`` value, which is a Hugging Face
+    repo id whenever the server was pointed at the hub rather than a local
+    checkpoint. Testing such a value with ``Path.exists()`` asks a question
+    about the current working directory, not about the model.
+    """
+    repo_id = Model(
+        name="hub-model",
+        runtime=RuntimeName.OLLAMA,
+        source="hub-model",
+        path="deepreinforce-ai/Ornith-1.0-35B-FP8",
+        status=ModelStatus.DISCOVERED,
+    )
+    _scan(db, healthy=True, models=[repo_id])
+    _scan(db, healthy=True, models=[])
+    assert _status(db, "hub-model") == ModelStatus.DISCOVERED
+
+    # ...and the verdict must not change with the process working directory.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "deepreinforce-ai").mkdir()
+    _scan(db, healthy=True, models=[])
+    assert _status(db, "hub-model") == ModelStatus.DISCOVERED
+
+
 def test_scan_flags_row_whose_path_vanished(db: Session, tmp_path) -> None:
     """A recorded path that no longer exists does not shield the row."""
     gone = Model(

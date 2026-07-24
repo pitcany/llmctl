@@ -9,7 +9,7 @@ from textual.containers import Grid
 from textual.widgets import Footer, Header, Static
 
 from llmctl.tui import _data
-from llmctl.tui._base import C_ACCENT, C_MUTED, C_OK, C_WARN, DataScreen
+from llmctl.tui._base import C_ACCENT, C_MUTED, C_OK, C_WARN, DataScreen, esc
 
 
 class StatCard(Static):
@@ -113,13 +113,13 @@ class DashboardScreen(DataScreen):
             color = C_OK if state == "ok" else C_WARN
             message = info.get("message", "")
             lines.append(
-                f"  [{color}]*[/] {name:<14} {state:<12} [{C_MUTED}]{message}[/]"
+                f"  [{color}]*[/] {esc(name):<14} {state:<12} [{C_MUTED}]{esc(message)}[/]"
             )
         warnings = data.get("scheduler_warnings", [])
         if warnings:
             lines.append("\n[b]Scheduler warnings[/b]")
             for warning in warnings:
-                lines.append(f"  [{C_WARN}]![/] {warning}")
+                lines.append(f"  [{C_WARN}]![/] {esc(warning)}")
         router = data.get("router") or {}
         if router:
             lines.append("\n[b]Router gateway[/b]")
@@ -143,8 +143,8 @@ class DashboardScreen(DataScreen):
                     )
                     session_id = entry.get("session_id") or "-"
                     lines.append(
-                        f"  [{a_color}]·[/] {entry['name']:<14} -> {target}  "
-                        f"[{C_MUTED}]session={session_id}[/]"
+                        f"  [{a_color}]·[/] {esc(entry['name']):<14} -> {esc(target)}  "
+                        f"[{C_MUTED}]session={esc(session_id)}[/]"
                     )
                 lines.append(
                     f"  [{C_MUTED}]{len(bound)}/{len(aliases)} aliases bound.[/]"

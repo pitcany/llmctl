@@ -8,7 +8,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from llmctl.schemas import LaunchPlan
-from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN
+from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, esc
 
 
 class LaunchPlanModal(ModalScreen[str | None]):
@@ -33,19 +33,19 @@ class LaunchPlanModal(ModalScreen[str | None]):
         free = "n/a" if plan.free_vram_gb is None else f"{plan.free_vram_gb:.1f} GB"
         lines = [
             "[b]Launch Plan[/b]",
-            f"[{C_MUTED}]Model[/]      {plan.model_name or plan.model_id}",
+            f"[{C_MUTED}]Model[/]      {esc(plan.model_name or plan.model_id)}",
             f"[{C_MUTED}]Backend[/]    {plan.runtime.value}",
-            f"[{C_MUTED}]Profile[/]    {plan.profile_name or '-'}",
+            f"[{C_MUTED}]Profile[/]    {esc(plan.profile_name or '-')}",
             f"[{C_MUTED}]GPU mode[/]   {plan.gpu_selection_mode}  ->  {gpus}",
             f"[{C_MUTED}]Tensor par[/] {plan.tensor_parallel_size}",
             f"[{C_MUTED}]Port[/]       {plan.port or '-'}",
             f"[{C_MUTED}]VRAM[/]       est {est} / free {free}",
-            f"[{C_MUTED}]Command[/]    {plan.command_preview}",
+            f"[{C_MUTED}]Command[/]    {esc(plan.command_preview)}",
         ]
         for warning in plan.warnings:
-            lines.append(f"[{C_WARN}]warning:[/] {warning}")
+            lines.append(f"[{C_WARN}]warning:[/] {esc(warning)}")
         for reason in plan.refusal_reasons:
-            lines.append(f"[{C_ERR}]refusal:[/] {reason}")
+            lines.append(f"[{C_ERR}]refusal:[/] {esc(reason)}")
         if plan.refusal_reasons:
             lines.append(
                 f"\n[{C_WARN}]This launch is refused; only a planned session can be "

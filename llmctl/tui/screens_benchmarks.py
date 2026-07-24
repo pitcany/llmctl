@@ -9,7 +9,7 @@ from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
-from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
+from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 from llmctl.tui._modals_benchmarks import BenchmarkLaunch, BenchmarkLaunchModal
 from llmctl.tui._modals_registry import ConfirmDelete, DeleteModal
 
@@ -111,13 +111,13 @@ class BenchmarksScreen(DataScreen):
             ok = f"[{ok_color}]{'y' if result.success else 'n'}[/]"
             when = result.created_at.strftime("%H:%M:%S") if result.created_at else "-"
             name_cell = (
-                f"[{C_OK}]* {result.name}[/]" if is_baseline else result.name
+                f"[{C_OK}]* {esc(result.name)}[/]" if is_baseline else esc(result.name)
             )
             self._ids.append(result.id or "")
             table.add_row(
                 name_cell,
                 result.kind.value if result.kind else "-",
-                result.backend or "-",
+                esc(result.backend or "-"),
                 f"[{color}]{mode}[/]",
                 str(result.total_tokens or 0),
                 tps,

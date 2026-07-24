@@ -9,7 +9,7 @@ from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
-from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen
+from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 
 
 class DoctorScreen(DataScreen):
@@ -58,7 +58,7 @@ class DoctorScreen(DataScreen):
             available = bool(entry["available"])
             if available:
                 status_cell = f"[{C_OK}]ready[/]"
-                detail = str(entry.get("path") or "-")
+                detail = esc(str(entry.get("path") or "-"))
                 command = ""
             else:
                 status_cell = f"[{C_ERR}]missing[/]"
@@ -69,7 +69,7 @@ class DoctorScreen(DataScreen):
                     else f"[{C_MUTED}]{_data.BACKEND_INSTALL_HINTS.get(backend, '')}[/]"
                 )
             self._rows.append((backend, command))
-            table.add_row(backend, binary, status_cell, detail)
+            table.add_row(backend, esc(binary), status_cell, detail)
         if 0 <= cursor < len(self._rows):
             table.move_cursor(row=cursor)
         self._render_summary(data["summary"])

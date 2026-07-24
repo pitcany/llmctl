@@ -8,7 +8,7 @@ from textual.app import ComposeResult
 from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.tui import _data
-from llmctl.tui._base import C_MUTED, C_OK, C_WARN, DataScreen
+from llmctl.tui._base import C_MUTED, C_OK, C_WARN, DataScreen, esc
 
 
 class GPUScreen(DataScreen):
@@ -53,7 +53,7 @@ class GPUScreen(DataScreen):
             power = "n/a" if gpu.power_draw_watts is None else f"{gpu.power_draw_watts:.0f}W"
             table.add_row(
                 str(gpu.index),
-                gpu.name,
+                esc(gpu.name),
                 memory,
                 util,
                 temp,
