@@ -2,24 +2,6 @@
 
 Local-first Linux control plane for vLLM (and friends).
 
-`llmctl` writes the `EnvironmentFile` for an externally-installed
-systemd unit (e.g. `vllm-tp.service`), restarts the unit, polls
-`/v1/models` for readiness, and verifies that downstream consumers
-(Hermes, Open WebUI) still see the right served name. It owns the
-*how* of running a preset; presets themselves live at
-`~/.config/llmctl/presets/<alias>.yaml`. Legacy presets in
-`~/.config/llm-models/` are symlinked into that directory on first
-load so existing installs keep working.
-
-This package replaced `gpu-models` in May 2026. The migration was
-non-disruptive — every legacy `gpu-models <verb>` still works via
-`bin/gpu-models` shim, the env file output is byte-identical
-(verified by 12 fixture files at
-`tests/fixtures/env_renders/`), and no production restart was
-required.
-
-## What it does
-
 In plain terms: `llmctl` is a control panel for the model servers on one
 machine. It does not serve models itself — it manages the programs that do
 (Ollama, vLLM, LM Studio, llama.cpp) and gives you one consistent way to drive
@@ -30,6 +12,8 @@ vLLM is a single systemd unit spanning every card, so "switching models" means
 reconfiguring and restarting that unit — a 1–3 minute operation that also stops
 Ollama first to free VRAM. Ollama is the opposite: many smaller models, loaded
 on demand. Much of `llmctl` exists to manage that split safely.
+
+## What it does
 
 **Knowing what you have.** `llmctl` keeps a catalog of every model it knows
 about — where the files are, which runtime serves it, how big it is.
@@ -79,6 +63,24 @@ compares runs against a baseline.
 already-running endpoint under management without restarting it, and
 `llmctl detach` lets go again — `llmctl` is a layer over an existing setup, not
 a replacement for it.
+
+## How it works
+
+`llmctl` writes the `EnvironmentFile` for an externally-installed
+systemd unit (e.g. `vllm-tp.service`), restarts the unit, polls
+`/v1/models` for readiness, and verifies that downstream consumers
+(Hermes, Open WebUI) still see the right served name. It owns the
+*how* of running a preset; presets themselves live at
+`~/.config/llmctl/presets/<alias>.yaml`. Legacy presets in
+`~/.config/llm-models/` are symlinked into that directory on first
+load so existing installs keep working.
+
+This package replaced `gpu-models` in May 2026. The migration was
+non-disruptive — every legacy `gpu-models <verb>` still works via
+`bin/gpu-models` shim, the env file output is byte-identical
+(verified by 12 fixture files at
+`tests/fixtures/env_renders/`), and no production restart was
+required.
 
 ## Docs
 
