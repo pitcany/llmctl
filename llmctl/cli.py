@@ -168,9 +168,16 @@ def models_cmd(json_out: _JSON_OPT = False) -> None:
     table.add_column("ID")
     table.add_column("Name")
     table.add_column("Runtime")
+    table.add_column("Host")
     table.add_column("Status")
     for model in models:
-        table.add_row(model.id or "", model.name, model.runtime.value, model.status.value)
+        table.add_row(
+            model.id or "",
+            model.name,
+            model.runtime.value,
+            model.host or "",
+            model.status.value,
+        )
     console.print(table)
 
 
