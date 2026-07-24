@@ -9,6 +9,7 @@ thread via ``call_from_thread``.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from rich.markup import escape
@@ -125,24 +126,54 @@ class DataScreen(Screen[None]):
                 severity="warning",
             )
             return
+
+        app = self.app  # captured here; self.app is unreliable once the app stops
         self._action_busy = True
+        app._actions_in_flight = getattr(app, "_actions_in_flight", 0) + 1
 
         def _worker() -> None:
             try:
                 try:
                     result = func()
                 except Exception as exc:
-                    self.app.call_from_thread(self._notify_error, exc, "Action failed")
+                    self._on_ui(app, self._notify_error, exc, "Action failed")
                     return
                 try:
-                    self.app.call_from_thread(after, result)
+                    self._on_ui(app, after, result)
                 except Exception as exc:
-                    self.app.call_from_thread(self._notify_error, exc, "Action failed")
+                    self._on_ui(app, self._notify_error, exc, "Action failed")
             finally:
                 # Must clear on every path, or the screen is inert until restart.
                 self._action_busy = False
+                app._actions_in_flight = max(
+                    0, getattr(app, "_actions_in_flight", 1) - 1
+                )
 
-        self.run_worker(_worker, thread=True)
+        # A daemon thread, not run_worker(thread=True): Textual thread workers
+        # run on the event loop's default executor, which asyncio.run joins on
+        # the way out with a 300s grace period. A launch waits up to 300s for
+        # readiness, so quitting during one left the shell dead for minutes
+        # with the UI already gone. Daemon threads are not joined at exit.
+        threading.Thread(
+            target=_worker, name="llmctl-tui-action", daemon=True
+        ).start()
+
+    @staticmethod
+    def _on_ui(app: Any, fn: Any, *args: Any) -> None:
+        """Marshal ``fn`` onto the UI thread, tolerating an app that has quit.
+
+        Re-raises whatever ``fn`` itself raised so the caller can report it,
+        but swallows the ``RuntimeError`` that ``call_from_thread`` produces
+        once the app has stopped — otherwise an action outliving a quit would
+        dump a traceback over the user's shell prompt.
+        """
+        if not app.is_running:
+            return
+        try:
+            app.call_from_thread(fn, *args)
+        except RuntimeError as exc:  # app stopped between the check and the call
+            if "not running" not in str(exc).lower():
+                raise
 
     def _notify_error(self, exc: Exception, title: str = "Action failed") -> None:
         """Show a persistent, visible error without letting markup parse it."""
