@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from rich.markup import escape
+from textual import events
 from textual.screen import Screen
 
 #: Inline-markup colors (Textual content markup accepts hex color tags).
@@ -37,7 +38,22 @@ class DataScreen(Screen[None]):
     """Screen that fetches data off-thread and renders on the UI thread."""
 
     def on_mount(self) -> None:
-        """Load data when the screen is first mounted."""
+        """Mount hook, kept so subclasses can extend it via ``super()``.
+
+        The initial load deliberately does *not* happen here. Textual posts
+        ``ScreenResume`` on first activation as well as on every switch-back,
+        so :meth:`on_screen_resume` covers both with exactly one fetch;
+        loading from both hooks would start two workers per screen entry,
+        and a thread worker already handed to the executor still renders even
+        when a newer one supersedes it.
+        """
+
+    def on_screen_resume(self, event: events.ScreenResume) -> None:
+        """Load data whenever this screen becomes the active one.
+
+        Lives on the screen, not the App: ``ScreenResume`` is declared
+        ``bubble=False``, so an App-level handler never receives it.
+        """
         self.refresh_data()
 
     def fetch(self) -> Any:

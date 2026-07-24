@@ -128,3 +128,61 @@ def test_failing_render_notifies_instead_of_killing_the_app(monkeypatch) -> None
     assert any("models" in n for n in notes), (
         f"render failure was not surfaced to the user: {notes!r}"
     )
+
+
+def test_switching_back_to_a_screen_refetches(monkeypatch) -> None:
+    """A revisited screen must reload, not show data from first mount.
+
+    ``MissionControlApp.on_screen_resume`` was dead code: Textual declares
+    ``ScreenResume`` with ``bubble=False``, so the event never reached the
+    App. The handler belongs on the screen itself.
+    """
+    calls: list[int] = []
+    monkeypatch.setattr(_data, "get_models", lambda: calls.append(1) or [])
+    monkeypatch.setattr(_data, "get_backend_map", lambda: {})
+    monkeypatch.setattr(_data, "get_preset_count_by_model", lambda: {})
+    monkeypatch.setattr(_data, "get_missing_count", lambda: 0)
+    # Keep the interval timer from muddying the count.
+    monkeypatch.setattr(app_mod, "REFRESH_INTERVAL", 3600.0)
+
+    async def _run() -> None:
+        app = MissionControlApp()
+        async with app.run_test() as pilot:
+            app.action_show_models()
+            await _settle(pilot, times=30)
+            first = len(calls)
+            assert first >= 1, "screen never loaded on first activation"
+            app.action_show_dashboard()
+            await _settle(pilot, times=30)
+            app.action_show_models()
+            await _settle(pilot, times=30)
+            assert len(calls) > first, (
+                "returning to the screen did not refetch "
+                f"({first} fetch(es) before, {len(calls)} after)"
+            )
+
+    asyncio.run(_run())
+
+
+def test_first_activation_fetches_once(monkeypatch) -> None:
+    """on_mount and on_screen_resume must not both trigger a load.
+
+    ``ScreenResume`` fires on first activation too, so refreshing from both
+    hooks would double every screen entry — two concurrent workers whose
+    render order is not their start order.
+    """
+    calls: list[int] = []
+    monkeypatch.setattr(_data, "get_models", lambda: calls.append(1) or [])
+    monkeypatch.setattr(_data, "get_backend_map", lambda: {})
+    monkeypatch.setattr(_data, "get_preset_count_by_model", lambda: {})
+    monkeypatch.setattr(_data, "get_missing_count", lambda: 0)
+    monkeypatch.setattr(app_mod, "REFRESH_INTERVAL", 3600.0)
+
+    async def _run() -> None:
+        app = MissionControlApp()
+        async with app.run_test() as pilot:
+            app.action_show_models()
+            await _settle(pilot, times=40)
+
+    asyncio.run(_run())
+    assert len(calls) == 1, f"first activation fetched {len(calls)} times, want 1"
