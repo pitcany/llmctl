@@ -28,6 +28,7 @@ class Model(BaseModel):
     runtime: RuntimeName
     source: str | None = None
     path: str | None = None
+    host: str | None = None
     format: str | None = None
     quantization: str | None = None
     size_bytes: int | None = None
@@ -51,6 +52,7 @@ class ModelCreate(BaseModel):
     runtime: RuntimeName
     source: str | None = None
     path: str | None = None
+    host: str | None = None
     format: str | None = None
     quantization: str | None = None
     estimated_vram_gb: float | None = None
@@ -69,6 +71,7 @@ class ModelUpdate(BaseModel):
     runtime: RuntimeName | None = None
     source: str | None = None
     path: str | None = None
+    host: str | None = None
     format: str | None = None
     quantization: str | None = None
     estimated_vram_gb: float | None = None

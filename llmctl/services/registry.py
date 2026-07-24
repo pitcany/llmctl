@@ -10,6 +10,7 @@ CLI, TUI, and API.
 from __future__ import annotations
 
 import asyncio
+import socket
 from pathlib import Path
 
 from sqlmodel import Session, select
@@ -20,6 +21,23 @@ from llmctl.schemas import HealthState, Model, ModelCreate, ModelUpdate
 from llmctl.services.router import RuntimeRouter
 
 
+def local_host() -> str:
+    """Return this machine's hostname, used as the default model host.
+
+    Adapters that can't attribute a model to a specific device (every loopback
+    runtime, and LM Studio when the ``lms`` CLI enrichment is unavailable)
+    report no host; the registry treats those — and pre-host NULL rows — as
+    living on the local machine so the discovery identity key is always
+    non-null and consistent.
+    """
+    return socket.gethostname()
+
+
+def effective_host(host: str | None) -> str:
+    """Normalize a possibly-missing host to the local machine's hostname."""
+    return host or local_host()
+
+
 def record_to_model(record: ModelRecord) -> Model:
     """Convert a database record into an API schema."""
     return Model(
@@ -28,6 +46,7 @@ def record_to_model(record: ModelRecord) -> Model:
         runtime=record.runtime,
         source=record.source,
         path=record.path,
+        host=record.host,
         format=record.format,
         quantization=record.quantization,
         size_bytes=record.size_bytes,
@@ -112,7 +131,9 @@ class RegistryService:
         one scan means the unit rotated, not that the checkpoint vanished.
         ``MISSING`` is reserved for artifacts that are actually gone.
         """
-        discovered_keys = {(runtime, m.source or m.name) for m in discovered}
+        discovered_keys = {
+            (runtime, m.source or m.name, effective_host(m.host)) for m in discovered
+        }
         stale = self.db.exec(
             select(ModelRecord).where(
                 ModelRecord.runtime == runtime,
@@ -121,7 +142,8 @@ class RegistryService:
         ).all()
         changed = False
         for record in stale:
-            if (record.runtime, record.source or record.name) in discovered_keys:
+            key = (record.runtime, record.source or record.name, effective_host(record.host))
+            if key in discovered_keys:
                 continue
             if not self._artifact_is_gone(record):
                 continue
@@ -176,12 +198,14 @@ class RegistryService:
             select(ModelRecord).where(ModelRecord.status != ModelStatus.DELETED)
         ).all()
         existing_keys = {
-            (record.runtime, record.source or record.name) for record in existing
+            (record.runtime, record.source or record.name, effective_host(record.host))
+            for record in existing
         }
         return [
             model
             for model in discovered
-            if (model.runtime, model.source or model.name) not in existing_keys
+            if (model.runtime, model.source or model.name, effective_host(model.host))
+            not in existing_keys
         ]
 
     def list_models(self, include_inactive: bool = False) -> list[Model]:
@@ -241,6 +265,7 @@ class RegistryService:
             runtime=payload.runtime,
             source=payload.source,
             path=payload.path,
+            host=payload.host,
             format=payload.format,
             quantization=payload.quantization,
             estimated_vram_gb=payload.estimated_vram_gb,
@@ -283,6 +308,7 @@ class RegistryService:
             runtime=record.runtime,
             source=record.source,
             path=record.path,
+            host=record.host,
             format=record.format,
             quantization=record.quantization,
             size_bytes=record.size_bytes,
@@ -392,17 +418,36 @@ class RegistryService:
             return
 
     def _upsert(self, model: Model) -> None:
-        """Insert a discovered model or refresh an existing record."""
+        """Insert a discovered model or refresh an existing record.
+
+        Identity is ``(runtime, source, host)``, so the same model served from
+        two devices is two rows. On the first scan after the ``host`` column is
+        added, a pre-host row (``host IS NULL``) with a matching runtime/source
+        is adopted in place — its host is backfilled rather than a duplicate
+        created.
+        """
         key_source = model.source or model.name
+        host = effective_host(model.host)
         existing = self.db.exec(
             select(ModelRecord).where(
                 ModelRecord.runtime == model.runtime,
                 ModelRecord.source == key_source,
+                ModelRecord.host == host,
             )
         ).first()
+        if existing is None:
+            # Migration bridge: adopt a pre-host row instead of duplicating it.
+            existing = self.db.exec(
+                select(ModelRecord).where(
+                    ModelRecord.runtime == model.runtime,
+                    ModelRecord.source == key_source,
+                    ModelRecord.host.is_(None),
+                )
+            ).first()
         if existing is not None:
             if existing.status == ModelStatus.MISSING:
                 existing.status = ModelStatus.DISCOVERED
+            existing.host = host
             existing.path = model.path or existing.path
             existing.format = model.format or existing.format
             existing.quantization = model.quantization or existing.quantization
@@ -416,6 +461,7 @@ class RegistryService:
             name=model.name,
             runtime=model.runtime,
             source=key_source,
+            host=host,
             path=model.path,
             format=model.format,
             quantization=model.quantization,

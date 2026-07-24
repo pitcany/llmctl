@@ -303,9 +303,14 @@ auto-refreshes every 3s and never blocks the UI on probes.
   CLI defaults to `~/.local/share/llmctl/llmctl.sqlite3`; if the API
   is run from a different shell, export the same URL there.
 - **`scan --import` skipped my model** — `scan` deduplicates by
-  `(backend, source-or-name)`. If you've registered the same file
+  `(backend, source-or-name, host)`. If you've registered the same file
   manually under a different name, `--import` is a no-op for that
   path.
+- **The same model shows up twice in `llmctl models`** — `host` is part
+  of a model's identity, so a model served from two machines (e.g. an
+  LM Studio model on two LM Link devices) is two rows, one per host. The
+  `Host` column shows where each lives: the LM Link device name for LM
+  Studio fleet models, the local hostname otherwise.
 
 ## Managed units (defaults)
 
