@@ -97,12 +97,21 @@ class OrchestratorResult:
 
     @property
     def ok(self) -> bool:
-        """``True`` when the launch succeeded end-to-end."""
+        """``True`` when the launch succeeded end-to-end.
+
+        ``restart.ready is None`` means ``--no-wait``: the restart was issued
+        cleanly and nobody probed the endpoint. That is a success with an
+        unknown endpoint, not a failure — exiting non-zero would punish the
+        operator for a flag they chose. The *reporting* layer is what must not
+        call it "ready" (see ``cli.vllm_cmd``).
+        """
         if self.dry_run:
             return True
-        if not self.fleet_failed and self.restart is not None and self.restart.ready:
-            return True
-        return False
+        if self.fleet_failed or self.restart is None:
+            return False
+        if self.restart.error:
+            return False
+        return self.restart.ready is not False
 
 
 # Injection seam for tests — production code uses the real defaults.
