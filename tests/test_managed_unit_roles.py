@@ -179,3 +179,53 @@ def test_adopt_managed_unknown_role_lists_choices(
     assert result.exit_code != 0
     assert "deepseek" in result.output
     assert "vllm-tp" in result.output
+
+
+def test_status_marks_absent_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A role whose env file does not exist must not render a path.
+
+    `resolve_env_file()` always returns *a* path, even for a runtime llmctl
+    never writes an env file for. Printing it reads as "edit this file" for a
+    file that isn't there — which is exactly the noise registering a llama.cpp
+    role introduced.
+    """
+    import json
+
+    from typer.testing import CliRunner
+
+    import llmctl.cli as cli_mod
+    from llmctl.cli import app
+
+    real = tmp_path / "vllm-tp.env"
+    real.write_text("VLLM_PORT=8003\n")
+
+    settings = Settings.model_validate(
+        {
+            "managed_units": {
+                "vllm_tp": {"unit_name": "vllm-tp", "env_file_path": str(real)},
+                "units": {
+                    "deepseek": {
+                        "unit_name": "ds4",
+                        "default_port": 8000,
+                        "runtime": "llama_cpp",
+                        "env_file_path": str(tmp_path / "does-not-exist.env"),
+                    }
+                },
+            }
+        }
+    )
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "llmctl.services.backends.probe_openai_v1_models", lambda url, timeout: None
+    )
+
+    rows = json.loads(CliRunner().invoke(app, ["status", "--json"]).output)
+    by_role = {r["role"]: r for r in rows}
+    assert by_role["vllm-tp"]["env_file_exists"] is True
+    assert by_role["deepseek"]["env_file_exists"] is False
+    # JSON keeps the resolved path either way; only the table hides it.
+    assert by_role["deepseek"]["env_file"].endswith("does-not-exist.env")
+
+    table = CliRunner().invoke(app, ["status"]).output
+    assert "does-not-exist.env" not in table
+    assert "—" in table
