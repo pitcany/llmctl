@@ -32,6 +32,7 @@ from llmctl.services.preset_loader import load_preset_views
 from llmctl.services.registry import RegistryService
 from llmctl.services.sessions import AdoptError, SessionService
 from llmctl.services.vllm_orchestrator import (
+    MissingModelPathError,
     OrchestratorOptions,
     UnknownPresetError,
     start_vllm_tp,
@@ -1285,6 +1286,7 @@ def _build_options(
     no_tq: bool,
     dry_run: bool,
     no_wait: bool,
+    force: bool = False,
 ) -> OrchestratorOptions:
     """Resolve the tri-state TQ flag and turn CLI flags into options."""
     if no_tq and tq:
@@ -1297,6 +1299,7 @@ def _build_options(
     return OrchestratorOptions(
         tq_override=tq_override,
         dry_run=dry_run,
+        force=force,
         wait_for_ready=not no_wait,
     )
 
@@ -1323,6 +1326,13 @@ def vllm_cmd(
         bool,
         typer.Option("--no-wait", help="Skip waiting for /v1/models readiness after restart."),
     ] = False,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Restart even if the preset's local model path is missing.",
+        ),
+    ] = False,
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
     ] = False,
@@ -1336,7 +1346,7 @@ def vllm_cmd(
             required=settings.scheduler.require_confirmation_for_start,
             assume_yes=yes,
         )
-    options = _build_options(tq if tq else None, no_tq, dry_run, no_wait)
+    options = _build_options(tq if tq else None, no_tq, dry_run, no_wait, force)
     try:
         result = start_vllm_tp(
             preset,
@@ -1346,6 +1356,10 @@ def vllm_cmd(
             options=options,
         )
     except UnknownPresetError as exc:
+        console.print(f"[red]Unknown preset:[/red] {exc.args[0] if exc.args else preset}")
+        raise typer.Exit(2) from exc
+    except MissingModelPathError as exc:
+        console.print(f"[red]Refusing to start {preset}:[/red] {exc}")
         raise typer.Exit(2) from exc
 
     if result.dry_run:
