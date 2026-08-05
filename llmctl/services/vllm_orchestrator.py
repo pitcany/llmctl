@@ -50,6 +50,15 @@ class UnknownPresetError(KeyError):
     """Raised when the requested preset alias isn't on disk."""
 
 
+class MissingModelPathError(FileNotFoundError):
+    """Raised when a preset's *local* model path is not present on disk."""
+
+
+#: Prefixes that mark a preset ``model_id`` as a filesystem path rather than
+#: a HuggingFace repo id. Repo ids ("org/name") never start with these.
+_LOCAL_PATH_PREFIXES = ("/", "~", "./", "../")
+
+
 @dataclass
 class OrchestratorOptions:
     """Everything the daily-driver orchestrator can be told to do or skip.
@@ -61,6 +70,11 @@ class OrchestratorOptions:
 
     tq_override: bool | None = None
     dry_run: bool = False
+    #: Bypass the local-model-path refusal. The check only fires on a path
+    #: that is provably absent, but an unreadable parent directory can make
+    #: a present model look absent, and locking the operator out of their
+    #: own unit is worse than one doomed restart.
+    force: bool = False
     wait_for_ready: bool = True
     timeout_s: float = 300.0
     enable_fleet_preflight: bool = True
@@ -142,6 +156,9 @@ def start_vllm_tp(
         tq_override=options.tq_override,
     )
 
+    if not options.force:
+        _check_model_path(spec)
+
     return _run_lifecycle(
         spec=spec,
         managed_unit=managed_unit,
@@ -190,6 +207,36 @@ def _build_spec(
     ).model_dump()
     base = apply_to_spec_dict(base, override=tq_override)
     return VLLMLaunchSpec.model_validate(base)
+
+
+def _check_model_path(spec: VLLMLaunchSpec) -> None:
+    """Refuse to swap the managed unit onto a local model path that is gone.
+
+    ``llmctl vllm <preset>`` rewrites the env file and restarts the
+    **single** TP unit, so a preset naming deleted weights first evicts
+    whatever is currently serving and only then fails to load — the
+    generator stays down until a human notices and re-points it by hand.
+    That is precisely what a stale ``ornith-35b-refusal`` preset would
+    have done after its checkpoint was deleted on 2026-07-26.
+
+    Only **local paths** are checked. A HuggingFace repo id (``org/name``)
+    resolves from the HF cache or is fetched on demand, so it fails OPEN —
+    the same rule the scheduler's shard-completeness check follows. The
+    refusal fires before fleet preflight, so a refused start never stops
+    ollama or touches the env file.
+    """
+    model = (spec.model or "").strip()
+    if not model.startswith(_LOCAL_PATH_PREFIXES):
+        return
+    path = Path(model).expanduser()
+    if path.exists():
+        return
+    raise MissingModelPathError(
+        f"preset model path does not exist: {path}. Refusing to restart the "
+        f"unit onto missing weights — it would evict the currently served "
+        f"model and then fail to load. Fix the preset's model_id, or pass "
+        f"--force to override."
+    )
 
 
 def _run_lifecycle(
