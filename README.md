@@ -37,7 +37,7 @@ runtimes expect files already on disk, which `scan` then discovers.
 
 | Command | For | What happens |
 | --- | --- | --- |
-| `llmctl vllm <preset>` | The big shared model on the GPUs | Rewrites the unit's env file and restarts it; stops Ollama first; waits for readiness |
+| `llmctl vllm <preset>` | The big shared model on the GPUs | Refuses first if the preset's local model path is missing (`--force` overrides); otherwise rewrites the unit's env file and restarts it, stops Ollama first, waits for readiness |
 | `llmctl start <model>` | A one-off session for one model | Launches a process, tracks it, and reports `running` only once the endpoint answers |
 
 A **preset** is a recipe at `~/.config/llmctl/presets/<alias>.yaml` — which
@@ -54,8 +54,10 @@ environment report.
 
 **Cleaning up after crashes.** When records and reality disagree,
 `llmctl reconcile` re-syncs them, `llmctl cleanup` finds dead sessions and
-frees the ports they were holding, and `llmctl model prune` clears catalog rows
-for models that are genuinely gone.
+frees the ports they were holding (`--remove-stale` also deletes the
+`PLANNED` rows a `--dry-run` start leaves behind, which would otherwise
+reserve their endpoint against `adopt` forever), and `llmctl model prune`
+clears catalog rows for models that are genuinely gone.
 
 **Serving it to clients.** `llmctl gateway` runs an OpenAI-compatible endpoint
 that downstream apps point at, with aliases (`llmctl aliases`,
@@ -139,7 +141,8 @@ read commands accept `--json` for stable, script-friendly output.
   `--json`: plain JSON on stdout, no ANSI, stable keys.
 - **Exit codes.** 0 = success (or a declined confirmation), 1 =
   operational failure / findings (`validate`, `doctor`), 2 = usage
-  errors and unknown ids.
+  errors, unknown ids, and safety refusals (e.g. `llmctl vllm` on a
+  preset whose local model path is missing).
 - **Config.** `llmctl config path|show|validate` — `show` prints the
   fully-resolved settings with secret-looking fields redacted.
 
@@ -329,8 +332,23 @@ Out-of-the-box, llmctl knows about:
 single `vllm-tp` unit remains, model swapped per preset.)
 
 Every default is overridable in `~/.config/llmctl/settings.yaml` so
-llmctl runs on hosts that don't share yannik-desktop's layout. See
-the user guide for the full schema.
+llmctl runs on hosts that don't share yannik-desktop's layout.
+
+You can also **register your own roles**, of any runtime — they then
+appear in `llmctl status`, are adoptable via `llmctl adopt-managed`,
+show on the TUI Units screen, and are covered by the port-drift check:
+
+```yaml
+managed_units:
+  units:
+    my-llama:
+      unit_name: llama-server
+      default_port: 8080
+      runtime: llama_cpp
+```
+
+`vllm-tp`, `vllm_tp` and `fleet` are reserved names inside `units`.
+See the user guide for the full schema.
 
 ## Test
 
