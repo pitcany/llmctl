@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 import uvicorn
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 from sqlmodel import Session
 
@@ -358,9 +359,9 @@ def _build_start_request(
 def _print_plan_warnings(plan: object) -> None:
     """Print any warnings and refusal reasons attached to a launch plan."""
     for warning in getattr(plan, "warnings", []) or []:
-        console.print(f"[yellow]warning:[/yellow] {warning}")
+        console.print(f"[yellow]warning:[/yellow] {escape(str(warning))}")
     for reason in getattr(plan, "refusal_reasons", []) or []:
-        console.print(f"[red]refusal:[/red] {reason}")
+        console.print(f"[red]refusal:[/red] {escape(str(reason))}")
 
 
 @app.command()
@@ -410,7 +411,7 @@ def start(
         )
     else:
         console.print(
-            f"[red]Session {session.id} {session.status.value}[/red]: {session.error}"
+            f"[red]Session {session.id} {session.status.value}[/red]: {escape(str(session.error))}"
         )
 
 
@@ -434,7 +435,7 @@ def plan(
     table = Table(title="Launch Plan", show_header=False)
     table.add_column("Field", style="cyan")
     table.add_column("Value")
-    table.add_row("Model", f"{launch_plan.model_name or launch_plan.model_id} ")
+    table.add_row("Model", escape(f"{launch_plan.model_name or launch_plan.model_id} "))
     table.add_row("Backend", launch_plan.runtime.value)
     table.add_row("Profile", launch_plan.profile_name or "-")
     table.add_row("GPU mode", launch_plan.gpu_selection_mode)
@@ -450,7 +451,8 @@ def plan(
     free = "n/a" if launch_plan.free_vram_gb is None else f"{launch_plan.free_vram_gb:.1f} GB"
     table.add_row("Estimated VRAM", est)
     table.add_row("Free VRAM", free)
-    table.add_row("Command", launch_plan.command_preview)
+    # The command preview carries model paths and launch args verbatim.
+    table.add_row("Command", escape(launch_plan.command_preview))
     console.print(table)
     _print_plan_warnings(launch_plan)
     if launch_plan.refusal_reasons:
@@ -641,7 +643,10 @@ def logs(
         if not content:
             console.print("[yellow]No log output for this session yet.[/yellow]")
         else:
-            console.print(content)
+            # Log text is bracket-rich: `[/INST]` chat tokens raise MarkupError,
+            # `[rank0]:` torch prefixes are silently deleted. Print the tail
+            # verbatim -- the TUI escapes the same bytes (see tui/_base.esc).
+            console.print(content, markup=False, highlight=False)
         return
 
     with _session() as db:
@@ -658,8 +663,8 @@ def logs(
         table.add_row(
             event.created_at.isoformat(timespec="seconds"),
             event.level.value,
-            event.category,
-            event.message,
+            escape(event.category),
+            escape(event.message),
         )
     console.print(table)
 
@@ -1460,14 +1465,16 @@ def status_cmd(json_out: _JSON_OPT = False) -> None:
     table.add_column("port", justify="right")
     table.add_column("serving")
     for row in rows:
+        # Served model ids and env paths are process/config derived and may
+        # contain brackets; escape them so a name cannot eat the styling.
         serving = (
-            f"[green]{', '.join(row['served_models'])}[/green]"
+            f"[green]{escape(', '.join(row['served_models']))}[/green]"
             if row["serving"] and row["served_models"]
             else ("[green]yes (empty list)[/green]" if row["serving"] else "[red]no[/red]")
         )
-        env_cell = row["env_file"] if row["env_file_exists"] else "[dim]—[/dim]"
+        env_cell = escape(row["env_file"]) if row["env_file_exists"] else "[dim]—[/dim]"
         table.add_row(
-            row["role"], row["unit_name"], env_cell, str(row["port"]), serving
+            row["role"], escape(row["unit_name"]), env_cell, str(row["port"]), serving
         )
     console.print(table)
 
