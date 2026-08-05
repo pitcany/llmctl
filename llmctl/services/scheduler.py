@@ -13,6 +13,7 @@ plan`` or the TUI without launching anything.
 
 from __future__ import annotations
 
+import re
 import shutil
 import socket
 import sys
@@ -37,6 +38,11 @@ GPU_REQUIRED_RUNTIMES = {RuntimeName.VLLM}
 LOCAL_FILE_RUNTIMES = {RuntimeName.LLAMA_CPP, RuntimeName.PYTHON_SCRIPT}
 VALID_GPU_MODES = {"auto", "balanced", "most-free", "least-used"}
 _ACTIVE_STATES = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
+
+#: llama.cpp split-GGUF naming: ``<name>-00001-of-00004.gguf``. Only the first
+#: shard is passed to the server; the rest are opened implicitly deep into
+#: loading, so a missing tail shard costs ~2 minutes before it fails.
+_SHARDED_GGUF_RE = re.compile(r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.gguf$")
 
 
 class SchedulerError(ValueError):
@@ -132,6 +138,7 @@ class SchedulerService:
                 warnings.append("No command could be built; verify the model path/source.")
             self._check_binary(runtime_config, refusals)
             self._check_model_path(runtime, model, parameters, refusals)
+            self._check_shard_completeness(runtime, model, refusals)
 
         safety_checks: list[str] = []
         if request.dry_run:
@@ -341,6 +348,62 @@ class SchedulerService:
             return
         if not Path(str(target)).exists():
             refusals.append(f"Model path does not exist: {target}")
+
+    @staticmethod
+    def _check_shard_completeness(
+        runtime: RuntimeName,
+        model: ModelRecord | None,
+        refusals: list[str],
+    ) -> None:
+        """Refuse when a sharded GGUF is incomplete or still downloading.
+
+        Ported from the ``llama-server-guarded`` wrapper so it applies to
+        every llama.cpp launch. Two unambiguous signals refuse:
+
+        * the model path matches ``*-NNNNN-of-MMMMM.gguf`` and one of the
+          MMMMM sibling shards is absent (llama.cpp opens them implicitly,
+          failing only ~2 minutes into loading);
+        * HuggingFace staging files (``*.incomplete`` under
+          ``<root>/.cache/huggingface/download/<subdir>/``) exist next to
+          the model, meaning the download is still in flight.
+
+        Everything else fails OPEN — a guard that blocks a valid launch
+        because it misread a filename is worse than no guard.
+        """
+        if runtime != RuntimeName.LLAMA_CPP:
+            return
+        target = (model.path or model.source) if model else None
+        if not target:
+            return
+        path = Path(str(target))
+        if not path.exists():
+            return  # _check_model_path already refused with a clearer message
+        match = _SHARDED_GGUF_RE.match(path.name)
+        if match:
+            total = int(match.group("total"))
+            missing: list[str] = []
+            for i in range(1, total + 1):
+                shard = path.with_name(
+                    f"{match.group('stem')}-{i:05d}-of-{match.group('total')}.gguf"
+                )
+                if not shard.is_file():
+                    missing.append(shard.name)
+            if missing:
+                refusals.append(
+                    f"Sharded GGUF is incomplete: {total} shard(s) expected, "
+                    f"missing {', '.join(missing)}."
+                )
+        try:
+            staging = (
+                path.parent.parent / ".cache" / "huggingface" / "download" / path.parent.name
+            )
+            if staging.is_dir() and any(staging.glob("*.incomplete")):
+                refusals.append(
+                    f"Model is still downloading: '*.incomplete' staging files "
+                    f"present in {staging}."
+                )
+        except OSError:
+            return  # unreadable staging dir must never block a valid launch
 
     # -- command building ---------------------------------------------------
 
