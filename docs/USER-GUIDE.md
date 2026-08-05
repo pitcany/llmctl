@@ -515,7 +515,7 @@ either is true:
 
 Fetch the missing shards, or wait for the download, then retry. The
 check is llama.cpp-only (vLLM is exempt), and any filename it cannot
-parse **fails open**, so it never blocks a valid launch. `--force`
+parse **fails open** and is never refused on that basis. `--force`
 overrides it like any other scheduler refusal.
 
 ### Health says vllm is unavailable but the unit IS running

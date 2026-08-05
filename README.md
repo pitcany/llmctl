@@ -329,7 +329,11 @@ llmctl runs on hosts that don't share yannik-desktop's layout.
 
 You can also **register your own roles**, of any runtime — they then
 appear in `llmctl status`, are adoptable via `llmctl adopt-managed`,
-and are covered by the port-drift check:
+show on the TUI Units screen, and are covered by the port-drift check:
+
+[…yaml block…]
+
+`vllm-tp`, `vllm_tp` and `fleet` are reserved names inside `units`.
 
 ```yaml
 managed_units:
