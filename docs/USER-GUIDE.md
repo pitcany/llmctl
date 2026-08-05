@@ -11,9 +11,8 @@ install + first command, see [QUICKSTART.md](./QUICKSTART.md).
 4. [Configuration](#configuration)
 5. [Integrations](#integrations)
 6. [Presets](#presets)
-7. [Slots](#slots)
-8. [Troubleshooting](#troubleshooting)
-9. [Internals — how it works under the hood](#internals)
+7. [Troubleshooting](#troubleshooting)
+8. [Internals — how it works under the hood](#internals)
 
 ---
 
@@ -36,29 +35,18 @@ A preset is data — it doesn't say where to run, just what.
 ### Managed unit
 
 An externally-installed systemd `.service` file that llmctl owns the
-**how** for. The default config knows about three:
+**how** for. The default config knows about one:
 
 - `vllm-tp` (port 8003, dual-GPU TP=2, daily-driver TP fleet)
-- `vllm-coder` (port 8001, GPU 0, slot)
-- `vllm-reasoner` (port 8002, GPU 1, slot)
+
+Register additional roles of any runtime under `managed_units.units` —
+see [Adding your own managed unit](#adding-your-own-managed-unit).
 
 llmctl never installs these units itself — they must already exist
 on your box. The reference unit files used in development live in
 the upstream `~/AI/services/` directory; you can adapt them or write
 your own. llmctl just writes their `EnvironmentFile`, calls
 `sudo systemctl restart <unit>`, and polls `/v1/models` for readiness.
-
-### Slot
-
-A logical "named GPU lane" — `coder` on GPU 0, `reasoner` on GPU 1.
-A slot's identity (name, GPU, port) is **stable**; the underlying
-model can swap. Downstream clients that talk to `coder` keep
-working when you change which model is loaded there.
-
-Slots are TP=1 single-GPU. They share unit names with the
-"managed unit" of the same name (`vllm-coder` runs the `coder`
-slot), but the conceptual distinction matters: a slot pins served
-name to its identity, not to the preset's `served_name`.
 
 ### Launch spec / orchestrator
 
@@ -235,8 +223,6 @@ launch picker:
 | Key in picker | Target |
 |----------------|--------|
 | `t` | TP fleet (vllm-tp, both GPUs) |
-| `c` | Coder slot (GPU 0) |
-| `r` | Reasoner slot (GPU 1) |
 | `esc` | Cancel |
 
 Picking a target runs the orchestrator in a worker thread.
@@ -245,9 +231,10 @@ failure (with reason).
 
 ### Units screen (`u`)
 
-Live status. One row per managed unit + one row per slot. Columns:
+Live status. One row per managed-unit role — the built-in `vllm-tp`
+plus anything you registered under `managed_units.units`. Columns:
 
-- **Role** — `unit vllm-tp`, `slot coder`, etc.
+- **Role** — `vllm-tp`, or your own role name
 - **Unit** — bare systemd unit name
 - **Active** — `active` (green) or `inactive` (muted)
 - **Port** — what llmctl thinks the unit listens on
@@ -323,12 +310,9 @@ managed_units:
       default_port: 8080
       runtime: llama_cpp
 
-  fleet:
+  fleet:                         # units stopped before the TP unit starts
     tp: vllm-tp
-    coder: vllm-coder
-    reasoner: vllm-reasoner
     ollama: ollama
-    fleet_target: agents.target
 
 scheduler:
   default_host: 127.0.0.1
@@ -352,7 +336,6 @@ empty file works.
 | `LLMCTL_PYTHON_ROOT` | Where the vLLM interpreter lives (for `LD_LIBRARY_PATH` / `PATH` in rendered env files) |
 | `LLMCTL_CUDA_ROOT` | CUDA toolkit root (default `/usr/local/cuda`) |
 | `LLMCTL_VLLM_ENV_FILE` | Direct override for the vllm-tp env file path |
-| `LLMCTL_SLOT_CODER_ENV_FILE`, `LLMCTL_SLOT_REASONER_ENV_FILE` | Per-slot env file overrides |
 | `AI_HOME` | Used to resolve `$AI_HOME/services/<unit>.env` when no explicit path is set |
 | `HF_HOME` | HuggingFace cache (default `~/.cache/huggingface`) |
 | `LLMCTL_QUIET_DEPRECATION` | Set to `1` to silence the `gpu-models` shim's deprecation hint |
@@ -363,7 +346,7 @@ empty file works.
 For each managed unit, the env file path is resolved in this order:
 
 1. Explicit `env_file_path` in `settings.yaml`
-2. `$LLMCTL_VLLM_ENV_FILE` (or per-slot `$LLMCTL_SLOT_<UPPER>_ENV_FILE`)
+2. `$LLMCTL_VLLM_ENV_FILE`
 3. `$AI_HOME/services/<unit_name>.env`
 4. `~/AI/services/<unit_name>.env` (fallback)
 
@@ -383,8 +366,6 @@ in `~/.hermes/config.yaml`:
 | Unit role | Hermes provider name |
 |-----------|----------------------|
 | `vllm-tp` | `vllm` |
-| `vllm-coder` | `vllm-coder` |
-| `vllm-reasoner` | `vllm-reasoner` |
 
 The verify is **read-only**. It prints one of:
 
@@ -405,17 +386,13 @@ or the container isn't running.
 
 ### Fleet preflight (pre-start)
 
-Stops competing systemd units before starting the target. Order
-matters — the fleet target is stopped before the slot services it
-gates to avoid systemd `Wants=` restart loops.
+Stops competing systemd units before starting the target, so nothing
+else is holding VRAM when it comes up. Which units those are is
+configured under `managed_units.fleet`.
 
 | Starting | Stops (in order) |
 |----------|------------------|
-| `vllm-tp` (TP fleet) | `agents.target`, `vllm-coder`, `vllm-reasoner`, `ollama`, `vllm-tp` |
-| `vllm-coder` (slot) | `vllm-tp`, `ollama` |
-| `vllm-reasoner` (slot) | `vllm-tp`, `ollama` |
-
-Slot starts intentionally do **not** stop the sibling slot.
+| `vllm-tp` (TP fleet) | `ollama`, `vllm-tp` |
 
 ---
 
@@ -472,15 +449,14 @@ Model (canonical schema)
 VLLMLaunchSpec (Pydantic, validated)
     ↓ apply_to_spec_dict(spec, override=tq_override)   # CLI --tq/--no-tq flags
 VLLMLaunchSpec (final)
-    ↓ render_vllm_env(spec)   OR   render_slot_env(spec, slot)
+    ↓ render_vllm_env(spec)
 services/<unit>.env (systemd EnvironmentFile body)
     ↓ systemd reads on next restart
 vllm-launcher.sh    ↓
 vllm.entrypoints.openai.api_server with the right args
 ```
 
-The two render functions (`render_vllm_env` for the TP fleet,
-`render_slot_env` for slots) produce env file output that is
+`render_vllm_env` produces env file output that is
 **byte-identical** to the output `gpu-models` used to produce. The
 parity is locked in by 14 fixture files at
 `tests/fixtures/env_renders/`.
@@ -602,8 +578,8 @@ WebUI custom models in `Workspace → Models` pin to `base_model_id`.
 After swapping vLLM, if no served name matches a pin, the pin
 errors. Two fixes:
 
-- Keep using the same `served_name` across swaps (use slots — they
-  fix this structurally)
+- Keep using the same `served_name` across swaps (set the same
+  `served_name` in each preset you rotate between)
 - Rebind the pin in the WebUI UI
 
 ---
@@ -618,7 +594,7 @@ llmctl/
 │   ├── vllm.py              # HTTP-probe health + discovery (Phase A)
 │   └── vllm_systemd.py      # VLLMSystemdAdapter (Phase 1)
 ├── integrations/    # external-system glue
-│   ├── vllm_env.py          # render_vllm_env, render_slot_env (Phase 1+4)
+│   ├── vllm_env.py          # render_vllm_env (Phase 1)
 │   ├── systemctl.py         # SystemctlRunner (Phase 1)
 │   ├── hermes.py            # provider verify (Phase 3)
 │   ├── harbor.py            # ollama-container stop (Phase 3)
@@ -626,7 +602,7 @@ llmctl/
 │   └── turboquant.py        # --tq override (Phase 4)
 ├── services/
 │   ├── preset_loader.py     # Model -> VLLMLaunchSpec (Phase 2)
-│   └── vllm_orchestrator.py # start_vllm_tp, start_slot (Phase 5)
+│   └── vllm_orchestrator.py # start_vllm_tp (Phase 5)
 ├── presets/         # schema + XDG-aware YAML loader (Phase 7c)
 ├── tui/             # Textual screens
 │   ├── screens_presets.py   # Presets screen (Phase B)

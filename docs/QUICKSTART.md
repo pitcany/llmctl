@@ -64,7 +64,7 @@ llmctl presets
 ```
 
 Shows alias, served name, model id, family, size, TP, quant for every
-preset on disk. Aliases are what you pass to `vllm` and `slot` below.
+preset on disk. Aliases are what you pass to `vllm` below.
 
 ### 2. Start the TP fleet on a preset
 
@@ -81,9 +81,12 @@ What this does, in order:
 0. **Refuses** (exit 2) if the preset's model path is a *local* path
    that does not exist on disk. `--force` overrides; a HuggingFace repo
    id (`org/name`) is never refused.
-1. Stops competing units (`agents.target`, `vllm-coder`, `vllm-reasoner`, `ollama`)
+1. Stops competing units (whatever you list under `managed_units.fleet` —
+   by default the TP unit and `ollama`)
 2. Stops the Harbor `ollama` Docker container if running (frees GPU memory)
-3. Writes `~/AI/services/vllm-tp.env` from your preset
+3. Writes the unit's `EnvironmentFile` from your preset — the path comes
+   from `managed_units.vllm_tp.env_file_path`, defaulting to
+   `$AI_HOME/services/<unit>.env`
 4. `sudo systemctl restart vllm-tp`
 5. Polls `http://localhost:8003/v1/models` until it answers (≤5 min)
 6. Verifies the Hermes `vllm` provider URL matches the served port
@@ -93,25 +96,30 @@ env file is written before the restart so you can inspect what would
 have run. A step-0 refusal writes nothing and stops nothing — the
 previously-serving model keeps running.
 
-### 3. Apply a preset to a per-GPU slot
+### 3. Track a server llmctl didn't start
 
-```bash
-llmctl slot coder qwen2.5-coder-32b       # GPU 0, port 8001
-llmctl slot reasoner qwq-32b-awq          # GPU 1, port 8002
-llmctl slot coder qwen2.5-coder-32b --dry-run
+If you already run an inference server under systemd, register it as a
+managed-unit role and let llmctl adopt it — it then shows up in
+`status`, `health`, and the TUI alongside everything else:
+
+```yaml
+# ~/.config/llmctl/settings.yaml
+managed_units:
+  units:
+    my-llama:
+      unit_name: llama-server
+      default_port: 8080
+      runtime: llama_cpp
 ```
 
-Slots are TP=1 single-GPU units with a **stable served name**
-(`coder` / `reasoner`). The preset only contributes
-model/quant/ctx — downstream client configs that talk to
-`coder` keep working when you swap the underlying model.
-
-Short-form wrappers also work:
-
 ```bash
-set-coder qwen2.5-coder-32b
-set-reasoner qwq-32b-awq
+llmctl adopt-managed my-llama    # or --all for every declared role
+llmctl status                    # the role now appears here
 ```
+
+Adopting never starts or stops anything: systemd keeps the lifecycle,
+llmctl just tracks and routes to it. `llmctl detach <session_id>` stops
+tracking, leaving the unit alone.
 
 ---
 
@@ -138,9 +146,8 @@ llmctl tui
 The two screens you'll use most:
 
 - **Presets (`p`)** — table of every preset; enter on a row opens a
-  picker (TP fleet / coder slot / reasoner slot). Confirming runs
-  the same orchestrator as `llmctl vllm <preset>` / `llmctl slot
-  <name> <preset>` in a background thread, so the TUI stays
+  picker. Confirming runs the same orchestrator as
+  `llmctl vllm <preset>` in a background thread, so the TUI stays
   responsive during the 1–3 min vLLM cold start.
 - **Units (`u`)** — live status of every managed unit: which ones
   are `active`, what port they're on, which model IDs they're
@@ -178,10 +185,10 @@ See `llmctl presets` against an existing box for canonical examples.
 
 ### "sudo: a password is required"
 
-`llmctl vllm <preset>` calls `sudo systemctl restart <unit>`. On
-yannik-desktop this works because `NOPASSWD` is configured for the
-specific unit names; on other hosts you'll need to either
-configure passwordless sudo for those units, run llmctl from a
+`llmctl vllm <preset>` calls `sudo systemctl restart <unit>`. That
+succeeds unattended only if `NOPASSWD` is configured for those specific
+unit names, so on a fresh host you'll need to either
+configure passwordless sudo for them, run llmctl from a
 session that's already authenticated, or set
 `managed_units.<role>.launcher_marker: null` in settings to bypass
 the guard if you've installed a non-standard launcher.
@@ -202,7 +209,7 @@ export LLMCTL_QUIET_DEPRECATION=1
 which llmctl              # should resolve to your venv/conda env's bin/
 llmctl --help             # if this works, install is fine
 llmctl health             # vllm should be "ok" if vllm-tp is running
-llmctl status             # shows the managed units + slots and their env paths
+llmctl status             # every managed-unit role, with env paths and ports
 ```
 
 If `llmctl --help` cannot find the command, confirm that `pip` installed
