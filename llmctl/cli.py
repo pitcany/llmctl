@@ -1422,11 +1422,17 @@ def status_cmd(json_out: _JSON_OPT = False) -> None:
     rows = []
     for role, unit in settings.managed_units.roles().items():
         served = probe_openai_v1_models(f"http://127.0.0.1:{unit.default_port}", 1.5)
+        env_file = unit.resolve_env_file()
         rows.append(
             {
                 "role": role,
                 "unit_name": unit.unit_name,
-                "env_file": str(unit.resolve_env_file()),
+                "env_file": str(env_file),
+                # resolve_env_file() always returns a path, even for a role whose
+                # runtime llmctl never writes an env file for. Rendering a path
+                # that isn't there reads as "edit this file" for a file that does
+                # not exist, so the table shows it only when it is real.
+                "env_file_exists": env_file.exists(),
                 "port": unit.default_port,
                 "serving": served is not None,
                 "served_models": served or [],
@@ -1447,8 +1453,9 @@ def status_cmd(json_out: _JSON_OPT = False) -> None:
             if row["serving"] and row["served_models"]
             else ("[green]yes (empty list)[/green]" if row["serving"] else "[red]no[/red]")
         )
+        env_cell = row["env_file"] if row["env_file_exists"] else "[dim]—[/dim]"
         table.add_row(
-            row["role"], row["unit_name"], row["env_file"], str(row["port"]), serving
+            row["role"], row["unit_name"], env_cell, str(row["port"]), serving
         )
     console.print(table)
 
