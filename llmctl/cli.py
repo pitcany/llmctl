@@ -356,6 +356,42 @@ def _build_start_request(
     )
 
 
+def _print_session_state(session: object, *, verb: str) -> bool:
+    """Print what actually happened to ``session``; ``False`` when it failed.
+
+    One producer for ``start`` and ``restart`` so the two commands cannot
+    drift into describing the same states differently. ``restart`` used to
+    print "Restart planned <id>; no process launched." unconditionally --
+    while `SessionService.restart` terminated the process *and relaunched it*
+    -- so the one surface an operator checks after a restart reported the
+    opposite of what happened.
+    """
+    status = session.status.value
+    if status == "running":
+        console.print(
+            f"[green]{verb} session[/green] {session.id} "
+            f"pid={session.pid} -> {session.endpoint_url}"
+        )
+        return True
+    if status == "planned":
+        console.print(
+            f"[cyan]Planned session[/cyan] {session.id} "
+            f"({session.runtime.value}); no process launched."
+        )
+        return True
+    if status == "starting":
+        console.print(
+            f"[yellow]Session {session.id} is starting[/yellow] pid={session.pid}; "
+            "the endpoint is not ready yet (large models load for minutes). "
+            "`llmctl sessions` will show it running once it responds."
+        )
+        return True
+    console.print(
+        f"[red]Session {session.id} {status}[/red]: {escape(str(session.error))}"
+    )
+    return False
+
+
 def _print_plan_warnings(plan: object) -> None:
     """Print any warnings and refusal reasons attached to a launch plan."""
     for warning in getattr(plan, "warnings", []) or []:
@@ -393,26 +429,9 @@ def start(
             raise typer.BadParameter(str(exc)) from exc
     if session.launch_plan is not None:
         _print_plan_warnings(session.launch_plan)
-    if session.status.value == "running":
-        console.print(
-            f"[green]Started session[/green] {session.id} "
-            f"pid={session.pid} -> {session.endpoint_url}"
-        )
-    elif session.status.value == "planned":
-        console.print(
-            f"[cyan]Planned session[/cyan] {session.id} "
-            f"({session.runtime.value}); no process launched."
-        )
-    elif session.status.value == "starting":
-        console.print(
-            f"[yellow]Session {session.id} is starting[/yellow] pid={session.pid}; "
-            "the endpoint is not ready yet (large models load for minutes). "
-            "`llmctl sessions` will show it running once it responds."
-        )
-    else:
-        console.print(
-            f"[red]Session {session.id} {session.status.value}[/red]: {escape(str(session.error))}"
-        )
+    # Exit code deliberately unchanged here: `start` has always returned 0 on a
+    # failed launch and scripts may depend on it. `restart` is new behaviour.
+    _print_session_state(session, verb="Started")
 
 
 @app.command()
@@ -567,12 +586,36 @@ def stop(
             raise typer.Exit(1) from exc
     if not session:
         raise typer.BadParameter(f"Session not found: {session_id}")
+    if session.status.value != "stopped":
+        # The process outlived SIGTERM and SIGKILL. It still holds its GPU
+        # memory and its port, and the row keeps its pid so reconcile can
+        # settle it later -- but this is not a successful stop.
+        console.print(
+            f"[red]Session {session_id} not stopped[/red] "
+            f"(pid={session.pid}): {escape(str(session.error))}"
+        )
+        raise typer.Exit(1)
     console.print(f"[green]Session marked stopped[/green] {session_id}")
 
 
 @app.command()
-def restart(session_id: Annotated[str, typer.Argument(help="Session ID to restart-plan.")]) -> None:
-    """Plan a safe session restart."""
+def restart(
+    session_id: Annotated[str, typer.Argument(help="Session ID to restart.")],
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
+    ] = False,
+) -> None:
+    """Stop a session's process and relaunch it from its stored launch plan.
+
+    Confirmation is gated on scheduler.require_confirmation_for_stop -- the
+    risky half is terminating whatever is currently serving.
+    """
+    settings = load_settings()
+    _confirm_state_change(
+        f"Restart session {session_id} (stops its process if running, then relaunches)",
+        required=settings.scheduler.require_confirmation_for_stop,
+        assume_yes=yes,
+    )
     with _session() as db:
         try:
             session = SessionService(db).restart(session_id)
@@ -581,7 +624,8 @@ def restart(session_id: Annotated[str, typer.Argument(help="Session ID to restar
             raise typer.Exit(1) from exc
     if not session:
         raise typer.BadParameter(f"Session not found: {session_id}")
-    console.print(f"[cyan]Restart planned[/cyan] {session_id}; no process launched.")
+    if not _print_session_state(session, verb="Restarted"):
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -1388,8 +1432,17 @@ def vllm_cmd(
         if result.restart is not None and result.restart.error:
             console.print(f"  restart: {result.restart.error}")
         raise typer.Exit(1)
+    if result.restart is not None and result.restart.ready is None:
+        # --no-wait: the restart was issued and nobody probed /v1/models.
+        # Announcing "ready" here would be a claim no code checked.
+        console.print(
+            f"[cyan]Restart issued[/cyan] for {escape(result.spec.served_name)} "
+            f"on port {result.spec.port}; readiness not checked (--no-wait). "
+            "Run `llmctl status` once it has loaded."
+        )
+        return
     console.print(
-        f"[green]vLLM ready[/green] — serving {result.spec.served_name} "
+        f"[green]vLLM ready[/green] — serving {escape(result.spec.served_name)} "
         f"on port {result.spec.port}"
     )
 
