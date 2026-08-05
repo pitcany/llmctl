@@ -834,7 +834,8 @@ def health(json_out: _JSON_OPT = False) -> None:
     """Show overall and per-runtime health."""
     from llmctl.services.health import HealthService
 
-    data = HealthService(load_settings()).get_health()
+    with _session() as db:
+        data = HealthService(load_settings(), db=db).get_health()
     if json_out:
         _emit_json(data)
         return
@@ -847,9 +848,20 @@ def health(json_out: _JSON_OPT = False) -> None:
     table = Table(title="Runtime Health")
     table.add_column("Runtime")
     table.add_column("State")
+    table.add_column("Serving")
     table.add_column("Message")
     for name, info in data["runtimes"].items():
-        table.add_row(name, info["state"], info["message"])
+        sessions = info.get("sessions", [])
+        if sessions:
+            served = ", ".join(
+                s["served_name"] or s["endpoint_url"] or s["id"][:8] for s in sessions
+            )
+            serving = f"[green]{served}[/green]"
+        else:
+            # "binary found" with nothing serving is the case that used to read
+            # as healthy; say so plainly instead.
+            serving = f"[{'red' if info['state'] == 'ok' else 'dim'}]nothing[/]"
+        table.add_row(name, info["state"], serving, info["message"])
     console.print(table)
 
 
