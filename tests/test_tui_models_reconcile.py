@@ -61,6 +61,11 @@ def test_prune_action_with_no_missing_notifies(monkeypatch) -> None:
     monkeypatch.setattr(_data, "get_backend_map", lambda: {})
     monkeypatch.setattr(_data, "get_preset_count_by_model", lambda: {})
     monkeypatch.setattr(_data, "get_missing_count", lambda: 0)
+    # `action_prune_missing` reads get_missing_model_ids(), NOT get_missing_count().
+    # Without this patch the action queries the developer's real registry, so the
+    # test passes only on a machine with zero MISSING rows (e.g. CI's empty DB) and
+    # fails on any box with an offline LM Studio/Ollama fleet.
+    monkeypatch.setattr(_data, "get_missing_model_ids", lambda: [])
     notes: list[tuple] = []
 
     async def _run() -> None:
