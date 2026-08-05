@@ -62,20 +62,45 @@ name to its identity, not to the preset's `served_name`.
 
 ### Launch spec / orchestrator
 
-When you run `llmctl vllm <preset>` or `llmctl slot <name> <preset>`,
-the orchestrator:
+When you run `llmctl vllm <preset>`, the orchestrator:
 
 1. Loads the preset via the canonical preset store
 2. Applies any CLI overrides (`--tq`, `--no-tq`)
 3. Builds a `VLLMLaunchSpec` (Pydantic, validated)
-4. Runs the fleet preflight (stop competing units)
-5. Runs the Harbor preflight (stop `harbor.ollama` container)
-6. Renders the env file, writes it, restarts the unit
-7. Polls `/v1/models` until ready (or times out at 5 min)
-8. Verifies the Hermes provider URL still matches
+4. **Refuses if the preset's model path is a local path that does not
+   exist** — see [Missing model paths](#missing-model-paths) below
+5. Runs the fleet preflight (stop competing units)
+6. Runs the Harbor preflight (stop `harbor.ollama` container)
+7. Renders the env file, writes it, restarts the unit
+8. Polls `/v1/models` until ready (or times out at 5 min)
+9. Verifies the Hermes provider URL still matches
 
-Steps 4, 5, and 8 are optional and can be disabled in code; from the
+Steps 5, 6, and 9 are optional and can be disabled in code; from the
 CLI they're always on.
+
+Because step 4 precedes steps 5–7, a refused start never stops a
+competing unit, never touches the Harbor container, and never writes
+the env file — the previously-serving model keeps running.
+
+#### Missing model paths
+
+`llmctl vllm` refuses when the preset's `model_id` is a **local path**
+(one starting with `/`, `~`, `./` or `../`) that does not exist on
+disk. It exits 2 and names the path.
+
+The reason is that the command rewrites the env file and restarts the
+unit, so a preset naming deleted weights would first evict whatever is
+currently serving and only then fail to load.
+
+Scope, deliberately narrow:
+
+- A HuggingFace repo id (`org/name`) **fails open** and is never
+  refused — it resolves from the HF cache or is fetched on demand.
+- `--dry-run` refuses too; a dry-run reporting "would restart" against
+  missing weights is exactly the misreport this prevents.
+- `--force` overrides the refusal. The check only fires on a provably
+  absent path, but an unreadable parent directory can make present
+  weights look missing, and that must not lock you out of your unit.
 
 ---
 
@@ -87,18 +112,18 @@ CLI they're always on.
 |---------|------|
 | `llmctl presets` | List presets from `~/.config/llmctl/presets/` |
 | `llmctl vllm <preset>` | Start TP-fleet unit on preset |
-| `llmctl slot <name> <preset>` | Apply preset to slot (`coder` / `reasoner`) |
-| `llmctl status` | Managed units + slots with resolved env paths and ports |
+| `llmctl status` | Every managed-unit role with resolved env paths, ports, and served models |
 | `llmctl health` | Per-runtime health rollup (vLLM, llama.cpp, LM Studio, Ollama) |
 
 ### Common flags
 
-Used by `vllm` and `slot`:
+Used by `vllm`:
 
 | Flag | Effect |
 |------|--------|
-| `--dry-run` | Render the env file + print planned actions, change nothing |
+| `--dry-run` | Render the env file + print planned actions, change nothing. Still refuses on a missing local model path |
 | `--no-wait` | Skip polling `/v1/models` after restart (returns immediately) |
+| `--force` | Restart even when the preset's local model path is missing |
 | `--tq` | Force `--kv-cache-dtype turboquant_k8v4` regardless of preset |
 | `--no-tq` | Force TurboQuant off (omit `VLLM_KV_DTYPE` entirely) |
 
@@ -143,8 +168,28 @@ flow; useful for debugging.
 | `llmctl stop SESSION_ID` | Mark a session stopped |
 | `llmctl restart SESSION_ID` | Plan a restart |
 | `llmctl plan MODEL_ID` | Print a launch plan without executing |
-| `llmctl cleanup [--remove-stale]` | Free ports + purge dead sessions |
+| `llmctl cleanup [--remove-stale]` | Free ports + purge dead sessions and leftover dry-run plans |
 | `llmctl add-model`, `delete-model` | Manual model registry CRUD |
+
+`--remove-stale` deletes `STOPPED`/`FAILED` rows *and* `PLANNED` rows
+left behind by `llmctl start --dry-run`. A dry-run records its plan
+without launching anything, so nothing ever transitions that row — and
+until it is cleared it reserves its endpoint against `llmctl adopt`.
+Real in-flight `PLANNED` rows are never touched.
+
+### Adopting external endpoints
+
+| Command | What |
+|---------|------|
+| `llmctl adopt --endpoint URL --runtime NAME` | Track an endpoint llmctl did not start |
+| `llmctl adopt-managed ROLE` / `--all` | Adopt a role from `managed_units` (see [Adding your own managed unit](#adding-your-own-managed-unit)) |
+| `llmctl detach SESSION_ID` | Stop tracking an adopted endpoint (leaves the unit alone) |
+
+`adopt` refuses when another non-terminal session already claims the
+same endpoint. The error names the blocking session, its status, and
+the exact command that clears it — `llmctl cleanup --remove-stale` for
+a leftover dry-run plan, `llmctl stop` for an owned session, or
+`llmctl detach` for an adopted one.
 
 ### Other surface
 
@@ -267,15 +312,16 @@ managed_units:
   vllm_tp:
     enabled: false               # opt-in only; orchestrator commands ignore this
     unit_name: vllm-tp
+    runtime: vllm                # runtime `adopt-managed` tags the session with
     env_file_path: null          # auto: $AI_HOME/services/vllm-tp.env -> ~/AI/services/vllm-tp.env
     launcher_marker: vllm-launcher.sh   # set to null to disable legacy-unit guard
     default_port: 8003
-  vllm_coder:   { unit_name: vllm-coder,    default_port: 8001 }
-  vllm_reasoner: { unit_name: vllm-reasoner, default_port: 8002 }
 
-  slots:
-    coder:    { gpu: "0", port: 8001, unit_name: vllm-coder }
-    reasoner: { gpu: "1", port: 8002, unit_name: vllm-reasoner }
+  units:                         # optional: any additional role, any runtime
+    my-llama:
+      unit_name: llama-server
+      default_port: 8080
+      runtime: llama_cpp
 
   fleet:
     tp: vllm-tp
@@ -398,7 +444,7 @@ kv_cache_dtype: fp8               # "auto" to omit; "turboquant_*" for TQ
 tool_parser: llama3_json          # optional; nullable
 reasoning_parser: deepseek_r1     # optional; folded into VLLM_EXTRA as --reasoning-parser
 host: 0.0.0.0
-port: 8000                        # ignored by llmctl (managed unit pins port)
+# port: 8000                      # VESTIGIAL — read by no launch path; omit it
 trust_remote_code: false
 schema_version: 1
 ```
@@ -441,67 +487,68 @@ parity is locked in by 14 fixture files at
 
 ---
 
-## Slots
+## Adding your own managed unit
 
-### What they are
-
-A slot is a stable serving identity tied to one GPU. The
-production fleet has two:
-
-| Slot | GPU | Port | Unit | Hermes provider |
-|------|-----|------|------|-----------------|
-| `coder` | 0 | 8001 | `vllm-coder.service` | `vllm-coder` |
-| `reasoner` | 1 | 8002 | `vllm-reasoner.service` | `vllm-reasoner` |
-
-### Why they exist
-
-Clients (Hermes, Open WebUI, llama-tools) pin their config to
-served names like `coder`. If you swap the underlying model, the
-clients break. Slots solve this by **decoupling**: the slot's served
-name is its identity, the preset only contributes
-model/quant/ctx.
-
-### Slot vs TP fleet
-
-| | TP fleet | Slot |
-|--|----------|------|
-| Unit | `vllm-tp` | `vllm-coder` / `vllm-reasoner` |
-| GPUs | both (TP=2) | one (TP=1) |
-| Port | 8003 | 8001 / 8002 |
-| Served name | preset's `served_name` | slot identity (`coder` / `reasoner`) |
-| Concurrent with the other thing? | No (mutually exclusive at systemd `Conflicts=` level) | Yes (slots coexist) |
-
-### Slot safety
-
-Legacy `gpu-models slot` refused 70B/72B/80B presets with a
-`slot_eligible: false` heuristic. llmctl doesn't replicate this
-yet — large presets that don't fit a single 32 GiB GPU at TP=1
-will fail at vLLM init time, not at llmctl input validation.
-Use `--dry-run` to render and inspect before applying.
-
-Add a new slot by editing `settings.yaml`:
+A **managed unit** is a systemd unit llmctl knows about but does not
+own: llmctl reads its port, reports its health, and can adopt it as a
+session, while systemd keeps the lifecycle. The built-in role is
+`vllm-tp`; register any others under `managed_units.units`:
 
 ```yaml
 managed_units:
-  slots:
-    vision:
-      gpu: "2"
-      port: 8004
-      unit_name: vllm-vision
+  units:
+    my-llama:
+      unit_name: llama-server     # the systemd unit, without .service
+      default_port: 8080          # where llmctl probes /v1/models
+      runtime: llama_cpp          # vllm | llama_cpp | ollama | lmstudio | ...
 ```
 
-You'll also need to install `vllm-vision.service` separately
-(llmctl doesn't generate slot units).
+Roles registered there appear in `llmctl status`, are adoptable with
+`llmctl adopt-managed <role>` (or `--all`), show up on the TUI Units
+screen, and are covered by the port-drift check in `llmctl validate`
+and `llmctl doctor`.
+
+`runtime` decides which runtime `adopt-managed` tags the resulting
+session with; it defaults to `vllm`, so set it explicitly for anything
+else or the session is mislabelled.
+
+The names `vllm-tp`, `vllm_tp` and `fleet` are **reserved** — using one
+as a key inside `units` is a validation error, not a silent override.
+Configure those through `managed_units.vllm_tp` and
+`managed_units.fleet` instead.
+
+You install and enable the unit yourself; llmctl does not generate unit
+files for these roles.
 
 ---
 
 ## Troubleshooting
 
+### `Sharded GGUF is incomplete` / `Model is still downloading`
+
+`llmctl start` and `llmctl plan` refuse a **llama.cpp** model when
+either is true:
+
+- the path matches `*-NNNNN-of-MMMMM.gguf` and one of the `MMMMM`
+  sibling shards is absent — the refusal names the missing files.
+  llama.cpp opens the tail shards implicitly, so without this the
+  server loads for minutes before dying;
+- HuggingFace `*.incomplete` staging files exist under
+  `<root>/.cache/huggingface/download/<subdir>/`, meaning the download
+  is still in flight.
+
+Fetch the missing shards, or wait for the download, then retry. The
+check is llama.cpp-only (vLLM is exempt), and any filename it cannot
+parse **fails open**, so it never blocks a valid launch. `--force`
+overrides it like any other scheduler refusal.
+
 ### Health says vllm is unavailable but the unit IS running
 
 The HTTP probe targets `http://localhost:<default_port>/v1/models`.
-If your unit listens on a different port, override
-`managed_units.vllm_tp.default_port` in `settings.yaml`.
+If your unit listens on a different port, override that role's
+`default_port` in `settings.yaml` — `managed_units.vllm_tp.default_port`
+for the built-in role, or `managed_units.units.<role>.default_port` for
+one you registered yourself.
 
 Verify with: `curl http://localhost:8003/v1/models`. If that
 returns a model list, llmctl should too — file a bug if not.

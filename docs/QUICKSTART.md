@@ -73,10 +73,14 @@ llmctl vllm llama-3.3-70b              # restart vllm-tp.service with this prese
 llmctl vllm llama-3.3-70b --dry-run    # render the env file, print the plan, change nothing
 llmctl vllm llama-3.3-70b --tq         # force TurboQuant KV cache on
 llmctl vllm llama-3.3-70b --no-wait    # don't poll /v1/models after restart
+llmctl vllm llama-3.3-70b --force      # start even if the local model path is missing
 ```
 
 What this does, in order:
 
+0. **Refuses** (exit 2) if the preset's model path is a *local* path
+   that does not exist on disk. `--force` overrides; a HuggingFace repo
+   id (`org/name`) is never refused.
 1. Stops competing units (`agents.target`, `vllm-coder`, `vllm-reasoner`, `ollama`)
 2. Stops the Harbor `ollama` Docker container if running (frees GPU memory)
 3. Writes `~/AI/services/vllm-tp.env` from your preset
@@ -84,8 +88,10 @@ What this does, in order:
 5. Polls `http://localhost:8003/v1/models` until it answers (≤5 min)
 6. Verifies the Hermes `vllm` provider URL matches the served port
 
-Each step prints a one-liner. Failures abort early; the env file is
-written before the restart so you can inspect what would have run.
+Each step prints a one-liner. Failures abort early; from step 3 on, the
+env file is written before the restart so you can inspect what would
+have run. A step-0 refusal writes nothing and stops nothing — the
+previously-serving model keeps running.
 
 ### 3. Apply a preset to a per-GPU slot
 

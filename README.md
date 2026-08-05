@@ -134,7 +134,8 @@ read commands accept `--json` for stable, script-friendly output.
   `--json`: plain JSON on stdout, no ANSI, stable keys.
 - **Exit codes.** 0 = success (or a declined confirmation), 1 =
   operational failure / findings (`validate`, `doctor`), 2 = usage
-  errors and unknown ids.
+  errors, unknown ids, and safety refusals (e.g. `llmctl vllm` on a
+  preset whose local model path is missing).
 - **Config.** `llmctl config path|show|validate` — `show` prints the
   fully-resolved settings with secret-looking fields redacted.
 
@@ -324,8 +325,22 @@ Out-of-the-box, llmctl knows about:
 single `vllm-tp` unit remains, model swapped per preset.)
 
 Every default is overridable in `~/.config/llmctl/settings.yaml` so
-llmctl runs on hosts that don't share yannik-desktop's layout. See
-the user guide for the full schema.
+llmctl runs on hosts that don't share yannik-desktop's layout.
+
+You can also **register your own roles**, of any runtime — they then
+appear in `llmctl status`, are adoptable via `llmctl adopt-managed`,
+and are covered by the port-drift check:
+
+```yaml
+managed_units:
+  units:
+    my-llama:
+      unit_name: llama-server
+      default_port: 8080
+      runtime: llama_cpp
+```
+
+See the user guide for the full schema.
 
 ## Test
 
