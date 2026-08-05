@@ -88,11 +88,8 @@ class UnitsScreen(DataScreen):
         sysctl = self._systemctl or SystemctlRunner()
         rows: list[_UnitRow] = []
 
-        # Managed-unit roles (vllm-tp)
-        managed = [
-            ("vllm-tp", settings.managed_units.vllm_tp),
-        ]
-        for role, cfg in managed:
+        # Managed-unit roles: built-in vllm-tp plus any managed_units.units.
+        for role, cfg in settings.managed_units.roles().items():
             rows.append(self._row_for_managed(role, cfg, sysctl))
 
         return rows

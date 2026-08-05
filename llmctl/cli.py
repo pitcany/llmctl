@@ -12,7 +12,7 @@ from rich.table import Table
 from sqlmodel import Session
 
 from llmctl.api.app import create_app
-from llmctl.config import ManagedUnitConfig, load_settings
+from llmctl.config import ManagedUnitConfig, Settings, load_settings
 from llmctl.db import (
     BenchmarkKind,
     ModelRecord,
@@ -1406,9 +1406,7 @@ def status_cmd(json_out: _JSON_OPT = False) -> None:
 
     settings = load_settings()
     rows = []
-    for role, unit in (
-        ("vllm-tp", settings.managed_units.vllm_tp),
-    ):
+    for role, unit in settings.managed_units.roles().items():
         served = probe_openai_v1_models(f"http://127.0.0.1:{unit.default_port}", 1.5)
         rows.append(
             {
@@ -1462,7 +1460,9 @@ def validate_cmd(json_out: _JSON_OPT = False) -> None:
         *validate_svc.check_preset_model_ids(load_all_presets()),
         *validate_svc.check_registry_paths(models),
         *validate_svc.check_model_root_symlinks(load_model_dirs()),
-        *validate_svc.check_managed_unit_ports([settings.managed_units.vllm_tp]),
+        *validate_svc.check_managed_unit_ports(
+            list(settings.managed_units.roles().values())
+        ),
     ]
 
     if json_out:
@@ -1664,11 +1664,14 @@ def set_alias_cmd(
 # ---------------------------------------------------------------------------
 
 
-#: CLI shorthand -> ManagedUnitsConfig attribute name. Lets the user type
-#: ``llmctl adopt-managed vllm-tp`` instead of ``vllm_tp``.
-_MANAGED_ROLES: dict[str, str] = {
-    "vllm-tp": "vllm_tp",
-}
+def _managed_roles(settings: Settings) -> dict[str, ManagedUnitConfig]:
+    """Adoptable managed-unit roles by CLI name.
+
+    The built-in ``vllm-tp`` plus every role in ``managed_units.units`` —
+    so ``llmctl adopt-managed <role>`` and ``--all`` cover units of any
+    runtime, not only the vLLM TP pair.
+    """
+    return settings.managed_units.roles()
 
 
 def _print_adopted(session: object, *, prefix: str = "Adopted") -> None:
@@ -1751,8 +1754,9 @@ def adopt_managed_cmd(
     role: Annotated[
         str | None,
         typer.Argument(
-            help="Managed-unit role to adopt (vllm-tp). "
-            "Omit and pass --all to adopt every running role.",
+            help="Managed-unit role to adopt (vllm-tp, or any role from "
+            "managed_units.units). Omit and pass --all to adopt every "
+            "running role.",
         ),
     ] = None,
     all_roles: Annotated[
@@ -1766,31 +1770,40 @@ def adopt_managed_cmd(
 ) -> None:
     """Adopt one or all managed systemd units declared in settings.managed_units.*."""
     if role is None and not all_roles:
-        raise typer.BadParameter("Pass a role (vllm-tp) or --all.")
+        raise typer.BadParameter("Pass a role (e.g. vllm-tp) or --all.")
     if role is not None and all_roles:
         raise typer.BadParameter("Pass a role OR --all, not both.")
 
     settings = load_settings()
+    roles = _managed_roles(settings)
     if all_roles:
-        targets = list(_MANAGED_ROLES.items())
+        targets = list(roles.items())
     else:
-        attr = _MANAGED_ROLES.get(role or "")
-        if attr is None:
+        unit = roles.get(role or "")
+        if unit is None:
             raise typer.BadParameter(
-                f"Unknown role '{role}'. Choose: {', '.join(sorted(_MANAGED_ROLES))}."
+                f"Unknown role '{role}'. Choose: {', '.join(sorted(roles))}."
             )
-        targets = [(role or "", attr)]
+        targets = [(role or "", unit)]
 
     adopted = 0
     skipped = 0
     with _session() as db:
         service = SessionService(db)
-        for cli_role, attr in targets:
-            unit_cfg: ManagedUnitConfig = getattr(settings.managed_units, attr)
+        for cli_role, unit_cfg in targets:
+            try:
+                unit_runtime = RuntimeName(unit_cfg.runtime)
+            except ValueError:
+                skipped += 1
+                console.print(
+                    f"[yellow]Skip {cli_role}[/yellow]: configured runtime "
+                    f"'{unit_cfg.runtime}' is not a known RuntimeName."
+                )
+                continue
             endpoint = f"http://127.0.0.1:{unit_cfg.default_port}"
             try:
                 session = service.adopt(
-                    RuntimeName.VLLM,
+                    unit_runtime,
                     endpoint,
                     systemd_unit=f"{unit_cfg.unit_name}.service",
                     timeout_s=timeout,
