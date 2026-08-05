@@ -71,7 +71,13 @@ class Model(BaseModel):
     )
     port: int | None = Field(
         default=None,
-        description="Preset port template; None falls back to renderer defaults.",
+        description=(
+            "VESTIGIAL — not read by any launch path. The managed-unit port "
+            "(managed_units.<role>.default_port) wins on the vllm-tp path and "
+            "the scheduler allocates its own port elsewhere, so setting this "
+            "changes nothing. Kept only so existing preset files still parse; "
+            "omit it in new presets."
+        ),
     )
 
     tool_parser: str | None = None
