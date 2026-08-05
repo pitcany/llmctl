@@ -64,6 +64,22 @@ _OWNED_PROBE_TIMEOUT_S = 3.0
 _PROBE_MAX_WORKERS = 8
 
 
+def _is_dry_run_planned(record: SessionRecord) -> bool:
+    """True for a PLANNED row left behind by a dry-run start.
+
+    A dry-run start records its plan (with ``dry_run: true``) and never
+    launches a process, so nothing ever transitions the row out of
+    ``PLANNED`` — without special handling it reserves its endpoint
+    forever. A *real* start also passes through PLANNED, but only for the
+    instants before ``_launch_record`` moves it to STARTING, and its plan
+    carries ``dry_run: false`` — those rows must never be treated as stale.
+    """
+    if record.status != SessionStatus.PLANNED:
+        return False
+    plan = record.launch_plan or {}
+    return bool(plan.get("dry_run"))
+
+
 class AdoptError(ValueError):
     """Raised when an adopt request cannot be honored.
 
@@ -393,18 +409,32 @@ class SessionService:
         return self.scheduler.create_launch_plan(request)
 
     def cleanup(self, *, remove_stale: bool = False) -> dict[str, object]:
-        """Reconcile dead sessions and optionally purge terminal ones.
+        """Reconcile dead sessions and optionally purge stale ones.
 
-        Returns a report describing how many sessions were marked dead, how many
-        stale (stopped/failed) records were removed, the ports that were freed,
-        and the number of still-active sessions remaining.
+        Stale means terminal (STOPPED/FAILED) plus PLANNED rows left by
+        dry-run starts, which never launched anything and would otherwise
+        block ``adopt`` at their endpoint forever.
+
+        Returns a report describing how many sessions were marked dead, how
+        many stale records were removed, the ports that were freed, and the
+        number of still-active sessions remaining.
         """
         dead_marked = self.reconcile()
         terminal = {SessionStatus.STOPPED, SessionStatus.FAILED}
 
-        stale_records = self.db.exec(
-            select(SessionRecord).where(SessionRecord.status.in_(terminal))  # type: ignore[attr-defined]
+        stale_records = list(
+            self.db.exec(
+                select(SessionRecord).where(SessionRecord.status.in_(terminal))  # type: ignore[attr-defined]
+            ).all()
+        )
+        # Dry-run PLANNED rows are terminal in everything but name: nothing was
+        # launched and nothing will ever transition them, yet they block adopt
+        # at their endpoint. Real in-flight PLANNED rows (dry_run false) are
+        # excluded — purging one would race a concurrent start.
+        planned = self.db.exec(
+            select(SessionRecord).where(SessionRecord.status == SessionStatus.PLANNED)
         ).all()
+        stale_records.extend(r for r in planned if _is_dry_run_planned(r))
 
         host = self.settings.scheduler.default_host
         freed_ports: list[int] = []
@@ -633,9 +663,21 @@ class SessionService:
             # dry-run start records the endpoint URL without launching,
             # and adopting on top would silently fork the routing.
             if prior.status in _ADOPT_BLOCKING_STATES:
+                if _is_dry_run_planned(prior):
+                    remedy = (
+                        "It is a leftover dry-run plan (nothing was launched); "
+                        "clear it with `llmctl cleanup --remove-stale` and retry."
+                    )
+                elif prior_kind == SessionKind.ADOPTED:
+                    remedy = f"Clear it with `llmctl detach {prior.id}` and retry."
+                else:
+                    remedy = (
+                        f"Clear it with `llmctl stop {prior.id}` followed by "
+                        "`llmctl cleanup --remove-stale`, then retry."
+                    )
                 raise AdoptError(
                     f"Endpoint {normalized} is already tracked by session {prior.id} "
-                    f"(status={prior.status.value}, kind={prior_kind.value})."
+                    f"(status={prior.status.value}, kind={prior_kind.value}). {remedy}"
                 )
             # A STOPPED adopted row at the same URL would be auto-revived by
             # the next reconcile, producing two RUNNING records pointing at
