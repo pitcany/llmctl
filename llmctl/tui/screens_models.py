@@ -231,7 +231,9 @@ class ModelsScreen(DataScreen):
         on exactly that set. Re-deriving it at confirm time let a scan landing
         in between widen the deletion past the number the operator agreed to.
         """
-        ids = _data.get_missing_model_ids()
+        ids = self.query_data(_data.get_missing_model_ids, what="Missing-model lookup")
+        if ids is None:
+            return
         if not ids:
             self.app.notify("No missing models to prune.", severity="information")
             return
@@ -259,11 +261,18 @@ class ModelsScreen(DataScreen):
         self.refresh_data()
 
     def _selected_model(self) -> Any:
-        """Return the full Model schema for the cursor row, if any."""
+        """Return the full Model schema for the cursor row, if any.
+
+        Runs from key handlers (``e``/``c``/``d``), so the read is guarded —
+        an unguarded registry query here would kill the app on a locked DB.
+        """
         model_id = self._selected_id()
         if not model_id:
             return None
-        for model in _data.get_models():
+        models = self.query_data(_data.get_models, what="Model lookup")
+        if models is None:
+            return None
+        for model in models:
             if model.id == model_id:
                 return model
         return None

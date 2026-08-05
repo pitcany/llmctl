@@ -296,7 +296,9 @@ class BenchmarksScreen(DataScreen):
 
     def action_new_benchmark(self) -> None:
         """Open the launch modal, then dispatch the selected run off-thread."""
-        models = _data.get_models()
+        models = self.query_data(_data.get_models, what="Model lookup")
+        if models is None:
+            return
         modal = BenchmarkLaunchModal(
             models, preselect_model_id=self._model_filter
         )

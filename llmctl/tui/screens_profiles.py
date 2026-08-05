@@ -85,7 +85,10 @@ class ProfilesScreen(DataScreen):
         if not (0 <= row < len(self._ids)):
             return None
         target_id = self._ids[row]
-        for profile in _data.get_profiles():
+        profiles = self.query_data(_data.get_profiles, what="Profile lookup")
+        if profiles is None:
+            return None
+        for profile in profiles:
             if profile.id == target_id:
                 return profile
         return None
