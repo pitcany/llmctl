@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 from platformdirs import user_config_dir, user_data_dir, user_log_dir
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 APP_NAME = "llmctl"
 
@@ -174,6 +174,11 @@ class ManagedUnitConfig(BaseModel):
 
     enabled: bool = False
     unit_name: str = "vllm-tp"
+    # Which runtime the unit serves, as a RuntimeName value ("vllm",
+    # "llama_cpp", ...). Only consulted where the role's runtime matters
+    # (e.g. `llmctl adopt-managed` tagging the adopted session); the
+    # default keeps every existing vllm_tp consumer unchanged.
+    runtime: str = "vllm"
     env_file_path: Path | None = None
     # The marker string the legacy-unit guard looks for in `systemctl cat`
     # output. If the unit's ExecStart doesn't contain this substring, the
@@ -252,11 +257,32 @@ class FleetUnitsConfig(BaseModel):
     ollama: str = "ollama"
 
 
+#: Role names claimed by ManagedUnitsConfig's typed fields; the generic
+#: ``units`` mapping may not redefine them.
+_RESERVED_ROLE_NAMES = {"vllm-tp", "vllm_tp", "fleet"}
+
+
 class ManagedUnitsConfig(BaseModel):
     """Container for all managed systemd units llmctl knows about.
 
     Keyed by logical role rather than unit name so the same role can be
     re-targeted to a different unit on another host without touching code.
+
+    ``vllm_tp`` and ``fleet`` are typed fields for compatibility — existing
+    consumers (``llmctl vllm``, ``adopt-managed vllm-tp``, the preset
+    orchestrator) read them directly and must keep working unchanged.
+    Additional roles go in the generic ``units`` mapping::
+
+        managed_units:
+          units:
+            deepseek:
+              unit_name: ds4-server
+              default_port: 8000
+              runtime: llama_cpp
+
+    Role-generic consumers (``llmctl status``, ``adopt-managed``, the
+    port-drift validator) iterate :meth:`roles` so opted-in units appear
+    alongside ``vllm-tp``; a config without ``units`` is a no-op migration.
     """
 
     vllm_tp: ManagedUnitConfig = Field(
@@ -265,6 +291,25 @@ class ManagedUnitsConfig(BaseModel):
         )
     )
     fleet: FleetUnitsConfig = Field(default_factory=FleetUnitsConfig)
+    units: dict[str, ManagedUnitConfig] = Field(default_factory=dict)
+
+    @field_validator("units")
+    @classmethod
+    def _reject_reserved_role_names(
+        cls, value: dict[str, ManagedUnitConfig]
+    ) -> dict[str, ManagedUnitConfig]:
+        clashes = sorted(_RESERVED_ROLE_NAMES & value.keys())
+        if clashes:
+            raise ValueError(
+                f"managed_units.units may not redefine reserved role(s) "
+                f"{', '.join(clashes)}; configure managed_units.vllm_tp / "
+                f"managed_units.fleet directly."
+            )
+        return value
+
+    def roles(self) -> dict[str, ManagedUnitConfig]:
+        """All unit roles by CLI name: the built-in ``vllm-tp`` plus ``units``."""
+        return {"vllm-tp": self.vllm_tp, **self.units}
 
 
 def default_runtime_configs() -> dict[str, RuntimeConfig]:

@@ -205,7 +205,7 @@ def _check_drift(cfg: Settings) -> list[DoctorCheck]:
         *validate_svc.check_preset_model_ids(load_all_presets()),
         *validate_svc.check_registry_paths(models),
         *validate_svc.check_model_root_symlinks(load_model_dirs()),
-        *validate_svc.check_managed_unit_ports([cfg.managed_units.vllm_tp]),
+        *validate_svc.check_managed_unit_ports(list(cfg.managed_units.roles().values())),
     ]
     if not findings:
         return [DoctorCheck("state-drift", "pass", "presets, registry paths, and units line up")]
