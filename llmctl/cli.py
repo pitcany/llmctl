@@ -496,7 +496,10 @@ def doctor(json_out: _JSON_OPT = False) -> None:
 @app.command()
 def cleanup(
     remove_stale: Annotated[
-        bool, typer.Option(help="Delete stopped/failed session records.")
+        bool,
+        typer.Option(
+            help="Delete stopped/failed session records and leftover dry-run plans."
+        ),
     ] = False,
 ) -> None:
     """Detect dead sessions, free their ports, and optionally purge stale records."""
