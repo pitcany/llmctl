@@ -31,6 +31,7 @@ class SessionsScreen(DataScreen):
         Binding("x", "stop_session", "Stop", show=True),
         Binding("ctrl+r", "restart_session", "Restart", show=True),
         Binding("c", "cleanup", "Cleanup", show=True),
+        Binding("C", "purge_stale", "Purge", show=True),
     ]
 
     def __init__(self) -> None:
@@ -42,7 +43,8 @@ class SessionsScreen(DataScreen):
         """Compose the sessions table + log-tail pane with screen-scoped chrome."""
         yield Header()
         yield Static(
-            f"Sessions  -  [{C_MUTED}]x = stop, ctrl+r = restart, c = cleanup[/]",
+            f"Sessions  -  [{C_MUTED}]x = stop, ctrl+r = restart, "
+            f"c = cleanup (marks dead), shift+C = purge records[/]",
             classes="panel safe",
             id="sessions-title",
         )
@@ -180,11 +182,50 @@ class SessionsScreen(DataScreen):
         )
 
     def _after_cleanup(self, report: Any) -> None:
-        """Notify and refresh after a cleanup action."""
+        """Notify and refresh after a cleanup action.
+
+        States plainly that no rows were removed. ``c`` reconciles only, so
+        stopped/failed rows stay on screen afterwards — without saying so the
+        action reads as broken ("I cleaned up, why is the dead session still
+        listed?"). Names the key that does remove them.
+        """
         freed = ", ".join(str(p) for p in report.get("freed_ports", [])) or "none"
         self.app.notify(
-            f"Cleanup: {report.get('dead_marked', 0)} marked dead, ports freed: {freed}.",
+            f"Cleanup: {report.get('dead_marked', 0)} marked dead, ports freed: {freed}. "
+            "No records removed — press shift+C to purge stopped/failed rows.",
             title="Cleanup",
+        )
+        self.refresh_data()
+
+    def action_purge_stale(self) -> None:
+        """Delete stopped/failed session records (and leftover dry-run plans)."""
+
+        def _on_close(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            self.run_action_worker(
+                lambda: _data.cleanup_sessions(remove_stale=True),
+                self._after_purge,
+            )
+
+        self.app.push_screen(
+            ConfirmActionModal(
+                "Purge stale session records?",
+                "Stopped and failed session rows are deleted from the database, "
+                "along with PLANNED rows left by dry-run starts. Running sessions "
+                "and the processes behind them are untouched. This cannot be undone.",
+                confirm_label="Purge",
+            ),
+            _on_close,
+        )
+
+    def _after_purge(self, report: Any) -> None:
+        """Notify and refresh after a purge."""
+        removed = report.get("stale_removed", 0)
+        self.app.notify(
+            f"Purged {removed} stale session record(s); "
+            f"{report.get('active_remaining', 0)} active remain.",
+            title="Purge",
         )
         self.refresh_data()
 
