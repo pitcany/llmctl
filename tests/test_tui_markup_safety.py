@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from rich.text import Text
 from textual.widgets import DataTable, Static
 
@@ -19,6 +20,19 @@ from llmctl.db import ModelStatus, RuntimeName, SessionStatus
 from llmctl.schemas import Model, Session
 from llmctl.tui import _data
 from llmctl.tui.app import MissionControlApp
+
+from ._tui_isolation import isolate_tui
+
+
+@pytest.fixture(autouse=True)
+def _isolated_tui(tmp_path, monkeypatch) -> None:
+    """Keep this file off the developer's registry and off the network.
+
+    Booting ``MissionControlApp`` fetches the dashboard, which opens the real
+    database and probes every runtime. See ``tests/_tui_isolation``.
+    """
+    isolate_tui(monkeypatch, tmp_path)
+
 
 #: A name with an unbalanced closing tag — the hard-crash case.
 HOSTILE_NAME = "qwen [/tmp] test"

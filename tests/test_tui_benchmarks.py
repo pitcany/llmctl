@@ -25,6 +25,18 @@ from llmctl.tui._modals_registry import ConfirmDelete, DeleteModal
 from llmctl.tui.app import MissionControlApp
 from llmctl.tui.screens_benchmarks import BenchmarksScreen
 
+from ._tui_isolation import isolate_tui
+
+
+@pytest.fixture(autouse=True)
+def _isolated_tui(tmp_path, monkeypatch) -> None:
+    """Keep this file off the developer's registry and off the network.
+
+    Booting ``MissionControlApp`` fetches the dashboard, which opens the real
+    database and probes every runtime. See ``tests/_tui_isolation``.
+    """
+    isolate_tui(monkeypatch, tmp_path)
+
 
 @pytest.fixture
 def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
