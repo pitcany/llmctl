@@ -100,6 +100,17 @@ def test_a_symlink_out_of_a_root_is_not_followed(tmp_path: Path) -> None:
     assert (outside / "data.txt").exists(), "followed a symlink out of the root"
 
 
+def test_a_configured_root_itself_is_never_deletable(tmp_path: Path) -> None:
+    """A row naming the root would otherwise take every model with it."""
+    roots = _roots(tmp_path)
+    (roots[0] / "keep.bin").write_text("x")
+
+    removed = RegistryService._delete_artifact(str(roots[0]), roots=roots)
+
+    assert removed is False
+    assert (roots[0] / "keep.bin").exists(), "deleted the whole model root"
+
+
 def test_no_roots_configured_refuses_rather_than_deleting_anything(tmp_path: Path) -> None:
     """Fail closed: an empty root list must not mean 'anything goes'."""
     target = tmp_path / "model"

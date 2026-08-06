@@ -49,6 +49,35 @@ class SchedulerError(ValueError):
     """Raised when a launch is refused and not overridden with ``--force``."""
 
 
+def python_script_refusal(script: str) -> str | None:
+    """Return why ``script`` may not be run as a python script, or ``None``.
+
+    ``runtime=python_script`` builds ``[sys.executable, script, *args]``. A
+    script path beginning with ``-`` reaches the interpreter as a *flag*:
+    ``script="-c"`` turns ``args[0]`` into executable code, which is remote code
+    execution once the control-plane API is reachable.
+
+    This is a hard stop rather than an ordinary refusal reason, because
+    ``force=true`` on the start request makes :meth:`SchedulerService.validate`
+    skip every refusal. It is enforced by *refusing to build a command at all*:
+    an empty ``plan.command`` fails closed at launch, and ``force`` cannot
+    conjure one.
+
+    Existence is deliberately not checked. Without a leading ``-`` the
+    interpreter reads the argument as a path, so a missing file is a failed
+    launch rather than code execution — and requiring existence here would break
+    ``llmctl plan``, which previews a command before the script is necessarily
+    in place. Non-existence is already surfaced as a plan refusal.
+    """
+    if script.startswith("-"):
+        return (
+            f"python_script refuses {script!r}: a script path cannot start with "
+            "'-'; the interpreter would read it as a flag, making the arguments "
+            "executable code."
+        )
+    return None
+
+
 class SchedulerService:
     """Builds safe, explainable launch plans and GPU placement decisions."""
 
@@ -136,6 +165,13 @@ class SchedulerService:
             command = self._build_command(runtime, runtime_config, model, parameters, host, port)
             if not command:
                 warnings.append("No command could be built; verify the model path/source.")
+            if runtime == RuntimeName.PYTHON_SCRIPT:
+                script = parameters.get("script") or (model.path or model.source if model else None)
+                reason = python_script_refusal(str(script)) if script else None
+                if reason:
+                    # A refusal, not just the generic "no command" warning, so
+                    # the operator is told *why* the preview is empty.
+                    refusals.append(reason)
             self._check_binary(runtime_config, refusals)
             self._check_model_path(runtime, model, parameters, refusals)
             self._check_shard_completeness(runtime, model, refusals)
@@ -482,34 +518,21 @@ class SchedulerService:
     ) -> list[str]:
         """Build a ``python <script> [args...]`` command.
 
-        Raises:
-            SchedulerError: when ``script`` would be read by the interpreter as
-                a flag rather than as a path.
+        Returns an empty command when the script is unusable — see
+        :func:`python_script_refusal`. That is deliberately not an exception:
+        planning must always yield a ``LaunchPlan`` (with refusal reasons)
+        rather than blowing up ``llmctl plan`` / ``POST /sessions/plan``, and an
+        empty command already fails closed at launch with "Launch plan has no
+        command to execute", which ``force`` cannot override.
         """
         script = parameters.get("script")
         if not script and model:
             script = model.path or model.source
         if not script:
             return []
-        # Checked here rather than as a plan refusal: ``force=true`` on the start
-        # request makes ``validate`` skip every refusal, and this one must not be
-        # skippable. ``script="-c"`` reaches the interpreter as a flag and turns
-        # args[0] into executable code -- that is the whole vector.
-        #
-        # Deliberately *not* checked here: whether the file exists. Without a
-        # leading "-" the interpreter treats the argument as a path, so a missing
-        # file is a failed launch, not code execution — and requiring existence
-        # at command-build time would break `llmctl plan`, which legitimately
-        # previews a command before the script is in place. Non-existence is
-        # already surfaced as a plan refusal.
-        script_str = str(script)
-        if script_str.startswith("-"):
-            raise SchedulerError(
-                f"Refusing to launch python_script with {script_str!r}: a script "
-                "path cannot start with '-'; the interpreter would read it as a "
-                "flag, making the arguments executable code."
-            )
-        command = [sys.executable, script_str]
+        if python_script_refusal(str(script)):
+            return []
+        command = [sys.executable, str(script)]
         args = parameters.get("args")
         if isinstance(args, list):
             command += [str(arg) for arg in args]

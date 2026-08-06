@@ -437,7 +437,10 @@ class RegistryService:
                 if target.is_symlink()
                 else target.resolve()
             )
-            if not any(probe == root or root in probe.parents for root in resolved_roots):
+            # Strict descendant: a root itself is never deletable. Otherwise a
+            # single row naming e.g. /mnt/storage/models would take the whole
+            # model root with it -- the exact blast radius this bounds.
+            if not any(root in probe.parents for root in resolved_roots):
                 return False
             if target.is_symlink() or target.is_file():
                 target.unlink()
