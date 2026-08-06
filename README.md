@@ -270,6 +270,26 @@ Edits run non-fatal validation — errors block the save, warnings are
 reported and the change goes through (so you can save profiles meant
 for a different host without llmctl second-guessing you).
 
+**Pinning the port.** By default the scheduler allocates from
+`scheduler.port_ranges`, so a profile launch lands on whatever is free.
+Set `parameters.port` to pin it:
+
+```yaml
+parameters:
+  port: 8005
+```
+
+This exists for models reachable two ways — a systemd unit that
+hardcodes a port, and `llmctl start --profile`. Without a pin the same
+model answers on a different port depending on who launched it, and
+anything downstream aimed at the documented endpoint breaks.
+
+An explicit pin is honoured verbatim, including outside the configured
+range. If the port is already taken the launch is **refused, never
+relocated**: silently moving it is the thing a pin exists to prevent,
+and a session whose recorded port is not where the server listens is its
+own kind of lie.
+
 ## Preview a launch
 
 `preview` renders a launch plan without starting anything: backend,

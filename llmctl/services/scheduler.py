@@ -155,11 +155,26 @@ class SchedulerService:
             endpoint = runtime_config.endpoint
             notes.append(f"{runtime.value} is server-managed; attaches to {endpoint}.")
         else:
-            port = self._allocate_port(runtime, runtime_config)
-            if port is None:
-                refusals.append("No free port available in the configured range.")
-                fallback = self._port_range(runtime, runtime_config)
-                port = fallback[0]
+            pinned = self._pinned_port(parameters)
+            if pinned is not None:
+                # An explicit pin is honoured verbatim, including outside the
+                # configured range: explicit beats implicit. If it is taken we
+                # refuse rather than relocate -- silently moving the endpoint is
+                # exactly what a pin exists to prevent, and it would leave the
+                # recorded port pointing somewhere the server is not listening.
+                port = pinned
+                if not self._port_available(runtime_config, port):
+                    refusals.append(
+                        f"Pinned port {port} is already in use; refusing to "
+                        "relocate it. Stop whatever holds it, or unset "
+                        "`parameters.port` to let the scheduler choose."
+                    )
+            else:
+                port = self._allocate_port(runtime, runtime_config)
+                if port is None:
+                    refusals.append("No free port available in the configured range.")
+                    fallback = self._port_range(runtime, runtime_config)
+                    port = fallback[0]
             endpoint = f"http://{host}:{port}"
             health_url = f"{endpoint}/v1/models"
             command = self._build_command(runtime, runtime_config, model, parameters, host, port)
@@ -563,6 +578,31 @@ class SchedulerService:
         if configured:
             return configured
         return runtime_config.port_range or [8000, 8099]
+
+    @staticmethod
+    def _pinned_port(parameters: dict[str, object]) -> int | None:
+        """Return an explicitly pinned port from the profile, if any.
+
+        Lets a profile launch on the same port its systemd unit hardcodes, so a
+        model reachable both ways answers at one documented endpoint regardless
+        of who started it. Garbage is ignored rather than raising: an unusable
+        value falls back to range allocation, which is the previous behaviour.
+        """
+        raw = parameters.get("port")
+        if isinstance(raw, bool) or raw is None:
+            return None
+        try:
+            port = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return port if 1 <= port <= 65535 else None
+
+    def _port_available(self, runtime_config: RuntimeConfig, port: int) -> bool:
+        """True when ``port`` is neither reserved by a session nor bound."""
+        if port in self._used_ports():
+            return False
+        host = runtime_config.host or self.settings.scheduler.default_host
+        return self._is_port_free(host, port)
 
     def _allocate_port(self, runtime: RuntimeName, runtime_config: RuntimeConfig) -> int | None:
         """Return a free TCP port within the runtime's range, or ``None``."""
