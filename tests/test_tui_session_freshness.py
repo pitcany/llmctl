@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 from sqlmodel import Session as DBSession
 
+from llmctl._testing import isolate_tui
 from llmctl.db import (
     RuntimeName,
     SessionKind,
@@ -25,8 +26,6 @@ from llmctl.db import (
     init_db,
 )
 from llmctl.tui import _data
-
-from ._tui_isolation import isolate_tui
 
 #: A pid that is not running. Chosen far above the default pid_max so the test
 #: cannot collide with a real process on the host.
