@@ -175,6 +175,26 @@ class DataScreen(Screen[None]):
             if "not running" not in str(exc).lower():
                 raise
 
+    def query_data(self, func: Any, *, what: str = "Lookup") -> Any:
+        """Run a blocking read from a keypress handler without risking the app.
+
+        Key handlers need the result immediately (to populate a modal), so this
+        stays synchronous rather than going through :meth:`run_action_worker` —
+        these are single-table reads, not the minutes-long systemctl work that
+        seam exists for. What it adds is the guard the refresh path already
+        has: the registry SQLite file is shared with the CLI, the API and the
+        gateway, so a transient lock is routine, and an unguarded read on the
+        UI thread takes the whole app down with a traceback.
+
+        Returns ``None`` on failure, having surfaced the error as a toast.
+        Callers must treat ``None`` as "nothing to act on" and stop.
+        """
+        try:
+            return func()
+        except Exception as exc:
+            self._notify_error(exc, f"{what} failed")
+            return None
+
     def _notify_error(self, exc: Exception, title: str = "Action failed") -> None:
         """Show a persistent, visible error without letting markup parse it."""
         self.notify(escape(str(exc)), title=title, severity="error", timeout=10)
