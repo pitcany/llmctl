@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 
 from llmctl.db import RuntimeName, SessionKind, SessionRecord, SessionStatus, get_engine, init_db
 from llmctl.integrations.systemctl import SystemctlRunner
-from llmctl.services.sessions import AdoptError, SessionService
+from llmctl.services.sessions import AdoptError, AmbiguousSessionError, SessionService
 
 
 def _make_service(
@@ -734,5 +734,143 @@ def test_reconcile_promotes_a_starting_adopted_row_once_it_answers(
         assert refreshed is not None
         assert refreshed.status == SessionStatus.RUNNING
         assert refreshed.error is None
+    finally:
+        db.close()
+
+
+def test_resolve_accepts_a_unique_id_prefix(tmp_path: Path) -> None:
+    """`llmctl sessions` elides the id, so a prefix must be usable."""
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"])
+    try:
+        session = service.adopt(RuntimeName.VLLM, "http://127.0.0.1:8003")
+        found = service.get_session(session.id[:8])
+        assert found is not None
+        assert found.id == session.id
+    finally:
+        db.close()
+
+
+def test_resolve_accepts_the_served_name(tmp_path: Path) -> None:
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"])
+    try:
+        session = service.adopt(
+            RuntimeName.LLAMA_CPP, "http://127.0.0.1:8005", served_name="gpt-oss-120b"
+        )
+        found = service.get_session("gpt-oss-120b")
+        assert found is not None
+        assert found.id == session.id
+    finally:
+        db.close()
+
+
+def test_resolve_prefers_a_live_session_over_a_stopped_namesake(tmp_path: Path) -> None:
+    """A stopped historical row must not shadow the server answering now."""
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"])
+    try:
+        old = service.adopt(
+            RuntimeName.LLAMA_CPP, "http://127.0.0.1:8005", served_name="gpt-oss-120b"
+        )
+        record = db.exec(select(SessionRecord).where(SessionRecord.id == old.id)).one()
+        record.status = SessionStatus.STOPPED
+        db.add(record)
+        db.commit()
+        live = service.adopt(
+            RuntimeName.LLAMA_CPP, "http://127.0.0.1:8006", served_name="gpt-oss-120b"
+        )
+
+        found = service.get_session("gpt-oss-120b")
+        assert found is not None
+        assert found.id == live.id
+    finally:
+        db.close()
+
+
+def test_resolve_refuses_to_guess_between_two_live_namesakes(tmp_path: Path) -> None:
+    """Guessing here would stop the wrong server."""
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"])
+    try:
+        service.adopt(
+            RuntimeName.LLAMA_CPP, "http://127.0.0.1:8005", served_name="twin"
+        )
+        service.adopt(
+            RuntimeName.LLAMA_CPP, "http://127.0.0.1:8006", served_name="twin"
+        )
+        with pytest.raises(AmbiguousSessionError, match="matches 2 sessions"):
+            service.get_session("twin")
+    finally:
+        db.close()
+
+
+def test_resolve_exact_id_wins_over_any_other_interpretation(tmp_path: Path) -> None:
+    """A full id must never be reinterpreted as a prefix or a name."""
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"])
+    try:
+        session = service.adopt(RuntimeName.VLLM, "http://127.0.0.1:8003")
+        found = service.get_session(session.id)
+        assert found is not None and found.id == session.id
+    finally:
+        db.close()
+
+
+def test_resolve_unknown_selector_is_not_found_not_an_error(tmp_path: Path) -> None:
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"])
+    try:
+        service.adopt(RuntimeName.VLLM, "http://127.0.0.1:8003")
+        assert service.get_session("no-such-thing") is None
+    finally:
+        db.close()
+
+
+def test_stop_accepts_a_served_name(tmp_path: Path) -> None:
+    """The ergonomics that matter: stop by name, not by UUID."""
+    calls, runner = _recording_systemctl()
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        service.adopt(
+            RuntimeName.LLAMA_CPP,
+            "http://127.0.0.1:8005",
+            served_name="gpt-oss-120b",
+            systemd_unit="gpt-oss-120b.service",
+        )
+        result = service.stop("gpt-oss-120b", stop_unit=True)
+        assert result is not None
+        assert result.status == SessionStatus.STOPPED
+    finally:
+        db.close()
+
+
+def test_stop_survives_the_unit_detaching_its_own_row(tmp_path: Path) -> None:
+    """`systemctl stop` runs the unit's ExecStopPost, which detaches the row.
+
+    The UPDATE then matches zero rows and SQLAlchemy raises StaleDataError.
+    That delete is correct behaviour — the caller asked for the unit to go
+    away and it did — so the stop must report success, not a traceback.
+    """
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"])
+
+    url = f"sqlite:///{tmp_path / 'adopt.sqlite3'}"
+
+    def fake(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if "stop" in argv:
+            # Stand in for ExecStopPost -> `ds4-llmctl-sync detach`, which runs
+            # in a *separate process*. Deleting over a second connection is what
+            # makes the in-flight UPDATE match zero rows, as it does in reality.
+            with Session(get_engine(url)) as other:
+                for row in other.exec(select(SessionRecord)).all():
+                    other.delete(row)
+                other.commit()
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    service._systemctl = SystemctlRunner(runner=fake)
+    try:
+        session = service.adopt(
+            RuntimeName.LLAMA_CPP,
+            "http://127.0.0.1:8005",
+            served_name="gpt-oss-120b",
+            systemd_unit="gpt-oss-120b.service",
+        )
+        result = service.stop(session.id, stop_unit=True)
+        assert result is not None
+        assert result.status == SessionStatus.STOPPED
     finally:
         db.close()
