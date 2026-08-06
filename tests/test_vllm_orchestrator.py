@@ -27,6 +27,7 @@ from llmctl.integrations.vllm_env import VLLMLaunchSpec
 from llmctl.services.vllm_orchestrator import (
     Dependencies,
     OrchestratorOptions,
+    OrchestratorResult,
     UnknownPresetError,
     start_vllm_tp,
 )
@@ -82,11 +83,14 @@ class _FleetReport:
 class _AdapterStub:
     """Drop-in for VLLMSystemdAdapter capturing all side effects."""
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, *, ready: bool | None = True, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.spec_received: VLLMLaunchSpec | None = None
         self.wait_for_ready_arg: bool | None = None
         self.timeout_arg: float | None = None
+        #: Readiness verdict this stub reports back (see the tri-state note
+        #: at the bottom of this file).
+        self._ready = ready
 
     def restart_with_spec(
         self,
@@ -102,7 +106,7 @@ class _AdapterStub:
         return ManagedRestartResult(
             env_path=Path("/tmp/fake.env"),
             env_body="rendered\n",
-            ready=True,
+            ready=self._ready,
         )
 
 
@@ -310,3 +314,61 @@ def test_wait_for_ready_false_skips_post_restart_polling(tmp_path: Path) -> None
     )
 
     assert adapter.wait_for_ready_arg is False
+
+
+# --- readiness tri-state ------------------------------------------------------
+#
+# `ready` is bool | None: True = probed and serving, False = probed and not
+# serving, None = `--no-wait`, nobody looked. `ok` must not confuse "I did not
+# check" with "it failed", or the CLI exits 1 on a restart the operator
+# deliberately chose not to wait for.
+
+
+def _result(ready: bool | None, *, error: str | None = None) -> OrchestratorResult:
+    return OrchestratorResult(
+        spec=VLLMLaunchSpec(model="m", served_name="s"),
+        restart=ManagedRestartResult(
+            env_path=Path("/tmp/fake.env"), env_body="", ready=ready, error=error
+        ),
+    )
+
+
+def test_ok_is_true_when_probed_and_ready() -> None:
+    assert _result(True).ok is True
+
+
+def test_ok_is_false_when_probed_and_not_ready() -> None:
+    assert _result(False, error="vLLM did not become ready within 300s").ok is False
+
+
+def test_ok_is_true_when_readiness_was_not_checked() -> None:
+    """`--no-wait` is a successful restart with an unknown endpoint, not a failure."""
+    assert _result(None).ok is True
+
+
+def test_ok_is_false_when_the_restart_itself_errored_unchecked() -> None:
+    """A failed `systemctl restart` reports ready=False + error; stays a failure."""
+    assert _result(False, error="systemctl restart vllm-tp failed (exit 1)").ok is False
+
+
+def test_ok_is_false_when_the_fleet_preflight_failed() -> None:
+    result = _result(None)
+    result.fleet_failed = ["ollama"]
+    assert result.ok is False
+
+
+def test_hermes_verify_is_skipped_when_readiness_was_not_checked(tmp_path: Path) -> None:
+    """Verifying a provider against an unprobed endpoint reports nothing useful."""
+    adapter = _AdapterStub(ready=None)
+    _write_preset(tmp_path)
+    deps, _ = _build_deps(config_dir=tmp_path, adapter=adapter)
+
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        options=OrchestratorOptions(wait_for_ready=False),
+        deps=deps,
+    )
+
+    assert result.restart is not None and result.restart.ready is None
+    assert result.hermes_status is None

@@ -181,7 +181,9 @@ def test_post_start_fires_when_wait_for_ready_false(tmp_path: Path) -> None:
         VLLMLaunchSpec(model="m", served_name="s"),
         wait_for_ready=False,
     )
-    assert result.ready is True
+    # Hook behaviour is deliberate and unchanged; only the readiness verdict
+    # moves from a false "True" to "not checked".
+    assert result.ready is None
     assert timeline == ["post"]
 
 

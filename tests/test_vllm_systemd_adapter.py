@@ -245,5 +245,32 @@ def test_wait_for_ready_false_skips_polling(tmp_path: Path) -> None:
         VLLMLaunchSpec(model="m", served_name="s"),
         wait_for_ready=False,
     )
-    assert result.ready is True
+    # None, not True: the restart was issued but readiness was never checked.
+    # Reporting True is what let the CLI print "vLLM ready -- serving X" a
+    # couple of seconds after stopping ollama and Harbor, before the port was
+    # even bound.
+    assert result.ready is None
     assert result.error is None
+
+
+def test_wait_for_ready_true_still_reports_a_real_verdict(tmp_path: Path) -> None:
+    """The tri-state must not blur the probed cases into "unknown"."""
+    runner, _ = _make_systemctl()
+
+    def never_ready(url: str, timeout: float) -> object:
+        raise OSError("connection refused")
+
+    adapter = VLLMSystemdAdapter(
+        env_file_path=tmp_path / "env",
+        systemctl=runner,
+        sleep=lambda s: None,
+        http_get=never_ready,
+    )
+    result = adapter.restart_with_spec(
+        VLLMLaunchSpec(model="m", served_name="s"),
+        wait_for_ready=True,
+        timeout_s=0.01,
+        poll_interval_s=0.01,
+    )
+    assert result.ready is False
+    assert result.error is not None

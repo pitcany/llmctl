@@ -53,7 +53,12 @@ class ManagedRestartResult:
 
     env_path: Path
     env_body: str
-    ready: bool
+    #: Tri-state, and the distinction is load-bearing: ``True`` means the
+    #: endpoint was polled and answered, ``False`` means it was polled and did
+    #: not, ``None`` means nobody looked (``wait_for_ready=False``). Collapsing
+    #: ``None`` into ``True`` is what let the CLI announce "vLLM ready" seconds
+    #: after stopping ollama and Harbor, before the port was bound.
+    ready: bool | None
     error: str | None = None
 
 
@@ -207,9 +212,12 @@ class VLLMSystemdAdapter:
             )
 
         if not wait_for_ready:
+            # Hooks still fire: opting out of the poll is the caller's signal
+            # that they have intentionally skipped verification. But readiness
+            # is reported as unknown, not as success.
             for hook in self.post_start_hooks:
                 hook(spec)
-            return ManagedRestartResult(env_path=env_path, env_body=body, ready=True)
+            return ManagedRestartResult(env_path=env_path, env_body=body, ready=None)
 
         ready = self._wait_for_ready(
             spec.port,
