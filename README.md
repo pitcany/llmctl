@@ -126,9 +126,21 @@ read commands accept `--json` for stable, script-friendly output.
   session's endpoint: process alive but endpoint dead → `degraded`,
   excluded from gateway routing until it recovers.
 - **Confirmations.** `scheduler.require_confirmation_for_start/stop/
-  delete` are honored by `vllm`, `stop`, and `delete-model`: llmctl
-  prompts when run interactively (never when scripted — prompts are
-  TTY-gated) and `--yes/-y` skips the prompt. Declining exits 0.
+  delete` are honored by `vllm`, `stop`, `restart`, and `delete-model`:
+  llmctl prompts when run interactively (never when scripted — prompts
+  are TTY-gated) and `--yes/-y` skips the prompt. Declining exits 0.
+  `restart` is gated on `require_confirmation_for_stop` — it terminates
+  the running process before relaunching, and that half is the risky one.
+- **`restart` relaunches.** It stops the session's process and starts it
+  again from the stored launch plan, then reports the state it ended in:
+  pid and endpoint when running, the error and exit 1 when the relaunch
+  failed. Only a session with no stored plan reports "no process
+  launched". A process that survives SIGTERM *and* SIGKILL is recorded
+  `degraded` with its pid kept (so `reconcile` can still see it), and
+  both `stop` and `restart` exit 1 rather than claiming success.
+- **`vllm --no-wait`.** Skipping the readiness poll reports "restart
+  issued; readiness not checked", not "ready" — nothing probed the
+  endpoint. Exit stays 0: opting out is a choice, not a failure.
 - **JSON output.** `models`, `sessions`, `gpus`, `status`, `health`,
   `presets`, `validate`, `doctor`, `runtimes`, and `config show` accept
   `--json`: plain JSON on stdout, no ANSI, stable keys.
