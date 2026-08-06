@@ -12,6 +12,23 @@ from llmctl.schemas import ModelCreate, ModelUpdate
 from llmctl.services.registry import RegistryService
 
 
+class _RootStub:
+    """Stands in for config.ModelRoot: only ``resolve_path`` is consulted."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def resolve_path(self) -> Path:
+        return self._path
+
+
+class _RootsStub:
+    """Stands in for config.ModelDirsConfig."""
+
+    def __init__(self, paths: list[Path]) -> None:
+        self.model_roots = [_RootStub(p) for p in paths]
+
+
 def _db(tmp_path: Path) -> Session:
     url = f"sqlite:///{tmp_path / 'reg.sqlite3'}"
     init_db(url)
@@ -100,7 +117,13 @@ def test_delete_soft_removes_from_default_list(tmp_path: Path) -> None:
         assert all(m.name != "ephemeral" for m in service.list_models())
 
 
-def test_delete_with_files_removes_artifact(tmp_path: Path) -> None:
+def test_delete_with_files_removes_artifact(tmp_path: Path, monkeypatch) -> None:
+    # File removal is confined to the configured model roots, so the artifact
+    # has to live under one. Previously any path on the box was fair game.
+    monkeypatch.setattr(
+        "llmctl.config.load_model_dirs",
+        lambda *a, **k: _RootsStub([tmp_path]),
+    )
     artifact = tmp_path / "weights.gguf"
     artifact.write_bytes(b"x" * 8)
     with _db(tmp_path) as db:

@@ -307,9 +307,25 @@ POST   /profiles/{id}/validate  # preview warnings before PUT
 Also served (same app): `GET /health`, `GET /doctor` (structured
 pass/warn/fail report), `GET /sessions`, `POST /sessions/plan|start|
 cleanup`, `POST /sessions/{id}/stop|restart`, `GET /gpus`, and the
-`/benchmarks` CRUD. The API binds loopback by default; `llmctl serve`
-refuses a public bind unless `scheduler.allow_public_bind` is set
-(its mutating routes are unauthenticated).
+`/benchmarks` CRUD. The API binds loopback by default.
+
+**Exposing it off loopback takes two deliberate steps**, because
+`POST /sessions/start` runs local commands by design:
+
+- `api.allow_public_bind: true` — its own flag, *not*
+  `scheduler.allow_public_bind` (which governs serving a **model**
+  publicly; one shared flag meant enabling that silently exposed the
+  control plane too), and
+- `api.auth_token` (or `LLMCTL_API_TOKEN`) — a public bind refuses to
+  start without one, and forces the bearer middleware on regardless of
+  `scheduler.require_auth_token`, which defaults to false.
+
+Related hardening: `api.cors_origins` rejects `"*"` at load (the
+middleware allows credentials, so a wildcard would let any page the
+operator visits call this API); `runtime=python_script` refuses a
+`script` beginning with `-` (the interpreter would read it as a flag,
+making the arguments executable code); and `--delete-files` only
+removes paths inside a configured model root.
 
 ## TUI keybindings
 
