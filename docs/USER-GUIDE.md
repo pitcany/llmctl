@@ -145,16 +145,19 @@ or if the unit is not active. A unit that is stopped is not drift.
 
 ### Sessions and scheduler
 
-These belong to the original scaffold and aren't part of the daily
-flow; useful for debugging.
+`start`, `stop` and `restart` here are real operational commands for
+scheduler-launched sessions; `scan`, `plan` and `cleanup` are the
+scaffold-and-debugging end of the table. Adopted sessions with a recorded
+systemd unit have their own workflow — see
+[Driving an adopted unit](#driving-an-adopted-unit).
 
 | Command | What |
 |---------|------|
 | `llmctl sessions` | List launched sessions |
 | `llmctl scan` | Refresh discovery cache (vLLM HTTP probe + filesystem + Ollama API) |
 | `llmctl start MODEL_ID --profile NAME` | Scheduler-based launch (subprocess, not systemd) |
-| `llmctl stop SESSION_ID` | Mark a session stopped |
-| `llmctl restart SESSION_ID` | Plan a restart |
+| `llmctl stop SESSION` | Mark a session stopped. `--systemd/-s` stops its backing unit instead |
+| `llmctl restart SESSION` | Stop the process and relaunch from the stored plan. `--systemd/-s` restarts its backing unit instead |
 | `llmctl plan MODEL_ID` | Print a launch plan without executing |
 | `llmctl cleanup [--remove-stale]` | Free ports + purge dead sessions and leftover dry-run plans |
 | `llmctl add-model`, `delete-model` | Manual model registry CRUD |
@@ -171,13 +174,67 @@ Real in-flight `PLANNED` rows are never touched.
 |---------|------|
 | `llmctl adopt --endpoint URL --runtime NAME` | Track an endpoint llmctl did not start |
 | `llmctl adopt-managed ROLE` / `--all` | Adopt a role from `managed_units` (see [Adding your own managed unit](#adding-your-own-managed-unit)) |
-| `llmctl detach SESSION_ID` | Stop tracking an adopted endpoint (leaves the unit alone) |
+| `llmctl detach SESSION` | Stop tracking an adopted endpoint (leaves the unit alone) |
+| `llmctl start-unit UNIT` | Start a systemd unit llmctl does not own — the counterpart to `stop --systemd` |
 
 `adopt` refuses when another non-terminal session already claims the
 same endpoint. The error names the blocking session, its status, and
 the exact command that clears it — `llmctl cleanup --remove-stale` for
 a leftover dry-run plan, `llmctl stop` for an owned session, or
 `llmctl detach` for an adopted one.
+
+### Driving an adopted unit
+
+When an adopted session records a systemd unit, llmctl can drive that unit
+for you instead of sending you back to `systemctl`.
+
+```bash
+llmctl sessions                            # what is up right now
+llmctl stop  my-model --systemd            # SESSION selector -> stops its unit
+llmctl start-unit my-server.service        # UNIT name
+llmctl logs  my-model                      # SESSION selector
+```
+
+Note the two different subjects. `stop`, `restart` and `logs` take a
+**session selector** (id, prefix, or served name). `start-unit` takes a
+**systemd unit name**. They are often similar but they are not the same
+string, and llmctl will not accept one where it wants the other.
+
+`llmctl logs` shows the session's log file. For an adopted session, which
+has none, it falls back to the recorded unit's journal.
+
+**Selectors.** Session ids are UUIDs and `llmctl sessions` prints them
+elided, so the id in the table cannot be pasted back. Every session command
+accepts three forms, most specific first: an **exact id**, a **unique id
+prefix**, or the **served name**. A served name prefers live sessions, so a
+stopped historical row cannot shadow the endpoint answering now. Anything
+ambiguous is refused with the matching ids listed rather than guessed.
+
+**Why `stop --systemd` but `start-unit`.** `stop` and `restart` take a
+*session*. If your unit detaches itself when it stops, its session row is
+gone by the time you want it back, and `restart --systemd` reports "Session
+not found". `start-unit` takes the **unit** as its subject instead. Use
+`restart --systemd` to bounce something currently up, `start-unit` to bring
+back something that is down.
+
+**Scope is detected**, not configured: a unit the *user* manager owns is
+driven with `systemctl --user` and no `sudo`; a system unit goes through
+`sudo`, subject to your NOPASSWD rules. Resolution reads systemd's
+`LoadState`, and system scope wins if both managers know the name.
+
+**Status honesty.** A restarted unit is recorded `starting`, not `running`
+— systemd accepting the command is not evidence the endpoint answers, which
+for a large model can be minutes later. `reconcile` promotes it on the first
+successful probe, and `llmctl sessions` reconciles by default.
+
+**`--systemd` requires a recorded unit.** A session adopted without
+`--unit` has none, so `stop --systemd` and `restart --systemd` both refuse.
+(`start-unit` is unaffected — it takes a unit name, not a session.) Adopt with
+`llmctl adopt -e URL -r RUNTIME --unit UNIT`, or have the unit's own
+`ExecStartPost` do it.
+
+**Already-active units are reported, not restarted.** `start-unit` is not a
+synonym for `restart` — it will not bounce a live server.
 
 ### Other surface
 
