@@ -131,11 +131,13 @@ def test_fetch_handles_unreachable_ports_gracefully(temp_settings) -> None:
     )
     rows = screen.fetch()
     for r in rows:
-        assert r.served == []
+        # None, not []: nobody answered. `[]` is reserved for "answered with
+        # nothing loaded", which is a different fact and renders differently.
+        assert r.served is None
 
 
 def test_fetch_handles_malformed_json_gracefully(temp_settings) -> None:
-    """A garbage payload -> [] served, no crash."""
+    """A garbage payload -> unreachable (None), no crash."""
 
     def fake_get(url: str, timeout: float):
         return io.BytesIO(b"<<not json>>")
@@ -145,7 +147,7 @@ def test_fetch_handles_malformed_json_gracefully(temp_settings) -> None:
         http_get=fake_get,
     )
     rows = screen.fetch()
-    assert all(r.served == [] for r in rows)
+    assert all(r.served is None for r in rows)
 
 
 def test_fetch_handles_systemctl_oserror_gracefully(

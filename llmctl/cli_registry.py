@@ -383,7 +383,11 @@ def model_prune(
         ):
             console.print("[yellow]Aborted; nothing changed.[/yellow]")
             raise typer.Exit(code=0)
-        count = service.prune_missing(rt)
+        # Bind the exact set that was displayed and agreed to. Re-running the
+        # query here let a scan landing during the prompt widen a no-undo
+        # soft-delete past what the operator confirmed. The TUI already passes
+        # ids for this reason; the CLI did not.
+        count = service.prune_missing(rt, ids=[m.id for m in missing if m.id])
     console.print(f"[green]Pruned[/green] {count} missing model(s).")
 
 

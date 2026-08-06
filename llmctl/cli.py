@@ -1505,9 +1505,20 @@ def vllm_cmd(
     if not result.ok:
         console.print("[red]vLLM start did not complete cleanly.[/red]")
         if result.fleet_failed:
-            console.print(f"  fleet preflight failed on: {', '.join(result.fleet_failed)}")
+            console.print(
+                f"  fleet preflight failed on: {escape(', '.join(result.fleet_failed))}"
+            )
         if result.restart is not None and result.restart.error:
-            console.print(f"  restart: {result.restart.error}")
+            console.print(f"  restart: {escape(result.restart.error)}")
+        if result.fleet_stopped:
+            # The launch stopped these to free VRAM and then failed, so they are
+            # still down. The TUI has always said so; the CLI discarded it, and
+            # an operator who did not know would just find ollama dead.
+            console.print(
+                f"  [yellow]still stopped:[/yellow] "
+                f"{escape(', '.join(result.fleet_stopped))}"
+                " — restart them or retry the launch."
+            )
         raise typer.Exit(1)
     if result.restart is not None and result.restart.ready is None:
         # --no-wait: the restart was issued and nobody probed /v1/models.
@@ -1563,28 +1574,22 @@ def presets_cmd(json_out: _JSON_OPT = False) -> None:
 @app.command("status")
 def status_cmd(json_out: _JSON_OPT = False) -> None:
     """Quick overview of managed units: config, live state, and served models."""
-    from llmctl.services.backends import probe_openai_v1_models
+    from llmctl.services.units import unit_rows
 
-    settings = load_settings()
-    rows = []
-    for role, unit in settings.managed_units.roles().items():
-        served = probe_openai_v1_models(f"http://127.0.0.1:{unit.default_port}", 1.5)
-        env_file = unit.resolve_env_file()
-        rows.append(
-            {
-                "role": role,
-                "unit_name": unit.unit_name,
-                "env_file": str(env_file),
-                # resolve_env_file() always returns a path, even for a role whose
-                # runtime llmctl never writes an env file for. Rendering a path
-                # that isn't there reads as "edit this file" for a file that does
-                # not exist, so the table shows it only when it is real.
-                "env_file_exists": env_file.exists(),
-                "port": unit.default_port,
-                "serving": served is not None,
-                "served_models": served or [],
-            }
-        )
+    # Shared with the TUI Units screen -- see services/units.py. The JSON shape
+    # below is the published contract and is kept byte-identical.
+    rows = [
+        {
+            "role": r.role,
+            "unit_name": r.unit_name,
+            "env_file": str(r.env_file),
+            "env_file_exists": r.env_file_exists,
+            "port": r.port,
+            "serving": r.serving,
+            "served_models": r.served or [],
+        }
+        for r in unit_rows(load_settings())
+    ]
     if json_out:
         _emit_json(rows)
         return

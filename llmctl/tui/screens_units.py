@@ -10,9 +10,6 @@ Bound to ``u`` from any screen.
 
 from __future__ import annotations
 
-import json
-import urllib.error
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -20,7 +17,7 @@ from typing import Any
 from textual.app import ComposeResult
 from textual.widgets import DataTable, Footer, Header, Static
 
-from llmctl.config import ManagedUnitConfig, load_settings
+from llmctl.config import load_settings
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 
@@ -34,9 +31,15 @@ class _UnitRow:
     role: str
     unit_name: str
     env_path: str
+    #: False when ``resolve_env_file()`` names a file that is not there. The
+    #: CLI stopped rendering phantom paths in 10d44ac1; this screen must too,
+    #: or operators edit a file nothing reads.
+    env_exists: bool
     port: int
     is_active: bool
-    served: list[str]
+    #: Tri-state from the shared probe: a list (possibly empty) means the
+    #: endpoint answered, ``None`` means it could not be reached.
+    served: list[str] | None
     role_kind: str  # "managed"
 
 
@@ -57,7 +60,10 @@ class UnitsScreen(DataScreen):
         # Both deps are injectable so tests don't hit real systemd /
         # real HTTP. Production wiring uses sensible defaults.
         self._systemctl = systemctl
-        self._http_get = http_get or _default_http_get
+        # None means "use the shared default in services.backends". Keeping a
+        # private transport here is what let this screen reach :8003 by a path
+        # the rest of the codebase could not see or stub.
+        self._http_get = http_get
 
     def compose(self) -> ComposeResult:
         """Compose the units table chrome with screen-scoped Header/Footer."""
@@ -84,15 +90,25 @@ class UnitsScreen(DataScreen):
         tolerance (worker is exclusive so back-pressured refreshes
         replace prior ones).
         """
-        settings = load_settings()
+        from llmctl.services.units import unit_rows
+
         sysctl = self._systemctl or SystemctlRunner()
-        rows: list[_UnitRow] = []
-
-        # Managed-unit roles: built-in vllm-tp plus any managed_units.units.
-        for role, cfg in settings.managed_units.roles().items():
-            rows.append(self._row_for_managed(role, cfg, sysctl))
-
-        return rows
+        # Facts shared with `llmctl status` come from one producer, so the two
+        # surfaces cannot describe the same unit differently. `is_active` is
+        # this screen's own addition -- the CLI table does not show it.
+        return [
+            _UnitRow(
+                role=r.role,
+                unit_name=r.unit_name,
+                env_path=str(r.env_file),
+                env_exists=r.env_file_exists,
+                port=r.port,
+                is_active=self._is_active_safe(r.unit_name, sysctl),
+                served=r.served,
+                role_kind="managed",
+            )
+            for r in unit_rows(load_settings(), http_get=self._http_get)
+        ]
 
     def render_data(self, data: Any) -> None:
         """Render the units table with color-coded state."""
@@ -104,20 +120,27 @@ class UnitsScreen(DataScreen):
             active_cell = (
                 f"[{C_OK}]active[/]" if r.is_active else f"[{C_MUTED}]inactive[/]"
             )
+            # Three distinct outcomes, not two. Collapsing "answered with
+            # nothing loaded" into "could not be reached" made an idle unit and
+            # a dead one look identical here, and made both disagree with
+            # `llmctl status`.
             if r.served:
                 served_cell = f"[{C_ACCENT}]{esc(', '.join(r.served))}[/]"
+            elif r.served == []:
+                served_cell = f"[{C_OK}]idle (none loaded)[/]"
             elif r.is_active:
-                # Unit running but no /v1/models — likely starting up
+                # Active in systemd but the endpoint did not answer: still loading.
                 served_cell = f"[{C_WARN}]starting?[/]"
             else:
                 served_cell = f"[{C_MUTED}]-[/]"
+            env_cell = esc(r.env_path) if r.env_exists else f"[{C_MUTED}]—[/]"
             table.add_row(
                 f"[{C_MUTED}]unit[/] {esc(r.role)}",
                 esc(r.unit_name),
                 active_cell,
                 str(r.port),
                 served_cell,
-                esc(r.env_path),
+                env_cell,
             )
         if not rows:
             table.add_row(
@@ -130,25 +153,6 @@ class UnitsScreen(DataScreen):
         """Manual refresh shortcut."""
         self.refresh_data()
 
-    def _row_for_managed(
-        self,
-        role: str,
-        cfg: ManagedUnitConfig,
-        sysctl: SystemctlRunner,
-    ) -> _UnitRow:
-        """Build a row for one managed unit."""
-        is_active = self._is_active_safe(cfg.unit_name, sysctl)
-        served = self._probe_served(cfg.default_port)
-        return _UnitRow(
-            role=role,
-            unit_name=cfg.unit_name,
-            env_path=str(cfg.resolve_env_file()),
-            port=cfg.default_port,
-            is_active=is_active,
-            served=served,
-            role_kind="managed",
-        )
-
     def _is_active_safe(self, unit: str, sysctl: SystemctlRunner) -> bool:
         """Return True iff systemctl reports active; False on any error.
 
@@ -160,25 +164,3 @@ class UnitsScreen(DataScreen):
             return sysctl.is_active(unit)
         except OSError:
             return False
-
-    def _probe_served(self, port: int) -> list[str]:
-        """Probe ``http://localhost:<port>/v1/models``; ``[]`` on failure."""
-        url = f"http://localhost:{port}/v1/models"
-        try:
-            resp = self._http_get(url, PROBE_TIMEOUT_S)
-            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
-            return []
-        ids: list[str] = []
-        for m in payload.get("data", []):
-            if not isinstance(m, dict):
-                continue
-            mid = m.get("id")
-            if isinstance(mid, str):
-                ids.append(mid)
-        return ids
-
-
-def _default_http_get(url: str, timeout: float) -> Any:
-    """Production HTTP GET — patched in tests."""
-    return urllib.request.urlopen(url, timeout=timeout)  # noqa: S310 - localhost only

@@ -75,3 +75,92 @@ def test_no_wait_is_not_treated_as_a_failure(monkeypatch) -> None:
 
     assert res.exit_code == 0, res.output
     assert "did not complete cleanly" not in res.output
+
+
+# --- the failure path and the exit-code contract ------------------------------
+#
+# `llmctl vllm` is the most destructive command in the tool -- it stops ollama
+# and the Harbor container, rewrites the unit env file and restarts the GPU pair
+# -- and had no CLI tests at all. These cover the contract README documents.
+
+
+def test_failed_launch_says_what_was_left_stopped(monkeypatch) -> None:
+    """The launch stopped ollama to free VRAM and then failed. Say so.
+
+    The TUI has always disclosed this; the CLI discarded `fleet_stopped`, so an
+    operator only found out by noticing ollama was dead.
+    """
+    res = _result(False, error="vLLM did not become ready within 300s")
+    res.fleet_stopped = ["ollama.service"]
+
+    out = _invoke(monkeypatch, res)
+
+    assert out.exit_code == 1, out.output
+    assert "still stopped" in out.output.lower(), out.output
+    assert "ollama.service" in out.output
+
+
+def test_fleet_preflight_failure_is_reported(monkeypatch) -> None:
+    res = _result(None)
+    res.fleet_failed = ["ollama.service"]
+
+    out = _invoke(monkeypatch, res)
+
+    assert out.exit_code == 1, out.output
+    assert "fleet preflight failed" in out.output
+
+
+def test_unknown_preset_exits_2(monkeypatch) -> None:
+    """Usage errors are exit 2, per the documented exit-code contract."""
+    from llmctl.services.vllm_orchestrator import UnknownPresetError
+
+    def boom(*a, **k):
+        raise UnknownPresetError("no-such-preset")
+
+    monkeypatch.setattr(cli, "start_vllm_tp", boom, raising=False)
+    out = CliRunner().invoke(cli.app, ["vllm", "no-such-preset"])
+
+    assert out.exit_code == 2, out.output
+    assert "no-such-preset" in out.output
+
+
+def test_missing_model_path_exits_2(monkeypatch) -> None:
+    """A safety refusal is exit 2, not 1."""
+    from llmctl.services.vllm_orchestrator import MissingModelPathError
+
+    def boom(*a, **k):
+        raise MissingModelPathError("/mnt/storage/gone")
+
+    monkeypatch.setattr(cli, "start_vllm_tp", boom, raising=False)
+    out = CliRunner().invoke(cli.app, ["vllm", "llama-3.3-70b"])
+
+    assert out.exit_code == 2, out.output
+    assert "Refusing to start" in out.output
+
+
+def test_declining_the_confirmation_is_exit_0(monkeypatch) -> None:
+    """Saying "no" is not an error."""
+    import typer
+
+    def decline(*a, **k):
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(cli, "_confirm_state_change", decline)
+    monkeypatch.setattr(
+        cli, "start_vllm_tp", lambda *a, **k: pytest.fail("must not launch"),
+        raising=False,
+    )
+
+    out = CliRunner().invoke(cli.app, ["vllm", "llama-3.3-70b"])
+
+    assert out.exit_code == 0, out.output
+
+
+def test_dry_run_prints_nothing_and_exits_0(monkeypatch) -> None:
+    res = _result(None)
+    res.dry_run = True
+
+    out = _invoke(monkeypatch, res, "--dry-run")
+
+    assert out.exit_code == 0, out.output
+    assert "vLLM ready" not in out.output
