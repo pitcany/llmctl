@@ -589,11 +589,17 @@ class SchedulerService:
         value falls back to range allocation, which is the previous behaviour.
         """
         raw = parameters.get("port")
-        if isinstance(raw, bool) or raw is None:
+        # Only a whole number is a port. `int(raw)` would have truncated 8005.9
+        # to 8005 -- silently turning nonsense into a plausible, *different*
+        # port, which is the opposite of falling back. A clean digit string is
+        # accepted because a hand-edited profile can round-trip `port: "8005"`.
+        if isinstance(raw, bool):
             return None
-        try:
-            port = int(raw)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
+        if isinstance(raw, int):
+            port = raw
+        elif isinstance(raw, str) and raw.strip().isdigit():
+            port = int(raw.strip())
+        else:
             return None
         return port if 1 <= port <= 65535 else None
 

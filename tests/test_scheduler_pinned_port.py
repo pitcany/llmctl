@@ -122,3 +122,75 @@ def test_without_a_pin_a_taken_port_still_moves_on(tmp_path: Path) -> None:
         assert not any("port" in r.lower() for r in second.refusal_reasons)
     finally:
         db.close()
+
+
+# --- gaps the review found ----------------------------------------------------
+
+
+def test_a_port_bound_on_the_host_is_also_refused(tmp_path: Path) -> None:
+    """`_port_available` has two halves; the DB half was the only one covered.
+
+    A port can be occupied by something llmctl never launched — the systemd unit
+    for this very model, most likely. Binding it must refuse just like a
+    reserved session does, or the pin would hand back a port already in use.
+    """
+    import socket
+
+    db = _db(tmp_path)
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        bound_port = sock.getsockname()[1]
+
+        plan = SchedulerService(db).create_launch_plan(_request(bound_port))
+
+        assert plan.port == bound_port, "must not silently relocate"
+        assert any(str(bound_port) in r for r in plan.refusal_reasons), (
+            plan.refusal_reasons
+        )
+    finally:
+        sock.close()
+        db.close()
+
+
+def test_a_float_port_falls_back_instead_of_truncating(tmp_path: Path) -> None:
+    """8005.9 is not port 8005. Truncating would invent a plausible wrong pin."""
+    db = _db(tmp_path)
+    try:
+        plan = SchedulerService(db).create_launch_plan(_request(None))
+        unpinned = plan.port
+
+        request = _request(None)
+        request.parameters["port"] = 8005.9
+        plan = SchedulerService(db).create_launch_plan(request)
+
+        assert plan.port == unpinned, "a float must not become a pin"
+    finally:
+        db.close()
+
+
+def test_a_clean_digit_string_is_accepted(tmp_path: Path) -> None:
+    """A hand-edited profile can round-trip `port: "8005"`."""
+    db = _db(tmp_path)
+    try:
+        request = _request(None)
+        request.parameters["port"] = "8005"
+
+        assert SchedulerService(db).create_launch_plan(request).port == 8005
+    finally:
+        db.close()
+
+
+def test_a_nonsense_string_falls_back(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    try:
+        request = _request(None)
+        request.parameters["port"] = "http://127.0.0.1:8005"
+
+        plan = SchedulerService(db).create_launch_plan(request)
+
+        assert plan.port != 8005
+        assert not any("pinned" in r.lower() for r in plan.refusal_reasons)
+    finally:
+        db.close()
