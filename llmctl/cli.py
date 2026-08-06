@@ -291,7 +291,7 @@ def add_model(
     )
     with _session() as db:
         model = RegistryService(db).add_model(payload)
-    console.print(f"[green]Registered model[/green] {model.name} ({model.id})")
+    console.print(f"[green]Registered model[/green] {escape(str(model.name))} ({model.id})")
 
 
 @app.command("delete-model")
@@ -376,7 +376,7 @@ def _print_session_state(session: object, *, verb: str) -> bool:
     if status == "running":
         console.print(
             f"[green]{verb} session[/green] {session.id} "
-            f"pid={session.pid} -> {session.endpoint_url}"
+            f"pid={session.pid} -> {escape(str(session.endpoint_url))}"
         )
         return True
     if status == "planned":
@@ -513,9 +513,12 @@ def doctor(json_out: _JSON_OPT = False) -> None:
         ("FAIL", "red", report["failures"]),
     ):
         for check in entries:
-            console.print(f"[{style}]{verdict}[/{style}] {check['name']}: {check['detail']}")
+            console.print(
+                f"[{style}]{verdict}[/{style}] {escape(str(check['name']))}: "
+                f"{escape(str(check['detail']))}"
+            )
             if check.get("remediation") and verdict != "PASS":
-                console.print(f"       ↳ {check['remediation']}")
+                console.print(f"       ↳ {escape(str(check['remediation']))}")
     console.print(
         f"\n{len(report['passed'])} passed, {len(report['warnings'])} warning(s), "
         f"{len(report['failures'])} failure(s)."
@@ -592,13 +595,13 @@ def start_unit(
         try:
             scope, was_active = SessionService(db).start_unit(unit)
         except AdoptError as exc:
-            console.print(f"[red]Start refused:[/red] {exc}")
+            console.print(f"[red]Start refused:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
     if was_active:
-        console.print(f"[cyan]{unit} is already active[/cyan] ({scope} scope).")
+        console.print(f"[cyan]{escape(str(unit))} is already active[/cyan] ({scope} scope).")
         return
     console.print(
-        f"[green]Started[/green] {unit} ({scope} scope). "
+        f"[green]Started[/green] {escape(str(unit))} ({scope} scope). "
         "It will appear in `llmctl sessions` once it adopts itself and answers."
     )
 
@@ -629,7 +632,7 @@ def stop(
         try:
             session = SessionService(db).stop(session_id, stop_unit=systemd)
         except AdoptError as exc:
-            console.print(f"[red]Stop refused:[/red] {exc}")
+            console.print(f"[red]Stop refused:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
     if not session:
         raise typer.BadParameter(f"Session not found: {session_id}")
@@ -683,7 +686,7 @@ def restart(
         try:
             session = SessionService(db).restart(session_id, restart_unit=systemd)
         except AdoptError as exc:
-            console.print(f"[red]Restart refused:[/red] {exc}")
+            console.print(f"[red]Restart refused:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
     if not session:
         raise typer.BadParameter(f"Session not found: {session_id}")
@@ -727,9 +730,9 @@ def pull(
 
     status = asyncio.run(adapter.pull_model(model, on_progress=on_progress))
     if status.state != HealthState.OK:
-        console.print(f"[red]{status.message}[/red]")
+        console.print(f"[red]{escape(str(status.message))}[/red]")
         raise typer.Exit(1)
-    console.print(f"[green]{status.message}[/green] Run `llmctl scan` to register it.")
+    console.print(f"[green]{escape(str(status.message))}[/green] Run `llmctl scan` to register it.")
 
 
 @app.command()
@@ -839,7 +842,7 @@ def config_show(json_out: _JSON_OPT = False) -> None:
         return
     import yaml
 
-    console.print(f"[dim]# resolved from {_settings_file_path()}[/dim]")
+    console.print(f"[dim]# resolved from {escape(str(_settings_file_path()))}[/dim]")
     print(yaml.safe_dump(payload, sort_keys=False))
 
 
@@ -849,10 +852,10 @@ def config_validate() -> None:
     try:
         load_settings()
     except Exception as exc:
-        console.print(f"[red]Configuration invalid:[/red] {_settings_file_path()}")
+        console.print(f"[red]Configuration invalid:[/red] {escape(str(_settings_file_path()))}")
         console.print(str(exc))
         raise typer.Exit(code=1) from exc
-    console.print(f"[green]Configuration valid.[/green] ({_settings_file_path()})")
+    console.print(f"[green]Configuration valid.[/green] ({escape(str(_settings_file_path()))})")
 
 
 runtimes_app = typer.Typer(
@@ -927,10 +930,10 @@ def runtimes_inspect(
     if json_out:
         _emit_json(match)
         return
-    console.print(f"[bold]{match['display_name']}[/bold] ({match['runtime']})")
-    console.print(f"  state:    {match['state']} — {match['message']}")
-    console.print(f"  version:  {match['version'] or 'unknown'}")
-    console.print(f"  endpoint: {match['endpoint'] or '-'}")
+    console.print(f"[bold]{escape(str(match['display_name']))}[/bold] ({match['runtime']})")
+    console.print(f"  state:    {escape(str(match['state']))} — {escape(str(match['message']))}")
+    console.print(f"  version:  {escape(str(match['version'] or 'unknown'))}")
+    console.print(f"  endpoint: {escape(str(match['endpoint'] or '-'))}")
     loaded = match["loaded"]
     console.print(
         "  loaded:   " + ("n/a" if loaded is None else (", ".join(loaded) or "(none)"))
@@ -952,7 +955,7 @@ def health(json_out: _JSON_OPT = False) -> None:
         _emit_json(data)
         return
     console.print(
-        f"[bold]State:[/bold] {data['state']}  "
+        f"[bold]State:[/bold] {escape(str(data['state']))}  "
         f"[bold]Safe mode:[/bold] {data['safe_mode']}  "
         f"[bold]GPUs:[/bold] {data['gpu_count']}  "
         f"[bold]NVML:[/bold] {data['nvml_available']}"
@@ -1114,7 +1117,7 @@ def _print_benchmark_result(result: object) -> None:
     success_color = "green" if result.success else "red"
     table.add_row("Success", f"[{success_color}]{result.success}[/{success_color}]")
     if result.error:
-        table.add_row("Error", f"[red]{result.error}[/red]")
+        table.add_row("Error", f"[red]{escape(str(result.error))}[/red]")
     mode_color = "green" if mode == "live" else "yellow"
     table.add_row("Mode", f"[{mode_color}]{mode}[/{mode_color}]")
     if reason:
@@ -1317,7 +1320,7 @@ def generate_systemd_session(
     try:
         unit = render_session_unit(session, user=user)
     except AdoptError as exc:
-        console.print(f"[red]generate-systemd-session refused:[/red] {exc}")
+        console.print(f"[red]generate-systemd-session refused:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
     _emit_unit(unit, output)
 
@@ -1349,15 +1352,16 @@ def install_systemd(
 
     def _install(unit: object) -> None:
         for warning in unit.warnings:  # type: ignore[attr-defined]
-            console.print(f"[yellow]warning:[/yellow] {warning}")
+            console.print(f"[yellow]warning:[/yellow] {escape(str(warning))}")
         report = install_unit(unit, dry_run=dry_run, enable=enable)  # type: ignore[arg-type]
         header = "DRY RUN - would run" if report.dry_run else "Install report"
         color = "yellow" if report.dry_run else "green"
         console.print(
-            f"[{color}]{header}[/{color}] for {unit.name} -> {report.unit_path}"  # type: ignore[attr-defined]
+            f"[{color}]{header}[/{color}] for {escape(str(unit.name))} -> "
+            f"{escape(str(report.unit_path))}"  # type: ignore[attr-defined]
         )
         for action in report.actions:
-            console.print(f"  - {action}")
+            console.print(f"  - {escape(str(action))}")
         for message in report.messages:
             console.print(f"  [cyan]{message}[/cyan]")
 
@@ -1374,7 +1378,7 @@ def install_systemd(
         for s in skipped:
             console.print(
                 f"[yellow]Skip adopted session[/yellow] {s.id} "
-                f"({s.systemd_unit or s.endpoint_url}); already managed by systemd."
+                f"({escape(str(s.systemd_unit or s.endpoint_url))}); already managed by systemd."
             )
         if not owned:
             console.print("[yellow]No owned sessions to persist.[/yellow]")
@@ -1392,7 +1396,7 @@ def install_systemd(
         try:
             unit = render_session_unit(session, user=user)
         except AdoptError as exc:
-            console.print(f"[red]install-systemd refused:[/red] {exc}")
+            console.print(f"[red]install-systemd refused:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
     else:
         unit = render_api_unit(load_settings(), user=user)
@@ -1405,7 +1409,7 @@ def _emit_unit(unit: object, output: Path | None) -> None:
     name = getattr(unit, "name", "unit.service")
     content = getattr(unit, "content", "")
     for warning in getattr(unit, "warnings", []) or []:
-        console.print(f"[yellow]warning:[/yellow] {warning}")
+        console.print(f"[yellow]warning:[/yellow] {escape(str(warning))}")
     if output is not None:
         output.write_text(content, encoding="utf-8")
         console.print(f"[green]Wrote {name}[/green] -> {output}")
@@ -1500,10 +1504,11 @@ def vllm_cmd(
             options=options,
         )
     except UnknownPresetError as exc:
-        console.print(f"[red]Unknown preset:[/red] {exc.args[0] if exc.args else preset}")
+        unknown = exc.args[0] if exc.args else preset
+        console.print(f"[red]Unknown preset:[/red] {escape(str(unknown))}")
         raise typer.Exit(2) from exc
     except MissingModelPathError as exc:
-        console.print(f"[red]Refusing to start {preset}:[/red] {exc}")
+        console.print(f"[red]Refusing to start {escape(str(preset))}:[/red] {escape(str(exc))}")
         raise typer.Exit(2) from exc
 
     if result.dry_run:
@@ -1725,7 +1730,7 @@ def router_status_cmd() -> None:
     try:
         response = httpx.get(url, headers=headers, timeout=2.0)
     except httpx.HTTPError as exc:
-        console.print(f"[red]Gateway unreachable[/red] at {url}: {exc}")
+        console.print(f"[red]Gateway unreachable[/red] at {escape(str(url))}: {escape(str(exc))}")
         console.print(
             "[cyan]Start it with[/cyan] `llmctl gateway` (default 127.0.0.1:9000)."
         )
@@ -1743,7 +1748,7 @@ def router_status_cmd() -> None:
     payload = response.json()
     router = payload.get("router", {})
     console.print(
-        f"[green]Gateway up[/green] at {url}  "
+        f"[green]Gateway up[/green] at {escape(str(url))}  "
         f"auth={'on' if router.get('auth_required') else 'off'}  "
         f"auto_start={router.get('auto_start')}  "
         f"fallback={router.get('fallback_policy')}"
@@ -1793,7 +1798,7 @@ def aliases_cmd() -> None:
             status_text = "[yellow]bound, no active session[/yellow]"
         table.add_row(
             row.name,
-            f"local-{row.name}",
+            f"local-{escape(str(row.name))}",
             row.target or "-",
             row.resolved_session_id or "-",
             row.resolved_served_name or "-",
@@ -1834,7 +1839,8 @@ def set_alias_cmd(
         else:
             console.print(
                 f"[green]Bound[/green] {alias} -> {resolved_target} "
-                f"(session {view.resolved_session_id}, served as {view.resolved_served_name})."
+                f"(session {view.resolved_session_id}, "
+                f"served as {escape(str(view.resolved_served_name))})."
             )
 
 
@@ -1860,9 +1866,9 @@ def _print_adopted(session: object, *, prefix: str = "Adopted") -> None:
     console.print(
         f"[green]{prefix}[/green] {session.id}  "  # type: ignore[attr-defined]
         f"runtime={session.runtime.value}  "  # type: ignore[attr-defined]
-        f"served_name={session.served_name or '-'}  "  # type: ignore[attr-defined]
-        f"endpoint={session.endpoint_url}  "  # type: ignore[attr-defined]
-        f"unit={session.systemd_unit or '-'}"  # type: ignore[attr-defined]
+        f"served_name={escape(str(session.served_name or '-'))}  "  # type: ignore[attr-defined]
+        f"endpoint={escape(str(session.endpoint_url))}  "  # type: ignore[attr-defined]
+        f"unit={escape(str(session.systemd_unit or '-'))}"  # type: ignore[attr-defined]
     )
 
 
@@ -1925,7 +1931,7 @@ def adopt_cmd(
                 timeout_s=timeout,
             )
         except AdoptError as exc:
-            console.print(f"[red]Adopt failed:[/red] {exc}")
+            console.print(f"[red]Adopt failed:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
     _print_adopted(session)
 
@@ -1978,7 +1984,7 @@ def adopt_managed_cmd(
                 skipped += 1
                 console.print(
                     f"[yellow]Skip {cli_role}[/yellow]: configured runtime "
-                    f"'{unit_cfg.runtime}' is not a known RuntimeName."
+                    f"'{escape(str(unit_cfg.runtime))}' is not a known RuntimeName."
                 )
                 continue
             endpoint = f"http://127.0.0.1:{unit_cfg.default_port}"
@@ -1992,7 +1998,8 @@ def adopt_managed_cmd(
             except AdoptError as exc:
                 skipped += 1
                 console.print(
-                    f"[yellow]Skip {cli_role}[/yellow] ({endpoint}): {exc}"
+                    f"[yellow]Skip {cli_role}[/yellow] "
+                    f"({escape(str(endpoint))}): {escape(str(exc))}"
                 )
                 continue
             adopted += 1
@@ -2016,12 +2023,13 @@ def detach_cmd(
         try:
             session = service.detach(session_id)
         except AdoptError as exc:
-            console.print(f"[red]Detach refused:[/red] {exc}")
+            console.print(f"[red]Detach refused:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
     if session is None:
         raise typer.BadParameter(f"Session not found: {session_id}")
     console.print(
         f"[green]Detached[/green] {session_id} "
-        f"(endpoint={session.endpoint_url}, unit={session.systemd_unit or '-'}). "
+        f"(endpoint={escape(str(session.endpoint_url))}, "
+        f"unit={escape(str(session.systemd_unit or '-'))}). "
         "The upstream process was not touched."
     )
