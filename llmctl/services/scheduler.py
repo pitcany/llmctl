@@ -480,13 +480,36 @@ class SchedulerService:
         model: ModelRecord | None,
         parameters: dict[str, object],
     ) -> list[str]:
-        """Build a ``python <script> [args...]`` command."""
+        """Build a ``python <script> [args...]`` command.
+
+        Raises:
+            SchedulerError: when ``script`` would be read by the interpreter as
+                a flag rather than as a path.
+        """
         script = parameters.get("script")
         if not script and model:
             script = model.path or model.source
         if not script:
             return []
-        command = [sys.executable, str(script)]
+        # Checked here rather than as a plan refusal: ``force=true`` on the start
+        # request makes ``validate`` skip every refusal, and this one must not be
+        # skippable. ``script="-c"`` reaches the interpreter as a flag and turns
+        # args[0] into executable code -- that is the whole vector.
+        #
+        # Deliberately *not* checked here: whether the file exists. Without a
+        # leading "-" the interpreter treats the argument as a path, so a missing
+        # file is a failed launch, not code execution — and requiring existence
+        # at command-build time would break `llmctl plan`, which legitimately
+        # previews a command before the script is in place. Non-existence is
+        # already surfaced as a plan refusal.
+        script_str = str(script)
+        if script_str.startswith("-"):
+            raise SchedulerError(
+                f"Refusing to launch python_script with {script_str!r}: a script "
+                "path cannot start with '-'; the interpreter would read it as a "
+                "flag, making the arguments executable code."
+            )
+        command = [sys.executable, script_str]
         args = parameters.get("args")
         if isinstance(args, list):
             command += [str(arg) for arg in args]
