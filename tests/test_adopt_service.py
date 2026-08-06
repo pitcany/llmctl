@@ -682,3 +682,57 @@ def test_list_sessions_round_trips_adopt_fields(tmp_path: Path) -> None:
         assert s.endpoint_url == "http://127.0.0.1:8003"
     finally:
         db.close()
+
+
+def test_reconcile_leaves_a_starting_adopted_row_alone_while_loading(
+    tmp_path: Path,
+) -> None:
+    """A restarted unit is loading; an unavailable probe must not call it STOPPED.
+
+    `restart --systemd` records STARTING precisely because the endpoint cannot
+    answer for minutes. Marking it STOPPED with "endpoint failed to respond"
+    would report the opposite of what happened.
+    """
+    probes: list[list[str] | None] = [["m"], None]
+
+    def probe(_url: str, _t: float) -> list[str] | None:
+        return probes.pop(0) if probes else None
+
+    calls, runner = _recording_systemctl()
+    db, service = _make_service(tmp_path, probe, systemctl=runner)
+    try:
+        session = service.adopt(
+            RuntimeName.VLLM, "http://127.0.0.1:8003", systemd_unit="vllm-tp"
+        )
+        restarted = service.restart(session.id, restart_unit=True)
+        assert restarted is not None and restarted.status == SessionStatus.STARTING
+
+        assert service.reconcile() == 0  # nothing changed
+        refreshed = service.get_session(session.id)
+        assert refreshed is not None
+        assert refreshed.status == SessionStatus.STARTING
+        assert refreshed.error is None
+    finally:
+        db.close()
+
+
+def test_reconcile_promotes_a_starting_adopted_row_once_it_answers(
+    tmp_path: Path,
+) -> None:
+    """The first successful probe moves STARTING -> RUNNING."""
+    calls, runner = _recording_systemctl()
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        session = service.adopt(
+            RuntimeName.VLLM, "http://127.0.0.1:8003", systemd_unit="vllm-tp"
+        )
+        restarted = service.restart(session.id, restart_unit=True)
+        assert restarted is not None and restarted.status == SessionStatus.STARTING
+
+        assert service.reconcile() == 1
+        refreshed = service.get_session(session.id)
+        assert refreshed is not None
+        assert refreshed.status == SessionStatus.RUNNING
+        assert refreshed.error is None
+    finally:
+        db.close()

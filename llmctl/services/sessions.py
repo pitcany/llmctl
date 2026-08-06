@@ -341,6 +341,14 @@ class SessionService:
         # serve an empty model list; only an unreachable endpoint is down.
         alive = served is not None
         now = utcnow()
+        # A STARTING adopted row is mid-load: `restart --systemd` issued a
+        # successful `systemctl restart` and the endpoint cannot answer until
+        # the weights are in. For a large local model that is minutes, and
+        # every reconcile in between would otherwise flip the row to STOPPED
+        # with "endpoint failed to respond" — the opposite of what happened.
+        # Leave it STARTING until its first successful probe promotes it.
+        if record.status == SessionStatus.STARTING and not alive:
+            return 0
         if record.status in _ACTIVE_STATES and not alive:
             record.status = SessionStatus.STOPPED
             record.stopped_at = now
@@ -359,7 +367,8 @@ class SessionService:
             )
             return 1
         changed = False
-        if record.status == SessionStatus.STOPPED and alive:
+        if record.status in (SessionStatus.STOPPED, SessionStatus.STARTING) and alive:
+            was_starting = record.status == SessionStatus.STARTING
             record.status = SessionStatus.RUNNING
             record.stopped_at = None
             record.error = None
@@ -368,8 +377,9 @@ class SessionService:
                 self.db,
                 EventLevel.INFO,
                 "session",
-                f"Adopted session {record.id} revived; "
-                f"{record.endpoint_url} is responding again.",
+                f"Adopted session {record.id} "
+                + ("finished starting; " if was_starting else "revived; ")
+                + f"{record.endpoint_url} is responding again.",
                 session_id=record.id,
                 model_id=record.model_id,
                 data={"endpoint_url": record.endpoint_url, "kind": "adopted"},
