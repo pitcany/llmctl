@@ -134,8 +134,10 @@ read commands accept `--json` for stable, script-friendly output.
 - **`restart` relaunches.** It stops the session's process and starts it
   again from the stored launch plan, then reports the state it ended in:
   pid and endpoint when running, the error and exit 1 when the relaunch
-  failed. Only a session with no stored plan reports "no process
-  launched". A process that survives SIGTERM *and* SIGKILL is recorded
+  failed. A session reports "no process launched" when it has no stored
+  plan, and also when its stored plan is itself a dry run — `restart`
+  replays the plan as recorded, so a `--dry-run` start stays planned.
+  A process that survives SIGTERM *and* SIGKILL is recorded
   `degraded` with its pid kept (so `reconcile` can still see it), and
   both `stop` and `restart` exit 1 rather than claiming success.
 - **`vllm --no-wait`.** Skipping the readiness poll reports "restart
