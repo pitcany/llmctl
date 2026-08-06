@@ -894,3 +894,108 @@ def test_detach_logs_the_resolved_id_not_the_selector(tmp_path: Path) -> None:
         assert "gpt-oss-120b " not in detached[-1].split("(")[0]
     finally:
         db.close()
+
+
+def _scoped_systemctl(
+    *, user_unit: bool, active: bool = False, start_rc: int = 0
+) -> tuple[list[list[str]], SystemctlRunner]:
+    """A runner answering LoadState/is-active per scope, recording every call."""
+    calls: list[list[str]] = []
+
+    def fake(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        in_user = "--user" in argv
+        if "show" in argv:
+            known = in_user if user_unit else not in_user
+            return subprocess.CompletedProcess(
+                argv, 0, ("loaded" if known else "not-found") + "\n", ""
+            )
+        if "is-active" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, ("active" if active else "inactive") + "\n", ""
+            )
+        if "start" in argv:
+            return subprocess.CompletedProcess(argv, start_rc, "", "boom" if start_rc else "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    return calls, SystemctlRunner(runner=fake)
+
+
+def test_start_unit_uses_user_scope_without_sudo(tmp_path: Path) -> None:
+    calls, runner = _scoped_systemctl(user_unit=True)
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        scope, was_active = service.start_unit("gpt-oss-120b")
+        assert (scope, was_active) == ("user", False)
+        starts = [a for a in calls if "start" in a]
+        assert starts == [["systemctl", "--user", "start", "gpt-oss-120b"]]
+        assert "sudo" not in starts[0]
+    finally:
+        db.close()
+
+
+def test_start_unit_uses_sudo_for_a_system_unit(tmp_path: Path) -> None:
+    calls, runner = _scoped_systemctl(user_unit=False)
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        scope, _ = service.start_unit("vllm-tp")
+        assert scope == "system"
+        starts = [a for a in calls if "start" in a]
+        assert starts == [["sudo", "systemctl", "start", "vllm-tp"]]
+    finally:
+        db.close()
+
+
+def test_start_unit_reports_an_already_active_unit_without_starting(
+    tmp_path: Path,
+) -> None:
+    calls, runner = _scoped_systemctl(user_unit=True, active=True)
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        scope, was_active = service.start_unit("gpt-oss-120b")
+        assert (scope, was_active) == ("user", True)
+        assert not [a for a in calls if "start" in a]  # nothing issued
+    finally:
+        db.close()
+
+
+def test_start_unit_refuses_an_unknown_unit(tmp_path: Path) -> None:
+    """Neither manager knows it — say so instead of shelling out."""
+    calls: list[list[str]] = []
+
+    def fake(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if "show" in argv:
+            return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    db, service = _make_service(
+        tmp_path, lambda u, _t: ["m"], systemctl=SystemctlRunner(runner=fake)
+    )
+    try:
+        with pytest.raises(AdoptError, match="No systemd unit named"):
+            service.start_unit("ghost")
+        assert not [a for a in calls if "start" in a]
+    finally:
+        db.close()
+
+
+def test_start_unit_surfaces_a_failed_start(tmp_path: Path) -> None:
+    _calls, runner = _scoped_systemctl(user_unit=True, start_rc=1)
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        with pytest.raises(AdoptError, match="failed"):
+            service.start_unit("gpt-oss-120b")
+    finally:
+        db.close()
+
+
+def test_start_unit_creates_no_session_row(tmp_path: Path) -> None:
+    """The unit adopts itself from ExecStartPost; a row here would race it."""
+    _calls, runner = _scoped_systemctl(user_unit=True)
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        service.start_unit("gpt-oss-120b")
+        assert db.exec(select(SessionRecord)).all() == []
+    finally:
+        db.close()
