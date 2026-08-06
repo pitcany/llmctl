@@ -145,9 +145,11 @@ or if the unit is not active. A unit that is stopped is not drift.
 
 ### Sessions and scheduler
 
-Most of this belongs to the original scaffold and is useful mainly for
-debugging. The exception is **adopted** sessions with a recorded systemd
-unit — see [Driving an adopted unit](#driving-an-adopted-unit).
+`start`, `stop` and `restart` here are real operational commands for
+scheduler-launched sessions; `scan`, `plan` and `cleanup` are the
+scaffold-and-debugging end of the table. Adopted sessions with a recorded
+systemd unit have their own workflow — see
+[Driving an adopted unit](#driving-an-adopted-unit).
 
 | Command | What |
 |---------|------|
@@ -187,11 +189,19 @@ When an adopted session records a systemd unit, llmctl can drive that unit
 for you instead of sending you back to `systemctl`.
 
 ```bash
-llmctl sessions                       # what is up right now
-llmctl stop  my-server --systemd      # stop the backing unit
-llmctl start-unit my-server           # start it again
-llmctl logs  my-server                # tail its journal
+llmctl sessions                            # what is up right now
+llmctl stop  my-model --systemd            # SESSION selector -> stops its unit
+llmctl start-unit my-server.service        # UNIT name
+llmctl logs  my-model                      # SESSION selector
 ```
+
+Note the two different subjects. `stop`, `restart` and `logs` take a
+**session selector** (id, prefix, or served name). `start-unit` takes a
+**systemd unit name**. They are often similar but they are not the same
+string, and llmctl will not accept one where it wants the other.
+
+`llmctl logs` shows the session's log file. For an adopted session, which
+has none, it falls back to the recorded unit's journal.
 
 **Selectors.** Session ids are UUIDs and `llmctl sessions` prints them
 elided, so the id in the table cannot be pasted back. Every session command
@@ -218,7 +228,8 @@ for a large model can be minutes later. `reconcile` promotes it on the first
 successful probe, and `llmctl sessions` reconciles by default.
 
 **`--systemd` requires a recorded unit.** A session adopted without
-`--unit` has none, and both verbs refuse. Adopt with
+`--unit` has none, so `stop --systemd` and `restart --systemd` both refuse.
+(`start-unit` is unaffected — it takes a unit name, not a session.) Adopt with
 `llmctl adopt -e URL -r RUNTIME --unit UNIT`, or have the unit's own
 `ExecStartPost` do it.
 
