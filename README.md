@@ -372,6 +372,6 @@ uv run pytest packages/llmctl/tests -q
 uv run ruff check packages/llmctl
 ```
 
-~650 tests, ~90–115s wall time. Tests use temp SQLite databases, fake
+~770 tests, ~130–160s wall time. Tests use temp SQLite databases, fake
 supervisors/probes, and `LLMCTL_CONFIG_DIR` isolation — no GPUs, no
 installed runtimes, and no running services are required.
