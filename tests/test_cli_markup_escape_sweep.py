@@ -45,6 +45,12 @@ RISKY = (
     "['name']",
     "['message']",
     "['display_name']",
+    # Bare identifiers too, not just attribute/subscript forms: a local named
+    # `message` carries exactly the same subprocess text as `result.message`.
+    "message",
+    "name",
+    "output",
+    "stderr",
 )
 
 #: Expressions that *are* markup by design (a style or colour name going into a
@@ -85,22 +91,43 @@ def _offenders(source: str) -> list[tuple[int, str]]:
     tree = ast.parse(source)
     found: list[tuple[int, str]] = []
     for call in _print_calls(tree):
-        # `markup=False` prints verbatim; nothing to escape.
-        if any(kw.arg == "markup" for kw in call.keywords):
+        # Only `markup=False` prints verbatim. A call passing `markup=True`
+        # (Rich's default) must still be checked -- skipping on the mere
+        # presence of the keyword would let an explicit `markup=True` through.
+        if any(
+            kw.arg == "markup"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is False
+            for kw in call.keywords
+        ):
             continue
         for arg in call.args:
-            for piece in ast.walk(arg):
-                if not isinstance(piece, ast.FormattedValue):
-                    continue
-                text = ast.unparse(piece.value)
-                if text in SAFE_EXPRS or _is_escaped(piece.value):
+            # A direct argument is rendered as markup just like an f-string
+            # piece: `console.print(str(exc))` and `add_row(entry["name"])`
+            # were invisible to an f-string-only walk.
+            # An argument already wrapped in escape() is done: descending into
+            # it would demand escaping its innards too, and escaping twice
+            # renders a literal backslash.
+            if _is_escaped(arg):
+                continue
+            candidates: list[tuple[int, ast.AST]] = []
+            if not isinstance(arg, ast.JoinedStr | ast.Constant):
+                candidates.append((getattr(arg, "lineno", 0), arg))
+            candidates += [
+                (piece.lineno, piece.value)
+                for piece in ast.walk(arg)
+                if isinstance(piece, ast.FormattedValue)
+            ]
+            for lineno, node in candidates:
+                text = ast.unparse(node)
+                if text in SAFE_EXPRS or _is_escaped(node):
                     continue
                 # Counts and lengths are ints; they cannot carry markup even
                 # when the thing being counted has a risky-looking name.
                 if text.startswith("len("):
                     continue
                 if any(token in text.lower() for token in RISKY):
-                    found.append((piece.lineno, text))
+                    found.append((lineno, text))
     return found
 
 
@@ -132,3 +159,34 @@ def test_the_guard_accepts_the_escaped_form() -> None:
 def test_the_guard_accepts_markup_false() -> None:
     offenders = _offenders('console.print(content, markup=False)\n')
     assert not offenders
+
+
+# --- gaps the review found in this guard --------------------------------------
+#
+# The first version of this check walked only f-string pieces and skipped any
+# call carrying a `markup=` keyword regardless of its value. Both let real
+# unescaped output through; these pin the fixes.
+
+
+def test_a_bare_direct_argument_is_checked() -> None:
+    """`console.print(str(exc))` has no f-string to walk into."""
+    assert _offenders("console.print(str(exc))\n")
+
+
+def test_a_direct_add_row_argument_is_checked() -> None:
+    assert _offenders('table.add_row(entry.get("name", ""))\n')
+
+
+def test_markup_true_is_not_a_free_pass() -> None:
+    """Only `markup=False` prints verbatim; `markup=True` still renders."""
+    assert _offenders('console.print(f"{exc}", markup=True)\n')
+
+
+def test_a_bare_message_identifier_is_checked() -> None:
+    """A local named `message` carries the same subprocess text as `.message`."""
+    assert _offenders('console.print(f"  [cyan]{message}[/cyan]")\n')
+
+
+def test_an_already_escaped_argument_is_not_descended_into() -> None:
+    """Escaping twice renders a literal backslash, so stop at the wrapper."""
+    assert not _offenders('table.add_row("Model", escape(f"{model.name} "))\n')

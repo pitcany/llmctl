@@ -147,9 +147,9 @@ def scan(
     table.add_column("Format")
     for model in discovered:
         table.add_row(
-            model.name,
+            escape(str(model.name)),
             model.runtime.value,
-            model.path or "",
+            escape(str(model.path or "")),
             model.format or "",
         )
     console.print(table)
@@ -175,7 +175,7 @@ def models_cmd(json_out: _JSON_OPT = False) -> None:
     for model in models:
         table.add_row(
             model.id or "",
-            model.name,
+            escape(str(model.name)),
             model.runtime.value,
             model.host or "",
             model.status.value,
@@ -217,7 +217,7 @@ def gpus(json_out: _JSON_OPT = False) -> None:
         power = "n/a" if gpu.power_draw_watts is None else f"{gpu.power_draw_watts:.0f}W"
         table.add_row(
             str(gpu.index),
-            gpu.name,
+            escape(str(gpu.name)),
             memory,
             util,
             temp,
@@ -463,14 +463,15 @@ def plan(
     table = Table(title="Launch Plan", show_header=False)
     table.add_column("Field", style="cyan")
     table.add_column("Value")
-    table.add_row("Model", escape(f"{launch_plan.model_name or launch_plan.model_id} "))
+    model_label = launch_plan.model_name or launch_plan.model_id
+    table.add_row("Model", escape(f"{model_label} "))
     table.add_row("Backend", launch_plan.runtime.value)
-    table.add_row("Profile", launch_plan.profile_name or "-")
+    table.add_row("Profile", escape(str(launch_plan.profile_name or "-")))
     table.add_row("GPU mode", launch_plan.gpu_selection_mode)
     table.add_row("Selected GPUs", ",".join(map(str, launch_plan.gpu_ids)) or "cpu")
     table.add_row("Tensor parallel", str(launch_plan.tensor_parallel_size))
     table.add_row("Port", str(launch_plan.port or "-"))
-    table.add_row("Endpoint", launch_plan.endpoint_url or "-")
+    table.add_row("Endpoint", escape(str(launch_plan.endpoint_url or "-")))
     est = (
         "unknown"
         if launch_plan.estimated_vram_gb is None
@@ -853,7 +854,7 @@ def config_validate() -> None:
         load_settings()
     except Exception as exc:
         console.print(f"[red]Configuration invalid:[/red] {escape(str(_settings_file_path()))}")
-        console.print(str(exc))
+        console.print(escape(str(exc)))
         raise typer.Exit(code=1) from exc
     console.print(f"[green]Configuration valid.[/green] ({escape(str(_settings_file_path()))})")
 
@@ -976,7 +977,12 @@ def health(json_out: _JSON_OPT = False) -> None:
             # "binary found" with nothing serving is the case that used to read
             # as healthy; say so plainly instead.
             serving = f"[{'red' if info['state'] == 'ok' else 'dim'}]nothing[/]"
-        table.add_row(name, info["state"], serving, info["message"])
+        table.add_row(
+            escape(str(name)),
+            escape(str(info["state"])),
+            serving,
+            escape(str(info["message"])),
+        )
     console.print(table)
 
 
@@ -1121,7 +1127,7 @@ def _print_benchmark_result(result: object) -> None:
     mode_color = "green" if mode == "live" else "yellow"
     table.add_row("Mode", f"[{mode_color}]{mode}[/{mode_color}]")
     if reason:
-        table.add_row("Reason", str(reason))
+        table.add_row("Reason", escape(str(reason)))
     if result.kind:
         table.add_row("Kind", result.kind.value)
     if result.backend:
@@ -1218,7 +1224,7 @@ def benchmarks_cmd(
         ok_color = "green" if result.success else "red"
         table.add_row(
             (result.id or "")[:8],
-            result.name,
+            escape(str(result.name)),
             result.kind.value if result.kind else "-",
             result.backend or "-",
             tps,
@@ -1363,7 +1369,7 @@ def install_systemd(
         for action in report.actions:
             console.print(f"  - {escape(str(action))}")
         for message in report.messages:
-            console.print(f"  [cyan]{message}[/cyan]")
+            console.print(f"  [cyan]{escape(str(message))}[/cyan]")
 
     if all_sessions:
         active_states = {"running", "starting", "degraded", "planned"}
@@ -1412,7 +1418,7 @@ def _emit_unit(unit: object, output: Path | None) -> None:
         console.print(f"[yellow]warning:[/yellow] {escape(str(warning))}")
     if output is not None:
         output.write_text(content, encoding="utf-8")
-        console.print(f"[green]Wrote {name}[/green] -> {output}")
+        console.print(f"[green]Wrote {escape(str(name))}[/green] -> {escape(str(output))}")
         return
     console.print(content)
     console.print("[cyan]Install with:[/cyan]")
@@ -1572,7 +1578,7 @@ def presets_cmd(json_out: _JSON_OPT = False) -> None:
     for v in views:
         table.add_row(
             v.alias,
-            v.served_name,
+            escape(str(v.served_name)),
             v.model_id,
             v.family or "-",
             f"{v.param_count_b:.0f}" if v.param_count_b else "-",
@@ -1671,7 +1677,7 @@ def validate_cmd(json_out: _JSON_OPT = False) -> None:
     table.add_column("Target", style="cyan")
     table.add_column("Detail")
     for finding in findings:
-        table.add_row(finding.check, finding.target, finding.detail)
+        table.add_row(finding.check, finding.target, escape(str(finding.detail)))
     console.print(table)
     raise typer.Exit(code=1)
 
@@ -1764,10 +1770,10 @@ def router_status_cmd() -> None:
         healthy = entry.get("healthy")
         color = "green" if healthy else "yellow" if entry.get("target") else "red"
         table.add_row(
-            entry.get("name", ""),
+            escape(str(entry.get("name", ""))),
             entry.get("target") or "-",
             entry.get("session_id") or "-",
-            entry.get("served_name") or "-",
+            escape(str(entry.get("served_name") or "-")),
             f"[{color}]{'yes' if healthy else 'no'}[/{color}]",
         )
     console.print(table)
@@ -1797,11 +1803,11 @@ def aliases_cmd() -> None:
         else:
             status_text = "[yellow]bound, no active session[/yellow]"
         table.add_row(
-            row.name,
+            escape(str(row.name)),
             f"local-{escape(str(row.name))}",
             row.target or "-",
             row.resolved_session_id or "-",
-            row.resolved_served_name or "-",
+            escape(str(row.resolved_served_name or "-")),
             status_text,
         )
     console.print(table)
