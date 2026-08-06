@@ -116,6 +116,83 @@ def test_try_stop_issues_stop_when_active() -> None:
     assert r.try_stop("vllm-tp") is True
 
 
+def test_user_scope_write_verbs_skip_sudo_and_pass_user_flag() -> None:
+    """User units run as the caller: no sudo, ``--user`` before the verb.
+
+    sudo would look for a *system* unit of the same name and fail, and the
+    NOPASSWD contract only whitelists system units anyway.
+    """
+    rec = _Recorder()
+    runner = SystemctlRunner(runner=rec)
+    runner.start("gpt-oss-120b", user=True)
+    runner.stop("gpt-oss-120b", user=True)
+    runner.restart("gpt-oss-120b", user=True)
+    assert rec.calls == [
+        ["systemctl", "--user", "start", "gpt-oss-120b"],
+        ["systemctl", "--user", "stop", "gpt-oss-120b"],
+        ["systemctl", "--user", "restart", "gpt-oss-120b"],
+    ]
+
+
+def test_user_scope_read_only_verbs() -> None:
+    rec = _Recorder(stdout="active\n")
+    runner = SystemctlRunner(runner=rec)
+    runner.is_active("gpt-oss-120b", user=True)
+    runner.cat("gpt-oss-120b", user=True)
+    assert rec.calls == [
+        ["systemctl", "--user", "is-active", "gpt-oss-120b"],
+        ["systemctl", "--user", "cat", "gpt-oss-120b"],
+    ]
+
+
+def test_user_scope_keeps_unit_last_with_extra_args() -> None:
+    rec = _Recorder()
+    runner = SystemctlRunner(runner=rec)
+    runner.run(SystemctlVerb.STOP, "gpt-oss-120b", "--no-block", user=True)
+    assert rec.calls[-1] == ["systemctl", "--user", "stop", "gpt-oss-120b", "--no-block"]
+
+
+def test_is_user_unit_prefers_system_scope() -> None:
+    """A name known to both managers resolves to system — no behaviour change."""
+    rec = _Recorder(stdout="[Unit]\n")  # every cat succeeds
+    runner = SystemctlRunner(runner=rec)
+    assert runner.is_user_unit("vllm-tp") is False
+    assert rec.calls == [["systemctl", "cat", "vllm-tp"]]  # user scope never probed
+
+
+def test_is_user_unit_detects_user_only_unit() -> None:
+    def runner(argv: list[str]) -> _FakeCompleted:
+        if "--user" in argv:
+            return _FakeCompleted(stdout="[Unit]\n")
+        return _FakeCompleted(returncode=1, stderr="No files found for gpt-oss-120b.\n")
+
+    assert SystemctlRunner(runner=runner).is_user_unit("gpt-oss-120b") is True
+
+
+def test_is_user_unit_false_when_neither_scope_knows_it() -> None:
+    """Unknown units take the system path so systemd's own error surfaces."""
+    rec = _Recorder(returncode=1, stderr="No files found\n")
+    runner = SystemctlRunner(runner=rec)
+    assert runner.is_user_unit("nope") is False
+
+
+def test_try_stop_user_scope_threads_through() -> None:
+    """``try_stop`` must probe and stop in the same scope, not mix them."""
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> _FakeCompleted:
+        calls.append(list(argv))
+        if "is-active" in argv:
+            return _FakeCompleted(stdout="active\n")
+        return _FakeCompleted()
+
+    assert SystemctlRunner(runner=runner).try_stop("gpt-oss-120b", user=True) is True
+    assert calls == [
+        ["systemctl", "--user", "is-active", "gpt-oss-120b"],
+        ["systemctl", "--user", "stop", "gpt-oss-120b"],
+    ]
+
+
 def test_result_ok_reflects_returncode() -> None:
     rec = _Recorder(returncode=0)
     result = SystemctlRunner(runner=rec).start("vllm-tp")
