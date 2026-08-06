@@ -232,10 +232,11 @@ def test_stop_adopted_user_unit_uses_user_scope(tmp_path: Path) -> None:
 
     def fake(argv: list[str]) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
-        # Only the user manager knows this unit.
-        if "cat" in argv and "--user" not in argv:
-            return subprocess.CompletedProcess(argv, 1, "", "No files found.\n")
-        return subprocess.CompletedProcess(argv, 0, "[Unit]\n", "")
+        # Only the user manager has this unit loaded.
+        if "show" in argv:
+            state = "loaded" if "--user" in argv else "not-found"
+            return subprocess.CompletedProcess(argv, 0, f"{state}\n", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
 
     runner = SystemctlRunner(runner=fake)
     db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)

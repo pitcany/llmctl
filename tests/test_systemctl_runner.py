@@ -152,28 +152,70 @@ def test_user_scope_keeps_unit_last_with_extra_args() -> None:
     assert rec.calls[-1] == ["systemctl", "--user", "stop", "gpt-oss-120b", "--no-block"]
 
 
+def _load_state_runner(system: str, user: str) -> object:
+    """Fake runner answering ``show -p LoadState`` per scope."""
+
+    def runner(argv: list[str]) -> _FakeCompleted:
+        return _FakeCompleted(stdout=f"{user if '--user' in argv else system}\n")
+
+    return runner
+
+
 def test_is_user_unit_prefers_system_scope() -> None:
     """A name known to both managers resolves to system — no behaviour change."""
-    rec = _Recorder(stdout="[Unit]\n")  # every cat succeeds
-    runner = SystemctlRunner(runner=rec)
-    assert runner.is_user_unit("vllm-tp") is False
-    assert rec.calls == [["systemctl", "cat", "vllm-tp"]]  # user scope never probed
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str]) -> _FakeCompleted:
+        calls.append(list(argv))
+        return _FakeCompleted(stdout="loaded\n")
+
+    assert SystemctlRunner(runner=runner).is_user_unit("vllm-tp") is False
+    # user scope is never probed once the system manager claims the name
+    assert calls == [["systemctl", "show", "vllm-tp", "-p", "LoadState", "--value"]]
 
 
 def test_is_user_unit_detects_user_only_unit() -> None:
-    def runner(argv: list[str]) -> _FakeCompleted:
-        if "--user" in argv:
-            return _FakeCompleted(stdout="[Unit]\n")
-        return _FakeCompleted(returncode=1, stderr="No files found for gpt-oss-120b.\n")
-
+    runner = _load_state_runner(system="not-found", user="loaded")
     assert SystemctlRunner(runner=runner).is_user_unit("gpt-oss-120b") is True
 
 
 def test_is_user_unit_false_when_neither_scope_knows_it() -> None:
     """Unknown units take the system path so systemd's own error surfaces."""
-    rec = _Recorder(returncode=1, stderr="No files found\n")
+    runner = _load_state_runner(system="not-found", user="not-found")
+    assert SystemctlRunner(runner=runner).is_user_unit("nope") is False
+
+
+def test_is_user_unit_file_less_system_unit_wins_over_user_namesake() -> None:
+    """Regression: a loaded-but-file-less system unit must still win.
+
+    ``systemctl cat`` reports unit-file fragments, so a transient or
+    generator-produced system unit reads as absent even while the manager
+    has it loaded. Resolving on that would pick user scope and stop the
+    wrong unit. ``LoadState`` reports manager state, so it does not.
+    """
+    runner = _load_state_runner(system="loaded", user="loaded")
+    assert SystemctlRunner(runner=runner).is_user_unit("collision") is False
+
+
+def test_is_user_unit_treats_masked_system_unit_as_known() -> None:
+    """``masked`` still means the system manager owns the name."""
+    runner = _load_state_runner(system="masked", user="loaded")
+    assert SystemctlRunner(runner=runner).is_user_unit("collision") is False
+
+
+def test_load_state_reads_value_not_exit_status() -> None:
+    """``systemctl show`` exits 0 for unknown units, so the value decides."""
+    rec = _Recorder(returncode=0, stdout="not-found\n")
     runner = SystemctlRunner(runner=rec)
-    assert runner.is_user_unit("nope") is False
+    assert runner.load_state("nope") == "not-found"
+    assert rec.calls[-1] == ["systemctl", "show", "nope", "-p", "LoadState", "--value"]
+
+
+def test_load_state_skips_sudo() -> None:
+    """``show`` is read-only — it must not escalate."""
+    rec = _Recorder(stdout="loaded\n")
+    SystemctlRunner(runner=rec).load_state("vllm-tp")
+    assert "sudo" not in rec.calls[-1]
 
 
 def test_try_stop_user_scope_threads_through() -> None:
