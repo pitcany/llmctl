@@ -48,9 +48,13 @@ class _UnitRow:
 class UnitsScreen(DataScreen):
     """Live table of managed units with per-unit probes."""
 
+    # Not `s`: that is the app-level binding for the Sessions screen, and a
+    # screen binding shadows it -- taking it here silently removed Sessions
+    # navigation from this screen. Not `enter` either: the DataTable consumes
+    # it for row selection before the screen sees it.
     BINDINGS = [
         ("ctrl+r", "refresh_now", "Refresh"),
-        ("s", "start_unit", "Start"),
+        ("a", "start_unit", "Start"),
         ("x", "stop_unit", "Stop"),
     ]
 

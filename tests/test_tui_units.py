@@ -260,4 +260,20 @@ def test_fetch_still_reads_system_units_in_system_scope(temp_settings) -> None:
 def test_units_screen_exposes_start_and_stop_bindings() -> None:
     """The screen was read-only; start/stop must be reachable by key."""
     keys = {b[0] if isinstance(b, tuple) else b.key for b in UnitsScreen.BINDINGS}
-    assert {"s", "x"} <= keys
+    assert {"a", "x"} <= keys
+    assert "s" not in keys, "`s` is the app-level Sessions binding; do not shadow it"
+
+
+def test_units_bindings_do_not_shadow_app_navigation() -> None:
+    """A screen binding wins over the app's, so it must not reuse those keys.
+
+    Binding `s` here removed Sessions navigation from this screen without any
+    error — the key simply did something else.
+    """
+    from llmctl.tui.app import MissionControlApp
+
+    app_keys = {
+        b.key for b in MissionControlApp.BINDINGS if hasattr(b, "key")
+    }
+    screen_keys = {b[0] if isinstance(b, tuple) else b.key for b in UnitsScreen.BINDINGS}
+    assert not (screen_keys & app_keys), screen_keys & app_keys

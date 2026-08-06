@@ -123,14 +123,14 @@ def _drive(
 
 def test_pressing_s_starts_the_selected_unit(monkeypatch, units_settings) -> None:
     """`s` on an inactive unit reaches start_managed_unit with *that* unit."""
-    seen = _drive(monkeypatch, units_settings, key="s", active=set())
+    seen = _drive(monkeypatch, units_settings, key="a", active=set())
     assert "gpt-oss-120b" in seen["started"], seen["notes"]
     assert seen["stopped"] == []
 
 
 def test_pressing_s_on_an_active_unit_refuses(monkeypatch, units_settings) -> None:
     """start is not a synonym for restart — it must not bounce a live unit."""
-    seen = _drive(monkeypatch, units_settings, key="s", active={"gpt-oss-120b"})
+    seen = _drive(monkeypatch, units_settings, key="a", active={"gpt-oss-120b"})
     assert seen["started"] == []
     assert any("already active" in n for n in seen["notes"]), seen["notes"]
 
@@ -152,10 +152,10 @@ def test_the_action_follows_the_cursor_not_the_first_row(
     monkeypatch, units_settings
 ) -> None:
     """Row 0 is vllm-tp; row 1 is gpt-oss. The key must act on the cursor."""
-    top = _drive(monkeypatch, units_settings, key="s", active=set(), row=0)
+    top = _drive(monkeypatch, units_settings, key="a", active=set(), row=0)
     assert top["started"] == ["vllm-tp"], top["notes"]
 
-    second = _drive(monkeypatch, units_settings, key="s", active=set(), row=1)
+    second = _drive(monkeypatch, units_settings, key="a", active=set(), row=1)
     assert second["started"] == ["gpt-oss-120b"], second["notes"]
 
 
