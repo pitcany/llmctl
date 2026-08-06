@@ -30,7 +30,7 @@ runtimes expect files already on disk, which `scan` then discovers.
 
 | Command | For | What happens |
 | --- | --- | --- |
-| `llmctl vllm <preset>` | The big shared model on the GPUs | Rewrites the unit's env file and restarts it; stops Ollama first; waits for readiness |
+| `llmctl vllm <preset>` | The big shared model on the GPUs | Refuses first if the preset's local model path is missing (`--force` overrides); otherwise rewrites the unit's env file and restarts it, stops Ollama first, waits for readiness |
 | `llmctl start <model>` | A one-off session for one model | Launches a process, tracks it, and reports `running` only once the endpoint answers |
 
 A **preset** is a recipe at `~/.config/llmctl/presets/<alias>.yaml` — which
@@ -47,8 +47,10 @@ environment report.
 
 **Cleaning up after crashes.** When records and reality disagree,
 `llmctl reconcile` re-syncs them, `llmctl cleanup` finds dead sessions and
-frees the ports they were holding, and `llmctl model prune` clears catalog rows
-for models that are genuinely gone.
+frees the ports they were holding (`--remove-stale` also deletes the
+`PLANNED` rows a `--dry-run` start leaves behind, which would otherwise
+reserve their endpoint against `adopt` forever), and `llmctl model prune`
+clears catalog rows for models that are genuinely gone.
 
 **Serving it to clients.** `llmctl gateway` runs an OpenAI-compatible endpoint
 that downstream apps point at, with aliases (`llmctl aliases`,
@@ -345,10 +347,6 @@ You can also **register your own roles**, of any runtime — they then
 appear in `llmctl status`, are adoptable via `llmctl adopt-managed`,
 show on the TUI Units screen, and are covered by the port-drift check:
 
-[…yaml block…]
-
-`vllm-tp`, `vllm_tp` and `fleet` are reserved names inside `units`.
-
 ```yaml
 managed_units:
   units:
@@ -358,6 +356,7 @@ managed_units:
       runtime: llama_cpp
 ```
 
+`vllm-tp`, `vllm_tp` and `fleet` are reserved names inside `units`.
 See the user guide for the full schema.
 
 ## Test
@@ -368,6 +367,6 @@ uv run pytest -q
 uv run ruff check .
 ```
 
-~655 tests, ~90–115s wall time. Tests marked `requires_gpu`,
-`requires_systemd`, `live_hf`, or `bench_live` are skipped in CI; run
-them locally on the appropriate host.
+~770 tests, ~130–160s wall time. Tests use temp SQLite databases, fake
+supervisors/probes, and `LLMCTL_CONFIG_DIR` isolation — no GPUs, no
+installed runtimes, and no running services are required.
