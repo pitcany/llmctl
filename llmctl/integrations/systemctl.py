@@ -33,6 +33,7 @@ class SystemctlVerb(StrEnum):
     STATUS = "status"
     CAT = "cat"
     IS_ACTIVE = "is-active"
+    SHOW = "show"
 
 
 @dataclass(frozen=True)
@@ -56,11 +57,25 @@ class SystemctlRunner:
     Write verbs (``start``, ``stop``, ``restart``) prepend ``sudo`` so
     the NOPASSWD entries on the workstation take effect.
 
+    User-scope units
+    ----------------
+    Passing ``user=True`` targets ``systemctl --user`` and never prepends
+    ``sudo``: the user manager runs as the invoking user, so sudo would
+    both be wrong (it would look for a *system* unit of that name) and
+    fail the NOPASSWD contract, which only whitelists system units.
+    Adopted llama.cpp servers (``deepseek-v4-flash-0731``,
+    ``gpt-oss-120b``) are user units, so stopping them needs this.
+
     Inject ``runner`` for tests — any callable taking ``list[str]`` and
     returning a :class:`subprocess.CompletedProcess` works.
     """
 
-    _READ_ONLY = {SystemctlVerb.STATUS, SystemctlVerb.CAT, SystemctlVerb.IS_ACTIVE}
+    _READ_ONLY = {
+        SystemctlVerb.STATUS,
+        SystemctlVerb.CAT,
+        SystemctlVerb.IS_ACTIVE,
+        SystemctlVerb.SHOW,
+    }
 
     def __init__(
         self,
@@ -77,16 +92,22 @@ class SystemctlRunner:
         """``True`` when ``systemctl`` is on PATH (false in most containers)."""
         return shutil.which(self.systemctl_bin) is not None
 
-    def run(self, verb: SystemctlVerb, unit: str, *extra: str) -> SystemctlResult:
-        """Invoke ``systemctl <verb> <unit> [extra...]``.
+    def run(
+        self, verb: SystemctlVerb, unit: str, *extra: str, user: bool = False
+    ) -> SystemctlResult:
+        """Invoke ``systemctl [--user] <verb> <unit> [extra...]``.
 
-        Adds ``sudo`` for write verbs. Always captures stdout/stderr as
+        Adds ``sudo`` for write verbs, except in user scope where the
+        caller already owns the manager. Always captures stdout/stderr as
         text. Never raises on non-zero exit — caller inspects ``.ok``.
         """
         argv: list[str] = []
-        if verb not in self._READ_ONLY:
+        if verb not in self._READ_ONLY and not user:
             argv.append(self.sudo_bin)
-        argv.extend([self.systemctl_bin, verb.value, unit, *extra])
+        argv.append(self.systemctl_bin)
+        if user:
+            argv.append("--user")
+        argv.extend([verb.value, unit, *extra])
         if self._runner is not None:
             completed = self._runner(argv)  # type: ignore[misc]
         else:
@@ -113,33 +134,67 @@ class SystemctlRunner:
             stderr=completed.stderr or "",
         )
 
-    def start(self, unit: str) -> SystemctlResult:
-        """``sudo systemctl start <unit>``."""
-        return self.run(SystemctlVerb.START, unit)
+    def start(self, unit: str, *, user: bool = False) -> SystemctlResult:
+        """``sudo systemctl start <unit>`` (or ``systemctl --user`` when ``user``)."""
+        return self.run(SystemctlVerb.START, unit, user=user)
 
-    def stop(self, unit: str) -> SystemctlResult:
-        """``sudo systemctl stop <unit>``."""
-        return self.run(SystemctlVerb.STOP, unit)
+    def stop(self, unit: str, *, user: bool = False) -> SystemctlResult:
+        """``sudo systemctl stop <unit>`` (or ``systemctl --user`` when ``user``)."""
+        return self.run(SystemctlVerb.STOP, unit, user=user)
 
-    def restart(self, unit: str) -> SystemctlResult:
-        """``sudo systemctl restart <unit>``."""
-        return self.run(SystemctlVerb.RESTART, unit)
+    def restart(self, unit: str, *, user: bool = False) -> SystemctlResult:
+        """``sudo systemctl restart <unit>`` (or ``systemctl --user`` when ``user``)."""
+        return self.run(SystemctlVerb.RESTART, unit, user=user)
 
-    def is_active(self, unit: str) -> bool:
+    def is_active(self, unit: str, *, user: bool = False) -> bool:
         """``True`` when ``systemctl is-active <unit>`` reports active."""
-        return self.run(SystemctlVerb.IS_ACTIVE, unit).stdout.strip() == "active"
+        return self.run(SystemctlVerb.IS_ACTIVE, unit, user=user).stdout.strip() == "active"
 
-    def cat(self, unit: str) -> str:
+    def cat(self, unit: str, *, user: bool = False) -> str:
         """Return the resolved unit file body, or empty string on error."""
-        result = self.run(SystemctlVerb.CAT, unit)
+        result = self.run(SystemctlVerb.CAT, unit, user=user)
         return result.stdout if result.ok else ""
 
-    def try_stop(self, unit: str) -> bool:
+    def load_state(self, unit: str, *, user: bool = False) -> str:
+        """Return systemd's ``LoadState`` for ``unit`` (``""`` if unreadable).
+
+        ``loaded`` / ``masked`` / ``error`` all mean the manager knows the
+        name; ``not-found`` means it does not. Note that ``systemctl show``
+        exits 0 even for an unknown unit, so callers must read the value
+        rather than the exit status.
+        """
+        result = self.run(SystemctlVerb.SHOW, unit, "-p", "LoadState", "--value", user=user)
+        return result.stdout.strip() if result.ok else ""
+
+    def _manager_knows(self, unit: str, *, user: bool = False) -> bool:
+        """``True`` when the manager in this scope has the unit loaded at all."""
+        state = self.load_state(unit, user=user)
+        return bool(state) and state != "not-found"
+
+    def is_user_unit(self, unit: str) -> bool:
+        """``True`` when ``unit`` is known to the *user* manager only.
+
+        Resolution uses ``LoadState``, not ``cat``: ``cat`` reports unit-file
+        *fragments*, so a file-less-but-loaded system unit (transient, or
+        generator-produced) reads as absent. If a user unit shared that name,
+        scope detection would pick user and stop the wrong unit.
+
+        System scope wins when both managers know the name, which keeps every
+        pre-existing caller (``vllm-tp``, ``llama-server``, ``ollama``) on
+        exactly the path it used before. A name neither manager knows resolves
+        to system scope, so systemd's own "not found" error surfaces rather
+        than a misleading user-scope one.
+        """
+        if self._manager_knows(unit):
+            return False
+        return self._manager_knows(unit, user=True)
+
+    def try_stop(self, unit: str, *, user: bool = False) -> bool:
         """Stop ``unit`` if it's active. Return ``True`` when a stop was issued.
 
         Mirrors gpu-models's ``ProcessManager.try_stop`` so the preflight
         ("stop competing services first") reads the same in both packages.
         """
-        if not self.is_active(unit):
+        if not self.is_active(unit, user=user):
             return False
-        return self.stop(unit).ok
+        return self.stop(unit, user=user).ok

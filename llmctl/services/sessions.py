@@ -555,10 +555,16 @@ class SessionService:
                     f"`llmctl stop {record.id} --systemd` to stop the backing unit, or "
                     "`llmctl detach <session_id>` to remove it from tracking."
                 )
-            result = self._systemctl.stop(record.systemd_unit)
+            # Adopted units are not all system-scope: the llama.cpp servers
+            # (deepseek-v4-flash-0731, gpt-oss-120b) are user units. Stopping
+            # those as `sudo systemctl stop` looks for a system unit of that
+            # name and fails, so pick the scope the unit actually lives in.
+            user_scope = self._systemctl.is_user_unit(record.systemd_unit)
+            result = self._systemctl.stop(record.systemd_unit, user=user_scope)
             if not result.ok:
+                scope = " --user" if user_scope else ""
                 raise AdoptError(
-                    f"`systemctl stop {record.systemd_unit}` failed "
+                    f"`systemctl{scope} stop {record.systemd_unit}` failed "
                     f"(exit {result.returncode}): {result.stderr.strip()}"
                 )
             # Keep the row — the next reconcile probes the now-down endpoint
