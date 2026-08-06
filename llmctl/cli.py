@@ -559,6 +559,44 @@ def reconcile() -> None:
         console.print("[cyan]Reconcile complete.[/cyan] no changes.")
 
 
+@app.command("start-unit")
+def start_unit(
+    unit: Annotated[str, typer.Argument(help="systemd unit name, e.g. gpt-oss-120b.")],
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
+    ] = False,
+) -> None:
+    """Start a systemd unit llmctl does not own.
+
+    The counterpart to `stop <id> --systemd`. That verb takes a *session*, but
+    stopping one of these units typically removes its session row, leaving
+    nothing to name -- so this takes the unit instead. Scope is detected, so a
+    user unit is started with `systemctl --user` and no sudo.
+
+    No session row is created: these units adopt themselves from their own
+    ExecStartPost, and inventing a row here would race that hook.
+    """
+    settings = load_settings()
+    _confirm_state_change(
+        f"Start systemd unit {unit}",
+        required=settings.scheduler.require_confirmation_for_start,
+        assume_yes=yes,
+    )
+    with _session() as db:
+        try:
+            scope, was_active = SessionService(db).start_unit(unit)
+        except AdoptError as exc:
+            console.print(f"[red]Start refused:[/red] {exc}")
+            raise typer.Exit(1) from exc
+    if was_active:
+        console.print(f"[cyan]{unit} is already active[/cyan] ({scope} scope).")
+        return
+    console.print(
+        f"[green]Started[/green] {unit} ({scope} scope). "
+        "It will appear in `llmctl sessions` once it adopts itself and answers."
+    )
+
+
 @app.command()
 def stop(
     session_id: Annotated[str, typer.Argument(help="Session ID to stop.")],

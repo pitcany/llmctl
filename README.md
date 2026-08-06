@@ -145,6 +145,16 @@ read commands accept `--json` for stable, script-friendly output.
   A process that survives SIGTERM *and* SIGKILL is recorded
   `degraded` with its pid kept (so `reconcile` can still see it), and
   both `stop` and `restart` exit 1 rather than claiming success.
+- **`start-unit`.** The counterpart to `stop <id> --systemd`. The session
+  verbs take a *session*, but stopping one of these units usually removes its
+  session row (they detach themselves on stop), leaving nothing to name — so
+  `llmctl start-unit gpt-oss-120b` takes the unit as its subject instead.
+  Scope is detected, so a user unit starts with `systemctl --user` and no
+  sudo. An already-active unit is reported, not restarted, and a name
+  neither manager knows is refused after a read-only `systemctl show`
+  probe, before any `start` is issued. No session row is created: these units
+  adopt themselves from their own `ExecStartPost`, and inventing one here
+  would race that hook.
 - **Session selectors.** `stop`, `restart`, `logs`, `detach` and the session
   lookup accept an exact id, a **unique id prefix**, or a **served name** —
   `llmctl stop gpt-oss-120b --systemd` rather than a UUID. Session ids are
