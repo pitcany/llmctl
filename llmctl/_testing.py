@@ -13,6 +13,16 @@ explicitly. Call :func:`isolate_tui` first in a TUI test, then override any
 individual ``_data`` helper the test is actually about -- a later
 ``monkeypatch.setattr`` wins over the defaults installed here.
 
+It lives *in the package* rather than under ``tests/`` because the monorepo has
+its own top-level ``tests/`` directory. Making ``packages/llmctl/tests`` an
+importable package (so a sibling helper could be imported from it) gave two
+different directories the module name ``tests``, and every file importing the
+helper failed to collect with ``No module named 'tests._tui_isolation'`` as
+soon as pytest ran from the monorepo root -- which is how CI runs it. An
+absolute import from the package has no such collision and works under both
+pytest import modes. Nothing here imports pytest; ``monkeypatch`` is supplied
+by the caller.
+
 Only the *boundaries* are stubbed: the database is redirected to a throwaway
 file and the network/hardware probes are pinned to inert values. Aggregation
 logic such as ``get_overview`` still runs for real against the temp database,

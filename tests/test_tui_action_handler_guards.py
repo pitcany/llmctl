@@ -17,12 +17,11 @@ import asyncio
 
 import pytest
 
+from llmctl._testing import isolate_tui
 from llmctl.db import ModelStatus, RuntimeName
 from llmctl.schemas import Model, Profile
 from llmctl.tui import _data
 from llmctl.tui.app import MissionControlApp
-
-from ._tui_isolation import isolate_tui
 
 
 @pytest.fixture(autouse=True)
