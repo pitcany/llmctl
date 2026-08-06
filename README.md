@@ -2,13 +2,6 @@
 
 Local-first Linux control plane for vLLM (and friends).
 
-> **Two homes, one package.** This lives in the `pitcany/AI` monorepo at
-> `packages/llmctl/` and is mirrored to the standalone repo
-> [`github.com/pitcany/llmctl`](https://github.com/pitcany/llmctl), whose CI is
-> the canonical lint/test gate. The copies drift — changes under
-> `packages/llmctl/` must be mirrored both ways. See the monorepo's
-> `docs/RELEASE-RUNBOOK.md` → "llmctl standalone mirror" for the procedure.
-
 In plain terms: `llmctl` is a control panel for the model servers on one
 machine. It does not serve models itself — it manages the programs that do
 (Ollama, vLLM, LM Studio, llama.cpp) and gives you one consistent way to drive
