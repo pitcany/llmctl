@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from sqlalchemy import or_
+from sqlalchemy.orm.exc import ObjectDeletedError, StaleDataError
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
@@ -99,6 +100,18 @@ class AdoptError(ValueError):
     should surface back to the caller: probe failure (endpoint not
     serving), duplicate adoption (already-tracked endpoint), and
     unsupported runtimes.
+    """
+
+
+class AmbiguousSessionError(AdoptError):
+    """A session selector matched more than one session.
+
+    Acting on a guess would stop or restart the wrong server, so the
+    caller is told which sessions matched and asked to be specific.
+
+    Subclasses :class:`AdoptError` so every CLI and API path that already
+    surfaces "this request cannot be honored" reports it too, rather than
+    letting a selector collision escape as an unhandled traceback.
     """
 
 
@@ -421,9 +434,58 @@ class SessionService:
                 updated = True
         return updated
 
+    def _resolve_record(self, selector: str) -> SessionRecord | None:
+        """Find a session by exact id, unique id prefix, or unique served name.
+
+        Session ids are UUIDs and ``llmctl sessions`` prints them elided, so
+        requiring an exact match meant the id shown in the table could not be
+        used. Accepting a prefix or the served name is what makes the session
+        commands usable by hand.
+
+        Resolution order, most specific first:
+
+        1. exact id — always wins, so a full id can never be reinterpreted
+        2. unique id prefix
+        3. unique served name, preferring live sessions — a stopped historical
+           row must not shadow the server currently answering to that name
+
+        Returns ``None`` when nothing matches (callers report "not found").
+        Raises :class:`AmbiguousSessionError` rather than guessing.
+        """
+        record = self.db.get(SessionRecord, selector)
+        if record is not None:
+            return record
+        if not selector:
+            return None
+
+        rows = list(self.db.exec(select(SessionRecord)))
+
+        by_prefix = [r for r in rows if r.id.startswith(selector)]
+        if len(by_prefix) == 1:
+            return by_prefix[0]
+        if by_prefix:
+            raise AmbiguousSessionError(
+                f"{selector!r} matches {len(by_prefix)} sessions: "
+                + ", ".join(sorted(r.id for r in by_prefix))
+                + ". Use more of the id."
+            )
+
+        named = [r for r in rows if r.served_name == selector]
+        live = [r for r in named if r.status in _ACTIVE_STATES]
+        candidates = live or named
+        if len(candidates) == 1:
+            return candidates[0]
+        if candidates:
+            raise AmbiguousSessionError(
+                f"{selector!r} matches {len(candidates)} sessions: "
+                + ", ".join(sorted(f"{r.id} ({r.status.value})" for r in candidates))
+                + ". Use a session id."
+            )
+        return None
+
     def get_session(self, session_id: str) -> Session | None:
-        """Return a single session by id."""
-        record = self.db.get(SessionRecord, session_id)
+        """Return a single session by id, id prefix, or served name."""
+        record = self._resolve_record(session_id)
         return record_to_session(record) if record else None
 
     def plan(self, request: SessionStartRequest) -> LaunchPlan:
@@ -497,7 +559,7 @@ class SessionService:
         Returns ``None`` when the session does not exist, and an empty string
         when no log output is available yet.
         """
-        record = self.db.get(SessionRecord, session_id)
+        record = self._resolve_record(session_id)
         if record is None:
             return None
         if record.log_path:
@@ -565,7 +627,7 @@ class SessionService:
         ``STOPPED`` (the row is kept; ``detach`` is the verb that deletes).
         An adopted session without a known unit still refuses.
         """
-        record = self.db.get(SessionRecord, session_id)
+        record = self._resolve_record(session_id)
         if not record:
             return None
         if record.kind == SessionKind.ADOPTED:
@@ -591,22 +653,26 @@ class SessionService:
                 )
             # Keep the row — the next reconcile probes the now-down endpoint
             # and keeps it STOPPED (or revives it if the unit is restarted).
+            # Unless the unit's own ExecStopPost detached it first, which
+            # _persist_unit_transition treats as success rather than a crash.
             record.status = SessionStatus.STOPPED
             record.stopped_at = utcnow()
             record.pid = None
             record.updated_at = utcnow()
-            self.db.add(record)
-            self.db.commit()
-            self.db.refresh(record)
+            session = self._persist_unit_transition(record)
+            # Read from the snapshot, not the record: if the unit's hook
+            # detached the row, the ORM instance is dead and every attribute
+            # access re-raises.
             log_event(
                 self.db,
                 EventLevel.INFO,
                 "session",
-                f"Adopted session {record.id} stopped via systemctl ({record.systemd_unit}).",
-                session_id=record.id,
-                model_id=record.model_id,
+                f"Adopted session {session.id} stopped via systemctl "
+                f"({session.systemd_unit}).",
+                session_id=session.id,
+                model_id=session.model_id,
             )
-            return record_to_session(record)
+            return session
         status = self._terminate_record(record)
         if _process_survived(status):
             # Recording STOPPED here would erase the pid and lose the process.
@@ -641,7 +707,7 @@ class SessionService:
         that a previous ``stop --systemd`` took down. An adopted session
         without a known unit still refuses.
         """
-        record = self.db.get(SessionRecord, session_id)
+        record = self._resolve_record(session_id)
         if not record:
             return None
         if record.kind == SessionKind.ADOPTED:
@@ -678,6 +744,34 @@ class SessionService:
             return record_to_session(record)
         return self._launch_record(record, plan)
 
+    def _persist_unit_transition(self, record: SessionRecord) -> Session:
+        """Save a row we just drove through systemctl, tolerating its own hooks.
+
+        Stopping or restarting a unit runs that unit's ``ExecStopPost``, and on
+        this workstation those hooks call ``ds4-llmctl-sync detach``, which
+        *deletes* the row — while this transaction is still holding it. The
+        UPDATE then matches zero rows (``StaleDataError``), or the commit lands
+        and the reload finds nothing (``ObjectDeletedError``) — which of the two
+        surfaces depends on timing.
+
+        The delete is correct behaviour, so treat it as success: the caller
+        asked for the unit to go away and it did. Report the in-memory record,
+        which already carries the status we were about to write.
+        """
+        # Snapshot first: once the row is gone, touching the ORM instance
+        # re-raises on the lazy reload, so it must be read while still loaded.
+        snapshot = record_to_session(record)
+        try:
+            self.db.add(record)
+            self.db.commit()
+            self.db.refresh(record)
+        except (StaleDataError, ObjectDeletedError):
+            # The unit's detach hook removed the row mid-flight. Nothing to
+            # persist and nothing wrong — the requested transition happened.
+            self.db.rollback()
+            return snapshot
+        return record_to_session(record)
+
     def _restart_adopted_unit(self, record: SessionRecord) -> Session:
         """``systemctl restart`` an adopted session's unit and mark it STARTING.
 
@@ -705,18 +799,21 @@ class SessionService:
         record.stopped_at = None
         record.started_at = utcnow()
         record.updated_at = utcnow()
-        self.db.add(record)
-        self.db.commit()
-        self.db.refresh(record)
+        # A restart runs the unit's ExecStopPost too, so this row can be
+        # detached mid-flight exactly as on the stop path — and its
+        # ExecStartPost then re-adopts under a fresh id.
+        session = self._persist_unit_transition(record)
+        # Snapshot fields, not the record — see the stop path.
         log_event(
             self.db,
             EventLevel.INFO,
             "session",
-            f"Adopted session {record.id} restarted via systemctl ({record.systemd_unit}).",
-            session_id=record.id,
-            model_id=record.model_id,
+            f"Adopted session {session.id} restarted via systemctl "
+            f"({session.systemd_unit}).",
+            session_id=session.id,
+            model_id=session.model_id,
         )
-        return record_to_session(record)
+        return session
 
     def adopt(
         self,
@@ -853,7 +950,7 @@ class SessionService:
         ``OWNED`` sessions: those have a process llmctl spawned, so the
         right verb is ``stop`` followed by ``cleanup``.
         """
-        record = self.db.get(SessionRecord, session_id)
+        record = self._resolve_record(session_id)
         if not record:
             return None
         if record.kind != SessionKind.ADOPTED:
