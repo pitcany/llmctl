@@ -941,6 +941,51 @@ class SessionService:
         )
         return record_to_session(record)
 
+    def start_unit(self, unit_name: str) -> tuple[str, bool]:
+        """Start a systemd unit llmctl does not own. Returns ``(scope, was_active)``.
+
+        The counterpart to ``stop --systemd`` that the session verbs cannot
+        provide: once a unit is stopped its session row is typically gone
+        (the llama.cpp units detach themselves on stop), so there is no
+        session left to name. This takes the *unit* as its subject instead.
+
+        Deliberately creates no session row. These units adopt themselves
+        from their own ``ExecStartPost``; inventing a row here would race
+        that hook and could leave two rows for one endpoint.
+        """
+        if not unit_name:
+            raise AdoptError("A unit name is required.")
+
+        user_scope = self._systemctl.is_user_unit(unit_name)
+        # is_user_unit() answers "which manager", not "does it exist" — it
+        # returns False for a name neither knows. Check before starting so an
+        # unknown unit is a clear refusal rather than a systemd error string.
+        if not user_scope and self._systemctl.load_state(unit_name) in ("", "not-found"):
+            raise AdoptError(
+                f"No systemd unit named {unit_name!r} in either scope. "
+                "Check `systemctl list-unit-files` and `systemctl --user list-unit-files`."
+            )
+
+        scope = "user" if user_scope else "system"
+        if self._systemctl.is_active(unit_name, user=user_scope):
+            return scope, True
+
+        result = self._systemctl.start(unit_name, user=user_scope)
+        if not result.ok:
+            flag = " --user" if user_scope else ""
+            raise AdoptError(
+                f"`systemctl{flag} start {unit_name}` failed "
+                f"(exit {result.returncode}): {result.stderr.strip()}"
+            )
+        log_event(
+            self.db,
+            EventLevel.INFO,
+            "session",
+            f"Started systemd unit {unit_name} ({scope} scope).",
+            data={"systemd_unit": unit_name, "scope": scope},
+        )
+        return scope, False
+
     def detach(self, session_id: str) -> Session | None:
         """Remove an ``ADOPTED`` session from tracking.
 
