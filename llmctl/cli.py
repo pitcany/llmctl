@@ -380,8 +380,11 @@ def _print_session_state(session: object, *, verb: str) -> bool:
         )
         return True
     if status == "starting":
+        # An adopted unit restarted via systemctl has no pid llmctl owns,
+        # so print one only when there is one rather than "pid=None".
+        pid_part = f" pid={session.pid}" if session.pid is not None else ""
         console.print(
-            f"[yellow]Session {session.id} is starting[/yellow] pid={session.pid}; "
+            f"[yellow]Session {session.id} is starting[/yellow]{pid_part}; "
             "the endpoint is not ready yet (large models load for minutes). "
             "`llmctl sessions` will show it running once it responds."
         )
@@ -601,24 +604,40 @@ def stop(
 @app.command()
 def restart(
     session_id: Annotated[str, typer.Argument(help="Session ID to restart.")],
+    systemd: Annotated[
+        bool,
+        typer.Option(
+            "--systemd",
+            "-s",
+            help="For an adopted session, restart its backing systemd unit.",
+        ),
+    ] = False,
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
     ] = False,
 ) -> None:
     """Stop a session's process and relaunch it from its stored launch plan.
 
+    With --systemd, restart an adopted session's backing unit instead; this
+    also starts a unit that is currently down.
+
     Confirmation is gated on scheduler.require_confirmation_for_stop -- the
     risky half is terminating whatever is currently serving.
     """
     settings = load_settings()
     _confirm_state_change(
-        f"Restart session {session_id} (stops its process if running, then relaunches)",
+        f"Restart session {session_id}"
+        + (
+            " and its systemd unit"
+            if systemd
+            else " (stops its process if running, then relaunches)"
+        ),
         required=settings.scheduler.require_confirmation_for_stop,
         assume_yes=yes,
     )
     with _session() as db:
         try:
-            session = SessionService(db).restart(session_id)
+            session = SessionService(db).restart(session_id, restart_unit=systemd)
         except AdoptError as exc:
             console.print(f"[red]Restart refused:[/red] {exc}")
             raise typer.Exit(1) from exc

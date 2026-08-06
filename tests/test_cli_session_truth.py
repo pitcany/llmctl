@@ -38,7 +38,7 @@ class _StubService:
     def stop(self, session_id, *, stop_unit=False):
         return type(self).result
 
-    def restart(self, session_id):
+    def restart(self, session_id, *, restart_unit=False):
         return type(self).result
 
 
@@ -144,6 +144,36 @@ def test_restart_yes_flag_skips_the_prompt(monkeypatch) -> None:
     assert res.exit_code == 0, res.output
     assert seen == [True]
 
+
+def test_restart_systemd_flag_reaches_the_service() -> None:
+    """`--systemd` must be threaded through, not silently dropped."""
+    seen: list[bool] = []
+
+    class _Recording(_StubService):
+        def restart(self, session_id, *, restart_unit=False):
+            seen.append(restart_unit)
+            return type(self).result
+
+    _Recording.result = _session(SessionStatus.STARTING)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cli, "SessionService", _Recording)
+        res = CliRunner().invoke(cli.app, ["restart", "sess-1", "--systemd"])
+        assert res.exit_code == 0, res.output
+        res_plain = CliRunner().invoke(cli.app, ["restart", "sess-1"])
+        assert res_plain.exit_code == 0, res_plain.output
+
+    assert seen == [True, False]
+
+
+def test_restart_starting_without_pid_omits_the_pid() -> None:
+    """An adopted unit restart has no llmctl-owned pid — don't print `pid=None`."""
+    _StubService.result = _session(SessionStatus.STARTING, pid=None)
+
+    res = CliRunner().invoke(cli.app, ["restart", "sess-1", "--systemd"])
+
+    assert res.exit_code == 0, res.output
+    assert "is starting" in res.output
+    assert "pid=None" not in res.output
 
 # --- stop ---------------------------------------------------------------------
 
