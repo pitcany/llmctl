@@ -150,8 +150,9 @@ read commands accept `--json` for stable, script-friendly output.
   session row (they detach themselves on stop), leaving nothing to name — so
   `llmctl start-unit gpt-oss-120b` takes the unit as its subject instead.
   Scope is detected, so a user unit starts with `systemctl --user` and no
-  sudo. An already-active unit is reported, not restarted, and an unknown
-  name is refused before shelling out. No session row is created: these units
+  sudo. An already-active unit is reported, not restarted, and a name
+  neither manager knows is refused after a read-only `systemctl show`
+  probe, before any `start` is issued. No session row is created: these units
   adopt themselves from their own `ExecStartPost`, and inventing one here
   would race that hook.
 - **Session selectors.** `stop`, `restart`, `logs`, `detach` and the session
