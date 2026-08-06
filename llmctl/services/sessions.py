@@ -28,7 +28,7 @@ from llmctl.db import (
 )
 from llmctl.integrations.journalctl import JournalctlRunner
 from llmctl.integrations.systemctl import SystemctlRunner
-from llmctl.schemas import LaunchPlan, Session, SessionStartRequest
+from llmctl.schemas import AdapterStatus, LaunchPlan, Session, SessionStartRequest
 from llmctl.services.backends import probe_openai_v1_models
 from llmctl.services.events import log_event
 from llmctl.services.router import RuntimeRouter
@@ -36,6 +36,18 @@ from llmctl.services.scheduler import SchedulerService
 from llmctl.services.unit_gpus import unit_gpu_ids
 
 _ACTIVE_STATES = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
+
+
+def _process_survived(status: AdapterStatus | None) -> bool:
+    """True when the adapter reports the process outlived the stop attempt.
+
+    Only ``ProcessRuntimeAdapter`` reports ``stopped``; shared-server runtimes
+    (ollama, lmstudio) detach without killing a daemon and report nothing, so
+    a missing key means "nothing was left running", not "unknown".
+    """
+    if status is None:
+        return False
+    return status.details.get("stopped") is False
 
 #: Statuses that block a new adopt at the same endpoint URL. Anything except
 #: ``FAILED`` and (for OWNED rows) ``STOPPED`` reserves the endpoint enough
@@ -585,10 +597,15 @@ class SessionService:
                 model_id=record.model_id,
             )
             return record_to_session(record)
-        self._terminate_record(record)
+        status = self._terminate_record(record)
+        if _process_survived(status):
+            # Recording STOPPED here would erase the pid and lose the process.
+            assert status is not None  # narrowed by _process_survived
+            return self._mark_survivor(record, status)
         record.status = SessionStatus.STOPPED
         record.stopped_at = utcnow()
         record.pid = None
+        record.error = None
         record.updated_at = utcnow()
         self.db.add(record)
         self.db.commit()
@@ -619,7 +636,12 @@ class SessionService:
                 "llmctl does not manage its lifecycle. Use `systemctl restart <unit>` and the "
                 "session will be revived on the next reconcile."
             )
-        self._terminate_record(record)
+        status = self._terminate_record(record)
+        if _process_survived(status):
+            # Relaunching now would put a second server on the same port and
+            # the same GPUs as the one that would not die.
+            assert status is not None  # narrowed by _process_survived
+            return self._mark_survivor(record, status)
         plan = (
             LaunchPlan.model_validate(record.launch_plan)
             if record.launch_plan
@@ -946,18 +968,42 @@ class SessionService:
             )
         return record_to_session(record)
 
-    def _terminate_record(self, record: SessionRecord) -> None:
-        """Terminate the runtime process backing ``record`` when it is live."""
+    def _terminate_record(self, record: SessionRecord) -> AdapterStatus | None:
+        """Terminate the runtime process backing ``record`` when it is live.
+
+        Returns the adapter's verdict so the caller can tell a real stop from
+        a process that outlived SIGTERM *and* SIGKILL. ``None`` means there
+        was nothing to terminate.
+        """
         if not record.pid and record.status not in _ACTIVE_STATES:
-            return
+            return None
         adapter = self.router.get_adapter(record.runtime)
         status = asyncio.run(adapter.stop(record_to_session(record)))
+        survived = _process_survived(status)
         log_event(
             self.db,
-            EventLevel.INFO,
+            EventLevel.ERROR if survived else EventLevel.INFO,
             "session",
             status.message,
             session_id=record.id,
             model_id=record.model_id,
             data=status.details,
         )
+        return status
+
+    def _mark_survivor(self, record: SessionRecord, status: AdapterStatus) -> Session:
+        """Record a process that refused to die, without losing track of it.
+
+        The pid is deliberately kept: :meth:`reconcile` finds dead OWNED rows
+        *through* ``record.pid``, so clearing it would make the survivor
+        permanently invisible while it still holds its GPU memory and its
+        port. ``DEGRADED`` is in ``_ACTIVE_STATES``, so the next reconcile
+        re-checks the pid and settles the row once the process really exits.
+        """
+        record.status = SessionStatus.DEGRADED
+        record.error = status.message
+        record.updated_at = utcnow()
+        self.db.add(record)
+        self.db.commit()
+        self.db.refresh(record)
+        return record_to_session(record)
