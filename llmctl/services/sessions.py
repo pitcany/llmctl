@@ -966,7 +966,10 @@ class SessionService:
             self.db,
             EventLevel.INFO,
             "session",
-            f"Detached adopted session {session_id} "
+            # The resolved id, not the raw selector: that may now be a prefix
+            # or a served name, which would leave the event log ambiguous
+            # about which session was actually removed.
+            f"Detached adopted session {snapshot.id} "
             f"({snapshot.systemd_unit or snapshot.endpoint_url}).",
             data={
                 "endpoint_url": snapshot.endpoint_url,

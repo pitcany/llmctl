@@ -874,3 +874,23 @@ def test_stop_survives_the_unit_detaching_its_own_row(tmp_path: Path) -> None:
         assert result.status == SessionStatus.STOPPED
     finally:
         db.close()
+
+
+def test_detach_logs_the_resolved_id_not_the_selector(tmp_path: Path) -> None:
+    """A prefix or name in the event log leaves it ambiguous after the fact."""
+    from llmctl.db import EventRecord
+
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"])
+    try:
+        session = service.adopt(
+            RuntimeName.LLAMA_CPP, "http://127.0.0.1:8005", served_name="gpt-oss-120b"
+        )
+        service.detach("gpt-oss-120b")  # resolved by served name
+
+        messages = [e.message for e in db.exec(select(EventRecord)).all()]
+        detached = [m for m in messages if "Detached adopted session" in m]
+        assert detached, messages
+        assert session.id in detached[-1]
+        assert "gpt-oss-120b " not in detached[-1].split("(")[0]
+    finally:
+        db.close()
