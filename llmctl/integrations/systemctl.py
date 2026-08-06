@@ -33,6 +33,7 @@ class SystemctlVerb(StrEnum):
     STATUS = "status"
     CAT = "cat"
     IS_ACTIVE = "is-active"
+    SHOW = "show"
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,12 @@ class SystemctlRunner:
     returning a :class:`subprocess.CompletedProcess` works.
     """
 
-    _READ_ONLY = {SystemctlVerb.STATUS, SystemctlVerb.CAT, SystemctlVerb.IS_ACTIVE}
+    _READ_ONLY = {
+        SystemctlVerb.STATUS,
+        SystemctlVerb.CAT,
+        SystemctlVerb.IS_ACTIVE,
+        SystemctlVerb.SHOW,
+    }
 
     def __init__(
         self,
@@ -149,19 +155,39 @@ class SystemctlRunner:
         result = self.run(SystemctlVerb.CAT, unit, user=user)
         return result.stdout if result.ok else ""
 
+    def load_state(self, unit: str, *, user: bool = False) -> str:
+        """Return systemd's ``LoadState`` for ``unit`` (``""`` if unreadable).
+
+        ``loaded`` / ``masked`` / ``error`` all mean the manager knows the
+        name; ``not-found`` means it does not. Note that ``systemctl show``
+        exits 0 even for an unknown unit, so callers must read the value
+        rather than the exit status.
+        """
+        result = self.run(SystemctlVerb.SHOW, unit, "-p", "LoadState", "--value", user=user)
+        return result.stdout.strip() if result.ok else ""
+
+    def _manager_knows(self, unit: str, *, user: bool = False) -> bool:
+        """``True`` when the manager in this scope has the unit loaded at all."""
+        state = self.load_state(unit, user=user)
+        return bool(state) and state != "not-found"
+
     def is_user_unit(self, unit: str) -> bool:
         """``True`` when ``unit`` is known to the *user* manager only.
 
-        System scope wins when a name exists in both, which keeps every
-        pre-existing caller (``vllm-tp``, ``llama-server``, ``ollama``)
-        on exactly the path it used before. Returns ``False`` for a name
-        neither manager knows, so an unknown unit still takes the system
-        path and surfaces systemd's own "not found" error rather than a
-        misleading user-scope one.
+        Resolution uses ``LoadState``, not ``cat``: ``cat`` reports unit-file
+        *fragments*, so a file-less-but-loaded system unit (transient, or
+        generator-produced) reads as absent. If a user unit shared that name,
+        scope detection would pick user and stop the wrong unit.
+
+        System scope wins when both managers know the name, which keeps every
+        pre-existing caller (``vllm-tp``, ``llama-server``, ``ollama``) on
+        exactly the path it used before. A name neither manager knows resolves
+        to system scope, so systemd's own "not found" error surfaces rather
+        than a misleading user-scope one.
         """
-        if self.cat(unit):
+        if self._manager_knows(unit):
             return False
-        return bool(self.cat(unit, user=True))
+        return self._manager_knows(unit, user=True)
 
     def try_stop(self, unit: str, *, user: bool = False) -> bool:
         """Stop ``unit`` if it's active. Return ``True`` when a stop was issued.
