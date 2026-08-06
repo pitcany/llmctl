@@ -145,6 +145,15 @@ read commands accept `--json` for stable, script-friendly output.
   A process that survives SIGTERM *and* SIGKILL is recorded
   `degraded` with its pid kept (so `reconcile` can still see it), and
   both `stop` and `restart` exit 1 rather than claiming success.
+- **Session selectors.** `stop`, `restart`, `logs`, `detach` and the session
+  lookup accept an exact id, a **unique id prefix**, or a **served name** —
+  `llmctl stop gpt-oss-120b --systemd` rather than a UUID. Session ids are
+  UUIDs and `llmctl sessions` prints them elided, so exact-match-only meant
+  the id shown in the table could not be pasted back. Resolution is most
+  specific first (exact id, then prefix, then name), and a name prefers live
+  sessions so a stopped historical row cannot shadow the server answering
+  now. Anything ambiguous is refused with the matching ids listed, never
+  guessed — guessing would stop the wrong server.
 - **Adopted sessions, `--systemd`.** `stop` and `restart` refuse for an
   adopted session by default — systemd owns its lifecycle. `--systemd/-s`
   delegates to the backing unit instead: `stop` issues `systemctl stop`,
