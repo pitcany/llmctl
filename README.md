@@ -2,6 +2,12 @@
 
 Local-first Linux control plane for vLLM (and friends).
 
+> **⚠️ Archived — development moved.** This repo was a mirror of
+> `packages/llmctl/` in [`pitcany/AI`](https://github.com/pitcany/AI), which
+> is now the single home for llmctl. Development, issues and releases happen
+> there; PyPI (`pitcany-llmctl`) has always published from there. This copy
+> is kept read-only for history and for any links that point at it.
+
 In plain terms: `llmctl` is a control panel for the model servers on one
 machine. It does not serve models itself — it manages the programs that do
 (Ollama, vLLM, LM Studio, llama.cpp) and gives you one consistent way to drive
