@@ -408,9 +408,18 @@ def delete_profile(profile_id: str) -> bool:
 
 
 def get_sessions() -> list[RuntimeSession]:
-    """Return all sessions after reconciling any dead processes."""
+    """Return all sessions after reconciling any dead processes.
+
+    ``list_sessions`` is a pure DB read by design, so without this reconcile
+    pass the TUI renders a session whose process has died as ``running``
+    forever, while ``llmctl sessions`` (which reconciles by default) shows the
+    same row stopped. Callers run on the refresh worker thread, so the probe
+    cost stays off the UI thread.
+    """
     with db_session() as db:
-        return SessionService(db).list_sessions()
+        service = SessionService(db)
+        service.reconcile()
+        return service.list_sessions()
 
 
 def _build_request(
@@ -609,7 +618,11 @@ def get_overview() -> dict[str, Any]:
     settings = load_settings()
     with db_session() as db:
         models = RegistryService(db).list_models()
-        sessions = SessionService(db).list_sessions()
+        session_service = SessionService(db)
+        # Same reason as get_sessions: the dashboard's running/planned counts
+        # are a claim about live processes, so they must be reconciled first.
+        session_service.reconcile()
+        sessions = session_service.list_sessions()
         profiles = ProfileService(db).list_profiles()
         aliases = GatewayService(db, settings).alias_view()
     gpus = get_gpu_info()
