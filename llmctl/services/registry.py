@@ -341,7 +341,11 @@ class RegistryService:
         ``delete_files=True`` additionally removes the on-disk artifact at
         ``record.path``. This is intentionally opt-in: callers must explicitly
         request file deletion (matching the ``--delete-files`` CLI flag).
-        Missing paths and unexpected I/O errors are silently skipped.
+
+        File removal is confined to the configured model roots — see
+        :meth:`_delete_artifact`. A path outside them is left alone, as are
+        missing paths and unreadable ones. The record is soft-deleted either
+        way; the boolean return reports the *record* update, not the file.
         """
         record = self.db.get(ModelRecord, model_id)
         if not record:
@@ -392,19 +396,55 @@ class RegistryService:
         return True
 
     @staticmethod
-    def _delete_artifact(path_str: str) -> None:
-        """Remove a file or directory referenced by a model record.
+    def _delete_artifact(path_str: str, *, roots: list[Path] | None = None) -> bool:
+        """Remove a model artifact, but only inside a configured model root.
 
-        Best-effort: missing or unreadable paths leave the registry update
-        unchanged. Symlinks are unlinked, not followed.
+        ``record.path`` is caller-supplied — ``POST``/``PUT /models`` accept any
+        string — and this used to unlink it recursively with no confinement, so
+        a row naming an arbitrary directory turned ``delete_files=true`` into
+        "delete that directory". Every candidate is now resolved and required to
+        sit under one of the configured model roots; a path that escapes via
+        ``..`` or a symlink is refused.
+
+        Fails closed: with no roots configured, nothing is deletable.
+
+        Returns:
+            True when the artifact was removed, False when it was refused,
+            absent, or unreadable. Symlinks are unlinked, never followed.
         """
+        if roots is None:
+            from llmctl.config import load_model_dirs
+
+            search_roots = [
+                p for r in load_model_dirs().model_roots if (p := r.resolve_path())
+            ]
+        else:
+            search_roots = list(roots)
+        resolved_roots = [Path(r).resolve() for r in search_roots]
+        if not resolved_roots:
+            return False
         try:
             target = Path(path_str)
             if not target.exists() and not target.is_symlink():
-                return
+                return False
+            # ``resolve()`` follows symlinks, which is exactly what confinement
+            # needs: a link *inside* a root that points outside it must not
+            # qualify for a recursive walk. The link itself is still removable,
+            # since unlinking it cannot touch the target's contents — so it is
+            # located by its parent rather than by following it.
+            probe = (
+                target.parent.resolve() / target.name
+                if target.is_symlink()
+                else target.resolve()
+            )
+            # Strict descendant: a root itself is never deletable. Otherwise a
+            # single row naming e.g. /mnt/storage/models would take the whole
+            # model root with it -- the exact blast radius this bounds.
+            if not any(root in probe.parents for root in resolved_roots):
+                return False
             if target.is_symlink() or target.is_file():
                 target.unlink()
-                return
+                return True
             if target.is_dir():
                 for sub in sorted(
                     target.rglob("*"), key=lambda p: len(p.parts), reverse=True
@@ -414,8 +454,10 @@ class RegistryService:
                     elif sub.is_dir():
                         sub.rmdir()
                 target.rmdir()
+                return True
+            return False
         except OSError:
-            return
+            return False
 
     def _upsert(self, model: Model) -> None:
         """Insert a discovered model or refresh an existing record.

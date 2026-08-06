@@ -37,7 +37,33 @@ class APISettings(BaseModel):
 
     host: str = "127.0.0.1"
     port: int = 8088
+    #: Permit binding the *control plane* to a non-loopback address. Separate
+    #: from ``scheduler.allow_public_bind``, which is about serving a **model**
+    #: publicly: conflating the two meant that enabling public model serving
+    #: also permitted exposing the API, whose mutating routes include
+    #: ``POST /sessions/start`` — local command execution by design. A public
+    #: bind additionally requires a resolvable auth token; see ``cli.serve``.
+    allow_public_bind: bool = False
     cors_origins: list[str] = Field(default_factory=list)
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _reject_wildcard_origin(cls, value: list[str]) -> list[str]:
+        """Refuse ``*``: with credentials it opens the API to any web page.
+
+        The CORS middleware is installed with ``allow_credentials=True``, and
+        Starlette answers a wildcard-plus-credentials config by echoing whatever
+        ``Origin`` it is sent and mirroring any requested header. Combined with
+        an unauthenticated control plane, any page the operator visits could
+        drive ``POST /sessions/start``. List origins explicitly instead.
+        """
+        if "*" in value:
+            raise ValueError(
+                "api.cors_origins may not contain '*': the API is served with "
+                "credentials allowed, so a wildcard lets any web page call it. "
+                "List the origins explicitly."
+            )
+        return value
     # Bearer token the control-plane API demands when
     # ``scheduler.require_auth_token`` is on. The ``LLMCTL_API_TOKEN``
     # environment variable overrides this, so systemd units can keep the

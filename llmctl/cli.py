@@ -1236,22 +1236,42 @@ def serve(
     port: Annotated[int | None, typer.Option(help="Bind port; defaults to settings.")] = None,
 ) -> None:
     """Serve the FastAPI scaffold."""
+    from llmctl.config import resolve_api_auth_token
+
     settings = load_settings()
     bind_host = host or settings.api.host
-    if bind_host not in ("127.0.0.1", "localhost") and not settings.scheduler.allow_public_bind:
+    public = bind_host not in ("127.0.0.1", "localhost", "::1")
+
+    # `api.allow_public_bind`, NOT `scheduler.allow_public_bind`: the latter is
+    # about serving a *model* on a public host, and reusing it here meant that
+    # opting into that silently also exposed this API.
+    if public and not settings.api.allow_public_bind:
         raise typer.BadParameter(
             f"Refusing to bind the control-plane API to {bind_host}: its mutating "
-            "routes are unauthenticated. Set scheduler.allow_public_bind=true in "
-            "settings.yaml to override, or expose it via a reverse proxy instead."
+            "routes include POST /sessions/start, which runs local commands. Set "
+            "api.allow_public_bind=true in settings.yaml (and configure "
+            "api.auth_token) to override, or put it behind a reverse proxy instead."
         )
-    if settings.scheduler.require_auth_token:
-        from llmctl.config import resolve_api_auth_token
 
+    if public:
+        # A public bind forces authentication on regardless of
+        # `require_auth_token`, which defaults to False -- otherwise a token can
+        # be configured while the bearer middleware is never installed, leaving
+        # every mutating route open.
         if not resolve_api_auth_token(settings):
             raise typer.BadParameter(
-                "scheduler.require_auth_token is on but no token is configured. "
-                "Set api.auth_token in settings.yaml or export LLMCTL_API_TOKEN."
+                f"Refusing to bind the control-plane API to {bind_host} without an "
+                "auth token. Set api.auth_token in settings.yaml or export "
+                "LLMCTL_API_TOKEN."
             )
+        settings = settings.model_copy(deep=True)
+        settings.scheduler.require_auth_token = True
+    elif settings.scheduler.require_auth_token and not resolve_api_auth_token(settings):
+        raise typer.BadParameter(
+            "scheduler.require_auth_token is on but no token is configured. "
+            "Set api.auth_token in settings.yaml or export LLMCTL_API_TOKEN."
+        )
+
     uvicorn.run(
         create_app(settings),
         host=bind_host,
