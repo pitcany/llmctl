@@ -64,7 +64,10 @@ compares runs against a baseline.
 **Adopting what it did not start.** `llmctl adopt` brings an
 already-running endpoint under management without restarting it, and
 `llmctl detach` lets go again — `llmctl` is a layer over an existing setup, not
-a replacement for it.
+a replacement for it. An adopted session's lifecycle stays with systemd, but
+`llmctl stop <id> --systemd` and `llmctl restart <id> --systemd` drive its
+backing unit for you, in whichever scope the unit actually lives (system or
+`--user`).
 
 ## How it works
 
@@ -142,6 +145,15 @@ read commands accept `--json` for stable, script-friendly output.
   A process that survives SIGTERM *and* SIGKILL is recorded
   `degraded` with its pid kept (so `reconcile` can still see it), and
   both `stop` and `restart` exit 1 rather than claiming success.
+- **Adopted sessions, `--systemd`.** `stop` and `restart` refuse for an
+  adopted session by default — systemd owns its lifecycle. `--systemd/-s`
+  delegates to the backing unit instead: `stop` issues `systemctl stop`,
+  `restart` issues `systemctl restart`, which also brings back a unit that
+  is currently down. Scope is detected from systemd's `LoadState`, so user
+  units (the llama.cpp servers) get `systemctl --user` and no `sudo`, while
+  system units are unaffected. A restarted unit is recorded `starting`, not
+  `running` — the endpoint answers only once the model has loaded, and
+  `reconcile` promotes the row then.
 - **`vllm --no-wait`.** Skipping the readiness poll reports "restart
   issued; readiness not checked", not "ready" — nothing probed the
   endpoint. Exit stays 0: opting out is a choice, not a failure.
