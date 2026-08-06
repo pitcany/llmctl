@@ -19,7 +19,9 @@ from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.config import load_settings
 from llmctl.integrations.systemctl import SystemctlRunner
+from llmctl.tui import _data
 from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
+from llmctl.tui._modals_registry import ConfirmDelete, DeleteModal
 
 PROBE_TIMEOUT_S = 1.5
 
@@ -48,6 +50,8 @@ class UnitsScreen(DataScreen):
 
     BINDINGS = [
         ("ctrl+r", "refresh_now", "Refresh"),
+        ("s", "start_unit", "Start"),
+        ("x", "stop_unit", "Stop"),
     ]
 
     def __init__(
@@ -64,12 +68,15 @@ class UnitsScreen(DataScreen):
         # private transport here is what let this screen reach :8003 by a path
         # the rest of the codebase could not see or stub.
         self._http_get = http_get
+        # Last rendered rows, so an action can tell which unit the cursor is
+        # on. Kept in render order, which is the order the table shows.
+        self._rows: list[_UnitRow] = []
 
     def compose(self) -> ComposeResult:
         """Compose the units table chrome with screen-scoped Header/Footer."""
         yield Header()
         yield Static(
-            f"Managed Units  -  [{C_MUTED}]probes vllm-tp every 3s; "
+            f"Managed Units  -  [{C_MUTED}]probes every unit every 3s; "
             f"ctrl+r = refresh now[/]",
             classes="panel safe",
             id="units-title",
@@ -113,6 +120,7 @@ class UnitsScreen(DataScreen):
     def render_data(self, data: Any) -> None:
         """Render the units table with color-coded state."""
         rows: list[_UnitRow] = list(data or [])
+        self._rows = rows
         table = self.query_one("#units-table", DataTable)
         cursor = table.cursor_row
         table.clear()
@@ -153,14 +161,92 @@ class UnitsScreen(DataScreen):
         """Manual refresh shortcut."""
         self.refresh_data()
 
+    def _selected_row(self) -> _UnitRow | None:
+        """The unit under the cursor, or None when the table is empty."""
+        table = self.query_one("#units-table", DataTable)
+        rows = self._rows
+        idx = table.cursor_row
+        if not rows or not (0 <= idx < len(rows)):
+            return None
+        return rows[idx]
+
+    def action_start_unit(self) -> None:
+        """Start the unit under the cursor."""
+        row = self._selected_row()
+        if row is None:
+            self.app.notify("No unit selected.", severity="warning")
+            return
+        if row.is_active:
+            self.app.notify(f"{row.unit_name} is already active.", severity="warning")
+            return
+
+        def _after(result: Any) -> None:
+            scope, was_active = result
+            if was_active:
+                self.app.notify(f"{row.unit_name} was already active ({scope}).")
+            else:
+                self.app.notify(
+                    f"Started {row.unit_name} ({scope}). "
+                    "Large models take minutes to answer."
+                )
+            self.refresh_data()
+
+        self.run_action_worker(
+            lambda: _data.start_managed_unit(row.unit_name), _after
+        )
+
+    def action_stop_unit(self) -> None:
+        """Confirm and stop the unit under the cursor.
+
+        Confirmed because these units are the thing actually serving: on this
+        box they hold every GPU, and stopping one takes a live model down.
+        """
+        row = self._selected_row()
+        if row is None:
+            self.app.notify("No unit selected.", severity="warning")
+            return
+        if not row.is_active:
+            self.app.notify(f"{row.unit_name} is not active.", severity="warning")
+            return
+
+        def _on_close(payload: ConfirmDelete | None) -> None:
+            if payload is None:
+                return
+
+            def _after(scope: Any) -> None:
+                self.app.notify(f"Stopped {row.unit_name} ({scope}).")
+                self.refresh_data()
+
+            self.run_action_worker(
+                lambda: _data.stop_managed_unit(row.unit_name), _after
+            )
+
+        served = ", ".join(row.served) if row.served else "no model probed"
+        self.app.push_screen(
+            DeleteModal(
+                f"unit '{row.unit_name}'",
+                f"Currently serving: {served}. Stopping it drops whatever is "
+                "using that endpoint. Nothing is deleted — the unit can be "
+                "started again with `s`.",
+                allow_file_delete=False,
+                verb="Stop",
+            ),
+            _on_close,
+        )
+
     def _is_active_safe(self, unit: str, sysctl: SystemctlRunner) -> bool:
         """Return True iff systemctl reports active; False on any error.
 
-        Wraps :meth:`SystemctlRunner.is_active` to swallow subprocess
-        spawn failures (no systemd in container / etc.) — the UI just
-        shows 'inactive', the user isn't crashed out of the screen.
+        Scope matters: the llama.cpp units (`gpt-oss-120b`,
+        `deepseek-v4-flash-0731`) are *user* units, and a system-scope
+        `is-active` reports them `inactive` even while they serve — so this
+        screen showed them permanently down. Resolve the scope first.
+
+        Wraps the call to swallow subprocess spawn failures (no systemd in a
+        container / etc.) — the UI just shows 'inactive' rather than crashing
+        the user out of the screen.
         """
         try:
-            return sysctl.is_active(unit)
+            return sysctl.is_active(unit, user=sysctl.is_user_unit(unit))
         except OSError:
             return False

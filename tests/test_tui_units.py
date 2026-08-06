@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from llmctl._testing import isolate_tui
-from llmctl.config import Settings
+from llmctl.config import ManagedUnitConfig, Settings
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.tui.app import MissionControlApp
 from llmctl.tui.screens_units import UnitsScreen, _UnitRow
@@ -156,7 +156,12 @@ def test_fetch_handles_systemctl_oserror_gracefully(
     """No systemd binary (container) -> is_active=False, not a crash."""
 
     class _RaisingRunner:
-        def is_active(self, unit: str) -> bool:
+        # When systemd is unavailable every call fails, not just is_active --
+        # scope resolution shells out too.
+        def is_active(self, unit: str, *, user: bool = False) -> bool:
+            raise OSError("systemctl not found")
+
+        def is_user_unit(self, unit: str) -> bool:
             raise OSError("systemctl not found")
 
     screen = UnitsScreen(
@@ -198,3 +203,61 @@ def test_units_screen_installed_in_app(temp_settings) -> None:
             assert isinstance(app.screen, UnitsScreen)
 
     asyncio.run(_run())
+
+
+def _scoped_systemctl(user_units: set[str], active: set[str]) -> SystemctlRunner:
+    """Runner where `user_units` are known only to the user manager."""
+
+    names = user_units | active
+
+    def fake(argv: list[str]) -> _FakeCompleted:
+        in_user = "--user" in argv
+        # `show` puts flags after the unit, so the unit is not argv[-1].
+        unit = next((a for a in argv if a in names), "")
+        if "show" in argv:
+            known = in_user if unit in user_units else not in_user
+            return _FakeCompleted(stdout=("loaded" if known else "not-found") + "\n")
+        if "is-active" in argv:
+            hit = unit in active and (in_user == (unit in user_units))
+            return _FakeCompleted(stdout=("active" if hit else "inactive") + "\n")
+        return _FakeCompleted()
+
+    return SystemctlRunner(runner=fake)
+
+
+def test_fetch_sees_a_running_user_scope_unit(temp_settings) -> None:
+    """Regression: user units read `inactive` in system scope.
+
+    `gpt-oss-120b` and `deepseek-v4-flash-0731` are user units. Before scope
+    resolution this screen asked the *system* manager, which reports them
+    inactive even while they serve — so they showed permanently down.
+    """
+    temp_settings.managed_units.units = {
+        "gpt-oss": ManagedUnitConfig(
+            unit_name="gpt-oss-120b", default_port=8005, runtime="llama_cpp"
+        )
+    }
+    screen = UnitsScreen(
+        systemctl=_scoped_systemctl(
+            user_units={"gpt-oss-120b"}, active={"gpt-oss-120b"}
+        ),
+        http_get=_http_responder(by_port={}),
+    )
+    rows = {r.unit_name: r for r in screen.fetch()}
+    assert rows["gpt-oss-120b"].is_active is True
+
+
+def test_fetch_still_reads_system_units_in_system_scope(temp_settings) -> None:
+    """The vllm-tp path must be unchanged by scope resolution."""
+    screen = UnitsScreen(
+        systemctl=_scoped_systemctl(user_units=set(), active={"vllm-tp"}),
+        http_get=_http_responder(by_port={}),
+    )
+    rows = {r.unit_name: r for r in screen.fetch()}
+    assert rows["vllm-tp"].is_active is True
+
+
+def test_units_screen_exposes_start_and_stop_bindings() -> None:
+    """The screen was read-only; start/stop must be reachable by key."""
+    keys = {b[0] if isinstance(b, tuple) else b.key for b in UnitsScreen.BINDINGS}
+    assert {"s", "x"} <= keys

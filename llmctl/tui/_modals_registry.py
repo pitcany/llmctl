@@ -336,16 +336,24 @@ class DeleteModal(ModalScreen[ConfirmDelete | None]):
         *,
         allow_file_delete: bool = False,
         file_delete_target: str | None = None,
+        verb: str = "Delete",
     ) -> None:
         super().__init__()
         self._label = label
         self._consequence = consequence
         self._allow_file_delete = allow_file_delete
         self._file_delete_target = file_delete_target
+        # The modal is reused for any confirmed action, not just deletion.
+        # Asking "Delete unit 'gpt-oss-120b'?" before a *stop* reads as though
+        # the unit file is about to be removed, which is far more alarming
+        # than what actually happens.
+        self._verb = verb
 
     def compose(self) -> ComposeResult:
         with Vertical(id="delete-dialog", classes="panel"):
-            yield Static(f"[b]Delete {esc(self._label)}?[/b]", id="delete-title")
+            yield Static(
+                f"[b]{esc(self._verb)} {esc(self._label)}?[/b]", id="delete-title"
+            )
             yield Static(esc(self._consequence), id="delete-explainer")
             if self._allow_file_delete:
                 target = self._file_delete_target or "(no path recorded)"
@@ -355,7 +363,7 @@ class DeleteModal(ModalScreen[ConfirmDelete | None]):
                     id="delete-files-cb",
                 )
             with Horizontal(id="delete-buttons"):
-                yield Button("Delete", variant="error", id="delete-confirm")
+                yield Button(self._verb, variant="error", id="delete-confirm")
                 yield Button("Cancel", variant="primary", id="delete-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

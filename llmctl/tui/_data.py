@@ -229,6 +229,34 @@ class PresetValidationError(ValueError):
     """Raised when the TUI submits a preset payload that fails the schema."""
 
 
+def start_managed_unit(unit_name: str) -> tuple[str, bool]:
+    """Start a managed systemd unit. Returns ``(scope, was_already_active)``."""
+    with db_session() as db:
+        from llmctl.services.sessions import SessionService
+
+        return SessionService(db).start_unit(unit_name)
+
+
+def stop_managed_unit(unit_name: str) -> str:
+    """Stop a managed systemd unit in whichever scope owns it.
+
+    Unit-level, not session-level: the Units screen is showing units, and a
+    unit may have no session row at all. Returns the scope used.
+    """
+    from llmctl.integrations.systemctl import SystemctlRunner
+
+    sysctl = SystemctlRunner()
+    user_scope = sysctl.is_user_unit(unit_name)
+    result = sysctl.stop(unit_name, user=user_scope)
+    if not result.ok:
+        flag = " --user" if user_scope else ""
+        raise RuntimeError(
+            f"`systemctl{flag} stop {unit_name}` failed "
+            f"(exit {result.returncode}): {result.stderr.strip()}"
+        )
+    return "user" if user_scope else "system"
+
+
 def get_preset_views_with_links() -> list[Any]:
     """Return preset views enriched with registry linkage info."""
     from llmctl.services.preset_loader import load_preset_views
