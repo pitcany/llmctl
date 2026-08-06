@@ -1,6 +1,6 @@
 """The TUI isolation helper must actually keep tests off the live stack.
 
-Without this guard the isolation in ``_tui_isolation`` is a convention that
+Without this guard the isolation in ``llmctl._testing`` is a convention that
 decays silently: a helper that stops covering a new network call still looks
 like it works, because the test passes either way -- against whatever happens
 to be running on the developer's machine.
@@ -14,11 +14,10 @@ from pathlib import Path
 
 import pytest
 
+from llmctl._testing import isolate_tui
 from llmctl.config import load_settings
 from llmctl.services.backends import probe_openai_v1_models
 from llmctl.tui import _data
-
-from ._tui_isolation import isolate_tui
 
 
 def _live_db_url() -> str:

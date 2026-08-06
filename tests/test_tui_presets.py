@@ -13,13 +13,12 @@ from unittest.mock import patch
 
 import pytest
 
+from llmctl._testing import isolate_tui
 from llmctl.config import Settings
 from llmctl.services.preset_loader import PresetView
 from llmctl.tui._modals_presets import PresetLaunchModal, PresetLaunchTarget
 from llmctl.tui.app import MissionControlApp
 from llmctl.tui.screens_presets import PresetsScreen
-
-from ._tui_isolation import isolate_tui
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +26,7 @@ def _isolated_tui(tmp_path, monkeypatch) -> None:
     """Keep this file off the developer's registry and off the network.
 
     Booting ``MissionControlApp`` fetches the dashboard, which opens the real
-    database and probes every runtime. See ``tests/_tui_isolation``.
+    database and probes every runtime. See ``llmctl._testing``.
     """
     isolate_tui(monkeypatch, tmp_path)
 

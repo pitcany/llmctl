@@ -267,6 +267,107 @@ def test_stop_adopted_flag_without_unit_still_refuses(tmp_path: Path) -> None:
         db.close()
 
 
+def test_restart_adopted_with_unit_and_flag_restarts_unit(tmp_path: Path) -> None:
+    """`restart --systemd` mirrors `stop --systemd` for a system-scope unit."""
+    calls, runner = _recording_systemctl()
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        session = service.adopt(
+            RuntimeName.VLLM, "http://127.0.0.1:8003", systemd_unit="vllm-tp"
+        )
+        result = service.restart(session.id, restart_unit=True)
+        assert result is not None
+        # STARTING, not RUNNING: systemd accepted the restart but the endpoint
+        # answers only once the model is loaded. reconcile promotes it.
+        assert result.status == SessionStatus.STARTING
+        assert result.error is None
+        restarts = [argv for argv in calls if "restart" in argv]
+        assert restarts == [["sudo", "systemctl", "restart", "vllm-tp"]]
+    finally:
+        db.close()
+
+
+def test_restart_adopted_user_unit_uses_user_scope(tmp_path: Path) -> None:
+    """The llama.cpp servers are user units — no sudo, `--user` instead."""
+    calls: list[list[str]] = []
+
+    def fake(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if "show" in argv:
+            state = "loaded" if "--user" in argv else "not-found"
+            return subprocess.CompletedProcess(argv, 0, f"{state}\n", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    db, service = _make_service(
+        tmp_path, lambda u, _t: ["m"], systemctl=SystemctlRunner(runner=fake)
+    )
+    try:
+        session = service.adopt(
+            RuntimeName.LLAMA_CPP, "http://127.0.0.1:8005", systemd_unit="gpt-oss-120b"
+        )
+        result = service.restart(session.id, restart_unit=True)
+        assert result is not None
+        assert result.status == SessionStatus.STARTING
+        restarts = [argv for argv in calls if "restart" in argv]
+        assert restarts == [["systemctl", "--user", "restart", "gpt-oss-120b"]]
+        assert "sudo" not in restarts[0]
+    finally:
+        db.close()
+
+
+def test_restart_adopted_revives_a_stopped_row(tmp_path: Path) -> None:
+    """`systemctl restart` starts an inactive unit, so a stopped row comes back.
+
+    This is the half of the symmetry that `stop --systemd` alone left missing:
+    without it an operator could take an adopted unit down through llmctl but
+    not bring it back.
+    """
+    calls, runner = _recording_systemctl()
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        session = service.adopt(
+            RuntimeName.VLLM, "http://127.0.0.1:8003", systemd_unit="vllm-tp"
+        )
+        stopped = service.stop(session.id, stop_unit=True)
+        assert stopped is not None and stopped.status == SessionStatus.STOPPED
+
+        revived = service.restart(session.id, restart_unit=True)
+        assert revived is not None
+        assert revived.status == SessionStatus.STARTING
+        assert revived.stopped_at is None
+    finally:
+        db.close()
+
+
+def test_restart_adopted_flag_without_unit_still_refuses(tmp_path: Path) -> None:
+    calls, runner = _recording_systemctl()
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        session = service.adopt(RuntimeName.VLLM, "http://127.0.0.1:8003")  # no unit
+        with pytest.raises(AdoptError, match="adopted"):
+            service.restart(session.id, restart_unit=True)
+        assert calls == []  # never shelled out to systemctl
+    finally:
+        db.close()
+
+
+def test_restart_adopted_systemctl_failure_raises(tmp_path: Path) -> None:
+    _calls, runner = _recording_systemctl(returncode=1, stderr="Failed to restart")
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        session = service.adopt(
+            RuntimeName.VLLM, "http://127.0.0.1:8003", systemd_unit="vllm-tp"
+        )
+        with pytest.raises(AdoptError, match="failed"):
+            service.restart(session.id, restart_unit=True)
+        # a failed restart must not claim the session is coming back
+        refreshed = service.get_session(session.id)
+        assert refreshed is not None
+        assert refreshed.status == SessionStatus.RUNNING
+    finally:
+        db.close()
+
+
 def test_stop_adopted_systemctl_failure_raises(tmp_path: Path) -> None:
     _calls, runner = _recording_systemctl(returncode=1, stderr="Failed to stop")
     db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)

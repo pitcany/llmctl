@@ -620,22 +620,30 @@ class SessionService:
         )
         return record_to_session(record)
 
-    def restart(self, session_id: str) -> Session | None:
+    def restart(self, session_id: str, *, restart_unit: bool = False) -> Session | None:
         """Stop and relaunch a session, reusing its stored launch plan.
 
-        Refuses for ``ADOPTED`` sessions — llmctl never spawned the
-        upstream, so it cannot restart it. The caller can use ``systemctl
-        restart <unit>`` and ``reconcile()`` will revive the row.
+        For ``ADOPTED`` sessions llmctl never spawned the upstream, so by
+        default it refuses. When ``restart_unit`` is set *and* the session
+        records a ``systemd_unit``, llmctl delegates to ``systemctl restart
+        <unit>`` — the mirror of ``stop(stop_unit=True)``. ``systemctl
+        restart`` starts an inactive unit, so this also brings back a unit
+        that a previous ``stop --systemd`` took down. An adopted session
+        without a known unit still refuses.
         """
         record = self.db.get(SessionRecord, session_id)
         if not record:
             return None
         if record.kind == SessionKind.ADOPTED:
-            raise AdoptError(
-                f"Session {record.id} is adopted ({record.systemd_unit or record.endpoint_url}); "
-                "llmctl does not manage its lifecycle. Use `systemctl restart <unit>` and the "
-                "session will be revived on the next reconcile."
-            )
+            where = record.systemd_unit or record.endpoint_url
+            if not (restart_unit and record.systemd_unit):
+                raise AdoptError(
+                    f"Session {record.id} is adopted ({where}); llmctl does not manage its "
+                    "lifecycle. Use `systemctl restart <unit>` or "
+                    f"`llmctl restart {record.id} --systemd` to restart the backing unit; "
+                    "either way the row is revived on the next reconcile."
+                )
+            return self._restart_adopted_unit(record)
         status = self._terminate_record(record)
         if _process_survived(status):
             # Relaunching now would put a second server on the same port and
@@ -659,6 +667,46 @@ class SessionService:
         if plan is None:
             return record_to_session(record)
         return self._launch_record(record, plan)
+
+    def _restart_adopted_unit(self, record: SessionRecord) -> Session:
+        """``systemctl restart`` an adopted session's unit and mark it STARTING.
+
+        Scope is resolved the same way as the stop path — the llama.cpp
+        servers are user units, and `sudo systemctl restart` would look for
+        a system unit of that name and fail.
+        """
+        assert record.systemd_unit is not None  # narrowed by the caller
+        user_scope = self._systemctl.is_user_unit(record.systemd_unit)
+        result = self._systemctl.restart(record.systemd_unit, user=user_scope)
+        if not result.ok:
+            scope = " --user" if user_scope else ""
+            raise AdoptError(
+                f"`systemctl{scope} restart {record.systemd_unit}` failed "
+                f"(exit {result.returncode}): {result.stderr.strip()}"
+            )
+        # STARTING, not RUNNING: systemd has accepted the restart but the
+        # endpoint answers only once the weights are loaded, which for a
+        # large local model is minutes. reconcile() promotes it on a
+        # successful probe, exactly as it does for an adopted row revived
+        # out-of-band.
+        record.status = SessionStatus.STARTING
+        record.error = None
+        record.pid = None
+        record.stopped_at = None
+        record.started_at = utcnow()
+        record.updated_at = utcnow()
+        self.db.add(record)
+        self.db.commit()
+        self.db.refresh(record)
+        log_event(
+            self.db,
+            EventLevel.INFO,
+            "session",
+            f"Adopted session {record.id} restarted via systemctl ({record.systemd_unit}).",
+            session_id=record.id,
+            model_id=record.model_id,
+        )
+        return record_to_session(record)
 
     def adopt(
         self,
