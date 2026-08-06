@@ -221,6 +221,39 @@ def test_stop_adopted_with_unit_and_flag_stops_unit(tmp_path: Path) -> None:
         db.close()
 
 
+def test_stop_adopted_user_unit_uses_user_scope(tmp_path: Path) -> None:
+    """A user-scope unit must be stopped with ``--user`` and without sudo.
+
+    The llama.cpp servers (deepseek-v4-flash-0731, gpt-oss-120b) are user
+    units. Stopping them as ``sudo systemctl stop`` looks for a system unit
+    of that name and fails, and the NOPASSWD contract does not cover them.
+    """
+    calls: list[list[str]] = []
+
+    def fake(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        # Only the user manager knows this unit.
+        if "cat" in argv and "--user" not in argv:
+            return subprocess.CompletedProcess(argv, 1, "", "No files found.\n")
+        return subprocess.CompletedProcess(argv, 0, "[Unit]\n", "")
+
+    runner = SystemctlRunner(runner=fake)
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        session = service.adopt(
+            RuntimeName.LLAMA_CPP, "http://127.0.0.1:8005", systemd_unit="gpt-oss-120b"
+        )
+        result = service.stop(session.id, stop_unit=True)
+        assert result is not None
+        assert result.status == SessionStatus.STOPPED
+
+        stops = [argv for argv in calls if "stop" in argv]
+        assert stops == [["systemctl", "--user", "stop", "gpt-oss-120b"]]
+        assert "sudo" not in stops[0]
+    finally:
+        db.close()
+
+
 def test_stop_adopted_flag_without_unit_still_refuses(tmp_path: Path) -> None:
     calls, runner = _recording_systemctl()
     db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
