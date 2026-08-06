@@ -128,6 +128,15 @@ read commands accept `--json` for stable, script-friendly output.
   reconciles by default; `--no-fresh` skips it) probes each owned
   session's endpoint: process alive but endpoint dead → `degraded`,
   excluded from gateway routing until it recovers.
+- **A stop that did not take is tracked apart from status.** When a
+  process outlives SIGTERM *and* SIGKILL, the row keeps its pid (so
+  `reconcile` can still find it) and records `terminate_failed_at`.
+  `status` goes on describing reality — once that survivor answers its
+  endpoint again, `reconcile` correctly reports it `running` — while
+  `llmctl sessions` appends **(stop failed)** so the operator can see
+  their stop never landed. The marker clears on a stop that succeeds or
+  on a fresh launch. Status is what *is*; `terminate_failed_at` is what
+  *happened*, and reconcile owns only the first.
 - **Confirmations.** `scheduler.require_confirmation_for_start/stop/
   delete` are honored by `vllm`, `stop`, `restart`, and `delete-model`:
   llmctl prompts when run interactively (never when scripted — prompts

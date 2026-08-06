@@ -236,6 +236,9 @@ class Session(BaseModel):
     systemd_unit: str | None = None
     served_name: str | None = None
     adopted_at: datetime | None = None
+    #: Set when a stop/restart attempt left the process alive. Separate from
+    #: ``status`` on purpose — see ``db.SessionRecord.terminate_failed_at``.
+    terminate_failed_at: datetime | None = None
     created_at: datetime | None = None
     started_at: datetime | None = None
     stopped_at: datetime | None = None

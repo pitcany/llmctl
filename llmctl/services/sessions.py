@@ -142,6 +142,7 @@ def record_to_session(record: SessionRecord) -> Session:
         systemd_unit=record.systemd_unit,
         served_name=record.served_name,
         adopted_at=record.adopted_at,
+        terminate_failed_at=record.terminate_failed_at,
         created_at=record.created_at,
         started_at=record.started_at,
         stopped_at=record.stopped_at,
@@ -682,6 +683,8 @@ class SessionService:
         record.stopped_at = utcnow()
         record.pid = None
         record.error = None
+        # The process is really gone, so an earlier failed attempt is history.
+        record.terminate_failed_at = None
         record.updated_at = utcnow()
         self.db.add(record)
         self.db.commit()
@@ -734,6 +737,10 @@ class SessionService:
         record.status = SessionStatus.PLANNED
         record.error = None
         record.pid = None
+        # The termination succeeded this time (a survivor returned above), so
+        # any earlier failed attempt is history. Cleared here rather than only
+        # in _launch_record because a dry-run plan returns before that point.
+        record.terminate_failed_at = None
         record.stopped_at = None
         record.started_at = None
         record.updated_at = utcnow()
@@ -1078,6 +1085,9 @@ class SessionService:
             return record_to_session(record)
 
         record.status = SessionStatus.STARTING
+        # A fresh process supersedes any earlier failed termination: whatever
+        # this row now tracks, it is not the one that would not die.
+        record.terminate_failed_at = None
         self.db.add(record)
         self.db.commit()
 
@@ -1202,9 +1212,19 @@ class SessionService:
         permanently invisible while it still holds its GPU memory and its
         port. ``DEGRADED`` is in ``_ACTIVE_STATES``, so the next reconcile
         re-checks the pid and settles the row once the process really exits.
+
+        ``DEGRADED`` alone cannot carry this fact, though. It already means
+        "process alive, endpoint dead" — a condition designed to auto-recover,
+        so ``_reconcile_owned`` promotes it to ``RUNNING`` and clears ``error``
+        the moment the endpoint answers. For a survivor that keeps serving,
+        that promotion is *correct about the process* and would silently erase
+        the fact that a stop was attempted and did not take. The attempt is
+        therefore recorded out of band, in ``terminate_failed_at``, which
+        reconcile never touches.
         """
         record.status = SessionStatus.DEGRADED
         record.error = status.message
+        record.terminate_failed_at = utcnow()
         record.updated_at = utcnow()
         self.db.add(record)
         self.db.commit()

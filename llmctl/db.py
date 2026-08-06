@@ -206,6 +206,13 @@ class SessionRecord(SQLModel, table=True):
     systemd_unit: str | None = Field(default=None, index=True)
     served_name: str | None = Field(default=None, index=True)
     adopted_at: datetime | None = None
+    #: When a termination attempt was made and the process outlived it
+    #: (SIGTERM *and* SIGKILL). Deliberately separate from ``status``: status
+    #: describes the world right now, and a survivor that keeps serving really
+    #: is ``RUNNING`` — reconcile is right to say so. This records that an
+    #: *operation* did not take, which reconcile has no business clearing.
+    #: Cleared by a stop that succeeds, or by a fresh launch.
+    terminate_failed_at: datetime | None = None
     created_at: datetime = Field(default_factory=utcnow, index=True)
     started_at: datetime | None = None
     stopped_at: datetime | None = None

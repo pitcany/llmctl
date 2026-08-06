@@ -253,10 +253,16 @@ def sessions_cmd(
     table.add_column("Status")
     table.add_column("Model")
     for session in sessions:
+        # A stop that did not take is not a status — reconcile legitimately
+        # reports the process as running again — but the operator still needs
+        # to see that their stop never landed.
+        status_cell = session.status.value
+        if session.terminate_failed_at is not None:
+            status_cell = f"{status_cell} [yellow](stop failed)[/yellow]"
         table.add_row(
             session.id or "",
             session.runtime.value,
-            session.status.value,
+            status_cell,
             session.model_id or "",
         )
     console.print(table)
