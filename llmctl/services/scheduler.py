@@ -127,7 +127,17 @@ class SchedulerService:
         gpus_info = get_gpu_info()
         gpu_ids = self._select_gpus(runtime, request, mode, tp, gpus_info, refusals)
 
+        # Runtime env first, then the profile's on top: `runtimes.<name>.env` is
+        # shared by every model on that runtime, so per-model settings are the
+        # more specific of the two and win. This field has existed on Profile
+        # since the schema was written but was never read here, which made
+        # anything set on a profile silently inert.
         env = dict(runtime_config.env)
+        if profile is not None:
+            env.update(profile.environment_variables)
+        # GPU selection is the scheduler's own decision, applied last: a profile
+        # pinning CUDA_VISIBLE_DEVICES would contradict `--gpus` and leave the
+        # plan reporting a GPU set the process never saw.
         if gpu_ids:
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in gpu_ids)
         elif request.allow_cpu and runtime in GPU_REQUIRED_RUNTIMES:
