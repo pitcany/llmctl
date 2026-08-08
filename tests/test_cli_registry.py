@@ -12,11 +12,12 @@ from pathlib import Path
 
 import pytest
 import yaml
-from sqlmodel import Session
+from sqlmodel import Session, select
 from typer.testing import CliRunner
 
+from llmctl import cli_registry
 from llmctl.cli import app
-from llmctl.db import RuntimeName, get_engine, init_db
+from llmctl.db import ModelRecord, RuntimeName, get_engine, init_db
 from llmctl.schemas import ModelCreate, ProfileCreate
 from llmctl.services.profiles import ProfileService
 from llmctl.services.registry import RegistryService
@@ -320,3 +321,32 @@ def test_scan_dry_run_does_not_persist(cli_env: Path) -> None:
     assert result.exit_code == 0
     with _engine_session(cli_env) as db:
         assert RegistryService(db).list_models() == []
+
+
+def test_model_add_persists_notes(tmp_path, monkeypatch) -> None:
+    """`add` must be able to set every field `edit` can.
+
+    `ModelCreate` has carried `notes` all along, but only `model edit` exposed
+    it — so a documented restore procedure could recreate a row and silently
+    drop the operational context attached to it. The two paths should agree.
+    """
+    url = f"sqlite:///{tmp_path}/notes.db"
+    init_db(url)
+    monkeypatch.setattr(cli_registry, "_session", lambda: Session(get_engine(url)))
+
+    result = CliRunner().invoke(
+        cli_registry.model_app,
+        [
+            "add",
+            "--name", "noted",
+            "--backend", "llama_cpp",
+            "--notes", "started deliberately; unit stays disabled",
+            "--non-interactive",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    with Session(get_engine(url)) as db:
+        row = db.exec(select(ModelRecord).where(ModelRecord.name == "noted")).first()
+        assert row is not None
+        assert row.notes == "started deliberately; unit stays disabled"

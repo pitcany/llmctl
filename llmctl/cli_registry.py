@@ -206,12 +206,21 @@ def model_add(
         str | None,
         typer.Option(help="Comma-separated tags."),
     ] = None,
+    notes: Annotated[
+        str | None,
+        typer.Option(help="Free-text operational notes."),
+    ] = None,
     non_interactive: Annotated[
         bool,
         typer.Option("--non-interactive", help="Fail instead of prompting."),
     ] = False,
 ) -> None:
-    """Register a model, prompting for any unspecified fields."""
+    """Register a model, prompting for any unspecified fields.
+
+    ``--notes`` matches ``model edit --notes``: ``ModelCreate`` has always
+    carried the field, but only ``edit`` exposed it, so a scripted restore
+    recreated a row and silently dropped the operational context attached to it.
+    """
     if non_interactive:
         if not name or not backend:
             raise typer.BadParameter(
@@ -229,6 +238,7 @@ def model_add(
             max_context=max_context,
             estimated_vram_gb=estimated_vram,
             tags=resolved_tags,
+            notes=notes,
         )
     else:
         name_val = name or Prompt.ask("model name")
@@ -259,6 +269,7 @@ def model_add(
             max_context=max_ctx_val,
             estimated_vram_gb=vram_val,
             tags=tags_val,
+            notes=notes if notes is not None else _prompt_optional("notes"),
         )
     with _session() as db:
         model = RegistryService(db).add_model(payload)
