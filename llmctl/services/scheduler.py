@@ -134,10 +134,15 @@ class SchedulerService:
         # anything set on a profile silently inert.
         env = dict(runtime_config.env)
         if profile is not None:
-            env.update(profile.environment_variables)
-        # GPU selection is the scheduler's own decision, applied last: a profile
-        # pinning CUDA_VISIBLE_DEVICES would contradict `--gpus` and leave the
-        # plan reporting a GPU set the process never saw.
+            # `or {}`: this is a ProfileRecord, whose JSON column can be NULL.
+            profile_env = dict(profile.environment_variables or {})
+            # GPU visibility is the scheduler's decision, never a profile's.
+            # Dropped before the merge rather than overwritten after, because
+            # the overwrite only happens when a GPU was selected -- a forced
+            # launch with no GPUs would otherwise inherit the profile's pin and
+            # see a card the plan says it is not using.
+            profile_env.pop("CUDA_VISIBLE_DEVICES", None)
+            env.update(profile_env)
         if gpu_ids:
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in gpu_ids)
         elif request.allow_cpu and runtime in GPU_REQUIRED_RUNTIMES:

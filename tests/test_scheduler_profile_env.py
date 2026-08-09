@@ -97,9 +97,63 @@ def test_cuda_visible_devices_still_wins_over_both(tmp_path: Path) -> None:
     try:
         pid = _profile(db, {"CUDA_VISIBLE_DEVICES": "7"})
 
-        plan = _plan(db, pid)
+        plan = SchedulerService(db).create_launch_plan(
+            SessionStartRequest(
+                model_id="m1",
+                profile_id=pid,
+                runtime=RuntimeName.LLAMA_CPP,
+                gpu_ids=[0],
+                gpu_mode="explicit",
+                dry_run=True,
+            )
+        )
+
+        assert plan.env.get("CUDA_VISIBLE_DEVICES") == "0"
+    finally:
+        db.close()
+
+
+def test_a_profile_cannot_pin_gpus_when_none_are_selected(tmp_path: Path) -> None:
+    """The leak case: with no GPU selected, nothing overwrites the profile pin.
+
+    A forced launch would otherwise inherit `CUDA_VISIBLE_DEVICES` from the
+    profile and see a card the plan reports it is not using.
+    """
+    db = _db(tmp_path)
+    try:
+        pid = _profile(db, {"CUDA_VISIBLE_DEVICES": "7"})
+
+        plan = SchedulerService(db).create_launch_plan(
+            SessionStartRequest(
+                model_id="m1",
+                profile_id=pid,
+                runtime=RuntimeName.LLAMA_CPP,
+                gpu_mode="cpu",
+                dry_run=True,
+            )
+        )
 
         assert plan.env.get("CUDA_VISIBLE_DEVICES") != "7"
+    finally:
+        db.close()
+
+
+def test_a_null_environment_column_does_not_crash_planning(tmp_path: Path) -> None:
+    """`_get_profile` returns a ProfileRecord; its JSON column can be NULL."""
+    from llmctl.db import ProfileRecord
+
+    db = _db(tmp_path)
+    try:
+        pid = _profile(db, {})
+        record = db.get(ProfileRecord, pid)
+        assert record is not None
+        record.environment_variables = None
+        db.add(record)
+        db.commit()
+
+        plan = _plan(db, pid)
+
+        assert plan is not None
     finally:
         db.close()
 
