@@ -35,7 +35,7 @@ runtimes expect files already on disk, which `scan` then discovers.
 
 A **preset** is a recipe at `~/.config/llmctl/presets/<alias>.yaml` — which
 checkpoint, how many GPUs, which quantization, how much context — so
-`llmctl vllm ornith-35b` means "make the shared unit be Ornith". A **profile**
+`llmctl vllm qwen3.8-27b` means "make the shared unit be Qwen3.8-27B". A **profile**
 is the lighter-weight equivalent for the `start` path. Both have a dry run
 (`llmctl plan`, `llmctl preview`, or `--dry-run`) that shows the exact command
 and VRAM estimate without touching anything.
@@ -102,7 +102,7 @@ required.
 llmctl runtimes                      # what runtimes exist, versions, loaded models
 llmctl runtimes inspect ollama       # one runtime's capabilities in detail
 llmctl presets                       # list available presets
-llmctl vllm ornith-35b               # restart vllm-tp with this preset
+llmctl vllm qwen3.8-27b              # restart vllm-tp with this preset
 llmctl status                        # managed units + what they serve right now
 llmctl doctor                        # pass/warn/fail environment report
 llmctl tui                           # interactive TUI
