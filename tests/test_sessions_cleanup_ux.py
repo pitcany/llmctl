@@ -101,8 +101,35 @@ def test_health_reports_live_sessions_per_runtime(tmp_path: Path) -> None:
 
 
 def test_health_without_db_declares_session_state_unavailable() -> None:
-    """serving_count == 0 must not be readable as 'nothing is running'."""
-    data = HealthService().get_health()
+    """serving_count == 0 must not be readable as 'nothing is running'.
+
+    Since 2026-08-26 health also probes each runtime for resident models, so a
+    missing DB no longer forces serving_count to 0 -- an unmanaged model still
+    shows. What must stay true is the honesty flag: without a DB, llmctl cannot
+    speak to *managed* session state and has to say so. The runtime double
+    keeps this hermetic; asserting on live counts would depend on whatever
+    happens to be loaded on the machine running the tests.
+    """
+
+    class _NoModels:
+        async def health_check(self) -> Any:
+            from llmctl.schemas import AdapterStatus, HealthState
+
+            return AdapterStatus(state=HealthState.OK, message="binary found")
+
+        async def list_loaded_models(self) -> None:
+            return None
+
+    class _Router:
+        adapters = {RuntimeName.LLAMA_CPP: _NoModels()}
+
+        def list_runtimes(self) -> list[RuntimeName]:
+            return list(self.adapters)
+
+        def get_adapter(self, runtime: RuntimeName) -> Any:
+            return self.adapters[runtime]
+
+    data = HealthService(router=_Router()).get_health()
     assert data["session_state_available"] is False
     for info in data["runtimes"].values():
         assert info["serving_count"] == 0

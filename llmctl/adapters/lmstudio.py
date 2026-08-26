@@ -27,6 +27,10 @@ from llmctl.schemas import Model
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:1234"
 
+#: LM Studio's native listing. Unlike ``/v1/models`` it reports a per-model
+#: ``state``, which is what separates resident models from merely downloaded.
+LOADED_MODELS_PATH = "/api/v0/models"
+
 #: Returns a ``{modelKey: device_name}`` map for the LM Studio fleet, or ``{}``
 #: when device attribution can't be determined.
 DeviceMapFn = Callable[[], dict[str, str]]
@@ -146,11 +150,27 @@ class LMStudioAdapter(HttpRuntimeAdapter):
         ]
 
     async def list_loaded_models(self) -> list[Model] | None:
-        """LM Studio's ``/v1/models`` lists what the server has loaded."""
-        ok, data, _ = await self._get_json(self.models_path)
-        if not ok or data is None:
+        """Return only models resident in memory, via ``GET /api/v0/models``.
+
+        ``/v1/models`` cannot answer this: the OpenAI-compatible listing
+        includes every downloaded model, loaded or not, so using it reports the
+        whole catalog as serving. LM Studio's native endpoint carries a
+        ``state`` field (``loaded`` / ``not-loaded``) and is the only way to
+        tell them apart.
+
+        When that endpoint is unavailable -- an older LM Studio, say -- this
+        returns ``None`` (cannot answer) rather than falling back to the
+        catalog, which would overstate what is running.
+        """
+        ok, data, _ = await self._get_json(LOADED_MODELS_PATH)
+        if not ok or not isinstance(data, dict):
             return None
-        return self._parse_models(data)
+        resident = [
+            item
+            for item in data.get("data", [])
+            if isinstance(item, dict) and item.get("state") == "loaded"
+        ]
+        return self._parse_models({"data": resident})
 
     def _parse_models(self, data: object) -> list[Model]:
         """Parse an OpenAI-style ``/v1/models`` payload into models."""

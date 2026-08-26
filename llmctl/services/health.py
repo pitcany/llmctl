@@ -95,20 +95,82 @@ class HealthService:
                         "served_name": session.served_name,
                         "endpoint_url": session.endpoint_url,
                         "kind": (session.kind.value if session.kind else None),
+                        "managed": True,
                     }
                 )
             return grouped
         except Exception:
             return {}
 
+    def _loaded_by_runtime(self) -> dict[str, list[dict[str, Any]]]:
+        """Return models each runtime reports as loaded, grouped by runtime.
+
+        Complements :meth:`_serving_by_runtime`, which can only see what llmctl
+        launched. A runtime started by hand -- a systemd vLLM unit, or a model
+        Ollama pulled into memory on first request -- has no SessionRecord, so
+        the DB lookup reports nothing while the GPU is fully committed.
+
+        ``list_loaded_models`` returning ``None`` means the runtime cannot
+        answer; that is reported as no entries rather than as "idle".
+
+        Best-effort: a probe that fails yields no entries for that runtime
+        rather than failing the whole health call.
+        """
+        order = list(self.router.list_runtimes())
+
+        async def probe_all() -> list[Any]:
+            return await asyncio.gather(
+                *(self.router.get_adapter(runtime).list_loaded_models() for runtime in order),
+                return_exceptions=True,
+            )
+
+        try:
+            results = asyncio.run(probe_all())
+        except Exception:
+            return {}
+
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for runtime, result in zip(order, results, strict=True):
+            if isinstance(result, BaseException) or not result:
+                continue
+            for model in result:
+                grouped.setdefault(runtime.value, []).append(
+                    {
+                        "id": None,
+                        "status": "running",
+                        "served_name": model.name,
+                        "endpoint_url": None,
+                        "kind": None,
+                        "managed": False,
+                    }
+                )
+        return grouped
+
+    @staticmethod
+    def _merge_serving(
+        managed: list[dict[str, Any]], loaded: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Return managed sessions plus loaded models llmctl did not launch.
+
+        A model llmctl started is reported by both sources; the managed record
+        wins because it carries the session id and endpoint.
+        """
+        known = {s.get("served_name") for s in managed if s.get("served_name")}
+        extra = [m for m in loaded if m.get("served_name") not in known]
+        return [*managed, *extra]
+
     def get_health(self) -> dict[str, Any]:
         """Return a conservative health snapshot."""
         gpus = get_gpu_info()
         runtimes = self._runtime_health()
         serving = self._serving_by_runtime()
+        loaded = self._loaded_by_runtime()
         for name, info in runtimes.items():
-            info["sessions"] = serving.get(name, [])
+            info["sessions"] = self._merge_serving(serving.get(name, []), loaded.get(name, []))
             info["serving_count"] = len(info["sessions"])
+            info["unmanaged_count"] = sum(
+                1 for s in info["sessions"] if not s.get("managed", True)
+            )
         return {
             "state": HealthState.OK,
             "safe_mode": self.settings.app.safe_mode,

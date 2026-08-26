@@ -969,10 +969,14 @@ def health(json_out: _JSON_OPT = False) -> None:
     for name, info in data["runtimes"].items():
         sessions = info.get("sessions", [])
         if sessions:
-            served = ", ".join(
-                s["served_name"] or s["endpoint_url"] or s["id"][:8] for s in sessions
-            )
-            serving = f"[green]{served}[/green]"
+            labels = []
+            for s in sessions:
+                label = s["served_name"] or s["endpoint_url"] or (s["id"] or "")[:8]
+                # Started outside llmctl: real, but not ours to stop or track.
+                if not s.get("managed", True):
+                    label = f"{label} (unmanaged)"
+                labels.append(label)
+            serving = f"[green]{', '.join(labels)}[/green]"
         else:
             # "binary found" with nothing serving is the case that used to read
             # as healthy; say so plainly instead.
