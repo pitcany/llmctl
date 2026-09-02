@@ -82,6 +82,13 @@ class Model(BaseModel):
 
     tool_parser: str | None = None
     reasoning_parser: str | None = None
+    extra_args: str | None = Field(
+        default=None,
+        description=(
+            "Free-form extra vLLM CLI flags (e.g. '--enable-expert-parallel'), "
+            "appended after the reasoning_parser-derived flag into extra_args."
+        ),
+    )
 
     python_root: str | None = Field(
         default=None,

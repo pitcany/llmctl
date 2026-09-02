@@ -109,6 +109,9 @@ def model_to_launch_spec(
       default.
     * ``reasoning_parser`` — folded into ``extra_args`` as
       ``--reasoning-parser <name>``, matching gpu-models behaviour.
+    * ``extra_args`` — appended verbatim after the reasoning_parser flag,
+      for one-off vLLM flags no other preset field models (e.g.
+      ``--enable-expert-parallel``).
     * ``python_root``, ``spec_config`` — passed straight through; both
       are preset-only concerns the defaults have no opinion on.
     * ``tq`` — ignored here; TurboQuant override is wired in Phase 4
@@ -120,9 +123,12 @@ def model_to_launch_spec(
     if model.kv_cache_dtype and model.kv_cache_dtype != "auto":
         kv_cache_type = model.kv_cache_dtype
 
-    extra_args: str | None = None
+    extra_parts: list[str] = []
     if model.reasoning_parser:
-        extra_args = f"--reasoning-parser {model.reasoning_parser}"
+        extra_parts.append(f"--reasoning-parser {model.reasoning_parser}")
+    if model.extra_args:
+        extra_parts.append(model.extra_args)
+    extra_args: str | None = " ".join(extra_parts) if extra_parts else None
 
     port = port_override if port_override is not None else defaults.port
 
