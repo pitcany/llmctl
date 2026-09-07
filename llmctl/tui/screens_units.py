@@ -231,7 +231,7 @@ class UnitsScreen(DataScreen):
                 f"unit '{row.unit_name}'",
                 f"Currently serving: {served}. Stopping it drops whatever is "
                 "using that endpoint. Nothing is deleted — the unit can be "
-                "started again with `s`.",
+                "started again with `a`.",
                 allow_file_delete=False,
                 verb="Stop",
             ),
