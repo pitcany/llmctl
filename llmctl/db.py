@@ -33,6 +33,7 @@ class RuntimeName(StrEnum):
     LMSTUDIO = "lmstudio"
     OLLAMA = "ollama"
     PYTHON_SCRIPT = "python_script"
+    SGLANG = "sglang"
     OPENAI = "openai"
 
 

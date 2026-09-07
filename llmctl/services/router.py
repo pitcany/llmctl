@@ -12,6 +12,7 @@ from llmctl.adapters.llama_cpp import LlamaCppAdapter
 from llmctl.adapters.lmstudio import LMStudioAdapter
 from llmctl.adapters.ollama import OllamaAdapter
 from llmctl.adapters.python_script import PythonScriptAdapter
+from llmctl.adapters.sglang import SGLangAdapter
 from llmctl.adapters.vllm import VLLMAdapter
 from llmctl.config import Settings, load_settings
 from llmctl.db import RuntimeName
@@ -40,6 +41,7 @@ class RuntimeRouter:
             RuntimeName.LLAMA_CPP: LlamaCppAdapter(runtime_config("llama_cpp"), self.supervisor),
             RuntimeName.LMSTUDIO: LMStudioAdapter(runtime_config("lmstudio").endpoint),
             RuntimeName.OLLAMA: OllamaAdapter(runtime_config("ollama").endpoint),
+            RuntimeName.SGLANG: SGLangAdapter(runtime_config("sglang").endpoint),
             RuntimeName.PYTHON_SCRIPT: PythonScriptAdapter(
                 runtime_config("python_script"), self.supervisor
             ),

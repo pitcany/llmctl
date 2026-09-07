@@ -348,6 +348,9 @@ def default_runtime_configs() -> dict[str, RuntimeConfig]:
             binary="llama-server", host="127.0.0.1", port_range=[8100, 8199]
         ),
         "python_script": RuntimeConfig(host="127.0.0.1", port_range=[8200, 8299]),
+        # SGLang is adopt-only here: the systemd unit and its guard wrapper own
+        # the lifecycle, so only the endpoint matters.
+        "sglang": RuntimeConfig(endpoint="http://127.0.0.1:30000"),
     }
 
 
