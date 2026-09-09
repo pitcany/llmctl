@@ -56,6 +56,20 @@ from llmctl import cli_registry  # noqa: E402
 cli_registry.register(app)
 
 
+def _id_column(table: Table, header: str, **kwargs: object) -> None:
+    """Add a column holding a value the operator types back into a command.
+
+    Rich's default column overflow is ``ellipsis``: once a table is wider than
+    the terminal every column is squeezed and characters are dropped silently.
+    That is fine for prose, but an ellipsised alias, unit name, path or id is
+    unusable -- it cannot be copied into the next command, and nothing on
+    screen says it was shortened. ``fold`` wraps onto extra lines instead, so
+    the value survives at any terminal width. Descriptive columns keep the
+    default; ``--json`` remains the lossless machine-readable path.
+    """
+    table.add_column(header, overflow="fold", **kwargs)  # type: ignore[arg-type]
+
+
 def _parse_gpus(gpus: str | None, cpu: bool) -> tuple[list[int], str, bool]:
     """Parse a ``--gpus`` value into (gpu_ids, mode, allow_cpu).
 
@@ -141,9 +155,9 @@ def scan(
         console.print("[yellow]No new models discovered.[/yellow]")
         return
     table = Table(title=f"Discovered models ({len(discovered)})")
-    table.add_column("Name", style="cyan")
+    _id_column(table, "Name", style="cyan")
     table.add_column("Backend")
-    table.add_column("Path")
+    _id_column(table, "Path")
     table.add_column("Format")
     for model in discovered:
         table.add_row(
@@ -167,10 +181,10 @@ def models_cmd(json_out: _JSON_OPT = False) -> None:
         _emit_json([model.model_dump(mode="json") for model in models])
         return
     table = Table(title="Models")
-    table.add_column("ID")
-    table.add_column("Name")
+    _id_column(table, "ID")
+    _id_column(table, "Name")
     table.add_column("Runtime")
-    table.add_column("Host")
+    _id_column(table, "Host")
     table.add_column("Status")
     for model in models:
         table.add_row(
@@ -248,10 +262,10 @@ def sessions_cmd(
         _emit_json([session.model_dump(mode="json") for session in sessions])
         return
     table = Table(title="Sessions")
-    table.add_column("ID")
+    _id_column(table, "ID")
     table.add_column("Runtime")
     table.add_column("Status")
-    table.add_column("Model")
+    _id_column(table, "Model")
     for session in sessions:
         # A stop that did not take is not a status — reconcile legitimately
         # reports the process as running again — but the operator still needs
@@ -462,7 +476,7 @@ def plan(
 
     table = Table(title="Launch Plan", show_header=False)
     table.add_column("Field", style="cyan")
-    table.add_column("Value")
+    _id_column(table, "Value")
     model_label = launch_plan.model_name or launch_plan.model_id
     table.add_row("Model", escape(f"{model_label} "))
     table.add_row("Backend", launch_plan.runtime.value)
@@ -883,11 +897,11 @@ def runtimes_main(ctx: typer.Context, json_out: _JSON_OPT = False) -> None:
         _emit_json(inventory)
         return
     table = Table(title="Runtimes")
-    table.add_column("runtime", style="cyan")
+    _id_column(table, "runtime", style="cyan")
     table.add_column("state")
     table.add_column("version")
-    table.add_column("endpoint")
-    table.add_column("loaded models")
+    _id_column(table, "endpoint")
+    _id_column(table, "loaded models")
     for row in table_rows_from_inventory(inventory):
         table.add_row(*row)
     console.print(table)
@@ -962,9 +976,9 @@ def health(json_out: _JSON_OPT = False) -> None:
         f"[bold]NVML:[/bold] {data['nvml_available']}"
     )
     table = Table(title="Runtime Health")
-    table.add_column("Runtime")
+    _id_column(table, "Runtime")
     table.add_column("State")
-    table.add_column("Serving")
+    _id_column(table, "Serving")
     table.add_column("Message")
     for name, info in data["runtimes"].items():
         sessions = info.get("sessions", [])
@@ -1123,7 +1137,7 @@ def _print_benchmark_result(result: object) -> None:
     reason = result.parameters.get("reason")
     table = Table(title=f"Benchmark: {result.name}", show_header=False)
     table.add_column("Field", style="cyan")
-    table.add_column("Value")
+    _id_column(table, "Value")
     success_color = "green" if result.success else "red"
     table.add_row("Success", f"[{success_color}]{result.success}[/{success_color}]")
     if result.error:
@@ -1201,8 +1215,8 @@ def benchmarks_cmd(
         console.print("[yellow]No benchmarks recorded yet.[/yellow]")
         return
     table = Table(title=f"Benchmarks ({len(results)})")
-    table.add_column("ID", style="dim", no_wrap=True)
-    table.add_column("Name")
+    _id_column(table, "ID", style="dim")
+    _id_column(table, "Name")
     table.add_column("Kind")
     table.add_column("Backend")
     table.add_column("Tok/s", justify="right")
@@ -1572,8 +1586,11 @@ def presets_cmd(json_out: _JSON_OPT = False) -> None:
         )
         return
     table = Table(title="Presets")
-    table.add_column("alias", style="cyan")
-    table.add_column("served name")
+    _id_column(table, "alias", style="cyan")
+    _id_column(table, "served name")
+    # Deliberately NOT an id column. It is the longest field in a seven-column
+    # table, so folding it wraps every single row and buries the alias list
+    # this command exists to show. It is reference-only here; `--json` has it.
     table.add_column("model id")
     table.add_column("family")
     table.add_column("size (B)", justify="right")
@@ -1615,11 +1632,11 @@ def status_cmd(json_out: _JSON_OPT = False) -> None:
         _emit_json(rows)
         return
     table = Table(title="Managed units")
-    table.add_column("role", style="cyan")
-    table.add_column("unit name")
-    table.add_column("env file")
+    _id_column(table, "role", style="cyan")
+    _id_column(table, "unit name")
+    _id_column(table, "env file")
     table.add_column("port", justify="right")
-    table.add_column("serving")
+    _id_column(table, "serving")
     for row in rows:
         # Served model ids and env paths are process/config derived and may
         # contain brackets; escape them so a name cannot eat the styling.
@@ -1678,7 +1695,7 @@ def validate_cmd(json_out: _JSON_OPT = False) -> None:
 
     table = Table(title=f"Validation findings ({len(findings)})")
     table.add_column("Check", style="yellow")
-    table.add_column("Target", style="cyan")
+    _id_column(table, "Target", style="cyan")
     table.add_column("Detail")
     for finding in findings:
         table.add_row(finding.check, finding.target, escape(str(finding.detail)))
@@ -1765,10 +1782,10 @@ def router_status_cmd() -> None:
     )
     aliases = payload.get("aliases", [])
     table = Table(title="Aliases")
-    table.add_column("alias", style="cyan")
-    table.add_column("target")
-    table.add_column("session")
-    table.add_column("served name")
+    _id_column(table, "alias", style="cyan")
+    _id_column(table, "target")
+    _id_column(table, "session")
+    _id_column(table, "served name")
     table.add_column("healthy")
     for entry in aliases:
         healthy = entry.get("healthy")
@@ -1793,11 +1810,11 @@ def aliases_cmd() -> None:
         rows = GatewayService(db, settings).alias_view()
 
     table = Table(title="Router aliases")
-    table.add_column("alias", style="cyan")
-    table.add_column("public id")
-    table.add_column("target")
-    table.add_column("session")
-    table.add_column("served name")
+    _id_column(table, "alias", style="cyan")
+    _id_column(table, "public id")
+    _id_column(table, "target")
+    _id_column(table, "session")
+    _id_column(table, "served name")
     table.add_column("status")
     for row in rows:
         if row.target is None:
