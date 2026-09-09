@@ -1241,7 +1241,10 @@ def benchmarks_cmd(
         when = result.created_at.strftime("%Y-%m-%d %H:%M") if result.created_at else "-"
         ok_color = "green" if result.success else "red"
         table.add_row(
-            (result.id or "")[:8],
+            # Full id, not a [:8] prefix: `llmctl bench <id>` resolves by
+            # primary key (BenchmarkService.get_result), so a shortened id is
+            # not something the operator can act on. _id_column folds it.
+            result.id or "-",
             escape(str(result.name)),
             result.kind.value if result.kind else "-",
             result.backend or "-",
