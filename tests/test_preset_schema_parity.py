@@ -1,9 +1,9 @@
 """Drift guard between llmctl's preset schema and llm-models-config's.
 
-Both packages read and write ``~/.config/llm-models/*.yaml``. A key llmctl
-adds that llm-models-config neither models nor lists in
-``LLMCTL_OWNED_KEYS`` would be rejected there (and before 2026-09-18 was
-silently dropped on the next save). FIXPLAN 2026-09-18 §1.3.
+Since 2026-09-18 llm-models-config validates every preset with this package's
+``Model`` and derives ``LLMCTL_OWNED_KEYS`` from it (FIXPLAN §1.3, long-term
+half), so the first test holds by construction. It stays as a tripwire in
+case someone reintroduces a hand-kept list.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ def test_every_llmctl_preset_key_is_known_to_llm_models_config() -> None:
     missing = set(LlmctlModel.model_fields) - lmc_keys
     assert not missing, (
         f"llmctl preset keys unknown to llm-models-config: {sorted(missing)}; "
-        "add them to llm_models_config.schema.LLMCTL_OWNED_KEYS"
+        "llm_models_config.schema must derive LLMCTL_OWNED_KEYS from llmctl"
     )
 
 
