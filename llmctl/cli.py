@@ -2023,6 +2023,54 @@ def router_status_cmd() -> None:
     console.print(table)
 
 
+@app.command("router-profiles")
+def router_profiles_cmd(
+    write: Annotated[
+        bool,
+        typer.Option("--write", help="Rewrite drifted profile files from their presets."),
+    ] = False,
+) -> None:
+    """Check llm-router's vLLM profile envs against the llmctl presets.
+
+    Each router.yaml ``profile_env`` backend is matched to the preset with the
+    same served name and compared with what ``llmctl swap`` would render.
+    Exits 1 on drift (or an unmatched backend) unless --write fixed it. --write
+    rewrites only KEY=VALUE lines; the comments in the profile files are kept.
+    """
+    from llmctl.services.router_profiles import check_profiles, write_profile
+
+    settings = load_settings()
+    report = check_profiles(
+        port=settings.managed_units.vllm_tp.default_port,
+        defaults=settings.vllm.defaults,
+    )
+    if not report:
+        console.print("[yellow]No profile_env backends in router.yaml.[/yellow]")
+        return
+    failed = drifted = False
+    for drift in report:
+        label = f"{escape(drift.backend.name)} ({escape(drift.backend.path.name)})"
+        if drift.error:
+            console.print(f"[red]✗[/red] {label}: {escape(drift.error)}")
+            failed = True
+            continue
+        if drift.in_sync:
+            console.print(f"[green]✓[/green] {label} matches preset {escape(str(drift.preset))}")
+            continue
+        console.print(f"[yellow]≠[/yellow] {label} drifts from preset {escape(str(drift.preset))}:")
+        for key, (have, want) in drift.changes.items():
+            console.print(f"    {escape(key)}: {escape(str(have))} → {escape(str(want))}")
+        if write:
+            write_profile(drift)
+            console.print(f"    [green]rewritten[/green] {escape(str(drift.backend.path))}")
+        else:
+            failed = drifted = True
+    if drifted:
+        console.print("Run `llmctl router-profiles --write` to sync from the presets.")
+    if failed:
+        raise typer.Exit(1)
+
+
 @app.command("aliases")
 def aliases_cmd() -> None:
     """List configured router aliases and their resolved targets."""

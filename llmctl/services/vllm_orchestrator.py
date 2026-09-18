@@ -232,6 +232,28 @@ def preset_choices(
     return sorted(load_presets(defaults=defaults, config_dir=config_dir).keys())
 
 
+def render_preset_env(
+    preset_name: str,
+    *,
+    port: int,
+    defaults: VLLMDefaultsConfig | None = None,
+    config_dir: Path | None = None,
+) -> tuple[VLLMLaunchSpec, str]:
+    """Return ``(spec, env body)`` that ``llmctl swap PRESET`` would write.
+
+    No TQ override and no side effects: the same render a ``--dry-run`` prints.
+    Raises :class:`UnknownPresetError` like :func:`start_vllm_tp`.
+    """
+    spec = _build_spec(
+        preset_name,
+        deps=Dependencies(config_dir=config_dir),
+        defaults=defaults,
+        port_override=port,
+        tq_override=None,
+    )
+    return spec, render_vllm_env(spec)
+
+
 def _build_spec(
     preset_name: str,
     *,
