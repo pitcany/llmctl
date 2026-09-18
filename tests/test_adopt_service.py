@@ -999,3 +999,42 @@ def test_start_unit_creates_no_session_row(tmp_path: Path) -> None:
         assert db.exec(select(SessionRecord)).all() == []
     finally:
         db.close()
+
+
+# --- ADOPTED debounce + guarded fast path (FIXPLAN 2026-09-18 §2.4) ----------
+
+
+def test_one_failed_probe_does_not_stop_a_running_adopted_session(tmp_path: Path) -> None:
+    # adopt probe ok, reconcile probe fails once, the debounce re-probe answers.
+    responses: list[list[str] | None] = [["m"], None, ["m"]]
+
+    def probe(_url: str, _t: float) -> list[str] | None:
+        return responses.pop(0) if responses else None
+
+    db, service = _make_service(tmp_path, probe)
+    try:
+        session = service.adopt(RuntimeName.VLLM, "http://127.0.0.1:8003")
+        assert service.reconcile() == 0
+        refreshed = service.get_session(session.id)
+        assert refreshed is not None and refreshed.status == SessionStatus.RUNNING
+    finally:
+        db.close()
+
+
+def test_a_raising_probe_on_the_single_candidate_path_reads_as_down(tmp_path: Path) -> None:
+    calls = {"n": 0}
+
+    def probe(_url: str, _t: float) -> list[str] | None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ["m"]  # adopt
+        raise RuntimeError("probe blew up")
+
+    db, service = _make_service(tmp_path, probe)
+    try:
+        session = service.adopt(RuntimeName.VLLM, "http://127.0.0.1:8003")
+        assert service.reconcile() == 1  # no exception escapes
+        refreshed = service.get_session(session.id)
+        assert refreshed is not None and refreshed.status == SessionStatus.STOPPED
+    finally:
+        db.close()

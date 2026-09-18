@@ -255,8 +255,13 @@ class SessionService:
         if not candidates:
             return {}
         if len(candidates) == 1:
+            # Same contract as the pool path below: a probe that raises is
+            # "no answer", never an exception out of reconcile.
             record = candidates[0]
-            return {record.id: self._probe_record_endpoint(record)}
+            try:
+                return {record.id: self._probe_record_endpoint(record)}
+            except Exception:
+                return {record.id: None}
         from concurrent.futures import ThreadPoolExecutor
 
         results: dict[str, list[str] | None] = {}
@@ -274,13 +279,18 @@ class SessionService:
 
     def _probe_record_endpoint(self, record: SessionRecord) -> list[str] | None:
         """Probe one record's endpoint with kind-appropriate timeout/debounce."""
-        if record.kind == SessionKind.ADOPTED:
-            return self._probe(record.endpoint_url, _ADOPT_PROBE_TIMEOUT_S)
-        served = self._probe(record.endpoint_url, _OWNED_PROBE_TIMEOUT_S)
+        timeout = (
+            _ADOPT_PROBE_TIMEOUT_S
+            if record.kind == SessionKind.ADOPTED
+            else _OWNED_PROBE_TIMEOUT_S
+        )
+        served = self._probe(record.endpoint_url, timeout)
         if served is None and record.status == SessionStatus.RUNNING:
-            # Debounce: one slow/failed answer under load must not demote a
-            # healthy RUNNING session; only two consecutive failures do.
-            served = self._probe(record.endpoint_url, _OWNED_PROBE_TIMEOUT_S)
+            # Debounce, for OWNED and ADOPTED alike: one slow/failed answer
+            # under load must not demote a healthy RUNNING session (for an
+            # adopted row that means STOPPED and dropped from routing); only
+            # two consecutive failures do.
+            served = self._probe(record.endpoint_url, timeout)
         return served
 
     def _reconcile_owned(self, record: SessionRecord, served: list[str] | None) -> int:
