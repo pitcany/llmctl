@@ -214,3 +214,37 @@ def test_install_commands_are_platform_aware() -> None:
     assert _data.install_command_for("lmstudio", system="Linux") == ""
     assert _data.install_command_for("llama_cpp", system="Darwin").startswith("brew")
     assert _data.install_command_for("ollama", system="Linux").startswith("curl")
+
+
+# --- P1 #8: doctor summary in words --------------------------------------------
+
+
+def test_doctor_summary_has_no_raw_booleans() -> None:
+    from llmctl.tui.screens_doctor import DoctorScreen
+
+    rendered: dict = {}
+    screen = DoctorScreen()
+    screen.fetch = lambda: {  # type: ignore[method-assign]
+        "backends": [],
+        "summary": {
+            "gpu_count": 0, "nvml_available": False, "safe_mode": True,
+            "gpu_policy": "balanced", "safety_margin_gb": 2, "allow_public_bind": False,
+            "default_host": "127.0.0.1", "missing_backends": [],
+        },
+    }
+
+    class _Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(screen)
+
+    async def _run() -> None:
+        app = _Host()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            rendered["text"] = str(app.screen.query_one("#doctor-summary", Static).render())
+
+    asyncio.run(_run())
+    text = rendered["text"]
+    assert "True" not in text and "False" not in text, text
+    assert "CPU-only" in text and "not detected" in text

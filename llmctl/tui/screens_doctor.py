@@ -77,24 +77,40 @@ class DoctorScreen(DataScreen):
 
     def _render_summary(self, summary: dict[str, Any]) -> None:
         """Render the GPU/NVML status and scheduler configuration panel."""
-        gpu_color = C_OK if summary["gpu_count"] else C_WARN
-        nvml_color = C_OK if summary["nvml_available"] else C_WARN
-        public_color = C_WARN if summary["allow_public_bind"] else C_OK
+        gpu_count = summary["gpu_count"]
+        nvml = summary["nvml_available"]
+        # Plain words, not Python booleans. A host with no NVML and no GPUs is
+        # a CPU-only host, which is a configuration, not a warning.
+        if gpu_count:
+            gpu_text = f"[{C_OK}]{gpu_count} detected[/]"
+        elif nvml:
+            gpu_text = f"[{C_WARN}]none detected (NVML is up)[/]"
+        else:
+            gpu_text = f"[{C_MUTED}]none (CPU-only host)[/]"
+        nvml_text = f"[{C_OK}]OK[/]" if nvml else f"[{C_MUTED}]not detected[/]"
+        safe_text = (
+            "on (a label on launch plans; blocks nothing)"
+            if summary["safe_mode"]
+            else "off"
+        )
+        public_text = (
+            f"[{C_WARN}]allowed (sessions may bind 0.0.0.0)[/]"
+            if summary["allow_public_bind"]
+            else f"[{C_OK}]refused (loopback only)[/]"
+        )
         missing = summary["missing_backends"]
         missing_line = (
-            f"  [{C_ERR}]Missing backends:[/] {', '.join(missing)}"
+            f"  [{C_ERR}]Missing backends:[/] {esc(', '.join(missing))}"
             if missing
             else f"  [{C_OK}]All backends available.[/]"
         )
         lines = [
             "[b]System & scheduler[/b]",
-            f"  GPUs: [{gpu_color}]{summary['gpu_count']}[/]   "
-            f"NVML: [{nvml_color}]{summary['nvml_available']}[/]   "
-            f"Safe mode: {summary['safe_mode']}",
-            f"  Scheduler policy: {summary['gpu_policy']}   "
+            f"  GPUs: {gpu_text}   NVML: {nvml_text}   Safe mode: {safe_text}",
+            f"  Scheduler policy: {esc(summary['gpu_policy'])}   "
             f"safety margin: {summary['safety_margin_gb']} GB   "
-            f"default host: {summary['default_host']}",
-            f"  Public bind: [{public_color}]{summary['allow_public_bind']}[/]",
+            f"default host: {esc(summary['default_host'])}",
+            f"  Public bind: {public_text}",
             missing_line,
         ]
         self.query_one("#doctor-summary", Static).update("\n".join(lines))
