@@ -32,6 +32,7 @@ from sqlmodel import Session
 
 from llmctl.config import load_settings
 from llmctl.db import ModelStatus, RuntimeName, get_engine, init_db
+from llmctl.gpu_arg import GPU_MODES, parse_gpus
 from llmctl.schemas import (
     ModelCreate,
     ModelUpdate,
@@ -122,17 +123,6 @@ def _prompt_optional_float(label: str, default: float | None = None) -> float | 
         return float(raw)
     except ValueError as exc:
         raise typer.BadParameter(f"{label}: expected number") from exc
-
-
-def _resolve_gpu_mode(gpus: str) -> str:
-    """Classify a ``--gpus`` argument as a named mode or an explicit id list.
-
-    Accepts forms like ``"auto"``, ``"0"``, ``"0,1"``, or ``"0, 1"``. The
-    previous one-liner only stripped commas, so ``"0, 1"`` failed the
-    ``isdigit`` check and fell through as a literal mode name (later
-    rejected by the scheduler). Strip whitespace too.
-    """
-    return "explicit" if gpus.replace(",", "").replace(" ", "").isdigit() else gpus
 
 
 def _prompt_runtime(default: RuntimeName | None = None) -> RuntimeName:
@@ -756,12 +746,15 @@ def preview_cmd(
                     f"Profile not found: {profile_name_or_id}"
                 )
             profile_id = resolved_profile.id
+        gpu_ids, gpu_mode, allow_cpu = parse_gpus(gpus)
         request = SessionStartRequest(
             model_id=resolved_id,
             profile_id=profile_id,
             runtime=model.runtime,
-            gpu_ids=[int(p) for p in gpus.split(",") if p.strip().isdigit()],
-            gpu_mode=_resolve_gpu_mode(gpus),
+            gpu_ids=gpu_ids,
+            gpu_mode=gpu_mode,
+            gpus_auto=gpu_mode in GPU_MODES,
+            allow_cpu=allow_cpu,
             dry_run=True,
         )
         plan = SessionService(db).plan(request)

@@ -23,6 +23,7 @@ from llmctl.db import (
     get_engine,
     init_db,
 )
+from llmctl.gpu_arg import GPU_MODES, parse_gpus
 from llmctl.schemas import (
     BenchmarkRunRequest,
     HealthState,
@@ -75,22 +76,6 @@ def _id_column(table: Table, header: str, **kwargs: object) -> None:
     default; ``--json`` remains the lossless machine-readable path.
     """
     table.add_column(header, overflow="fold", **kwargs)  # type: ignore[arg-type]
-
-
-def _parse_gpus(gpus: str | None, cpu: bool) -> tuple[list[int], str, bool]:
-    """Parse a ``--gpus`` value into (gpu_ids, mode, allow_cpu).
-
-    Modes: ``auto``, ``balanced``, ``most-free``, ``least-used``, ``cpu``, or an
-    explicit comma-separated id list (e.g. ``0,1``) which yields mode
-    ``explicit``.
-    """
-    value = (gpus or "auto").strip().lower()
-    if cpu or value == "cpu":
-        return [], "cpu", True
-    if value in {"auto", "balanced", "most-free", "least-used"}:
-        return [], value, False
-    ids = [int(part) for part in value.split(",") if part.strip()]
-    return ids, "explicit", False
 
 
 def _session() -> Session:
@@ -351,7 +336,7 @@ def _build_start_request(
     from llmctl.services.profiles import ProfileService
     from llmctl.services.registry import RegistryService
 
-    gpu_ids, mode, allow_cpu = _parse_gpus(gpus, cpu)
+    gpu_ids, mode, allow_cpu = parse_gpus(gpus, cpu=cpu)
     # Resolve MODEL_ID by name OR id so `llmctl start/plan <name>` works, not
     # just the UUID. Reuses the registry resolver (raises on ambiguous names).
     try:
@@ -376,7 +361,7 @@ def _build_start_request(
         runtime=model.runtime,
         gpu_ids=gpu_ids,
         gpu_mode=mode,
-        gpus_auto=mode in {"auto", "balanced", "most-free", "least-used"},
+        gpus_auto=mode in GPU_MODES,
         allow_cpu=allow_cpu,
         force=force,
         dry_run=dry_run,
@@ -1146,9 +1131,16 @@ def bench(
     resolved_model, resolved_session = _resolve_bench_target(
         target, model_id, session_id
     )
-    sweep_levels = (
-        [int(part) for part in sweep.split(",") if part.strip()] if sweep else []
-    )
+    try:
+        sweep_levels = (
+            [int(part) for part in sweep.split(",") if part.strip()] if sweep else []
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"--sweep {sweep!r}: expected comma-separated integers like '1,2,4,8'."
+        ) from exc
+    if any(level < 1 for level in sweep_levels):
+        raise typer.BadParameter(f"--sweep {sweep!r}: concurrency levels must be >= 1.")
     payload = BenchmarkRunRequest(
         name=name,
         kind=kind,

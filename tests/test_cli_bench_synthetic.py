@@ -53,3 +53,10 @@ def test_dry_run_still_works_but_warns(captured: list[Any]) -> None:
     assert captured and captured[0].dry_run is True
     assert "deprecated" in res.output
     assert "--synthetic" in res.output
+
+
+def test_bad_sweep_is_a_usage_error_not_a_traceback(captured: list[Any]) -> None:
+    res = CliRunner().invoke(cli.app, ["bench", "m1", "--sweep", "1,a"])
+    assert res.exit_code == 2, res.output
+    assert "--sweep" in res.output
+    assert captured == []

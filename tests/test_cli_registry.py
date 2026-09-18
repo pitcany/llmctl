@@ -302,16 +302,27 @@ def test_import_registry_does_not_resync_yaml_per_profile(
     )
 
 
-def test_resolve_gpu_mode_handles_spaces() -> None:
-    """``--gpus "0, 1"`` must classify as explicit, not pass through as a mode."""
-    from llmctl.cli_registry import _resolve_gpu_mode
+def test_parse_gpus_handles_spaces() -> None:
+    """``--gpus "0, 1"`` is an explicit list, not a literal mode name."""
+    from llmctl.gpu_arg import parse_gpus
 
-    assert _resolve_gpu_mode("0") == "explicit"
-    assert _resolve_gpu_mode("0,1") == "explicit"
-    assert _resolve_gpu_mode("0, 1") == "explicit"
-    assert _resolve_gpu_mode(" 0 , 1 ") == "explicit"
-    assert _resolve_gpu_mode("auto") == "auto"
-    assert _resolve_gpu_mode("most-free") == "most-free"
+    assert parse_gpus("0") == ([0], "explicit", False)
+    assert parse_gpus("0,1") == ([0, 1], "explicit", False)
+    assert parse_gpus("0, 1") == ([0, 1], "explicit", False)
+    assert parse_gpus(" 0 , 1 ") == ([0, 1], "explicit", False)
+    assert parse_gpus("auto") == ([], "auto", False)
+    assert parse_gpus("most-free") == ([], "most-free", False)
+    assert parse_gpus("cpu") == ([], "cpu", True)
+
+
+@pytest.mark.parametrize("bad", ["0,x", "most_free", "0,,1", "-1", "0,0"])
+def test_parse_gpus_rejects_bad_input_with_bad_parameter(bad: str) -> None:
+    import typer
+
+    from llmctl.gpu_arg import parse_gpus
+
+    with pytest.raises(typer.BadParameter):
+        parse_gpus(bad)
 
 
 def test_scan_dry_run_does_not_persist(cli_env: Path) -> None:
