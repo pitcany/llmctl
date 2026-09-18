@@ -169,3 +169,60 @@ def test_validate_passes_reasonable_profile() -> None:
         )
     )
     assert issues == []
+
+
+# --- lost name race -> ValueError, not IntegrityError (FIXPLAN §2.4) --------
+
+
+class _BlindPrecheck:
+    """Make the pre-insert name SELECT miss, as if a racer inserted after it."""
+
+    def __init__(self, db: Session) -> None:
+        self._exec = db.exec
+
+    def __call__(self, stmt, *a, **k):  # type: ignore[no-untyped-def]
+        result = self._exec(stmt, *a, **k)
+        if "profiles.name" in str(stmt):
+
+            class _Empty:
+                def first(self) -> None:
+                    return None
+
+            return _Empty()
+        return result
+
+
+def _payload(name: str) -> ProfileCreate:
+    return ProfileCreate(
+        name=name,
+        runtime=RuntimeName.VLLM,
+        tensor_parallel_size=1,
+        max_model_len=4096,
+        gpu_memory_utilization=0.8,
+    )
+
+
+def test_create_race_surfaces_as_value_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _db(tmp_path) as db:
+        service = ProfileService(db)
+        service.create_profile(_payload("dup"))
+        monkeypatch.setattr(db, "exec", _BlindPrecheck(db))
+        with pytest.raises(ValueError, match="already exists"):
+            service.create_profile(_payload("dup"))
+        monkeypatch.undo()
+        # Session is usable again after the rollback.
+        assert service.get_by_name("dup") is not None
+
+
+def test_clone_race_surfaces_as_value_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _db(tmp_path) as db:
+        service = ProfileService(db)
+        src = service.create_profile(_payload("src"))
+        service.create_profile(_payload("taken"))
+        monkeypatch.setattr(db, "exec", _BlindPrecheck(db))
+        with pytest.raises(ValueError, match="already exists"):
+            service.clone_profile(src.id, "taken")

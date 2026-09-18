@@ -169,7 +169,7 @@ class ProfileService:
             safety=dict(payload.safety),
         )
         self.db.add(record)
-        self.db.commit()
+        self._commit_named(payload.name)
         self.db.refresh(record)
         return record_to_profile(record)
 
@@ -191,7 +191,7 @@ class ProfileService:
             setattr(record, field_name, value)
         record.updated_at = utcnow()
         self.db.add(record)
-        self.db.commit()
+        self._commit_named(str(data.get("name", record.name)))
         self.db.refresh(record)
         return record_to_profile(record)
 
@@ -231,9 +231,24 @@ class ProfileService:
             safety=dict(record.safety),
         )
         self.db.add(clone)
-        self.db.commit()
+        self._commit_named(new_name)
         self.db.refresh(clone)
         return record_to_profile(clone)
+
+    def _commit_named(self, name: str) -> None:
+        """Commit a write that set a profile ``name``, mapping a lost race.
+
+        The callers check for a name clash first, but a concurrent writer
+        (API + CLI, or two CLI calls) can insert the same name between that
+        SELECT and this COMMIT. The unique index then raises
+        ``IntegrityError``; surface it as the same ``ValueError`` the
+        pre-check raises so every caller's existing handling applies.
+        """
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            raise ValueError(f"Profile name '{name}' already exists") from exc
 
     def validate(
         self, profile: Profile | ProfileCreate | ProfileUpdate

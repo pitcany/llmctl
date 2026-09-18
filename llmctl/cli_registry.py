@@ -632,7 +632,9 @@ def profile_clone(
             cloned = service.clone_profile(existing.id, new_name)
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
-    assert cloned is not None
+    if cloned is None:
+        # Deleted between resolve and clone; asserts vanish under python -O.
+        raise typer.BadParameter(f"Profile not found: {profile}")
     console.print(f"[green]Cloned profile[/green] -> {cloned.name} ({cloned.id})")
 
 

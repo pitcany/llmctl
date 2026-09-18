@@ -1535,8 +1535,7 @@ def help_cmd(
     ] = None,
 ) -> None:
     """Show help for llmctl or for COMMAND (same as `llmctl COMMAND --help`)."""
-    root = ctx.parent
-    assert root is not None  # help is always invoked under the root group
+    root = ctx.find_root()
     group = root.command
     target_ctx = root
     for name in command or []:
