@@ -153,7 +153,11 @@ def test_fetch_handles_malformed_json_gracefully(temp_settings) -> None:
 def test_fetch_handles_systemctl_oserror_gracefully(
     temp_settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No systemd binary (container) -> is_active=False, not a crash."""
+    """No systemd binary (container) -> is_active=None (unknown), not a crash.
+
+    It was False, rendered "inactive" -- a claim nobody had checked
+    (TUI-UX-FIXPLAN P0 #5).
+    """
 
     class _RaisingRunner:
         # When systemd is unavailable every call fails, not just is_active --
@@ -169,7 +173,7 @@ def test_fetch_handles_systemctl_oserror_gracefully(
         http_get=_http_responder(by_port={}),
     )
     rows = screen.fetch()
-    assert all(r.is_active is False for r in rows)
+    assert all(r.is_active is None for r in rows)
 
 
 def test_fetch_default_ports_match_config(temp_settings) -> None:

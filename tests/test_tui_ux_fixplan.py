@@ -169,3 +169,36 @@ def test_stop_on_adopted_session_redirects_to_units(tmp_path, monkeypatch) -> No
     asyncio.run(_run())
     assert not seen["modal"]
     assert any("Units screen" in n and "vllm-tp" in n for n in seen["notes"]), seen["notes"]
+
+
+# --- P0 #5: unknown systemd state is shown as unknown -------------------------
+
+
+def test_units_render_unknown_when_systemd_unavailable() -> None:
+    from textual.widgets import DataTable
+
+    from llmctl.tui.screens_units import UnitsScreen, _UnitRow
+
+    row = _UnitRow(
+        role="vllm-tp", unit_name="vllm-tp", env_path="/x", env_exists=False,
+        port=8003, is_active=None, served=None, role_kind="managed",
+    )
+    cells: dict = {}
+
+    screen = UnitsScreen()
+    screen.fetch = lambda: [row]  # type: ignore[method-assign]  # no real systemd
+
+    class _Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(screen)
+
+    async def _run() -> None:
+        app = _Host()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            table = app.screen.query_one("#units-table", DataTable)
+            cells["active"] = str(table.get_row_at(0)[2])
+
+    asyncio.run(_run())
+    assert "unknown" in cells["active"]

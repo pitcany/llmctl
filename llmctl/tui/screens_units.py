@@ -38,7 +38,9 @@ class _UnitRow:
     #: or operators edit a file nothing reads.
     env_exists: bool
     port: int
-    is_active: bool
+    #: ``None`` = systemd could not be asked (no systemctl, D-Bus down):
+    #: unknown, which is not the same as inactive.
+    is_active: bool | None
     #: Tri-state from the shared probe: a list (possibly empty) means the
     #: endpoint answered, ``None`` means it could not be reached.
     served: list[str] | None
@@ -129,9 +131,12 @@ class UnitsScreen(DataScreen):
         cursor = table.cursor_row
         table.clear()
         for r in rows:
-            active_cell = (
-                f"[{C_OK}]active[/]" if r.is_active else f"[{C_MUTED}]inactive[/]"
-            )
+            if r.is_active is None:
+                active_cell = f"[{C_WARN}]unknown (systemd unavailable)[/]"
+            elif r.is_active:
+                active_cell = f"[{C_OK}]active[/]"
+            else:
+                active_cell = f"[{C_MUTED}]inactive[/]"
             # Three distinct outcomes, not two. Collapsing "answered with
             # nothing loaded" into "could not be reached" made an idle unit and
             # a dead one look identical here, and made both disagree with
@@ -142,7 +147,7 @@ class UnitsScreen(DataScreen):
                 served_cell = f"[{C_OK}]idle (none loaded)[/]"
             elif r.is_active:
                 # Active in systemd but the endpoint did not answer: still loading.
-                served_cell = f"[{C_WARN}]starting?[/]"
+                served_cell = f"[{C_WARN}]active, not responding yet[/]"
             else:
                 served_cell = f"[{C_MUTED}]-[/]"
             env_cell = esc(r.env_path) if r.env_exists else f"[{C_MUTED}]—[/]"
@@ -180,6 +185,12 @@ class UnitsScreen(DataScreen):
         if row is None:
             self.app.notify("No unit selected.", severity="warning")
             return
+        if row.is_active is None:
+            self.app.notify(
+                f"Cannot tell whether {row.unit_name} is running: systemd is unavailable.",
+                severity="warning",
+            )
+            return
         if row.is_active:
             self.app.notify(f"{row.unit_name} is already active.", severity="warning")
             return
@@ -208,6 +219,12 @@ class UnitsScreen(DataScreen):
         row = self._selected_row()
         if row is None:
             self.app.notify("No unit selected.", severity="warning")
+            return
+        if row.is_active is None:
+            self.app.notify(
+                f"Cannot tell whether {row.unit_name} is running: systemd is unavailable.",
+                severity="warning",
+            )
             return
         if not row.is_active:
             self.app.notify(f"{row.unit_name} is not active.", severity="warning")
@@ -238,19 +255,19 @@ class UnitsScreen(DataScreen):
             _on_close,
         )
 
-    def _is_active_safe(self, unit: str, sysctl: SystemctlRunner) -> bool:
-        """Return True iff systemctl reports active; False on any error.
+    def _is_active_safe(self, unit: str, sysctl: SystemctlRunner) -> bool | None:
+        """Return systemd's verdict, or ``None`` when systemd cannot be asked.
 
         Scope matters: the llama.cpp units (`gpt-oss-120b`,
         `deepseek-v4-flash-0731`) are *user* units, and a system-scope
         `is-active` reports them `inactive` even while they serve — so this
         screen showed them permanently down. Resolve the scope first.
 
-        Wraps the call to swallow subprocess spawn failures (no systemd in a
-        container / etc.) — the UI just shows 'inactive' rather than crashing
-        the user out of the screen.
+        A spawn failure (no systemd in a container, etc.) used to read as
+        ``False`` and render "inactive" -- a claim nobody checked. It is now
+        ``None``, rendered as "unknown (systemd unavailable)".
         """
         try:
             return sysctl.is_active(unit, user=sysctl.is_user_unit(unit))
         except OSError:
-            return False
+            return None
