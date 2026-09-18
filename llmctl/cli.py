@@ -85,17 +85,26 @@ def _session() -> Session:
 
 
 def _confirm_state_change(action: str, *, required: bool, assume_yes: bool) -> None:
-    """TTY-gated confirmation for a state-changing action.
+    """Confirmation gate for a state-changing action.
 
-    Prompts only when the matching ``scheduler.require_confirmation_for_*``
-    setting is on, ``--yes`` was not passed, and stdin is a TTY (scripts and
-    pipelines are never blocked by a prompt). Declining is a clean exit 0 —
-    the user saying "no" is not an error.
+    Applies when the matching ``scheduler.require_confirmation_for_*``
+    setting is on and ``--yes`` was not passed. On a TTY it prompts; off a
+    TTY it REFUSES (exit 1) rather than proceeding unasked -- a script that
+    means to restart the GPU fleet says so with ``--yes``. It used to fail
+    open, so any pipe or cron job silently skipped the confirmation the
+    setting asked for. Declining the prompt is a clean exit 0 -- the user
+    saying "no" is not an error.
     """
     import sys
 
-    if not required or assume_yes or not sys.stdin.isatty():
+    if not required or assume_yes:
         return
+    if not sys.stdin.isatty():
+        console.print(
+            f"[red]Refusing:[/red] {escape(action)} needs confirmation and stdin is "
+            "not a terminal. Pass --yes to run it non-interactively."
+        )
+        raise typer.Exit(1)
     if not typer.confirm(f"{action} — continue?"):
         console.print("[yellow]Aborted; nothing changed.[/yellow]")
         raise typer.Exit(0)

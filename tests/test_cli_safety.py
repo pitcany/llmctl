@@ -41,12 +41,20 @@ def test_confirm_skipped_with_yes_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     _confirm_state_change("x", required=True, assume_yes=True)
 
 
-def test_confirm_skipped_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_confirm_refuses_without_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail closed: no terminal to ask means no, unless --yes (FIXPLAN Phase 3)."""
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     monkeypatch.setattr(
         typer, "confirm", lambda _msg: pytest.fail("must not prompt without a TTY")
     )
-    _confirm_state_change("x", required=True, assume_yes=False)
+    with pytest.raises(typer.Exit) as excinfo:
+        _confirm_state_change("x", required=True, assume_yes=False)
+    assert excinfo.value.exit_code == 1
+
+
+def test_confirm_yes_proceeds_without_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    _confirm_state_change("x", required=True, assume_yes=True)
 
 
 def test_confirm_decline_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:

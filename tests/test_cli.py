@@ -140,7 +140,7 @@ def test_cli_stop_adopted_prints_refusal_and_exits_nonzero(tmp_path, monkeypatch
     db_url, session_id = _cli_db_with_adopted_row(tmp_path)
     _patch_session(monkeypatch, db_url)
     runner = CliRunner()
-    result = runner.invoke(app, ["stop", session_id])
+    result = runner.invoke(app, ["stop", session_id, "--yes"])
     assert result.exit_code == 1
     assert "refused" in result.output.lower()
     assert "adopted" in result.output.lower()
@@ -150,7 +150,7 @@ def test_cli_restart_adopted_prints_refusal_and_exits_nonzero(tmp_path, monkeypa
     db_url, session_id = _cli_db_with_adopted_row(tmp_path)
     _patch_session(monkeypatch, db_url)
     runner = CliRunner()
-    result = runner.invoke(app, ["restart", session_id])
+    result = runner.invoke(app, ["restart", session_id, "--yes"])
     assert result.exit_code == 1
     assert "refused" in result.output.lower()
     assert "adopted" in result.output.lower()
