@@ -164,9 +164,8 @@ def test_app_boots_and_navigates(temp_db: Settings) -> None:
         async with app.run_test() as pilot:
             # Dashboard is the default screen.
             assert isinstance(app.screen, DashboardScreen)
-            # `d` is shadowed by CRUD screens (Models/Presets/Profiles/Benchmarks
-            # bind it to Delete), so the final hop back to Dashboard must come
-            # from a screen that does NOT redefine `d` — Logs here.
+            # `d` is Dashboard from every screen: Delete moved to the Delete
+            # key (TUI-UX-FIXPLAN P0 #4), so no screen shadows it any more.
             for key, screen_cls in (
                 ("m", ModelsScreen),
                 ("s", SessionsScreen),

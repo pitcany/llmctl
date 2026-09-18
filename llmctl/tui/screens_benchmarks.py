@@ -22,7 +22,7 @@ class BenchmarksScreen(DataScreen):
         Binding("enter", "rerun", "Re-run", show=True),
         Binding("c", "set_baseline", "Baseline", show=True),
         Binding("x", "clear_baseline", "Clear baseline", show=True),
-        Binding("d", "delete_benchmark", "Delete", show=True),
+        Binding("delete", "delete_benchmark", "Delete", show=True, key_display="del"),
     ]
 
     def __init__(self, model_filter: str | None = None) -> None:
@@ -256,7 +256,7 @@ class BenchmarksScreen(DataScreen):
                 )
             else:
                 self.app.notify(
-                    "Highlight a row with arrow keys, then press 'd'.",
+                    "Highlight a row with arrow keys, then press Delete.",
                     severity="warning",
                 )
             return

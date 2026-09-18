@@ -204,7 +204,7 @@ def test_delete_action_on_empty_table_warns(temp_db) -> None:
                     "notify",
                     side_effect=lambda msg, **kw: notifications.append(msg),
                 ):
-                    await pilot.press("d")
+                    await pilot.press("delete")
                     for _ in range(20):
                         await pilot.pause(0.05)
                         if notifications:

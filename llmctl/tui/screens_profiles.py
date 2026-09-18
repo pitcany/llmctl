@@ -32,7 +32,7 @@ class ProfilesScreen(DataScreen):
     BINDINGS = [
         Binding("a", "add_profile", "Create", show=True),
         Binding("e", "edit_profile", "Edit", show=True),
-        Binding("d", "delete_profile", "Delete", show=True),
+        Binding("delete", "delete_profile", "Delete", show=True, key_display="del"),
         Binding("c", "clone_profile", "Clone", show=True),
     ]
 

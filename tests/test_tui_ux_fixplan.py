@@ -97,3 +97,28 @@ def test_palette_offers_go_to_dashboard(tmp_path, monkeypatch) -> None:
     asyncio.run(_run())
     assert "Go to Dashboard" in titles
     assert sum(t.startswith("Go to ") for t in titles) == 10
+
+
+# --- P0 #4: `d` is Dashboard everywhere --------------------------------------
+
+
+def test_d_goes_to_dashboard_from_every_crud_screen(tmp_path, monkeypatch) -> None:
+    from llmctl._testing import isolate_tui
+    from llmctl.tui.app import MissionControlApp
+    from llmctl.tui.screens_dashboard import DashboardScreen
+
+    isolate_tui(monkeypatch, tmp_path)
+    landed: list[bool] = []
+
+    async def _run() -> None:
+        app = MissionControlApp()
+        async with app.run_test() as pilot:
+            for key in ("m", "p", "f", "b"):
+                await pilot.press(key)
+                await pilot.pause()
+                await pilot.press("d")
+                await pilot.pause()
+                landed.append(isinstance(app.screen, DashboardScreen))
+
+    asyncio.run(_run())
+    assert landed == [True, True, True, True]

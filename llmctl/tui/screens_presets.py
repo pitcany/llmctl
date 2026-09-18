@@ -67,7 +67,7 @@ class PresetsScreen(DataScreen):
         Binding("a", "add_preset", "Add", show=True),
         Binding("e", "edit_preset", "Edit", show=True),
         Binding("c", "clone_preset", "Clone", show=True),
-        Binding("d", "delete_preset", "Delete", show=True),
+        Binding("delete", "delete_preset", "Delete", show=True, key_display="del"),
     ]
 
     def __init__(self) -> None:

@@ -30,7 +30,7 @@ class ModelsScreen(DataScreen):
         Binding("ctrl+s", "scan", "Scan", show=True),
         Binding("a", "add_model", "Add", show=True),
         Binding("e", "edit_model", "Edit", show=True),
-        Binding("d", "delete_model", "Delete", show=True),
+        Binding("delete", "delete_model", "Delete", show=True, key_display="del"),
         Binding("x", "prune_missing", "Prune missing", show=True),
         Binding("c", "clone_model", "Clone", show=True),
     ]

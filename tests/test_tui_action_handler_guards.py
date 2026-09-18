@@ -94,7 +94,7 @@ def _run_keypress(monkeypatch, *, screen_action: str, prefix: str, key: str) -> 
     [
         ("action_show_models", "models", "e"),  # edit -> _selected_model
         ("action_show_models", "models", "c"),  # clone -> _selected_model
-        ("action_show_models", "models", "d"),  # delete -> _selected_model
+        ("action_show_models", "models", "delete"),  # delete -> _selected_model
         ("action_show_models", "models", "x"),  # prune -> get_missing_model_ids
         ("action_show_profiles", "profiles", "e"),  # -> _selected_profile
         ("action_show_benchmarks", "benchmark", "n"),  # -> get_models
