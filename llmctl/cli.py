@@ -1080,21 +1080,41 @@ def bench(
         str | None,
         typer.Option(help="Concurrency sweep, e.g. '1,2,4,8' (overrides --concurrency)."),
     ] = None,
-    dry_run: Annotated[
+    synthetic: Annotated[
         bool,
         typer.Option(
-            "--dry-run/--no-dry-run",
-            help="Force a synthetic mock run instead of hitting the live endpoint.",
+            "--synthetic/--live",
+            help=(
+                "Run and record a synthetic mock benchmark instead of hitting "
+                "the live endpoint (e.g. on CI hosts without a runtime)."
+            ),
         ),
     ] = False,
+    dry_run: Annotated[
+        bool | None,
+        typer.Option(
+            "--dry-run/--no-dry-run",
+            hidden=True,
+            help="Deprecated alias of --synthetic/--live.",
+        ),
+    ] = None,
 ) -> None:
     """Benchmark a model or session against the configured runtime.
 
     Pass the positional ``TARGET`` as either a model ID or session ID --
     llmctl will look it up automatically. On live failures the result is
-    persisted with ``success=False`` for inspection. Use ``--dry-run`` to
-    force a synthetic mock run (e.g. on CI hosts without a runtime).
+    persisted with ``success=False`` for inspection. Use ``--synthetic`` to
+    run a mock benchmark instead (it still runs and records a result, so it
+    is not a no-op preview like ``start --dry-run``).
     """
+    if dry_run is not None:
+        # `start --dry-run` executes nothing; `bench --dry-run` ran a fake
+        # benchmark and persisted it. Same flag, opposite safety meaning.
+        console.print(
+            "[yellow]warning:[/yellow] `bench --dry-run` is deprecated -- it runs a "
+            "synthetic benchmark, it is not a preview. Use --synthetic."
+        )
+        synthetic = dry_run
     resolved_model, resolved_session = _resolve_bench_target(
         target, model_id, session_id
     )
@@ -1112,7 +1132,7 @@ def bench(
         parameters={"max_tokens": max_tokens},
         concurrency=concurrency,
         sweep=sweep_levels,
-        dry_run=dry_run,
+        dry_run=synthetic,
     )
     if sweep_levels:
         with _session() as db:
