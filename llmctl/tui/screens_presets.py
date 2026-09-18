@@ -339,15 +339,23 @@ class PresetsScreen(DataScreen):
                 reason = f"fleet preflight failed: {', '.join(result.fleet_failed)}"
             elif result.restart is not None and result.restart.error:
                 reason = result.restart.error
-            # Preflight stops ollama and Harbor before the restart is tried,
-            # and nothing rolls that back. Saying only "launch failed" leaves
-            # the operator believing the box is as they left it.
+            # Preflight stops ollama and Harbor before the restart is tried.
+            # The orchestrator rolls that back; say what it could not undo so
+            # the operator does not believe the box is as they left it.
             aftermath = ""
-            if result.fleet_stopped:
-                aftermath = (
-                    f"\nStill stopped: {esc(', '.join(result.fleet_stopped))}"
+            rollback = result.rollback
+            still_down = (
+                rollback.restart_failed if rollback is not None else result.fleet_stopped
+            )
+            if rollback is not None and rollback.restarted:
+                aftermath += f"\nStarted again: {esc(', '.join(rollback.restarted))}"
+            if still_down:
+                aftermath += (
+                    f"\nStill stopped: {esc(', '.join(still_down))}"
                     " — restart them or retry the launch."
                 )
+            if rollback is not None and rollback.env_restored is False:
+                aftermath += "\nPrevious env NOT restored — relaunch a known-good preset."
             self.app.notify(
                 f"[{C_ERR}]{label} failed[/]: {esc(reason)}{aftermath}",
                 severity="error",

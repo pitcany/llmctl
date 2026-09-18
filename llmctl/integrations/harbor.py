@@ -92,6 +92,32 @@ def stop_ollama_container(
     return StopOutcome.STOPPED
 
 
+def start_ollama_container(
+    *,
+    container: str = DEFAULT_OLLAMA_CONTAINER,
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+    logger: Callable[[str], None] = print,
+) -> bool:
+    """Start the Harbor Ollama container again; ``True`` when it is running.
+
+    The inverse of :func:`stop_ollama_container`, used to put the fleet back
+    after a vLLM launch that stopped the container and then failed.
+    """
+    if not is_docker_available(which):
+        return False
+    try:
+        result = _run(["docker", "start", container], runner, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        logger(f"  harbor: timed out starting {container}")
+        return False
+    if result.returncode != 0:
+        logger(f"  harbor: failed to start {container}: {result.stderr.strip()}")
+        return False
+    logger(f"  harbor: restarted {container}")
+    return True
+
+
 def webui_custom_models(
     *,
     container: str = DEFAULT_WEBUI_CONTAINER,

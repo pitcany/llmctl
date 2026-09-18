@@ -372,3 +372,162 @@ def test_hermes_verify_is_skipped_when_readiness_was_not_checked(tmp_path: Path)
 
     assert result.restart is not None and result.restart.ready is None
     assert result.hermes_status is None
+
+
+# --- rollback on a failed swap (FIXPLAN 2026-09-18 §1.1) ------------------
+
+
+class _Completed:
+    def __init__(self, returncode: int = 0, stdout: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = ""
+
+
+class _RecordingSystemctl:
+    """argv recorder; ``vllm-tp`` reads active so the rollback stops it."""
+
+    def __init__(self, *, fail_start: set[str] | None = None) -> None:
+        self.calls: list[list[str]] = []
+        self.fail_start = fail_start or set()
+
+    def __call__(self, argv: list[str]) -> _Completed:
+        self.calls.append(argv)
+        verb, unit = argv[-2], argv[-1]
+        if verb == "is-active":
+            return _Completed(stdout="active" if unit == "vllm-tp" else "inactive")
+        if verb == "start" and unit in self.fail_start:
+            return _Completed(returncode=1)
+        return _Completed()
+
+    def verbs(self) -> list[tuple[str, str]]:
+        return [(a[-2], a[-1]) for a in self.calls]
+
+
+class _EnvWritingAdapter(_AdapterStub):
+    """Writes the new env like the real adapter, then reports a failure."""
+
+    def __init__(self, env_file_path: Path, *, raises: bool = False, **kw: Any) -> None:
+        super().__init__(ready=False, **kw)
+        self.env_file_path = env_file_path
+        self.raises = raises
+
+    def restart_with_spec(self, spec: VLLMLaunchSpec, **kw: Any) -> ManagedRestartResult:
+        self.env_file_path.write_text("NEW-PRESET\n")
+        if self.raises:
+            raise RuntimeError("pre-start hook blew up")
+        return ManagedRestartResult(
+            env_path=self.env_file_path,
+            env_body="NEW-PRESET\n",
+            ready=False,
+            error="vLLM did not become ready within 300s",
+        )
+
+
+def _rollback_setup(
+    tmp_path: Path, *, raises: bool = False, fail_start: set[str] | None = None
+) -> tuple[Dependencies, dict[str, Any], _RecordingSystemctl, Path, list[str]]:
+    presets = tmp_path / "presets"
+    _write_preset(presets)
+    env = tmp_path / "vllm-tp.env"
+    env.write_text("OLD-PRESET\n")
+    adapter = _EnvWritingAdapter(env, raises=raises)
+    deps, log = _build_deps(
+        config_dir=presets,
+        adapter=adapter,
+        harbor_outcome=StopOutcome.STOPPED,
+        fleet_report=_FleetReport(stopped=["ollama", "vllm-tp"], skipped=[], failed=[]),
+    )
+    sysctl = _RecordingSystemctl(fail_start=fail_start)
+    deps.systemctl = SystemctlRunner(runner=sysctl)
+    harbor_started: list[str] = []
+    deps.harbor_start = lambda **kw: harbor_started.append(kw["container"]) or True
+    return deps, log, sysctl, env, harbor_started
+
+
+def test_failed_readiness_rolls_back_env_and_restarts_fleet(tmp_path: Path) -> None:
+    deps, log, sysctl, env, harbor_started = _rollback_setup(tmp_path)
+
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        deps=deps,
+    )
+
+    assert result.ok is False
+    assert env.read_text() == "OLD-PRESET\n"
+    rb = result.rollback
+    assert rb is not None and rb.clean
+    assert rb.env_restored is True
+    assert rb.tp_stopped is True
+    assert rb.restarted == ["ollama", "vllm-tp"]
+    assert harbor_started == ["harbor.ollama"]
+    # The half-started unit is stopped before the env is restored and the
+    # previous units are started, in preflight order.
+    assert sysctl.verbs()[-3:] == [("stop", "vllm-tp"), ("start", "ollama"), ("start", "vllm-tp")]
+    assert log["hermes_calls"] == []
+
+
+def test_adapter_exception_still_rolls_back(tmp_path: Path) -> None:
+    deps, _, _, env, _ = _rollback_setup(tmp_path, raises=True)
+
+    with pytest.raises(RuntimeError, match="blew up"):
+        start_vllm_tp(
+            "llama-3.3-70b",
+            managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+            deps=deps,
+        )
+
+    assert env.read_text() == "OLD-PRESET\n"
+
+
+def test_rollback_reports_units_it_could_not_start(tmp_path: Path) -> None:
+    deps, _, _, _, _ = _rollback_setup(tmp_path, fail_start={"ollama"})
+
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        deps=deps,
+    )
+
+    rb = result.rollback
+    assert rb is not None and not rb.clean
+    assert rb.restart_failed == ["ollama"]
+    assert rb.restarted == ["vllm-tp"]
+
+
+def test_partial_preflight_failure_restarts_what_it_stopped(tmp_path: Path) -> None:
+    _write_preset(tmp_path)
+    deps, log = _build_deps(
+        config_dir=tmp_path,
+        fleet_report=_FleetReport(stopped=["ollama"], skipped=[], failed=["vllm-tp"]),
+    )
+    sysctl = _RecordingSystemctl()
+    deps.systemctl = SystemctlRunner(runner=sysctl)
+
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        deps=deps,
+    )
+
+    assert result.rollback is not None
+    assert result.rollback.env_restored is None  # env was never written
+    assert result.rollback.restarted == ["ollama"]
+    assert ("stop", "vllm-tp") not in sysctl.verbs()
+    assert log["adapters_built"] == []
+
+
+def test_successful_launch_does_not_roll_back(tmp_path: Path) -> None:
+    _write_preset(tmp_path)
+    deps, _ = _build_deps(
+        config_dir=tmp_path,
+        fleet_report=_FleetReport(stopped=["ollama"], skipped=[], failed=[]),
+    )
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        deps=deps,
+    )
+    assert result.ok is True
+    assert result.rollback is None

@@ -706,6 +706,14 @@ def restart(
     if not session:
         raise typer.BadParameter(f"Session not found: {session_id}")
     if not _print_session_state(session, verb="Restarted"):
+        # The old process was terminated before the relaunch was attempted,
+        # so a failed relaunch means this session is serving nothing.
+        console.print(
+            "  [yellow]The previous process was stopped; nothing is serving "
+            f"this session.[/yellow]\n  next:\n    llmctl logs {session.id}"
+            f"  # why the relaunch failed\n    llmctl restart {session.id}"
+            "  # retry once fixed"
+        )
         raise typer.Exit(1)
 
 
@@ -1548,15 +1556,7 @@ def vllm_cmd(
             )
         if result.restart is not None and result.restart.error:
             console.print(f"  restart: {escape(result.restart.error)}")
-        if result.fleet_stopped:
-            # The launch stopped these to free VRAM and then failed, so they are
-            # still down. The TUI has always said so; the CLI discarded it, and
-            # an operator who did not know would just find ollama dead.
-            console.print(
-                f"  [yellow]still stopped:[/yellow] "
-                f"{escape(', '.join(result.fleet_stopped))}"
-                " — restart them or retry the launch."
-            )
+        _print_rollback(result, settings.managed_units.vllm_tp.unit_name)
         raise typer.Exit(1)
     if result.restart is not None and result.restart.ready is None:
         # --no-wait: the restart was issued and nobody probed /v1/models.
@@ -1571,6 +1571,52 @@ def vllm_cmd(
         f"[green]vLLM ready[/green] — serving {escape(result.spec.served_name)} "
         f"on port {result.spec.port}"
     )
+
+
+def _print_rollback(result: object, tp_unit: str) -> None:
+    """Say what a failed swap put back and what the operator must still do.
+
+    The orchestrator rolls back on failure (previous env restored, stopped
+    fleet units started again); anything it could not undo is printed as a
+    command to run, so a failed swap never silently leaves nothing serving.
+    """
+    rollback = getattr(result, "rollback", None)
+    stopped: list[str] = list(getattr(result, "fleet_stopped", []) or [])
+    todo: list[str] = []
+    if rollback is None:
+        if stopped:
+            console.print(
+                f"  [yellow]still stopped:[/yellow] {escape(', '.join(stopped))}"
+            )
+            todo += [f"sudo systemctl start {unit}" for unit in stopped]
+    else:
+        if rollback.env_restored:
+            console.print(f"  rollback: restored previous {escape(str(rollback.env_path))}")
+        elif rollback.env_restored is False:
+            console.print(
+                f"  [yellow]rollback: previous env NOT restored[/yellow] "
+                f"({escape(str(rollback.env_path))} holds the failed preset)"
+            )
+            todo.append("llmctl vllm <previous-preset>  # rewrite a known-good env")
+        if rollback.tp_stopped:
+            console.print(f"  rollback: stopped half-started {escape(tp_unit)}")
+        if rollback.restarted:
+            console.print(
+                f"  [green]rollback: started again:[/green] "
+                f"{escape(', '.join(rollback.restarted))}"
+            )
+        if rollback.restart_failed:
+            console.print(
+                f"  [red]rollback: could not start:[/red] "
+                f"{escape(', '.join(rollback.restart_failed))}"
+            )
+            todo += [f"sudo systemctl start {unit}" for unit in rollback.restart_failed]
+        if rollback.harbor_restarted is False:
+            todo.append("docker start harbor.ollama")
+    todo.append(f"journalctl -u {tp_unit} -n 80 --no-pager  # why the launch failed")
+    console.print("  next:")
+    for cmd in todo:
+        console.print(f"    {escape(cmd)}")
 
 
 @app.command("presets")

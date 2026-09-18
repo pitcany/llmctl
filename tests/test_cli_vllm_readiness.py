@@ -100,6 +100,29 @@ def test_failed_launch_says_what_was_left_stopped(monkeypatch) -> None:
     assert "ollama.service" in out.output
 
 
+def test_failed_launch_reports_rollback_and_next_commands(monkeypatch) -> None:
+    """After a rollback the CLI says what came back and what is still on the operator."""
+    from llmctl.services.vllm_orchestrator import RollbackReport
+
+    res = _result(False, error="vLLM did not become ready within 300s")
+    res.fleet_stopped = ["ollama", "vllm-tp"]
+    res.rollback = RollbackReport(
+        env_restored=True,
+        env_path=Path("/tmp/vllm-tp.env"),
+        tp_stopped=True,
+        restarted=["vllm-tp"],
+        restart_failed=["ollama"],
+    )
+
+    out = _invoke(monkeypatch, res)
+
+    assert out.exit_code == 1, out.output
+    assert "restored previous" in out.output
+    assert "started again: vllm-tp" in out.output
+    assert "sudo systemctl start ollama" in out.output
+    assert "journalctl -u vllm-tp" in out.output
+
+
 def test_fleet_preflight_failure_is_reported(monkeypatch) -> None:
     res = _result(None)
     res.fleet_failed = ["ollama.service"]

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from llmctl._fsutil import atomic_write_text
 from llmctl.adapters.vllm_systemd import ManagedRestartResult, VLLMSystemdAdapter
 from llmctl.config import (
     ManagedUnitConfig,
@@ -30,6 +31,7 @@ from llmctl.integrations.fleet import FleetRole, FleetUnitsConfig, preflight_sto
 from llmctl.integrations.harbor import (
     DEFAULT_OLLAMA_CONTAINER,
     StopOutcome,
+    start_ollama_container,
     stop_ollama_container,
 )
 from llmctl.integrations.hermes import (
@@ -81,6 +83,34 @@ class OrchestratorOptions:
     enable_harbor_preflight: bool = True
     enable_hermes_verify: bool = True
     hermes_provider: str = "vllm"
+    #: On a failed launch, put the env file and the stopped fleet back the
+    #: way they were (see :func:`_rollback`). Off only for tests/debugging.
+    rollback_on_failure: bool = True
+
+
+@dataclass
+class RollbackReport:
+    """What :func:`_rollback` managed to undo after a failed launch."""
+
+    #: ``True`` restored, ``False`` tried and failed, ``None`` untouched
+    #: (the failure happened before the env file was written).
+    env_restored: bool | None = None
+    env_path: Path | None = None
+    #: The TP unit was stopped because the failed launch left it half-up.
+    tp_stopped: bool = False
+    restarted: list[str] = field(default_factory=list)
+    restart_failed: list[str] = field(default_factory=list)
+    #: ``None`` when the Harbor container was not stopped by this launch.
+    harbor_restarted: bool | None = None
+
+    @property
+    def clean(self) -> bool:
+        """``True`` when everything this launch changed was put back."""
+        return (
+            self.env_restored is not False
+            and not self.restart_failed
+            and self.harbor_restarted is not False
+        )
 
 
 @dataclass
@@ -94,6 +124,7 @@ class OrchestratorResult:
     harbor_outcome: StopOutcome | None = None
     hermes_status: HermesStatus | None = None
     dry_run: bool = False
+    rollback: RollbackReport | None = None
 
     @property
     def ok(self) -> bool:
@@ -124,6 +155,7 @@ class Dependencies:
     adapter_factory: Callable[..., VLLMSystemdAdapter] = VLLMSystemdAdapter
     systemctl: SystemctlRunner | None = None
     harbor_stop: Callable[..., StopOutcome] = stop_ollama_container
+    harbor_start: Callable[..., bool] = start_ollama_container
     hermes_verify: Callable[..., HermesStatus] = verify_provider
     fleet_preflight: Callable[..., Any] = preflight_stop
     logger: Callable[[str], None] = print
@@ -282,6 +314,11 @@ def _run_lifecycle(
         result.fleet_stopped = list(report.stopped)
         result.fleet_failed = list(report.failed)
         if not report.all_clean:
+            # A partial preflight still stopped some units; put them back.
+            if options.rollback_on_failure and result.fleet_stopped:
+                result.rollback = _rollback(
+                    result, managed_unit, systemctl, deps, env_written=False
+                )
             return result
 
     if options.enable_harbor_preflight:
@@ -295,11 +332,42 @@ def _run_lifecycle(
         systemctl=systemctl,
         renderer=renderer,
     )
-    result.restart = adapter.restart_with_spec(
-        spec,
-        wait_for_ready=options.wait_for_ready,
-        timeout_s=options.timeout_s,
-    )
+    # Captured before the adapter overwrites it so a failed launch can put
+    # the previous preset back instead of leaving the new (broken) one on
+    # disk for the next `systemctl restart` to pick up.
+    env_path: Path | None = getattr(adapter, "env_file_path", None)
+    prior_env = _read_prior_env(env_path)
+
+    try:
+        result.restart = adapter.restart_with_spec(
+            spec,
+            wait_for_ready=options.wait_for_ready,
+            timeout_s=options.timeout_s,
+        )
+    except Exception:
+        if options.rollback_on_failure:
+            result.rollback = _rollback(
+                result,
+                managed_unit,
+                systemctl,
+                deps,
+                env_written=True,
+                env_path=env_path,
+                prior_env=prior_env,
+            )
+        raise
+
+    if options.rollback_on_failure and not result.ok:
+        result.rollback = _rollback(
+            result,
+            managed_unit,
+            systemctl,
+            deps,
+            env_written=True,
+            env_path=env_path,
+            prior_env=prior_env,
+        )
+        return result
 
     if options.enable_hermes_verify and (
         result.restart is not None and result.restart.ready
@@ -313,3 +381,89 @@ def _run_lifecycle(
         )
 
     return result
+
+
+#: Sentinel for "the env file did not exist before the launch".
+_ABSENT = object()
+
+
+def _read_prior_env(env_path: Path | None) -> str | object | None:
+    """Return the env file body, :data:`_ABSENT`, or ``None`` if unknown."""
+    if env_path is None:
+        return None
+    try:
+        return env_path.read_text()
+    except FileNotFoundError:
+        return _ABSENT
+    except OSError:
+        return None
+
+
+def _rollback(
+    result: OrchestratorResult,
+    managed_unit: ManagedUnitConfig,
+    systemctl: SystemctlRunner,
+    deps: Dependencies,
+    *,
+    env_written: bool,
+    env_path: Path | None = None,
+    prior_env: str | object | None = None,
+) -> RollbackReport:
+    """Best-effort undo of a failed launch; every step runs and is reported.
+
+    Order: stop the half-started TP unit (it holds the VRAM the fleet needs
+    and is running the spec we are about to un-write), restore the previous
+    env file, then start every unit the preflight stopped in its original
+    order. If ``vllm-tp`` itself was among them, starting it relaunches the
+    *previous* preset from the restored env — the state before the swap.
+    """
+    log = deps.logger
+    report = RollbackReport(env_path=env_path)
+    log("  rollback: launch failed, restoring the previous state")
+
+    if env_written:
+        try:
+            report.tp_stopped = systemctl.try_stop(managed_unit.unit_name)
+            if report.tp_stopped:
+                log(f"  rollback: stopped {managed_unit.unit_name}")
+        except Exception as exc:  # noqa: BLE001 - rollback must keep going
+            log(f"  rollback: could not stop {managed_unit.unit_name}: {exc}")
+
+        if env_path is not None and prior_env is not None:
+            try:
+                if prior_env is _ABSENT:
+                    env_path.unlink(missing_ok=True)
+                else:
+                    atomic_write_text(env_path, str(prior_env))
+                report.env_restored = True
+                log(f"  rollback: restored {env_path}")
+            except OSError as exc:
+                report.env_restored = False
+                log(f"  rollback: FAILED to restore {env_path}: {exc}")
+        else:
+            report.env_restored = False
+            log("  rollback: previous env file unknown; not restored")
+
+    for unit in result.fleet_stopped:
+        try:
+            ok = systemctl.start(unit).ok
+        except Exception as exc:  # noqa: BLE001 - rollback must keep going
+            ok = False
+            log(f"  rollback: could not start {unit}: {exc}")
+        if ok:
+            report.restarted.append(unit)
+            log(f"  rollback: started {unit}")
+        else:
+            report.restart_failed.append(unit)
+            log(f"  rollback: FAILED to start {unit}")
+
+    if result.harbor_outcome is StopOutcome.STOPPED:
+        try:
+            report.harbor_restarted = bool(
+                deps.harbor_start(container=DEFAULT_OLLAMA_CONTAINER, logger=log)
+            )
+        except Exception as exc:  # noqa: BLE001 - rollback must keep going
+            report.harbor_restarted = False
+            log(f"  rollback: could not start {DEFAULT_OLLAMA_CONTAINER}: {exc}")
+
+    return report
