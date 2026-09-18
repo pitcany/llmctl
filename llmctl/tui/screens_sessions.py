@@ -37,6 +37,8 @@ class SessionsScreen(DataScreen):
     def __init__(self) -> None:
         super().__init__()
         self._ids: list[str] = []
+        #: Parallel to ``_ids``: (kind, systemd unit) per row.
+        self._kinds: list[tuple[str, str | None]] = []
         self._tail_id: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -49,7 +51,7 @@ class SessionsScreen(DataScreen):
             id="sessions-title",
         )
         table: DataTable[str] = DataTable(id="sessions-table", cursor_type="row")
-        table.add_columns("ID", "Runtime", "Status", "PID", "Port", "GPUs", "Endpoint")
+        table.add_columns("ID", "Kind", "Runtime", "Status", "PID", "Port", "GPUs", "Endpoint")
         yield table
         yield Static(
             f"Session log  [{C_MUTED}](highlight a row to tail)[/]",
@@ -73,13 +75,17 @@ class SessionsScreen(DataScreen):
         cursor = table.cursor_row
         table.clear()
         self._ids = []
+        self._kinds = []
         for session in sessions:
             sid = session.id or ""
             self._ids.append(sid)
+            kind = session.kind.value
+            self._kinds.append((kind, session.systemd_unit))
             color = _STATUS_COLOR.get(session.status.value, C_MUTED)
             gpus = ",".join(str(g) for g in session.gpu_ids) or "cpu"
             table.add_row(
                 sid[:8],
+                kind if kind == "owned" else f"[{C_WARN}]{kind}[/]",
                 session.runtime.value,
                 f"[{color}]{session.status.value}[/]",
                 str(session.pid or "-"),
@@ -88,7 +94,7 @@ class SessionsScreen(DataScreen):
                 esc(session.endpoint_url or "-"),
             )
         if not sessions:
-            table.add_row("-", "-", "no sessions yet", "-", "-", "-", "-")
+            table.add_row("-", "-", "-", "no sessions yet", "-", "-", "-", "-")
         if 0 <= cursor < len(self._ids):
             table.move_cursor(row=cursor)
 
@@ -155,6 +161,20 @@ class SessionsScreen(DataScreen):
         session_id = self._selected_id()
         if not session_id:
             self.app.notify("No session selected.", severity="warning")
+            return
+        row = self._ids.index(session_id)
+        kind, unit = self._kinds[row] if row < len(self._kinds) else ("owned", None)
+        if kind == "adopted":
+            # The service refuses to terminate an adopted session (systemd owns
+            # the process), so a "will terminate" modal here was a promise the
+            # confirm button could never keep.
+            where = f"systemd unit {unit}" if unit else "an external manager"
+            self.app.notify(
+                f"Session {session_id[:8]} is adopted: {where} owns its process. "
+                f"{verb} it from the Units screen (u).",
+                title=f"Can't {verb.lower()} here",
+                severity="warning",
+            )
             return
 
         def _on_close(confirmed: bool | None) -> None:

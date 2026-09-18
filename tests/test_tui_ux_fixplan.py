@@ -122,3 +122,50 @@ def test_d_goes_to_dashboard_from_every_crud_screen(tmp_path, monkeypatch) -> No
 
     asyncio.run(_run())
     assert landed == [True, True, True, True]
+
+
+# --- P0 #3: `x` on an adopted session never offers to terminate it -----------
+
+
+def _adopted_session():
+    from llmctl.db import RuntimeName, SessionKind, SessionStatus
+    from llmctl.schemas import Session
+
+    return Session(
+        id="adopted-1234567",
+        model_id=None,
+        runtime=RuntimeName.VLLM,
+        status=SessionStatus.RUNNING,
+        kind=SessionKind.ADOPTED,
+        systemd_unit="vllm-tp.service",
+        endpoint_url="http://127.0.0.1:8003",
+    )
+
+
+def test_stop_on_adopted_session_redirects_to_units(tmp_path, monkeypatch) -> None:
+    from llmctl._testing import isolate_tui
+    from llmctl.tui import _data
+    from llmctl.tui._modals import ConfirmActionModal
+    from llmctl.tui.app import MissionControlApp
+
+    isolate_tui(monkeypatch, tmp_path)
+    monkeypatch.setattr(_data, "get_sessions", lambda: [_adopted_session()])
+    monkeypatch.setattr(_data, "tail_log", lambda _id: "")
+    seen: dict = {}
+
+    async def _run() -> None:
+        app = MissionControlApp()
+        async with app.run_test() as pilot:
+            await pilot.press("s")
+            for _ in range(20):
+                await pilot.pause(0.05)
+                if app.screen._ids:  # type: ignore[attr-defined]
+                    break
+            await pilot.press("x")
+            await pilot.pause()
+            seen["modal"] = isinstance(app.screen, ConfirmActionModal)
+            seen["notes"] = [str(n.message) for n in app._notifications]
+
+    asyncio.run(_run())
+    assert not seen["modal"]
+    assert any("Units screen" in n and "vllm-tp" in n for n in seen["notes"]), seen["notes"]
