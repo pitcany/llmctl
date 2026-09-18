@@ -448,7 +448,12 @@ def start(
         bool, typer.Option(help="Plan only; do not launch a process.")
     ] = False,
 ) -> None:
-    """Launch a model session (or plan it with --dry-run)."""
+    """Launch a model session (or plan it with --dry-run).
+
+    --dry-run records a PLANNED session row without launching (visible in
+    `sessions`, purged by `cleanup --remove-stale`). To look without writing
+    anything, use `plan` (verdict + command) or `preview` (adds env/health).
+    """
     from llmctl.services.scheduler import SchedulerError
 
     with _session() as db:
@@ -476,7 +481,11 @@ def plan(
     ] = "auto",
     cpu: Annotated[bool, typer.Option(help="Plan CPU-only mode (hide GPUs).")] = False,
 ) -> None:
-    """Print the launch plan for a model without launching anything."""
+    """Print the launch plan and allow/refuse verdict; writes nothing.
+
+    Siblings: `preview` shows the same plan plus env vars, health URL and
+    notes; `start --dry-run` also records a PLANNED session row.
+    """
     with _session() as db:
         request = _build_start_request(db, model_id, profile, gpus, cpu, force=False, dry_run=True)
         launch_plan = SessionService(db).plan(request)
@@ -558,7 +567,14 @@ def cleanup(
         ),
     ] = False,
 ) -> None:
-    """Detect dead sessions, free their ports, and optionally purge stale records."""
+    """Mark dead sessions and report free ports; --remove-stale deletes stale rows.
+
+    Always writes to the session DB: runs a reconcile that marks sessions
+    whose process/endpoint is gone as STOPPED. Never kills a process and
+    never frees a port -- it only reports which stale sessions' ports are
+    already free. With --remove-stale it also deletes STOPPED/FAILED rows and
+    leftover `start --dry-run` plans.
+    """
     with _session() as db:
         report = SessionService(db).cleanup(remove_stale=remove_stale)
     console.print(
@@ -569,7 +585,9 @@ def cleanup(
     )
     freed = report["freed_ports"]
     if freed:
-        console.print(f"[cyan]Freed ports:[/cyan] {', '.join(map(str, freed))}")
+        console.print(
+            f"[cyan]Ports already free (stale sessions):[/cyan] {', '.join(map(str, freed))}"
+        )
 
 
 @app.command()

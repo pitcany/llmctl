@@ -734,6 +734,8 @@ def preview_cmd(
 
     Prints backend, command, environment, selected GPUs, expected VRAM,
     context length, port, and health endpoint without starting anything.
+    Writes nothing. `plan` is the terse form with an allow/refuse verdict;
+    `start --dry-run` also records a PLANNED session row.
     """
     settings = load_settings()
     init_db(settings.database_url)
@@ -877,7 +879,13 @@ def register(app: typer.Typer) -> None:
     app.add_typer(model_app, name="model")
     app.add_typer(profile_app, name="profile")
     app.command("profiles", help="List launch profiles.")(profiles_cmd)
-    app.command("preview", help="Dry-run a launch plan for MODEL_ID.")(preview_cmd)
+    app.command(
+        "preview",
+        help=(
+            "Show the launch plan for MODEL_ID incl. env and health URL; writes "
+            "nothing (`plan` = terse + verdict, `start --dry-run` = records a row)."
+        ),
+    )(preview_cmd)
     app.command("export-registry", help="Write registry bundle to JSON.")(
         export_registry_cmd
     )
