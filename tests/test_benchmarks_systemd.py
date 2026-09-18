@@ -539,3 +539,28 @@ def test_install_systemd_all(tmp_path: Path, monkeypatch) -> None:
     assert "llmctl-session-" in result.stdout
 
 
+
+
+# --- systemd quoting in generated session units (FIXPLAN §2.4) ------------
+
+
+def test_environment_values_are_quoted_for_systemd() -> None:
+    from llmctl.services.systemd import _environment_line
+
+    line = _environment_line("EXTRA", 'a b %h "q" \\x')
+    # One quoted assignment; % doubled so systemd does not expand %h.
+    assert line == 'Environment="EXTRA=a b %%h \\"q\\" \\\\x"'
+
+
+def test_environment_value_with_newline_is_refused() -> None:
+    from llmctl.services.systemd import _environment_line
+
+    with pytest.raises(ValueError, match="newline"):
+        _environment_line("X", "a\nExecStart=/bin/evil")
+
+
+def test_exec_start_quotes_model_id_and_escapes_systemd_expansion() -> None:
+    from llmctl.services.systemd import _exec_command
+
+    cmd = _exec_command(["llmctl", "start", "org/model name", "--x=$HOME", "50%"])
+    assert cmd == "llmctl start 'org/model name' '--x=$$HOME' 50%%"

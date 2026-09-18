@@ -1394,7 +1394,7 @@ def generate_systemd_session(
         raise typer.BadParameter(f"Session not found: {session_id}")
     try:
         unit = render_session_unit(session, user=user)
-    except AdoptError as exc:
+    except (AdoptError, ValueError) as exc:
         console.print(f"[red]generate-systemd-session refused:[/red] {escape(str(exc))}")
         raise typer.Exit(1) from exc
     _emit_unit(unit, output)
@@ -1460,7 +1460,12 @@ def install_systemd(
             return
         console.print(f"[cyan]Persisting {len(owned)} owned session(s).[/cyan]")
         for session in owned:
-            _install(render_session_unit(session, user=user))
+            try:
+                unit = render_session_unit(session, user=user)
+            except ValueError as exc:
+                console.print(f"[red]Skip session[/red] {session.id}: {escape(str(exc))}")
+                continue
+            _install(unit)
         return
 
     if session_id:
@@ -1470,7 +1475,7 @@ def install_systemd(
             raise typer.BadParameter(f"Session not found: {session_id}")
         try:
             unit = render_session_unit(session, user=user)
-        except AdoptError as exc:
+        except (AdoptError, ValueError) as exc:
             console.print(f"[red]install-systemd refused:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
     else:
