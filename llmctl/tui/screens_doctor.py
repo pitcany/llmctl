@@ -22,7 +22,7 @@ class DoctorScreen(DataScreen):
     def __init__(self) -> None:
         super().__init__()
         #: Row index -> (backend_name, install_command)
-        self._rows: list[tuple[str, str]] = []
+        self._rows: list[tuple[str, str, bool]] = []
 
     def compose(self) -> ComposeResult:
         """Compose the doctor diagnostics table with screen-scoped chrome."""
@@ -64,11 +64,12 @@ class DoctorScreen(DataScreen):
                 status_cell = f"[{C_ERR}]missing[/]"
                 command = _data.install_command_for(backend)
                 detail = (
-                    f"[{C_MUTED}]$ {command}[/]"
+                    f"[{C_MUTED}]$ {esc(command)}[/]"
                     if command
-                    else f"[{C_MUTED}]{_data.BACKEND_INSTALL_HINTS.get(backend, '')}[/]"
+                    else f"[{C_MUTED}]manual install: "
+                    f"{esc(_data.BACKEND_INSTALL_HINTS.get(backend, ''))}[/]"
                 )
-            self._rows.append((backend, command))
+            self._rows.append((backend, command, available))
             table.add_row(backend, esc(binary), status_cell, detail)
         if 0 <= cursor < len(self._rows):
             table.move_cursor(row=cursor)
@@ -105,11 +106,20 @@ class DoctorScreen(DataScreen):
         if not (0 <= row < len(self._rows)):
             self.app.notify("No backend selected.", severity="warning")
             return
-        backend, command = self._rows[row]
-        if not command:
+        backend, command, available = self._rows[row]
+        if available:
             self.app.notify(
                 f"'{backend}' is already available - nothing to install.",
                 title="Doctor",
+            )
+            return
+        if not command:
+            hint = _data.BACKEND_INSTALL_HINTS.get(backend, "")
+            self.app.notify(
+                esc(f"No one-line install for '{backend}' on this OS; manual install "
+                    f"required. {hint}"),
+                title="Doctor",
+                severity="warning",
             )
             return
         self.app.copy_to_clipboard(command)

@@ -101,18 +101,34 @@ BACKEND_INSTALL_HINTS: dict[str, str] = {
 #: never needs installing).
 BACKEND_INSTALL_COMMANDS: dict[str, str] = {
     "vllm": "pip install vllm",
+    "ollama": "curl -fsSL https://ollama.com/install.sh | sh",
+}
+
+#: macOS-only additions. Homebrew is not a Linux default, and on this
+#: workstation llama.cpp is built from source and LM Studio is an AppImage,
+#: so copying ``brew install ...`` there handed the operator a dead command.
+_MACOS_INSTALL_COMMANDS: dict[str, str] = {
     "llama_cpp": "brew install llama.cpp",
     "lmstudio": "brew install --cask lm-studio",
-    "ollama": "curl -fsSL https://ollama.com/install.sh | sh",
 }
 
 #: Maps the backend name from ``detect_backends`` to its model runtime value.
 _BACKEND_TO_RUNTIME = {"python": "python_script"}
 
 
-def install_command_for(backend: str) -> str:
-    """Return a copy-pasteable install command for ``backend`` (or empty)."""
-    return BACKEND_INSTALL_COMMANDS.get(backend, "")
+def install_command_for(backend: str, system: str | None = None) -> str:
+    """Return a copy-pasteable install command for ``backend`` on this OS.
+
+    Empty means there is no one-liner here (manual install; see
+    :data:`BACKEND_INSTALL_HINTS`). ``system`` defaults to
+    ``platform.system()`` and exists for tests.
+    """
+    import platform
+
+    commands = dict(BACKEND_INSTALL_COMMANDS)
+    if (system or platform.system()) == "Darwin":
+        commands.update(_MACOS_INSTALL_COMMANDS)
+    return commands.get(backend, "")
 
 
 def get_backend_map() -> dict[str, bool]:

@@ -238,7 +238,7 @@ def test_doctor_copy_install_to_clipboard(temp_db: Settings) -> None:
             from textual.widgets import DataTable
 
             table = screen.query_one("#doctor-table", DataTable)
-            target = next(i for i, (b, _) in enumerate(screen._rows) if b == "vllm")
+            target = next(i for i, (b, *_) in enumerate(screen._rows) if b == "vllm")
             table.move_cursor(row=target)
             await pilot.press("c")
             await pilot.pause()

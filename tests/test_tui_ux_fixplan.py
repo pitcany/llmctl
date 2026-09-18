@@ -202,3 +202,15 @@ def test_units_render_unknown_when_systemd_unavailable() -> None:
 
     asyncio.run(_run())
     assert "unknown" in cells["active"]
+
+
+# --- P0 #6: no brew commands off macOS ----------------------------------------
+
+
+def test_install_commands_are_platform_aware() -> None:
+    from llmctl.tui import _data
+
+    assert _data.install_command_for("llama_cpp", system="Linux") == ""
+    assert _data.install_command_for("lmstudio", system="Linux") == ""
+    assert _data.install_command_for("llama_cpp", system="Darwin").startswith("brew")
+    assert _data.install_command_for("ollama", system="Linux").startswith("curl")
