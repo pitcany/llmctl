@@ -21,6 +21,7 @@ from llmctl.config import load_settings
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.tui import _data
 from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
+from llmctl.tui._modals import TextViewModal
 from llmctl.tui._modals_registry import ConfirmDelete, DeleteModal
 
 PROBE_TIMEOUT_S = 1.5
@@ -58,6 +59,7 @@ class UnitsScreen(DataScreen):
         ("ctrl+r", "refresh_now", "Refresh"),
         ("a", "start_unit", "Start"),
         ("x", "stop_unit", "Stop"),
+        ("j", "show_journal", "Journal"),
     ]
 
     def __init__(
@@ -83,7 +85,7 @@ class UnitsScreen(DataScreen):
         yield Header()
         yield Static(
             f"Managed Units  -  [{C_MUTED}]probes every unit every 3s; "
-            f"ctrl+r = refresh now[/]",
+            f"j = the unit's journal (its logs), ctrl+r = refresh now[/]",
             classes="panel safe",
             id="units-title",
         )
@@ -254,6 +256,19 @@ class UnitsScreen(DataScreen):
             ),
             _on_close,
         )
+
+    def action_show_journal(self) -> None:
+        """Show the selected unit's recent journal lines (read-only)."""
+        row = self._selected_row()
+        if row is None:
+            self.app.notify("No unit selected.", severity="warning")
+            return
+
+        def _after(text: Any) -> None:
+            body = str(text or "").strip() or "(no journal entries for this unit)"
+            self.app.push_screen(TextViewModal(f"journalctl -u {row.unit_name}", body))
+
+        self.run_action_worker(lambda: _data.unit_log_tail(row.unit_name), _after)
 
     def _is_active_safe(self, unit: str, sysctl: SystemctlRunner) -> bool | None:
         """Return systemd's verdict, or ``None`` when systemd cannot be asked.

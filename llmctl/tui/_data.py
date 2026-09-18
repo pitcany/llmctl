@@ -253,6 +253,14 @@ def start_managed_unit(unit_name: str) -> tuple[str, bool]:
         return SessionService(db).start_unit(unit_name)
 
 
+def unit_log_tail(unit_name: str, lines: int = 60) -> str:
+    """Last journal lines of a unit (system scope, then user scope). Read-only."""
+    with db_session() as db:
+        from llmctl.services.sessions import SessionService
+
+        return SessionService(db).unit_log_tail(unit_name, lines)
+
+
 def stop_managed_unit(unit_name: str) -> str:
     """Stop a managed systemd unit in whichever scope owns it.
 

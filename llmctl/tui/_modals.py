@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
@@ -108,4 +108,29 @@ class LaunchPlanModal(ModalScreen[str | None]):
 
     def action_dismiss_cancel(self) -> None:
         """Dismiss the modal as cancelled."""
+        self.dismiss(None)
+
+
+class TextViewModal(ModalScreen[None]):
+    """Read-only scrollable text (a unit's journal, the key help).
+
+    ``body`` is rendered literally unless ``markup`` is set: journal lines
+    carry ``[rank0]:`` and ``[/INST]`` brackets that would otherwise parse.
+    """
+
+    BINDINGS = [("escape", "close", "Close"), ("q", "close", "Close")]
+
+    def __init__(self, title: str, body: str, *, markup: bool = False) -> None:
+        super().__init__()
+        self._title = title
+        self._body = body
+        self._markup = markup
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="textview-dialog", classes="panel"):
+            yield Static(f"[b]{esc(self._title)}[/b]  [{C_MUTED}](esc to close)[/]")
+            with VerticalScroll(id="textview-scroll"):
+                yield Static(self._body if self._markup else esc(self._body), id="textview-body")
+
+    def action_close(self) -> None:
         self.dismiss(None)

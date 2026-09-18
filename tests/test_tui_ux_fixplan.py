@@ -248,3 +248,43 @@ def test_doctor_summary_has_no_raw_booleans() -> None:
     text = rendered["text"]
     assert "True" not in text and "False" not in text, text
     assert "CPU-only" in text and "not detected" in text
+
+
+# --- P1 #9: unit journals are reachable; "Logs" is honestly "Events" -----------
+
+
+def test_units_j_opens_the_unit_journal(monkeypatch) -> None:
+    from llmctl.tui import _data
+    from llmctl.tui._modals import TextViewModal
+    from llmctl.tui.screens_units import UnitsScreen, _UnitRow
+
+    row = _UnitRow(
+        role="vllm-tp", unit_name="vllm-tp", env_path="/x", env_exists=False,
+        port=8003, is_active=True, served=["m"], role_kind="managed",
+    )
+    monkeypatch.setattr(_data, "unit_log_tail", lambda unit, lines=60: f"[rank0]: {unit} up")
+    screen = UnitsScreen()
+    screen.fetch = lambda: [row]  # type: ignore[method-assign]
+    seen: dict = {}
+
+    class _Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(screen)
+
+    async def _run() -> None:
+        app = _Host()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.press("j")
+            for _ in range(20):
+                await pilot.pause(0.05)
+                if isinstance(app.screen, TextViewModal):
+                    break
+            seen["modal"] = isinstance(app.screen, TextViewModal)
+            if seen["modal"]:
+                seen["body"] = str(app.screen.query_one("#textview-body", Static).render())
+
+    asyncio.run(_run())
+    assert seen["modal"]
+    assert "[rank0]: vllm-tp up" in seen["body"]  # brackets shown literally

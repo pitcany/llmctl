@@ -89,6 +89,10 @@ class MissionControlApp(App[None]):
     #plan-buttons { height: auto; margin-top: 1; }
     #plan-buttons Button { width: 100%; margin-bottom: 1; }
 
+    TextViewModal { align: center middle; }
+    #textview-dialog { width: 90%; height: 80%; background: #0c1a1c; }
+    #textview-scroll { height: 1fr; }
+
     ConfirmActionModal { align: center middle; }
     #confirm-dialog { width: 70; height: auto; max-height: 90%; background: #0c1a1c; }
     #confirm-consequence { margin-top: 1; color: #d8f3f0; }
@@ -111,7 +115,7 @@ class MissionControlApp(App[None]):
         Binding("f", "show_profiles", "Profiles", show=True),
         Binding("s", "show_sessions", "Sessions", show=True),
         Binding("g", "show_gpus", "GPUs", show=True),
-        Binding("l", "show_logs", "Logs", show=True),
+        Binding("l", "show_logs", "Events", show=True),
         Binding("o", "show_doctor", "Doctor", show=True),
         Binding("b", "show_benchmarks", "Benchmarks", show=True),
         Binding("r", "refresh", "Refresh", show=True),

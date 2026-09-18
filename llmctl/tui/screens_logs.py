@@ -1,4 +1,9 @@
-"""Events/logs TUI screen with live audit trail."""
+"""Events screen: llmctl's own audit trail (not process logs).
+
+Retitled from "Logs" (TUI-UX-FIXPLAN P1 #9): it never showed a process log.
+Those live on the Sessions screen (log pane) and, for systemd units, behind
+``j`` on the Units screen.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +30,12 @@ class LogsScreen(DataScreen):
     def compose(self) -> ComposeResult:
         """Compose the events table with screen-scoped chrome."""
         yield Header()
-        yield Static("Events / Logs  -  live audit trail", classes="panel safe", id="logs-title")
+        yield Static(
+            f"Events  -  llmctl's audit trail  [{C_MUTED}]process logs: Sessions "
+            f"(log pane) · unit journals: Units, then j[/]",
+            classes="panel safe",
+            id="logs-title",
+        )
         table: DataTable[str] = DataTable(id="logs-table", cursor_type="row")
         table.add_columns("Time", "Level", "Category", "Message")
         yield table

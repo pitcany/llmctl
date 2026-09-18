@@ -607,6 +607,10 @@ class SessionService:
             return self._journal_tail(record.systemd_unit, lines)
         return ""
 
+    def unit_log_tail(self, unit: str, lines: int = 60) -> str:
+        """Public: the last ``lines`` journal lines of ``unit`` (either scope)."""
+        return self._journal_tail(unit, lines)
+
     def _journal_tail(self, unit: str, lines: int) -> str:
         """Tail ``unit``'s journal, trying the system scope then user scope.
 
