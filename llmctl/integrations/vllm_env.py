@@ -50,6 +50,10 @@ class VLLMLaunchSpec(BaseModel):
     gpu_memory_utilization: float = Field(default=0.85, gt=0.0, le=1.0)
     quantization: str | None = None
     kv_cache_type: str | None = None
+    #: vLLM --dtype; None lets the launcher (and vLLM) pick per model.
+    dtype: str | None = None
+    #: None keeps the launcher default (VLLM_TRUST_REMOTE=1, i.e. ON).
+    trust_remote_code: bool | None = None
     tool_parser: str | None = None
     max_num_seqs: int | None = None
     max_batched_tokens: int | None = None
@@ -125,6 +129,10 @@ def render_vllm_env(spec: VLLMLaunchSpec) -> str:
         lines.append(f"VLLM_QUANT={spec.quantization}")
     if spec.kv_cache_type:
         lines.append(f"VLLM_KV_DTYPE={spec.kv_cache_type}")
+    if spec.dtype:
+        lines.append(f"VLLM_DTYPE={spec.dtype}")
+    if spec.trust_remote_code is not None:
+        lines.append(f"VLLM_TRUST_REMOTE={1 if spec.trust_remote_code else 0}")
     if spec.tool_parser:
         lines.append(f"VLLM_TOOL_PARSER={spec.tool_parser}")
     if spec.max_num_seqs is not None:

@@ -34,40 +34,44 @@ class Model(BaseModel):
 
     family: str | None = None
     param_count_b: float | None = None
+    #: Catalogue metadata (from the model's config.json); never passed to vLLM.
     architectures: tuple[str, ...] = Field(default_factory=tuple)
 
     max_num_seqs: int | None = Field(
         default=None,
-        description="Maximum concurrent sequences; None falls back to renderer defaults.",
+        description="Maximum concurrent sequences; None falls back to settings.yaml vllm.defaults.",
     )
     max_num_batched_tokens: int | None = Field(
         default=None,
         description=(
-            "vLLM --max-num-batched-tokens; None falls back to renderer "
-            "defaults. Hybrid-Mamba models (e.g. qwen3_5_moe) must raise "
+            "vLLM --max-num-batched-tokens; None falls back to settings.yaml "
+            "vllm.defaults. Hybrid-Mamba models (e.g. qwen3_5_moe) must raise "
             "this above the chunked-prefill default so the Mamba cache "
             "block_size fits inside one prefill batch."
         ),
     )
     gpu_memory_utilization: float | None = Field(
         default=None,
-        description="vLLM GPU memory fraction; None falls back to renderer defaults.",
+        description="vLLM GPU memory fraction; None falls back to settings.yaml vllm.defaults.",
     )
     kv_cache_dtype: str | None = Field(
         default=None,
-        description="vLLM KV cache dtype; None falls back to renderer defaults.",
+        description="vLLM KV cache dtype; None or \"auto\" omits the flag (vLLM picks).",
     )
     dtype: str | None = Field(
         default=None,
-        description="Model dtype override; None falls back to renderer defaults.",
+        description="vLLM --dtype (VLLM_DTYPE); None lets vLLM pick per model.",
     )
     trust_remote_code: bool | None = Field(
         default=None,
-        description="Whether to trust remote model code; None falls back to renderer defaults.",
+        description=(
+            "VLLM_TRUST_REMOTE; None keeps the launcher default, which is ON "
+            "(--trust-remote-code). false turns it off."
+        ),
     )
     host: str | None = Field(
         default=None,
-        description="Bind host; None falls back to renderer defaults.",
+        description="Bind host; None falls back to settings.yaml vllm.defaults.",
     )
     port: int | None = Field(
         default=None,
@@ -119,8 +123,13 @@ class Model(BaseModel):
 
     tq: bool | None = Field(
         default=None,
-        description="TurboQuant preference; None falls back to renderer defaults.",
+        description=(
+            "VESTIGIAL: not read at launch. TurboQuant is chosen per launch with "
+            "`llmctl swap --tq/--no-tq`. Kept so existing YAMLs still validate."
+        ),
     )
+    #: Extra names for this preset, resolved by llm-models-config's ``load``;
+    #: llmctl itself only matches ``alias``. Not a launch input.
     shortcuts: tuple[str, ...] = Field(default_factory=tuple)
 
     schema_version: int = SCHEMA_VERSION

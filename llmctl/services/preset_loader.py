@@ -114,8 +114,12 @@ def model_to_launch_spec(
       ``--enable-expert-parallel``).
     * ``python_root``, ``spec_config`` — passed straight through; both
       are preset-only concerns the defaults have no opinion on.
-    * ``tq`` — ignored here; TurboQuant override is wired in Phase 4
-      via a separate CLI flag and resolves to ``kv_cache_type``.
+    * ``dtype`` / ``trust_remote_code`` — rendered as ``VLLM_DTYPE`` /
+      ``VLLM_TRUST_REMOTE``; ``None`` leaves the launcher default (auto
+      dtype, remote code ON).
+    * ``tq``, ``architectures``, ``shortcuts`` — not launch inputs. TurboQuant
+      is chosen by the ``--tq/--no-tq`` CLI flag (resolves to
+      ``kv_cache_type``); the other two are catalogue metadata.
     """
     defaults = defaults or VLLMDefaultsConfig()
 
@@ -148,6 +152,8 @@ def model_to_launch_spec(
         quantization=model.vllm_quantization_flag,
         kv_cache_type=kv_cache_type,
         tool_parser=model.tool_parser,
+        dtype=model.dtype,
+        trust_remote_code=model.trust_remote_code,
         python_root=model.python_root,
         max_num_seqs=(
             model.max_num_seqs

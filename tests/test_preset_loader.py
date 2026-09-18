@@ -345,3 +345,36 @@ def test_port_override_wins_over_defaults(isolated_preset_dir: Path) -> None:
         port_override=9999,
     )
     assert spec.port == 9999
+
+
+_BASE_PRESET = """
+alias: {alias}
+served_name: {alias}
+model_id: org/m
+quantization: awq
+vllm_quantization_flag: awq_marlin
+tensor_parallel_size: 2
+max_model_len: 32768
+"""
+
+
+@pytest.mark.parametrize(
+    ("extra", "present", "absent"),
+    [
+        ("dtype: bfloat16\n", ["VLLM_DTYPE=bfloat16"], []),
+        ("trust_remote_code: true\n", ["VLLM_TRUST_REMOTE=1"], []),
+        ("trust_remote_code: false\n", ["VLLM_TRUST_REMOTE=0"], []),
+        # null / absent leave the launcher default (remote code ON) alone.
+        ("trust_remote_code: null\ndtype: null\n", [], ["VLLM_TRUST_REMOTE", "VLLM_DTYPE"]),
+    ],
+)
+def test_dtype_and_trust_remote_code_reach_the_env(
+    isolated_preset_dir: Path, extra: str, present: list[str], absent: list[str]
+) -> None:
+    """FIXPLAN 2026-09-18 §2.3: TUI-editable fields must not be silently ignored."""
+    _write_preset(isolated_preset_dir, "dt", _BASE_PRESET.format(alias="dt") + extra)
+    body = render_vllm_env(load_presets(config_dir=isolated_preset_dir)["dt"])
+    for line in present:
+        assert line in body.splitlines()
+    for key in absent:
+        assert key not in body
