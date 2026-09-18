@@ -43,13 +43,15 @@ class ProfilesScreen(DataScreen):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static(
-            f"Profiles  -  [{C_MUTED}]a = add, e = edit, c = clone, del = delete[/]",
+            f"Profiles  -  reusable launch parameters (TP, context, GPU memory, dtype) "
+            f"that Models and `llmctl start --profile` apply to a model\n"
+            f"[{C_MUTED}]a = add, e = edit, c = clone, del = delete[/]",
             classes="panel safe",
             id="profiles-title",
         )
         table: DataTable[str] = DataTable(id="profiles-table", cursor_type="row")
         table.add_columns(
-            "ID", "Name", "Backend", "TP", "max_model_len", "Description"
+            "ID", "Name", "Backend", "TP", "Max context", "Description"
         )
         yield table
         yield Footer()
