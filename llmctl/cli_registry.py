@@ -19,7 +19,9 @@ Top-level commands added:
 
 from __future__ import annotations
 
+import functools
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -48,6 +50,26 @@ from llmctl.services.registry import RegistryService
 from llmctl.services.sessions import SessionService
 
 console = Console()
+#: Notes that must not pollute stdout (``--json`` consumers read stdout).
+err_console = Console(stderr=True)
+
+
+def deprecated_alias(fn: Callable[..., Any], old: str, new: str) -> Callable[..., Any]:
+    """Wrap ``fn`` so the old command name keeps working but says what replaced it.
+
+    Typer reads the wrapped signature (``functools.wraps`` sets
+    ``__wrapped__``), so options and help are identical to the canonical
+    command. The note goes to stderr.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        err_console.print(
+            f"[dim]note: `llmctl {old}` is now `llmctl {new}`; the old name keeps working.[/dim]"
+        )
+        return fn(*args, **kwargs)
+
+    return wrapper
 
 model_app = typer.Typer(
     name="model",
@@ -873,7 +895,10 @@ def register(app: typer.Typer) -> None:
     """
     app.add_typer(model_app, name="model")
     app.add_typer(profile_app, name="profile")
-    app.command("profiles", help="List launch profiles.")(profiles_cmd)
+    profile_app.command("list", help="List launch profiles.")(profiles_cmd)
+    app.command("profiles", hidden=True, help="Deprecated: use `profile list`.")(
+        deprecated_alias(profiles_cmd, "profiles", "profile list")
+    )
     app.command(
         "preview",
         help=(

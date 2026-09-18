@@ -38,3 +38,19 @@ def test_swap_switch_and_vllm_are_the_same_command() -> None:
         res = runner.invoke(app, [name, "--help"])
         assert res.exit_code == 0, (name, res.output)
         assert "MUTATES" in res.output, name
+
+
+# --- noun-surface cleanup (FIXPLAN Phase 3) ----------------------------------
+
+
+def test_canonical_list_commands_exist() -> None:
+    for argv in (["model", "list", "--help"], ["profile", "list", "--help"]):
+        res = runner.invoke(app, argv)
+        assert res.exit_code == 0, (argv, res.output)
+
+
+def test_deprecated_twins_are_hidden_but_still_work() -> None:
+    listing = runner.invoke(app, ["--help"]).output
+    for old in ("add-model", "delete-model", "profiles"):
+        assert f" {old} " not in listing, old
+        assert runner.invoke(app, [old, "--help"]).exit_code == 0, old

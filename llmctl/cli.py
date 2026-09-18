@@ -164,7 +164,6 @@ def scan(
     )
 
 
-@app.command("models")
 def models_cmd(json_out: _JSON_OPT = False) -> None:
     """List registered models."""
     with _session() as db:
@@ -187,6 +186,12 @@ def models_cmd(json_out: _JSON_OPT = False) -> None:
             model.status.value,
         )
     console.print(table)
+
+
+cli_registry.model_app.command("list", help="List registered models.")(models_cmd)
+app.command("models", hidden=True, help="Deprecated: use `model list`.")(
+    cli_registry.deprecated_alias(models_cmd, "models", "model list")
+)
 
 
 @app.command()
@@ -274,7 +279,7 @@ def sessions_cmd(
     console.print(table)
 
 
-@app.command("add-model")
+@app.command("add-model", hidden=True)
 def add_model(
     name: Annotated[str, typer.Option(help="Display name for the model.")],
     runtime: Annotated[
@@ -287,7 +292,11 @@ def add_model(
         float | None, typer.Option(help="Estimated VRAM (GB) for scheduling.")
     ] = None,
 ) -> None:
-    """Register a model record."""
+    """Deprecated: use `llmctl model add` (non-interactive when all flags are given)."""
+    cli_registry.err_console.print(
+        "[dim]note: `llmctl add-model` is deprecated; use `llmctl model add` "
+        "(--backend instead of --runtime).[/dim]"
+    )
     payload = ModelCreate(
         name=name,
         runtime=runtime,
@@ -300,14 +309,17 @@ def add_model(
     console.print(f"[green]Registered model[/green] {escape(str(model.name))} ({model.id})")
 
 
-@app.command("delete-model")
+@app.command("delete-model", hidden=True)
 def delete_model(
     model_id: Annotated[str, typer.Argument(help="Model ID to soft-delete.")],
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
     ] = False,
 ) -> None:
-    """Soft-delete a model record."""
+    """Deprecated: use `llmctl model delete` (also accepts a name)."""
+    cli_registry.err_console.print(
+        "[dim]note: `llmctl delete-model` is deprecated; use `llmctl model delete`.[/dim]"
+    )
     settings = load_settings()
     _confirm_state_change(
         f"Soft-delete model {model_id}",
@@ -509,7 +521,7 @@ def plan(
 
 @app.command()
 def doctor(json_out: _JSON_OPT = False) -> None:
-    """Inspect the environment: storage, runtimes, GPUs, sessions, drift.
+    """Full environment checkup with remediation hints: storage, runtimes, GPUs, drift.
 
     Read-only. Groups results into passed checks, warnings, and failures
     with suggested remediation. Exits 1 when any check fails outright.
@@ -982,7 +994,12 @@ def runtimes_inspect(
 
 @app.command()
 def health(json_out: _JSON_OPT = False) -> None:
-    """Show overall and per-runtime health."""
+    """Live runtime probe: is each backend (vllm, ollama, ...) answering right now?
+
+    Siblings: `status` = managed systemd units; `doctor` = whole-environment
+    checkup with fixes; `validate` = recorded paths still exist;
+    `router-status` = the llmctl gateway's routing table.
+    """
     from llmctl.services.health import HealthService
 
     with _session() as db:
@@ -1112,7 +1129,7 @@ def bench(
         ),
     ] = None,
 ) -> None:
-    """Benchmark a model or session against the configured runtime.
+    """Run a benchmark against a model or session (history: `llmctl benchmarks`).
 
     Pass the positional ``TARGET`` as either a model ID or session ID --
     llmctl will look it up automatically. On live failures the result is
@@ -1247,7 +1264,7 @@ def benchmarks_cmd(
     ] = None,
     limit: Annotated[int, typer.Option(help="Maximum rows to return.")] = 20,
 ) -> None:
-    """List benchmark history (newest first) or show one benchmark in detail."""
+    """List benchmark history (newest first) or show one in detail (run one: `llmctl bench`)."""
     with _session() as db:
         service = BenchmarkService(db)
         if benchmark_id:
@@ -1598,7 +1615,7 @@ def vllm_cmd(
 ) -> None:
     """Swap the TP-fleet vLLM unit onto PRESET (``swap``; ``vllm`` is the old name)."""
     if ctx.info_name == "vllm":
-        console.print(
+        cli_registry.err_console.print(
             "[dim]note: `llmctl vllm` is now `llmctl swap` (same command); "
             "the old name keeps working.[/dim]"
         )
@@ -1741,7 +1758,11 @@ def presets_cmd(json_out: _JSON_OPT = False) -> None:
 
 @app.command("status")
 def status_cmd(json_out: _JSON_OPT = False) -> None:
-    """Quick overview of managed units: config, live state, and served models."""
+    """Managed systemd units (vllm-tp, ...): unit state, env config, served models.
+
+    Siblings: `health` = per-runtime live probe; `doctor` = full checkup;
+    `validate` = recorded paths still exist; `router-status` = gateway routes.
+    """
     from llmctl.services.units import unit_rows
 
     # Shared with the TUI Units screen -- see services/units.py. The JSON shape
@@ -1784,7 +1805,7 @@ def status_cmd(json_out: _JSON_OPT = False) -> None:
 
 @app.command("validate")
 def validate_cmd(json_out: _JSON_OPT = False) -> None:
-    """Check that everything llmctl records still exists where it records it.
+    """Registry integrity: does everything llmctl records still exist where recorded?
 
     Four read-only checks: preset ``model_id`` targets, registry row
     paths, dangling symlinks in the configured model roots, and managed
@@ -1876,7 +1897,11 @@ def gateway_cmd(
 
 @app.command("router-status")
 def router_status_cmd() -> None:
-    """Probe the gateway and show its current routing view."""
+    """The llmctl gateway (`llmctl gateway`): is it up, and which alias routes where?
+
+    Not the LiteLLM gateway on :4000. Siblings: `health`, `status`, `doctor`,
+    `validate`.
+    """
     import httpx
 
     settings = load_settings()
