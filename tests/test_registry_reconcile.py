@@ -223,3 +223,21 @@ def test_prune_missing_runtime_filter(db: Session) -> None:
     assert count == 1
     assert _status(db, "oll") == ModelStatus.DELETED
     assert _status(db, "lms") == ModelStatus.MISSING
+
+
+def test_scan_batches_commits_but_still_dedupes_within_a_runtime(db: Session) -> None:
+    """One commit per runtime (FIXPLAN Phase 3); a repeated entry in one pass
+    must still resolve to the pending row via autoflush, not insert twice."""
+    commits = {"n": 0}
+    real_commit = db.commit
+
+    def counting_commit() -> None:
+        commits["n"] += 1
+        real_commit()
+
+    db.commit = counting_commit  # type: ignore[method-assign]
+    _scan(db, healthy=True, models=[_model("a"), _model("b"), _model("a")])
+
+    rows = db.exec(select(ModelRecord)).all()
+    assert sorted(r.name for r in rows) == ["a", "b"]
+    assert commits["n"] <= 2  # the batch + at most one reconcile commit

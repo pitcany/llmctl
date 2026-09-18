@@ -92,8 +92,11 @@ class RegistryService:
                 reachable, discovered = run_sync(self._probe(adapter))
             except Exception:
                 reachable, discovered = False, []
+            # One commit per runtime, not per row: a scan of a few hundred
+            # Ollama/HF entries was a few hundred fsyncs.
             for model in discovered:
-                self._upsert(model)
+                self._upsert(model, commit=False)
+            self.db.commit()
             if reachable:
                 self._reconcile_missing(runtime, discovered)
         return self.list_models()
@@ -459,7 +462,7 @@ class RegistryService:
         except OSError:
             return False
 
-    def _upsert(self, model: Model) -> None:
+    def _upsert(self, model: Model, *, commit: bool = True) -> None:
         """Insert a discovered model or refresh an existing record.
 
         Identity is ``(runtime, source, host)``, so the same model served from
@@ -497,7 +500,8 @@ class RegistryService:
             existing.metadata_json = {**existing.metadata_json, **model.metadata}
             existing.updated_at = utcnow()
             self.db.add(existing)
-            self.db.commit()
+            if commit:
+                self.db.commit()
             return
         record = ModelRecord(
             name=model.name,
@@ -514,4 +518,5 @@ class RegistryService:
             active=True,
         )
         self.db.add(record)
-        self.db.commit()
+        if commit:
+            self.db.commit()
