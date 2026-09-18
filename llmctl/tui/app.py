@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from textual.app import App, ComposeResult
+from collections.abc import Iterable
+
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
+from textual.screen import Screen
 
 from llmctl.tui._modals import ConfirmActionModal
 from llmctl.tui.screens_benchmarks import BenchmarksScreen
@@ -19,6 +22,21 @@ from llmctl.tui.screens_units import UnitsScreen
 
 #: Seconds between automatic data refreshes of the active screen.
 REFRESH_INTERVAL = 3.0
+
+#: (screen name, palette title, what it shows, key). One table drives both
+#: the command palette and the help modal so they cannot drift apart.
+SCREENS: tuple[tuple[str, str, str, str], ...] = (
+    ("dashboard", "Dashboard", "Overview: runtimes, sessions, GPUs at a glance", "d"),
+    ("presets", "Presets", "vLLM presets; launch one onto the TP fleet", "p"),
+    ("units", "Units", "Managed systemd units and what they serve", "u"),
+    ("models", "Models", "Registered models (add, edit, clone, delete)", "m"),
+    ("profiles", "Profiles", "Reusable launch parameters", "f"),
+    ("sessions", "Sessions", "Running and adopted sessions", "s"),
+    ("gpus", "GPUs", "Per-GPU utilization, memory, temperature", "g"),
+    ("logs", "Events", "Recent llmctl events", "l"),
+    ("doctor", "Doctor", "Backend install state and fixes", "o"),
+    ("benchmarks", "Benchmarks", "Benchmark history", "b"),
+)
 
 
 class MissionControlApp(App[None]):
@@ -126,6 +144,19 @@ class MissionControlApp(App[None]):
         self.install_screen(BenchmarksScreen(), name="benchmarks")
         self.push_screen("dashboard")
         self.set_interval(REFRESH_INTERVAL, self._tick_refresh)
+
+    def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
+        """Command palette: every screen is reachable by name ("Go to ...")."""
+        yield from super().get_system_commands(screen)
+        for name, title, help_text, key in SCREENS:
+            yield SystemCommand(
+                f"Go to {title}",
+                f"{help_text}  (key: {key})",
+                lambda name=name: self._switch(name),
+            )
+        yield SystemCommand(
+            "Refresh", "Reload the current screen now  (key: r)", self.action_refresh
+        )
 
     def _tick_refresh(self) -> None:
         """Refresh the active screen's data if it supports it.

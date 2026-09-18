@@ -76,3 +76,24 @@ def test_garbage_optional_number_is_refused_not_dropped() -> None:
     sink, state = _drive(PresetFormModal(), steps)
     assert sink == []
     assert "max_num_seqs" in state["error"]
+
+
+# --- P0 #2: the command palette lists screens ---------------------------------
+
+
+def test_palette_offers_go_to_dashboard(tmp_path, monkeypatch) -> None:
+    from llmctl._testing import isolate_tui
+    from llmctl.tui.app import MissionControlApp
+
+    isolate_tui(monkeypatch, tmp_path)
+    titles: list[str] = []
+
+    async def _run() -> None:
+        app = MissionControlApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            titles.extend(c.title for c in app.get_system_commands(app.screen))
+
+    asyncio.run(_run())
+    assert "Go to Dashboard" in titles
+    assert sum(t.startswith("Go to ") for t in titles) == 10
