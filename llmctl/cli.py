@@ -1336,7 +1336,7 @@ def benchmarks_cmd(
 
 @app.command()
 def tui() -> None:
-    """Launch the Textual TUI skeleton."""
+    """Launch the interactive TUI (the primary UI: presets, units, sessions, GPUs)."""
     from llmctl.tui.app import MissionControlApp
 
     MissionControlApp().run()

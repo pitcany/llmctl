@@ -283,7 +283,8 @@ class ModelsScreen(DataScreen):
         def _on_close(payload: ModelCreate | ModelUpdate | None) -> None:
             if isinstance(payload, ModelCreate):
                 self.run_action_worker(
-                    lambda: _data.add_model(payload), self._after_mutation
+                    lambda: _data.add_model(payload),
+                    self._after(f"Added model {payload.name}."),
                 )
 
         self.app.push_screen(ModelFormModal(), _on_close)
@@ -299,7 +300,7 @@ class ModelsScreen(DataScreen):
             if isinstance(payload, ModelUpdate):
                 self.run_action_worker(
                     lambda: _data.update_model(model.id, payload),
-                    self._after_mutation,
+                    self._after(f"Saved model {payload.name or model.name}."),
                 )
 
         self.app.push_screen(ModelFormModal(model), _on_close)
@@ -316,7 +317,7 @@ class ModelsScreen(DataScreen):
                 return
             self.run_action_worker(
                 lambda: _data.clone_model(payload.source_id, payload.new_name),
-                self._after_mutation,
+                self._after(f"Cloned {model.name} as {payload.new_name}."),
             )
 
         self.app.push_screen(CloneModal(model.id, model.name), _on_close)
@@ -335,7 +336,10 @@ class ModelsScreen(DataScreen):
                 lambda: _data.delete_model(
                     model.id, delete_files=payload.delete_files
                 ),
-                self._after_mutation,
+                self._after(
+                    f"Deleted model {model.name}"
+                    + (" and its files." if payload.delete_files else ".")
+                ),
             )
 
         self.app.push_screen(
@@ -349,6 +353,22 @@ class ModelsScreen(DataScreen):
             _on_close,
         )
 
-    def _after_mutation(self, _result: Any) -> None:
-        """Refresh the table after add/edit/delete/clone completes."""
-        self.refresh_data()
+    def _after(self, success: str) -> Any:
+        """Callback for add/edit/clone/delete: say what happened, then refresh.
+
+        Presets always confirmed a mutation; Models refreshed silently, so a
+        save looked the same as nothing happening. A ``None``/``False``
+        result is the service reporting the row was not there.
+        """
+
+        def _done(result: Any) -> None:
+            if result is None or result is False:
+                self.app.notify(
+                    "Nothing changed: the model was not found (deleted elsewhere?).",
+                    severity="warning",
+                )
+            else:
+                self.app.notify(esc(success), title="Models")
+            self.refresh_data()
+
+        return _done

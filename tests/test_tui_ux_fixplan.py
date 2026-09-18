@@ -544,3 +544,26 @@ def test_enter_action_is_the_screens_not_the_tables(tmp_path, monkeypatch) -> No
     assert found == {
         "p": ("Launch", True), "m": ("Plan/Launch", True), "b": ("Re-run", True)
     }
+
+
+# --- P2 #20: Models confirms mutations -----------------------------------------
+
+
+def test_models_after_callback_toasts_success_and_not_found() -> None:
+    from llmctl.tui.screens_models import ModelsScreen
+
+    notes: list[tuple[str, str | None]] = []
+    screen = ModelsScreen()
+
+    class _App:
+        def notify(self, msg, **kw):  # type: ignore[no-untyped-def]
+            notes.append((str(msg), kw.get("severity")))
+
+    screen.refresh_data = lambda: None  # type: ignore[method-assign]
+    import unittest.mock as um
+
+    with um.patch.object(type(screen), "app", new_callable=um.PropertyMock, return_value=_App()):
+        screen._after("Added model m.")(object())
+        screen._after("Deleted model m.")(False)
+    assert notes[0] == ("Added model m.", None)
+    assert notes[1][1] == "warning"
