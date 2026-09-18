@@ -128,9 +128,15 @@ def test_runtimes_inspect_unknown_is_usage_error(isolated_env) -> None:
 
 
 def test_models_and_sessions_json(isolated_env) -> None:
-    result = runner.invoke(app, ["models", "--json"])
+    result = runner.invoke(app, ["model", "list", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == []
+
+    # The deprecated spelling still works; its note goes to stderr only.
+    result = runner.invoke(app, ["models", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == []
+    assert "model list" in result.stderr
 
     result = runner.invoke(app, ["sessions", "--no-fresh", "--json"])
     assert result.exit_code == 0, result.output

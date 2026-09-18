@@ -34,7 +34,7 @@ class TestCLICommands:
         result = runner.invoke(cli_app, ["--help"])
         assert result.exit_code == 0
         required_commands = [
-            "scan", "models", "gpus", "sessions", "add-model", "delete-model",
+            "scan", "model", "profile", "gpus", "sessions",
             "start", "stop", "restart", "logs", "bench", "tui", "serve", "generate-systemd"
         ]
         for cmd in required_commands:
