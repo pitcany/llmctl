@@ -27,6 +27,7 @@ from typing import Annotated, Any
 
 import typer
 import yaml
+from pydantic import ValidationError
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
@@ -836,8 +837,21 @@ def import_registry_cmd(
     """Read a registry bundle and merge it into the local database."""
     if not in_path.exists():
         raise typer.BadParameter(f"File not found: {in_path}")
-    data = json.loads(in_path.read_text())
-    bundle = RegistryExport.model_validate(data)
+    try:
+        data = json.loads(in_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(
+            f"{in_path} is not valid JSON (line {exc.lineno}, column {exc.colno}): {exc.msg}"
+        ) from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise typer.BadParameter(f"Cannot read {in_path}: {exc}") from exc
+    try:
+        bundle = RegistryExport.model_validate(data)
+    except ValidationError as exc:
+        raise typer.BadParameter(
+            f"{in_path} is not a registry bundle ({exc.error_count()} problem(s)): "
+            f"{exc.errors()[0]['loc']} {exc.errors()[0]['msg']}"
+        ) from exc
     added_models = 0
     added_profiles = 0
     with _session() as db:

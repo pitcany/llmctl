@@ -361,3 +361,17 @@ def test_model_add_persists_notes(tmp_path, monkeypatch) -> None:
         row = db.exec(select(ModelRecord).where(ModelRecord.name == "noted")).first()
         assert row is not None
         assert row.notes == "started deliberately; unit stays disabled"
+
+
+@pytest.mark.parametrize("body", ["{not json", '{"models": "nope"}'])
+def test_import_registry_bad_file_is_a_usage_error(tmp_path, body: str) -> None:
+    """FIXPLAN Phase 3: no raw JSONDecodeError / ValidationError traceback."""
+    from typer.testing import CliRunner
+
+    from llmctl.cli import app
+
+    bad = tmp_path / "bundle.json"
+    bad.write_text(body)
+    res = CliRunner().invoke(app, ["import-registry", str(bad)])
+    assert res.exit_code == 2, res.output
+    assert res.exception is None or isinstance(res.exception, SystemExit)
