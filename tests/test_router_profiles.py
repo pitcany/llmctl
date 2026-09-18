@@ -10,6 +10,11 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
+import pytest
+from typer.testing import CliRunner
+
+from llmctl.cli import app
+from llmctl.services import router_profiles
 from llmctl.services.router_profiles import (
     check_profiles,
     diff_env,
@@ -130,3 +135,39 @@ def test_merge_drops_removed_keys_and_appends_new_ones() -> None:
 
     assert merged == "# keep\nA=1\n\n# b\nB=3\nNEW=y\n"
     assert diff_env(merged, rendered) == {}
+
+
+def test_quoted_value_matches_like_systemd_reads_it() -> None:
+    # systemd EnvironmentFile= drops quotes around a whole value.
+    assert diff_env('A="x y"\nB=\'1\'\n', "A=x y\nB=1\n") == {}
+    assert merge_env('A="x y"\n', "A=x y\n") == 'A="x y"\n'  # left as written
+
+
+def test_inline_comment_is_drift_because_systemd_keeps_it() -> None:
+    # systemd passes "0.85  # note" through verbatim; vLLM would get that string.
+    current = "# history\nVLLM_GPU_MEM=0.85  # note\n"
+
+    assert diff_env(current, "VLLM_GPU_MEM=0.85\n") == {
+        "VLLM_GPU_MEM": ("0.85  # note", "0.85")
+    }
+    assert merge_env(current, "VLLM_GPU_MEM=0.85\n") == "# history\nVLLM_GPU_MEM=0.85\n"
+
+
+def test_write_cannot_fix_an_unmatched_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    presets, services, router = _setup(tmp_path)
+    _write_router(router, services, [("b2", "nobody-serves-this", "vllm-tp.env.b2")])
+    real = router_profiles.check_profiles
+    monkeypatch.setattr(
+        router_profiles,
+        "check_profiles",
+        lambda **kw: real(**kw, config_dir=presets, router_config=router),
+    )
+
+    result = CliRunner().invoke(app, ["router-profiles", "--write"])
+
+    assert result.exit_code == 1
+    assert "no llmctl preset serves 'nobody-serves-this'" in result.output
+    assert "--write" not in result.output  # no hint that --write would fix it
+    assert not (services / "vllm-tp.env.b2").exists()

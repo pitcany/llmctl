@@ -78,13 +78,28 @@ def load_profile_backends(path: Path | None = None) -> list[ProfileBackend]:
     return found
 
 
+def _value(raw: str) -> str:
+    """An assignment's value as systemd's ``EnvironmentFile=`` reads it.
+
+    vllm-tp reads the active env through systemd, which drops quotes around a
+    whole value, so ``A="x"`` and ``A=x`` compare equal. It does NOT strip a
+    trailing ``# ...``: ``A=0.85  # note`` reaches vLLM as ``0.85  # note``.
+    Such a line therefore stays drift and ``--write`` fixes it, even though
+    llm-router's own ``_profile_var`` strips the comment and reads it as fine.
+    """
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
 def parse_env(text: str) -> dict[str, str]:
     """``KEY=VALUE`` lines of an env file, in order (the first of a repeated key wins)."""
     values: dict[str, str] = {}
     for line in text.splitlines():
         match = _ASSIGN.match(line)
         if match and match.group(1) not in values:
-            values[match.group(1)] = match.group(2).strip()
+            values[match.group(1)] = _value(match.group(2))
     return values
 
 
@@ -117,7 +132,7 @@ def merge_env(current: str, rendered: str) -> str:
         if key not in want or key in seen:
             continue
         seen.add(key)
-        out.append(line if match.group(2).strip() == want[key] else f"{key}={want[key]}")
+        out.append(line if _value(match.group(2)) == want[key] else f"{key}={want[key]}")
     out.extend(f"{key}={value}" for key, value in want.items() if key not in seen)
     return "\n".join(out) + "\n"
 
