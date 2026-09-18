@@ -49,7 +49,7 @@ class BenchmarksScreen(DataScreen):
         yield Header()
         chrome = (
             f"Benchmarks  -  [{C_MUTED}]n = new run, enter = re-run, "
-            f"c = baseline, x = clear baseline, d = delete[/]"
+            f"c = baseline, x = clear baseline, del = delete[/]"
         )
         if self._model_filter:
             chrome += f"  [{C_MUTED}]filter: model={self._model_filter}[/]"

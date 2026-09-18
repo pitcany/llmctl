@@ -43,7 +43,7 @@ class ProfilesScreen(DataScreen):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static(
-            f"Profiles  -  [{C_MUTED}]a = add, e = edit, c = clone, d = delete[/]",
+            f"Profiles  -  [{C_MUTED}]a = add, e = edit, c = clone, del = delete[/]",
             classes="panel safe",
             id="profiles-title",
         )

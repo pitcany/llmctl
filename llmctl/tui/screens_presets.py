@@ -86,7 +86,7 @@ class PresetsScreen(DataScreen):
         yield Header()
         yield Static(
             f"Presets  -  [{C_MUTED}]enter = launch, a = add, e = edit, "
-            f"c = clone, d = delete, ctrl+r = refresh[/]",
+            f"c = clone, del = delete, ctrl+r = refresh[/]",
             classes="panel safe",
             id="presets-title",
         )
