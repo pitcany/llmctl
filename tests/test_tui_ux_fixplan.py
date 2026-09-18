@@ -424,3 +424,21 @@ def test_edit_asks_before_suspending_into_the_editor(tmp_path, monkeypatch) -> N
 
     asyncio.run(_run())
     assert seen["asked"] and not seen["ran_before_confirm"]
+
+
+# --- P1 #13 / P3 #21: GPU rows ---------------------------------------------------
+
+
+def test_gpu_cells_use_units_and_dash_for_unknowns() -> None:
+    from llmctl.schemas import GPUInfo
+    from llmctl.tui.screens_gpu import gpu_row_cells
+
+    full = GPUInfo(
+        index=0, name="RTX 5090", memory_used_mb=12288, memory_total_mb=32768,
+        utilization_gpu_percent=40, temperature_c=55, power_draw_watts=220.4,
+    )
+    cells = gpu_row_cells(full)
+    assert cells[2] == "12.0 / 32.0 GiB" and cells[4] == "55 °C" and cells[5] == "220 W"
+
+    empty = GPUInfo(index=1, name="?")
+    assert gpu_row_cells(empty)[2:6] == ("—", "—", "—", "—")
