@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+from pydantic import ValidationError
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
@@ -122,24 +123,61 @@ class PresetLaunchModal(ModalScreen[PresetLaunchTarget | None]):
         self.dismiss(None)
 
 
-def _opt_int(text: str) -> int | None:
+def _opt_int(text: str, label: str = "value") -> int | None:
+    """Blank -> None; anything else must parse, or the form refuses it.
+
+    Garbage used to become ``None`` silently, i.e. "use the default" -- the
+    operator typed a number, saw no error, and got something else.
+    """
     text = text.strip()
     if not text:
         return None
     try:
         return int(text)
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a whole number (got {text!r})") from exc
 
 
-def _opt_float(text: str) -> float | None:
+def _opt_float(text: str, label: str = "value") -> float | None:
+    """Blank -> None; anything else must parse (see :func:`_opt_int`)."""
     text = text.strip()
     if not text:
         return None
     try:
         return float(text)
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a number (got {text!r})") from exc
+
+
+#: Schema field -> the words the form uses for it.
+_FIELD_LABELS = {
+    "alias": "Alias",
+    "served_name": "Served name",
+    "model_id": "Model id",
+    "tensor_parallel_size": "TP (tensor_parallel_size)",
+    "max_model_len": "max_model_len",
+    "gpu_memory_utilization": "GPU memory utilization",
+    "max_num_seqs": "max_num_seqs",
+    "port": "Port",
+    "quantization": "Quantization",
+}
+
+
+def humanize_validation_error(exc: ValidationError) -> str:
+    """One short sentence per invalid field, e.g. ``TP ...: must be in 1..8``.
+
+    Pydantic's ``str()`` carries ``[type=value_error, input_value=99, ...]``
+    and a docs URL. Rendered as-is it is unreadable, and its brackets are
+    Rich markup: unescaped they crashed the whole app.
+    """
+    lines: list[str] = []
+    for err in exc.errors():
+        field = str(err["loc"][0]) if err.get("loc") else "preset"
+        label = _FIELD_LABELS.get(field, field)
+        msg = str(err.get("msg", "invalid"))
+        msg = msg.removeprefix("Value error, ").removeprefix("Assertion failed, ")
+        lines.append(f"{label}: {msg}")
+    return "\n".join(lines) or "invalid preset"
 
 
 def _opt_str(text: str) -> str | None:
@@ -211,7 +249,7 @@ class PresetFormModal(ModalScreen[Model | None]):
             yield Label("max_num_seqs (optional)")
             yield Input(value="", id="preset-maxseqs")
 
-            yield Label("gpu_memory_utilization (0, 1])")
+            yield Label("gpu_memory_utilization, 0 < x <= 1 (optional)")
             yield Input(value="", id="preset-gpuutil")
 
             yield Label("kv_cache_dtype (e.g. fp8, fp16; blank = auto)")
@@ -256,11 +294,14 @@ class PresetFormModal(ModalScreen[Model | None]):
             return
         try:
             model = self._build_model()
-        except PresetSchemaError as exc:
-            self._show_error(str(exc))
-            return
-        except ValueError as exc:
-            self._show_error(str(exc))
+        except (PresetSchemaError, ValueError) as exc:
+            # The schema re-raises pydantic's ValidationError as
+            # PresetSchemaError(str(exc)) with the original as __cause__.
+            cause = exc if isinstance(exc, ValidationError) else exc.__cause__
+            if isinstance(cause, ValidationError):
+                self._show_error(humanize_validation_error(cause))
+            else:
+                self._show_error(str(exc))
             return
         self.dismiss(model)
 
@@ -296,16 +337,20 @@ class PresetFormModal(ModalScreen[Model | None]):
             tensor_parallel_size=tp,
             max_model_len=max_len,
             family=_opt_str(self.query_one("#preset-family", Input).value),
-            param_count_b=_opt_float(self.query_one("#preset-params", Input).value),
-            max_num_seqs=_opt_int(self.query_one("#preset-maxseqs", Input).value),
+            param_count_b=_opt_float(
+                self.query_one("#preset-params", Input).value, "param_count_b"
+            ),
+            max_num_seqs=_opt_int(
+                self.query_one("#preset-maxseqs", Input).value, "max_num_seqs"
+            ),
             gpu_memory_utilization=_opt_float(
-                self.query_one("#preset-gpuutil", Input).value
+                self.query_one("#preset-gpuutil", Input).value, "gpu_memory_utilization"
             ),
             kv_cache_dtype=_opt_str(self.query_one("#preset-kvdtype", Input).value),
             dtype=_opt_str(self.query_one("#preset-dtype", Input).value),
             trust_remote_code=_opt_bool(self.query_one("#preset-trc", Select).value),
             host=_opt_str(self.query_one("#preset-host", Input).value),
-            port=_opt_int(self.query_one("#preset-port", Input).value),
+            port=_opt_int(self.query_one("#preset-port", Input).value, "port"),
             tool_parser=_opt_str(self.query_one("#preset-tool", Input).value),
             reasoning_parser=_opt_str(
                 self.query_one("#preset-reasoning", Input).value
@@ -315,8 +360,8 @@ class PresetFormModal(ModalScreen[Model | None]):
 
     def _show_error(self, message: str) -> None:
         widget = self.query_one("#preset-form-error", Static)
-        widget.update(f"[{C_ERR}]{message}[/]")
-        self.app.notify(message, severity="error", title="Preset invalid")
+        widget.update(f"[{C_ERR}]{esc(message)}[/]")
+        self.app.notify(esc(message), severity="error", title="Preset invalid")
 
     def action_cancel(self) -> None:
         self.dismiss(None)
