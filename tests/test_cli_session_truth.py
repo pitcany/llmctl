@@ -175,6 +175,7 @@ def test_restart_starting_without_pid_omits_the_pid() -> None:
     assert "is starting" in res.output
     assert "pid=None" not in res.output
 
+
 # --- stop ---------------------------------------------------------------------
 
 
@@ -202,3 +203,22 @@ def test_stop_clean_is_unchanged() -> None:
 
     assert res.exit_code == 0, res.output
     assert "stopped" in res.output.lower()
+
+
+# --- start exit code (FIXPLAN 2026-09-18 Phase 3) ----------------------------
+
+
+@pytest.mark.parametrize(
+    ("status", "code"), [(SessionStatus.FAILED, 1), (SessionStatus.RUNNING, 0)]
+)
+def test_start_exit_code_reflects_the_launch(monkeypatch, status, code) -> None:
+    class _StartStub(_StubService):
+        def start(self, request):
+            return _session(status, error="boom", pid=1, endpoint_url="http://x:1")
+
+    monkeypatch.setattr(cli, "SessionService", _StartStub)
+    monkeypatch.setattr(cli, "_build_start_request", lambda *a, **k: object())
+
+    res = CliRunner().invoke(cli.app, ["start", "m1"])
+
+    assert res.exit_code == code, res.output

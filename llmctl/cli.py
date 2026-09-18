@@ -470,9 +470,11 @@ def start(
             raise typer.BadParameter(str(exc)) from exc
     if session.launch_plan is not None:
         _print_plan_warnings(session.launch_plan)
-    # Exit code deliberately unchanged here: `start` has always returned 0 on a
-    # failed launch and scripts may depend on it. `restart` is new behaviour.
-    _print_session_state(session, verb="Started")
+    # Exit 1 on a failed launch, like `restart`. It used to return 0 (kept for
+    # scripts that might depend on it; none on this box did), which also hid
+    # failures from the generated systemd units' Restart=on-failure.
+    if not _print_session_state(session, verb="Started"):
+        raise typer.Exit(1)
 
 
 @app.command()
