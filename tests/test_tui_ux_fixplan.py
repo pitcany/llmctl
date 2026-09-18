@@ -484,3 +484,38 @@ def test_units_restart_is_confirmed_then_runs(monkeypatch) -> None:
     asyncio.run(_run())
     assert seen["modal"] and seen["before"] == []
     assert restarted == ["vllm-tp"]
+
+
+# --- P2 #16 / #18: help modal, ctrl+c hint --------------------------------------
+
+
+def test_help_modal_lists_global_and_screen_keys(tmp_path, monkeypatch) -> None:
+    from llmctl._testing import isolate_tui
+    from llmctl.tui._modals import TextViewModal
+    from llmctl.tui.app import MissionControlApp
+
+    isolate_tui(monkeypatch, tmp_path)
+    seen: dict = {}
+
+    async def _run() -> None:
+        app = MissionControlApp()
+        async with app.run_test() as pilot:
+            await pilot.press("u")
+            await pilot.pause()
+            await pilot.press("question_mark")
+            await pilot.pause()
+            seen["modal"] = isinstance(app.screen, TextViewModal)
+            if seen["modal"]:
+                seen["text"] = str(app.screen.query_one("#textview-body", Static).render())
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            seen["alive"] = app.is_running
+            seen["notes"] = [str(n.message) for n in app._notifications]
+
+    asyncio.run(_run())
+    assert seen["modal"]
+    assert "Dashboard" in seen["text"] and "Journal" in seen["text"]  # global + Units
+    assert seen["alive"]
+    assert any("q to quit" in n for n in seen["notes"]), seen["notes"]

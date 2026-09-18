@@ -8,7 +8,8 @@ from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.screen import Screen
 
-from llmctl.tui._modals import ConfirmActionModal
+from llmctl.tui._base import esc
+from llmctl.tui._modals import ConfirmActionModal, TextViewModal
 from llmctl.tui.screens_benchmarks import BenchmarksScreen
 from llmctl.tui.screens_dashboard import DashboardScreen
 from llmctl.tui.screens_doctor import DoctorScreen
@@ -37,6 +38,35 @@ SCREENS: tuple[tuple[str, str, str, str], ...] = (
     ("doctor", "Doctor", "Backend install state and fixes", "o"),
     ("benchmarks", "Benchmarks", "Benchmark history", "b"),
 )
+
+
+def _binding_rows(bindings: Iterable[object]) -> list[tuple[str, str]]:
+    """(key, description) for bindings given as ``Binding`` or tuples."""
+    rows: list[tuple[str, str]] = []
+    for b in bindings:
+        if isinstance(b, Binding):
+            if b.action in {"ctrl_c_hint"}:
+                continue
+            rows.append((b.key_display or b.key, b.description or b.action))
+        elif isinstance(b, tuple) and len(b) >= 3:
+            rows.append((str(b[0]), str(b[2])))
+    return rows
+
+
+def help_text(screen: object) -> str:
+    """Markup for the help modal: screens, global keys, this screen's keys."""
+    lines = ["[b]Screens[/b]"]
+    for _name, title, what, key in SCREENS:
+        lines.append(f"  [b]{key}[/b]  {title:<11} {esc(what)}")
+    lines.append("\n[b]Everywhere[/b]")
+    lines.append("  [b]r[/b]  refresh   [b]?[/b] / [b]F1[/b]  this help   "
+                 "[b]ctrl+\\[/b]  command palette   [b]q[/b]  quit")
+    own = _binding_rows(getattr(type(screen), "BINDINGS", []))
+    if own:
+        lines.append(f"\n[b]This screen ({esc(type(screen).__name__)})[/b]")
+        for key, desc in own:
+            lines.append(f"  [b]{esc(key)}[/b]  {esc(desc)}")
+    return "\n".join(lines)
 
 
 class MissionControlApp(App[None]):
@@ -119,7 +149,12 @@ class MissionControlApp(App[None]):
         Binding("o", "show_doctor", "Doctor", show=True),
         Binding("b", "show_benchmarks", "Benchmarks", show=True),
         Binding("r", "refresh", "Refresh", show=True),
+        Binding("question_mark", "show_help", "Help", show=True, key_display="?"),
+        Binding("f1", "show_help", "Help", show=False),
         Binding("q", "quit", "Quit", show=True),
+        # ctrl+c does not quit a Textual app; say what does instead of
+        # silently doing nothing. Focused inputs keep ctrl+c for copy.
+        Binding("ctrl+c", "ctrl_c_hint", "Quit hint", show=False),
     ]
 
     def compose(self) -> ComposeResult:
@@ -161,6 +196,14 @@ class MissionControlApp(App[None]):
         yield SystemCommand(
             "Refresh", "Reload the current screen now  (key: r)", self.action_refresh
         )
+
+    def action_show_help(self) -> None:
+        """Show every key: global navigation plus the current screen's own."""
+        self.push_screen(TextViewModal("Keys", help_text(self.screen), markup=True))
+
+    def action_ctrl_c_hint(self) -> None:
+        """ctrl+c is not quit here; point at the key that is."""
+        self.notify("Press q to quit (ctrl+\\ opens the command palette).", title="Quit")
 
     def _tick_refresh(self) -> None:
         """Refresh the active screen's data if it supports it.
