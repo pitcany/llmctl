@@ -52,11 +52,13 @@ model_app = typer.Typer(
     name="model",
     help="Manage registered models.",
     no_args_is_help=True,
+    suggest_commands=False,
 )
 profile_app = typer.Typer(
     name="profile",
     help="Manage launch profiles.",
     no_args_is_help=True,
+    suggest_commands=False,
 )
 
 

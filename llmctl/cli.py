@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated
 
+import click
 import typer
 import uvicorn
 from rich.console import Console
@@ -44,6 +45,12 @@ app = typer.Typer(
     name="llmctl",
     help="Local-first mission control scaffold for LLM runtimes.",
     no_args_is_help=True,
+    # -h everywhere: Click contexts inherit help_option_names from the parent,
+    # so this one setting reaches every subcommand and sub-typer.
+    context_settings={"help_option_names": ["-h", "--help"]},
+    # Click's own NoSuchCommand already says "Did you mean ...?"; Typer's
+    # suggestion on top of it printed the hint twice.
+    suggest_commands=False,
 )
 console = Console()
 
@@ -802,7 +809,9 @@ def logs(
     console.print(table)
 
 
-config_app = typer.Typer(name="config", help="Show and validate llmctl configuration.")
+config_app = typer.Typer(
+    name="config", help="Show and validate llmctl configuration.", suggest_commands=False
+)
 app.add_typer(config_app, name="config")
 
 
@@ -883,6 +892,7 @@ def config_validate() -> None:
 
 runtimes_app = typer.Typer(
     name="runtimes",
+    suggest_commands=False,
     help="Inspect configured runtimes: install state, version, capabilities.",
     invoke_without_command=True,
     no_args_is_help=False,
@@ -1507,8 +1517,40 @@ def _build_options(
     )
 
 
-@app.command("vllm")
+@app.command("help")
+def help_cmd(
+    ctx: typer.Context,
+    command: Annotated[
+        list[str] | None, typer.Argument(help="Command (and subcommand) to explain.")
+    ] = None,
+) -> None:
+    """Show help for llmctl or for COMMAND (same as `llmctl COMMAND --help`)."""
+    root = ctx.parent
+    assert root is not None  # help is always invoked under the root group
+    group = root.command
+    target_ctx = root
+    for name in command or []:
+        sub = group.get_command(target_ctx, name) if isinstance(group, click.Group) else None
+        if sub is None:
+            raise typer.BadParameter(f"no such command: {' '.join(command or [])}")
+        target_ctx = click.Context(sub, info_name=name, parent=target_ctx)
+        group = sub
+    console.print(group.get_help(target_ctx), highlight=False, markup=False)
+
+
+_SWAP_HELP = (
+    "Swap the served model: restart the TP-fleet vLLM unit on PRESET. "
+    "MUTATES: stops ollama/Harbor to free VRAM, rewrites vllm-tp.env and "
+    "restarts vllm-tp; a failed launch rolls all of that back. "
+    "Preview with --dry-run."
+)
+
+
+@app.command("swap", help=_SWAP_HELP)
+@app.command("switch", help=_SWAP_HELP, hidden=True)
+@app.command("vllm", help="Deprecated alias of `swap`. " + _SWAP_HELP)
 def vllm_cmd(
+    ctx: typer.Context,
     preset: Annotated[
         str,
         typer.Argument(help="Preset alias from ~/.config/llm-models/."),
@@ -1540,7 +1582,12 @@ def vllm_cmd(
         bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
     ] = False,
 ) -> None:
-    """Start the TP-fleet vLLM unit on PRESET (replaces ``gpu-models vllm``)."""
+    """Swap the TP-fleet vLLM unit onto PRESET (``swap``; ``vllm`` is the old name)."""
+    if ctx.info_name == "vllm":
+        console.print(
+            "[dim]note: `llmctl vllm` is now `llmctl swap` (same command); "
+            "the old name keeps working.[/dim]"
+        )
     settings = load_settings()
     if not dry_run:
         _confirm_state_change(
