@@ -171,3 +171,28 @@ def test_write_cannot_fix_an_unmatched_backend(
     assert "no llmctl preset serves 'nobody-serves-this'" in result.output
     assert "--write" not in result.output  # no hint that --write would fix it
     assert not (services / "vllm-tp.env.b2").exists()
+
+
+def test_keys_missing_from_the_preset_are_named_before_and_after_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    presets, services, router = _setup(tmp_path)
+    _, body = render_preset_env("m1", port=8003, config_dir=presets)
+    profile = services / "vllm-tp.env.b1"
+    profile.write_text(body + "HAND_ADDED=1\n")
+    real = router_profiles.check_profiles
+    monkeypatch.setattr(
+        router_profiles,
+        "check_profiles",
+        lambda **kw: real(**kw, config_dir=presets, router_config=router),
+    )
+
+    checked = CliRunner().invoke(app, ["router-profiles"])
+    assert checked.exit_code == 1
+    assert "HAND_ADDED: 1 → removed by --write (not in the preset)" in checked.output
+    assert "HAND_ADDED" in profile.read_text()  # a check never writes
+
+    written = CliRunner().invoke(app, ["router-profiles", "--write"])
+    assert written.exit_code == 0
+    assert "removed HAND_ADDED" in written.output
+    assert "HAND_ADDED" not in profile.read_text()

@@ -2058,11 +2058,22 @@ def router_profiles_cmd(
             console.print(f"[green]✓[/green] {label} matches preset {escape(str(drift.preset))}")
             continue
         console.print(f"[yellow]≠[/yellow] {label} drifts from preset {escape(str(drift.preset))}:")
+        removed = [key for key, (_, want) in drift.changes.items() if want is None]
         for key, (have, want) in drift.changes.items():
-            console.print(f"    {escape(key)}: {escape(str(have))} → {escape(str(want))}")
+            if want is None:
+                new = "[yellow]removed by --write (not in the preset)[/yellow]"
+            else:
+                new = escape(want)
+            old = "(absent)" if have is None else escape(have)
+            console.print(f"    {escape(key)}: {old} → {new}")
         if write:
             write_profile(drift)
             console.print(f"    [green]rewritten[/green] {escape(str(drift.backend.path))}")
+            if removed:
+                console.print(
+                    f"    [yellow]removed {escape(', '.join(removed))}[/yellow]; "
+                    "add them to the preset to keep them (git has the old file)"
+                )
         else:
             failed = drifted = True
     if drifted:
