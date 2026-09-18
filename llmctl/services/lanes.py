@@ -341,7 +341,7 @@ def preview_swap(
             continue
         stops.append(f"{row.lane.unit} ({row.model})")
     if target.kind == "vllm":
-        stops.append("Ollama/Harbor models (VRAM preflight)")
+        stops.append("Ollama/Harbor (paused while vLLM loads, started again after)")
         preview.starts = f"{vllm_unit} on preset {target.key}"
     else:
         lane = target.lane

@@ -86,6 +86,12 @@ class OrchestratorOptions:
     #: On a failed launch, put the env file and the stopped fleet back the
     #: way they were (see :func:`_rollback`). Off only for tests/debugging.
     rollback_on_failure: bool = True
+    #: After a launch that was *verified* ready, start again what the
+    #: preflight stopped (ollama, the Harbor container). They were only
+    #: stopped so vLLM could size its KV cache from free VRAM at startup;
+    #: once it has, they coexist (the WebUI embedder runs on CPU). Before
+    #: this, a successful swap left ollama down and WebUI retrieval 400ing.
+    restore_companions: bool = True
 
 
 @dataclass
@@ -125,6 +131,12 @@ class OrchestratorResult:
     hermes_status: HermesStatus | None = None
     dry_run: bool = False
     rollback: RollbackReport | None = None
+    #: Preflight-stopped services started again after a verified-ready launch.
+    companions_restarted: list[str] = field(default_factory=list)
+    companions_failed: list[str] = field(default_factory=list)
+    #: Stopped and deliberately NOT restarted because readiness was not
+    #: checked (``--no-wait``): vLLM may still be sizing its KV cache.
+    companions_pending: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -369,6 +381,9 @@ def _run_lifecycle(
         )
         return result
 
+    if options.restore_companions:
+        _restore_companions(result, {managed_unit.unit_name, fleet.tp}, systemctl, deps)
+
     if options.enable_hermes_verify and (
         result.restart is not None and result.restart.ready
     ):
@@ -381,6 +396,46 @@ def _run_lifecycle(
         )
 
     return result
+
+
+def _restore_companions(
+    result: OrchestratorResult,
+    tp_units: set[str],
+    systemctl: SystemctlRunner,
+    deps: Dependencies,
+) -> None:
+    """Start again what the preflight stopped, once vLLM holds its memory.
+
+    Only services this launch stopped, never the TP unit itself (it is in
+    ``fleet_stopped`` when it was running, and the restart already brought
+    it back). Without verified readiness nothing is started: vLLM may still
+    be profiling free VRAM, which is the reason they were stopped.
+    """
+    names = [u for u in result.fleet_stopped if u not in tp_units]
+    harbor = result.harbor_outcome is StopOutcome.STOPPED
+    if not names and not harbor:
+        return
+    ready = result.restart is not None and result.restart.ready is True
+    if not ready:
+        result.companions_pending = names + ([DEFAULT_OLLAMA_CONTAINER] if harbor else [])
+        return
+    for unit in names:
+        try:
+            ok = systemctl.start(unit).ok
+        except Exception as exc:  # noqa: BLE001 - report, never fail a good launch
+            ok = False
+            deps.logger(f"  could not start {unit}: {exc}")
+        (result.companions_restarted if ok else result.companions_failed).append(unit)
+        if ok:
+            deps.logger(f"  started {unit} again (vLLM holds its memory now)")
+    if harbor:
+        try:
+            ok = bool(deps.harbor_start(container=DEFAULT_OLLAMA_CONTAINER, logger=deps.logger))
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            deps.logger(f"  could not start {DEFAULT_OLLAMA_CONTAINER}: {exc}")
+        target = result.companions_restarted if ok else result.companions_failed
+        target.append(DEFAULT_OLLAMA_CONTAINER)
 
 
 #: Sentinel for "the env file did not exist before the launch".

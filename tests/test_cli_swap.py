@@ -120,3 +120,26 @@ def test_a_typo_never_stops_a_lane(monkeypatch, calls):
     res = _run(monkeypatch, _state({"flash"}, {"ft.service"}), "qwen3.8-27", vllm_ok=True)
     assert calls["stop"] == []
     assert res.exit_code == 0, res.output
+
+
+def test_vllm_swap_reports_paused_services(monkeypatch, calls):
+    """Ollama coming back (or the command to bring it back) is printed."""
+    from llmctl.services import vllm_orchestrator
+
+    real = vllm_orchestrator.OrchestratorResult
+
+    def with_companions(*a, **k):
+        result = real(
+            spec=VLLMLaunchSpec(model="m", served_name="qwen3.8-27b", port=8003),
+            restart=ManagedRestartResult(env_path=Path("/tmp/x.env"), env_body="", ready=True),
+        )
+        result.companions_restarted = ["ollama"]
+        result.companions_failed = ["harbor.ollama"]
+        return result
+
+    monkeypatch.setattr(cli, "gather_state", lambda settings: _state(set(), set()))
+    monkeypatch.setattr(cli, "start_vllm_tp", with_companions)
+    res = CliRunner().invoke(cli.app, ["swap", "qwen3.8-27b"])
+    assert res.exit_code == 0, res.output
+    assert "started again: ollama" in res.output
+    assert "docker start harbor.ollama" in res.output

@@ -531,3 +531,68 @@ def test_successful_launch_does_not_roll_back(tmp_path: Path) -> None:
     )
     assert result.ok is True
     assert result.rollback is None
+
+
+# --- companions: what the preflight paused comes back after a verified launch ---
+
+
+def _companion_setup(tmp_path: Path, *, ready: bool | None, fail_start: set[str] | None = None):
+    _write_preset(tmp_path)
+    deps, _ = _build_deps(
+        config_dir=tmp_path,
+        adapter=_AdapterStub(ready=ready),
+        harbor_outcome=StopOutcome.STOPPED,
+        fleet_report=_FleetReport(stopped=["ollama", "vllm-tp"], skipped=[], failed=[]),
+    )
+    sysctl = _RecordingSystemctl(fail_start=fail_start)
+    deps.systemctl = SystemctlRunner(runner=sysctl)
+    harbor_started: list[str] = []
+    deps.harbor_start = lambda **kw: harbor_started.append(kw["container"]) or True
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        deps=deps,
+    )
+    return result, sysctl, harbor_started
+
+
+def test_ready_launch_starts_paused_services_again_but_not_the_tp_unit(tmp_path: Path) -> None:
+    """A successful swap used to leave ollama down (WebUI retrieval 400s)."""
+    result, sysctl, harbor_started = _companion_setup(tmp_path, ready=True)
+
+    assert result.ok is True
+    assert result.companions_restarted == ["ollama", "harbor.ollama"]
+    assert ("start", "ollama") in sysctl.verbs()
+    # vllm-tp was in fleet_stopped too; the restart already brought it back.
+    assert ("start", "vllm-tp") not in sysctl.verbs()
+    assert harbor_started == ["harbor.ollama"]
+
+
+def test_unverified_launch_leaves_them_paused_and_says_so(tmp_path: Path) -> None:
+    """--no-wait: vLLM may still be sizing its KV cache from free VRAM."""
+    result, sysctl, harbor_started = _companion_setup(tmp_path, ready=None)
+
+    assert result.ok is True
+    assert result.companions_restarted == []
+    assert result.companions_pending == ["ollama", "harbor.ollama"]
+    assert ("start", "ollama") not in sysctl.verbs()
+    assert harbor_started == []
+
+
+def test_a_companion_that_will_not_start_is_reported_not_fatal(tmp_path: Path) -> None:
+    result, _, _ = _companion_setup(tmp_path, ready=True, fail_start={"ollama"})
+
+    assert result.ok is True
+    assert result.companions_failed == ["ollama"]
+    assert result.companions_restarted == ["harbor.ollama"]
+
+
+def test_failed_launch_restores_via_rollback_not_companions(tmp_path: Path) -> None:
+    deps, _, _, _, _ = _rollback_setup(tmp_path)
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        deps=deps,
+    )
+    assert result.ok is False
+    assert result.companions_restarted == [] and result.companions_pending == []

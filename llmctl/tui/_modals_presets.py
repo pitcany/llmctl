@@ -46,6 +46,8 @@ def describe_launch_effects(
     steps.append(f"rewrites {managed_unit.resolve_env_file()} and restarts {tp_unit}")
     if options.wait_for_ready:
         steps.append(f"waits up to {options.timeout_s / 60:.0f} min for the model to load")
+    if options.restore_companions and options.wait_for_ready:
+        steps.append("starts the stopped services again once the model is ready")
     if options.enable_hermes_verify:
         steps.append(f"repoints the Hermes '{options.hermes_provider}' provider")
     return steps

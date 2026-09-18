@@ -1714,12 +1714,29 @@ def vllm_cmd(
             f"on port {result.spec.port}; readiness not checked (--no-wait). "
             "Run `llmctl status` once it has loaded."
         )
+        _print_companions(result)
         return
     record_load(preset, time.monotonic() - started_at)
     console.print(
         f"[green]vLLM ready[/green] — serving {escape(result.spec.served_name)} "
         f"on port {result.spec.port}"
     )
+    _print_companions(result)
+
+
+def _print_companions(result: object) -> None:
+    """Say which paused services (ollama, Harbor) came back, or how to."""
+    restarted = list(getattr(result, "companions_restarted", []) or [])
+    failed = list(getattr(result, "companions_failed", []) or [])
+    pending = list(getattr(result, "companions_pending", []) or [])
+    if restarted:
+        console.print(f"  started again: {escape(', '.join(restarted))}")
+    for name in failed + pending:
+        how = (
+            f"docker start {name}" if name == "harbor.ollama" else f"sudo systemctl start {name}"
+        )
+        why = "could not start" if name in failed else "not restarted (--no-wait)"
+        console.print(f"  [yellow]{escape(name)} {why}[/yellow] — run: {escape(how)}")
 
 
 def _print_rollback(result: object, tp_unit: str) -> None:

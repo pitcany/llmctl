@@ -69,7 +69,11 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
         return False, _failure(lanes.error, lanes)
     if getattr(vllm, "ok", False):
         record_load(target.key, time.monotonic() - started)
-        return True, f"{target.model} ready on vLLM"
+        message = f"{target.model} ready on vLLM"
+        failed = getattr(vllm, "companions_failed", [])
+        if failed:
+            message += f"\nNot started again: {esc(', '.join(failed))} — start by hand."
+        return True, message
     restart = getattr(vllm, "restart", None)
     reason = getattr(restart, "error", None) or "vLLM start did not complete cleanly"
     return False, _failure(reason, lanes)
