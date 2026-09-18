@@ -351,6 +351,9 @@ def default_runtime_configs() -> dict[str, RuntimeConfig]:
         # SGLang is adopt-only here: the systemd unit and its guard wrapper own
         # the lifecycle, so only the endpoint matters.
         "sglang": RuntimeConfig(endpoint="http://127.0.0.1:30000"),
+        # FreeToken likewise: the systemd unit and its VRAM guard own the
+        # lifecycle, so only the endpoint matters.
+        "freetoken": RuntimeConfig(endpoint="http://127.0.0.1:1919"),
     }
 
 

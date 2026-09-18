@@ -31,6 +31,7 @@ def test_runtime_router_has_expected_adapters() -> None:
         "ollama",
         "python_script",
         "sglang",
+        "freetoken",
     }
 
 

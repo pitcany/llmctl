@@ -8,6 +8,7 @@ settings.
 from __future__ import annotations
 
 from llmctl.adapters.base import RuntimeAdapter
+from llmctl.adapters.freetoken import FreeTokenAdapter
 from llmctl.adapters.llama_cpp import LlamaCppAdapter
 from llmctl.adapters.lmstudio import LMStudioAdapter
 from llmctl.adapters.ollama import OllamaAdapter
@@ -42,6 +43,7 @@ class RuntimeRouter:
             RuntimeName.LMSTUDIO: LMStudioAdapter(runtime_config("lmstudio").endpoint),
             RuntimeName.OLLAMA: OllamaAdapter(runtime_config("ollama").endpoint),
             RuntimeName.SGLANG: SGLangAdapter(runtime_config("sglang").endpoint),
+            RuntimeName.FREETOKEN: FreeTokenAdapter(runtime_config("freetoken").endpoint),
             RuntimeName.PYTHON_SCRIPT: PythonScriptAdapter(
                 runtime_config("python_script"), self.supervisor
             ),

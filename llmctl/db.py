@@ -34,6 +34,7 @@ class RuntimeName(StrEnum):
     OLLAMA = "ollama"
     PYTHON_SCRIPT = "python_script"
     SGLANG = "sglang"
+    FREETOKEN = "freetoken"
     OPENAI = "openai"
 
 

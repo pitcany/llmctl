@@ -240,7 +240,15 @@ class TestRuntimeAdapters:
         """Test all required runtime adapters are registered."""
         router = RuntimeRouter()
         runtimes = {rt.value for rt in router.list_runtimes()}
-        required_runtimes = {"vllm", "llama_cpp", "lmstudio", "ollama", "python_script", "sglang"}
+        required_runtimes = {
+            "vllm",
+            "llama_cpp",
+            "lmstudio",
+            "ollama",
+            "python_script",
+            "sglang",
+            "freetoken",
+        }
         assert runtimes == required_runtimes
 
     def test_adapter_safety_constraints(self):
