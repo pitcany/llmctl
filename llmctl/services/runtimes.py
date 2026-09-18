@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from llmctl._asyncutil import run_sync
 from llmctl.config import Settings
 from llmctl.schemas import HealthState
 from llmctl.services.router import RuntimeRouter
@@ -64,4 +65,4 @@ def runtime_inventory(
     async def inspect_all() -> list[dict[str, Any]]:
         return list(await asyncio.gather(*(inspect_one(rt) for rt in order)))
 
-    return asyncio.run(inspect_all())
+    return run_sync(inspect_all())

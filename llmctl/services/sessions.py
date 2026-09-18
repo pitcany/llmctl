@@ -8,7 +8,6 @@ and never launches a process; a real start performs genuine process control.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
@@ -18,6 +17,7 @@ from sqlalchemy.orm.exc import ObjectDeletedError, StaleDataError
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
+from llmctl._asyncutil import run_sync
 from llmctl.config import Settings, load_settings
 from llmctl.db import (
     EventLevel,
@@ -1137,7 +1137,7 @@ class SessionService:
             self.db.add(record)
             self.db.commit()
 
-        result = asyncio.run(adapter.start(plan, on_spawn=_on_spawn))
+        result = run_sync(adapter.start(plan, on_spawn=_on_spawn))
 
         # The readiness wait can take up to readiness_timeout_s, during which
         # a concurrent reconcile pass (gateway loop) may have already promoted
@@ -1201,7 +1201,7 @@ class SessionService:
         if not record.pid and record.status not in _ACTIVE_STATES:
             return None
         adapter = self.router.get_adapter(record.runtime)
-        status = asyncio.run(adapter.stop(record_to_session(record)))
+        status = run_sync(adapter.stop(record_to_session(record)))
         survived = _process_survived(status)
         log_event(
             self.db,

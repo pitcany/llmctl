@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from llmctl._asyncutil import run_sync
 from llmctl.config import Settings, load_settings
 from llmctl.schemas import HealthState
 from llmctl.services.router import RuntimeRouter
@@ -50,7 +51,7 @@ class HealthService:
 
         runtimes: dict[str, dict[str, Any]] = {}
         try:
-            results = asyncio.run(probe_all())
+            results = run_sync(probe_all())
         except Exception as exc:  # event-loop level failure; report on every runtime
             results = [exc] * len(order)
         for runtime, result in zip(order, results, strict=True):
@@ -125,7 +126,7 @@ class HealthService:
             )
 
         try:
-            results = asyncio.run(probe_all())
+            results = run_sync(probe_all())
         except Exception:
             return {}
 

@@ -9,12 +9,12 @@ CLI, TUI, and API.
 
 from __future__ import annotations
 
-import asyncio
 import socket
 from pathlib import Path
 
 from sqlmodel import Session, select
 
+from llmctl._asyncutil import run_sync
 from llmctl.adapters.base import RuntimeAdapter
 from llmctl.db import ModelRecord, ModelStatus, RuntimeName, utcnow
 from llmctl.schemas import HealthState, Model, ModelCreate, ModelUpdate
@@ -89,7 +89,7 @@ class RegistryService:
         for runtime in self.router.list_runtimes():
             adapter = self.router.get_adapter(runtime)
             try:
-                reachable, discovered = asyncio.run(self._probe(adapter))
+                reachable, discovered = run_sync(self._probe(adapter))
             except Exception:
                 reachable, discovered = False, []
             for model in discovered:
@@ -190,7 +190,7 @@ class RegistryService:
         for runtime in self.router.list_runtimes():
             adapter = self.router.get_adapter(runtime)
             try:
-                results = asyncio.run(adapter.discover_models())
+                results = run_sync(adapter.discover_models())
             except Exception:
                 results = []
             discovered.extend(results)
