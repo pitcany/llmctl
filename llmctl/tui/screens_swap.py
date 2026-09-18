@@ -23,6 +23,7 @@ from llmctl.services.lanes import (
     SwapState,
     SwapTarget,
     format_duration,
+    format_gpus,
     gather_state,
     last_load_s,
     record_load,
@@ -43,7 +44,7 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
         assert target.lane is not None
         result = swap_to_lane(
             target.lane,
-            other_active=state.active_lanes(exclude=target.key),
+            other_active=state.lanes_in_the_way(target),
             vllm_active=state.vllm_active,
             vllm_unit=state.vllm_unit,
             deps=deps,
@@ -109,7 +110,7 @@ class SwapScreen(DataScreen):
             id="swap-title",
         )
         table: DataTable[str] = DataTable(id="swap-table", cursor_type="row")
-        table.add_columns("Model", "Engine", "Name", "State", "Last load")
+        table.add_columns("Model", "Engine", "Name", "Cards", "State", "Last load")
         yield table
         yield Footer()
 
@@ -132,6 +133,7 @@ class SwapScreen(DataScreen):
                 esc(row.model),
                 row.engine,
                 esc(row.key),
+                format_gpus(row.gpus),
                 f"[{color}]{status}[/]" if color else f"[{C_MUTED}]—[/]",
                 format_duration(seconds) if seconds else f"[{C_MUTED}]—[/]",
             )

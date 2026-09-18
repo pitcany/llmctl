@@ -14,6 +14,11 @@ by port.
 
 The router's ``profile_env`` backends are NOT read: vLLM rows come from llmctl's
 own presets, the canonical vLLM schema.
+
+Each row has a GPU *footprint*: the cards it occupies. A lane declares it as
+``gpus: [0]`` in router.yaml (the one place llm-router reads too); a lane
+without one, and every vLLM preset (``vllm-tp`` is TP=2), occupies every card.
+A swap stops only what overlaps the new target's footprint.
 """
 
 from __future__ import annotations
@@ -60,6 +65,37 @@ def router_config_path() -> Path:
     return Path(override).expanduser() if override else DEFAULT_ROUTER_CONFIG
 
 
+#: A GPU footprint: the card indices a target occupies. ``None`` = every card.
+Gpus = frozenset[int] | None
+
+
+def gpus_overlap(a: Gpus, b: Gpus) -> bool:
+    """True if two footprints share a card. ``None`` (every card) overlaps all."""
+    if a is None or b is None:
+        return True
+    return bool(a & b)
+
+
+def format_gpus(gpus: Gpus) -> str:
+    """``frozenset({0})`` -> ``0``; ``{0, 1}`` -> ``0+1``; ``None`` -> ``all``."""
+    if gpus is None:
+        return "all"
+    return "+".join(str(i) for i in sorted(gpus))
+
+
+def _parse_gpus(raw: Any) -> Gpus:
+    """router.yaml ``gpus:`` -> footprint. Missing or malformed -> every card.
+
+    Fails closed: an unreadable footprint overlaps everything, so a swap stops
+    it rather than loading a second engine onto its card.
+    """
+    if not isinstance(raw, list) or not raw:
+        return None
+    if not all(isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in raw):
+        return None
+    return frozenset(raw)
+
+
 def _port_of(url: str) -> int | None:
     try:
         return urlparse(url).port
@@ -81,6 +117,8 @@ class Lane:
     unit: str | None = None
     #: llmctl runtime id of that unit (``freetoken``, ``llama_cpp``, ...).
     runtime: str | None = None
+    #: Cards the lane occupies, from router.yaml ``gpus:``; None = every card.
+    gpus: Gpus = None
 
 
 def load_lanes(
@@ -136,6 +174,7 @@ def load_lanes(
                 aliases=tuple(str(a) for a in entry.get("aliases") or ()),
                 unit=unit,
                 runtime=runtime,
+                gpus=_parse_gpus(entry.get("gpus")),
             )
         )
     return lanes
@@ -154,6 +193,11 @@ class SwapTarget:
     engine: str
     upstream: str
     lane: Lane | None = None
+
+    @property
+    def gpus(self) -> Gpus:
+        """Cards this target occupies. vLLM presets (TP=2) take every card."""
+        return self.lane.gpus if self.lane is not None else None
 
     def matches(self, wanted: str) -> bool:
         """Case-insensitive match on key, served model, or lane alias."""
@@ -339,6 +383,8 @@ def preview_swap(
             continue
         if row.key == target.key or row.lane.unit not in active_units:
             continue
+        if not gpus_overlap(row.gpus, target.gpus):
+            continue
         stops.append(f"{row.lane.unit} ({row.model})")
     if target.kind == "vllm":
         stops.append("Ollama/Harbor (paused while vLLM loads, started again after)")
@@ -381,6 +427,17 @@ class SwapState:
             row.lane
             for row in self.catalog
             if row.lane is not None and row.lane.unit in self.active_units and row.key != exclude
+        ]
+
+    def lanes_in_the_way(self, target: SwapTarget) -> list[Lane]:
+        """Active lanes a swap to ``target`` must stop: those sharing a card."""
+        return [
+            row.lane
+            for row in self.catalog
+            if row.lane is not None
+            and row.lane.unit in self.active_units
+            and row.key != target.key
+            and gpus_overlap(row.gpus, target.gpus)
         ]
 
     def preview(self, target: SwapTarget, load_times: Path | None = None) -> SwapPreview:

@@ -27,13 +27,14 @@ from llmctl.services.lanes import (
     SwapState,
     SwapTarget,
     format_duration,
+    format_gpus,
     last_load_s,
     resolve,
 )
 
 
 def render_table(state: SwapState, console: Console) -> None:
-    """Numbered swap list: model, engine, key, state, last load time."""
+    """Numbered swap list: model, engine, key, cards, state, last load time."""
     table = Table(
         title="Swap targets", title_justify="left", caption="llmctl swap NAME  (or: llmctl swap)"
     )
@@ -41,6 +42,7 @@ def render_table(state: SwapState, console: Console) -> None:
     table.add_column("Model")
     table.add_column("Engine")
     table.add_column("Name")
+    table.add_column("Cards")
     table.add_column("State")
     table.add_column("Last load")
     for index, row in enumerate(state.catalog, start=1):
@@ -51,6 +53,7 @@ def render_table(state: SwapState, console: Console) -> None:
             escape(row.model),
             row.engine,
             escape(row.key),
+            format_gpus(row.gpus),
             f"[{style}]{status}[/{style}]" if style else "—",
             format_duration(last_load_s(row.key)) if last_load_s(row.key) else "—",
         )
@@ -136,7 +139,7 @@ def run_lane_swap(state: SwapState, target: SwapTarget, console: Console) -> Non
     assert target.lane is not None
     result = swap_to_lane(
         target.lane,
-        other_active=state.active_lanes(exclude=target.key),
+        other_active=state.lanes_in_the_way(target),
         vllm_active=state.vllm_active,
         vllm_unit=state.vllm_unit,
     )
