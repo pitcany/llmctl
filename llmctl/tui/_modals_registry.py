@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pydantic import ValidationError
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
@@ -23,7 +24,7 @@ from llmctl.schemas import (
     ProfileCreate,
     ProfileUpdate,
 )
-from llmctl.tui._base import esc
+from llmctl.tui._base import C_ERR, esc
 
 _RUNTIME_OPTIONS = [(r.value, r.value) for r in RuntimeName]
 
@@ -43,28 +44,52 @@ class ConfirmDelete:
     delete_files: bool
 
 
-def _optional_int(text: str) -> int | None:
+def _optional_int(text: str, label: str = "value") -> int | None:
+    """Blank -> None; anything else must be a whole number or the form refuses.
+
+    ``abc`` in "Max context" used to be saved as ``None`` without a word.
+    """
     text = text.strip()
     if not text:
         return None
     try:
         return int(text)
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a whole number (got {text!r})") from exc
 
 
-def _optional_float(text: str) -> float | None:
+def _optional_float(text: str, label: str = "value") -> float | None:
+    """Blank -> None; anything else must be a number (see :func:`_optional_int`)."""
     text = text.strip()
     if not text:
         return None
     try:
         return float(text)
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a number (got {text!r})") from exc
+
+
+def _form_error_text(exc: Exception) -> str:
+    """One line per problem; pydantic's bracketed detail and URL dropped."""
+    if isinstance(exc, ValidationError):
+        parts = []
+        for err in exc.errors():
+            field = ".".join(str(p) for p in err.get("loc", ())) or "form"
+            msg = str(err.get("msg", "invalid")).removeprefix("Value error, ")
+            parts.append(f"{field}: {msg}")
+        return "\n".join(parts)
+    return str(exc)
 
 
 def _parse_tags(text: str) -> list[str]:
     return [t.strip() for t in text.split(",") if t.strip()]
+
+
+def _show_form_error(screen: ModalScreen, selector: str, exc: Exception) -> None:
+    """Inline red error under the form; the modal stays open, nothing saved."""
+    text = _form_error_text(exc)
+    screen.query_one(selector, Static).update(f"[{C_ERR}]{esc(text)}[/]")
+    screen.app.notify(esc(text), severity="error", title="Not saved")
 
 
 class ModelFormModal(ModalScreen[ModelCreate | ModelUpdate | None]):
@@ -118,6 +143,7 @@ class ModelFormModal(ModalScreen[ModelCreate | ModelUpdate | None]):
             yield Input(value=", ".join(m.tags) if m else "", id="m-tags")
             yield Label("Notes")
             yield Input(value=(m.notes if m and m.notes else ""), id="m-notes")
+            yield Static("", id="m-error")
             with Horizontal(id="model-form-buttons"):
                 label = "Save" if self._is_edit else "Add"
                 yield Button(label, variant="success", id="m-submit")
@@ -132,40 +158,31 @@ class ModelFormModal(ModalScreen[ModelCreate | ModelUpdate | None]):
         if not name or runtime_value is Select.BLANK:
             self.app.notify("Name and backend are required.", severity="error")
             return
+        try:
+            self.dismiss(self._build(name, runtime_value))
+        except (ValueError, ValidationError) as exc:
+            _show_form_error(self, "#m-error", exc)
+
+    def _build(self, name: str, runtime_value: object) -> ModelCreate | ModelUpdate:
+        """Read the form; raises ValueError/ValidationError on bad input."""
         path = self.query_one("#m-path", Input).value.strip() or None
-        quant = self.query_one("#m-quant", Input).value.strip() or None
-        max_ctx = _optional_int(self.query_one("#m-maxctx", Input).value)
-        vram = _optional_float(self.query_one("#m-vram", Input).value)
-        tags = _parse_tags(self.query_one("#m-tags", Input).value)
-        notes = self.query_one("#m-notes", Input).value.strip() or None
-        runtime = RuntimeName(str(runtime_value))
+        fields = {
+            "name": name,
+            "runtime": RuntimeName(str(runtime_value)),
+            "path": path,
+            "quantization": self.query_one("#m-quant", Input).value.strip() or None,
+            "max_context": _optional_int(
+                self.query_one("#m-maxctx", Input).value, "Max context"
+            ),
+            "estimated_vram_gb": _optional_float(
+                self.query_one("#m-vram", Input).value, "Estimated VRAM"
+            ),
+            "tags": _parse_tags(self.query_one("#m-tags", Input).value),
+            "notes": self.query_one("#m-notes", Input).value.strip() or None,
+        }
         if self._is_edit:
-            self.dismiss(
-                ModelUpdate(
-                    name=name,
-                    runtime=runtime,
-                    path=path,
-                    quantization=quant,
-                    max_context=max_ctx,
-                    estimated_vram_gb=vram,
-                    tags=tags,
-                    notes=notes,
-                )
-            )
-        else:
-            self.dismiss(
-                ModelCreate(
-                    name=name,
-                    runtime=runtime,
-                    path=path,
-                    source=path,
-                    quantization=quant,
-                    max_context=max_ctx,
-                    estimated_vram_gb=vram,
-                    tags=tags,
-                    notes=notes,
-                )
-            )
+            return ModelUpdate(**fields)
+        return ModelCreate(**fields, source=path)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -200,17 +217,17 @@ class ProfileFormModal(ModalScreen[ProfileCreate | ProfileUpdate | None]):
             )
             yield Label("Description")
             yield Input(value=(p.description if p and p.description else ""), id="p-desc")
-            yield Label("tensor_parallel_size")
+            yield Label("Tensor parallel size (GPUs per replica)")
             yield Input(
                 value=str(p.tensor_parallel_size) if p and p.tensor_parallel_size else "",
                 id="p-tp",
             )
-            yield Label("max_model_len")
+            yield Label("Max model length (tokens)")
             yield Input(
                 value=str(p.max_model_len) if p and p.max_model_len else "",
                 id="p-maxlen",
             )
-            yield Label("gpu_memory_utilization (0..1]")
+            yield Label("GPU memory fraction, 0 < x <= 1")
             yield Input(
                 value=(
                     f"{p.gpu_memory_utilization:.2f}"
@@ -219,13 +236,14 @@ class ProfileFormModal(ModalScreen[ProfileCreate | ProfileUpdate | None]):
                 ),
                 id="p-gpuutil",
             )
-            yield Label("dtype")
+            yield Label("dtype (e.g. bfloat16; blank = auto)")
             yield Input(value=(p.dtype if p and p.dtype else ""), id="p-dtype")
-            yield Label("quantization")
+            yield Label("Quantization (e.g. awq, fp8; blank = none)")
             yield Input(
                 value=(p.quantization if p and p.quantization else ""),
                 id="p-quant",
             )
+            yield Static("", id="p-error")
             with Horizontal(id="profile-form-buttons"):
                 label = "Save" if self._is_edit else "Create"
                 yield Button(label, variant="success", id="p-submit")
@@ -240,39 +258,32 @@ class ProfileFormModal(ModalScreen[ProfileCreate | ProfileUpdate | None]):
         if not name or runtime_value is Select.BLANK:
             self.app.notify("Name and backend are required.", severity="error")
             return
-        description = self.query_one("#p-desc", Input).value.strip() or None
-        tp = _optional_int(self.query_one("#p-tp", Input).value)
-        max_len = _optional_int(self.query_one("#p-maxlen", Input).value)
-        gpu_util = _optional_float(self.query_one("#p-gpuutil", Input).value)
-        dtype = self.query_one("#p-dtype", Input).value.strip() or None
-        quant = self.query_one("#p-quant", Input).value.strip() or None
-        runtime = RuntimeName(str(runtime_value))
+        try:
+            self.dismiss(self._build(name, runtime_value))
+        except (ValueError, ValidationError) as exc:
+            _show_form_error(self, "#p-error", exc)
+
+    def _build(self, name: str, runtime_value: object) -> ProfileCreate | ProfileUpdate:
+        """Read the form; raises ValueError/ValidationError on bad input."""
+        fields = {
+            "name": name,
+            "runtime": RuntimeName(str(runtime_value)),
+            "description": self.query_one("#p-desc", Input).value.strip() or None,
+            "tensor_parallel_size": _optional_int(
+                self.query_one("#p-tp", Input).value, "Tensor parallel size"
+            ),
+            "max_model_len": _optional_int(
+                self.query_one("#p-maxlen", Input).value, "Max model length"
+            ),
+            "gpu_memory_utilization": _optional_float(
+                self.query_one("#p-gpuutil", Input).value, "GPU memory fraction"
+            ),
+            "dtype": self.query_one("#p-dtype", Input).value.strip() or None,
+            "quantization": self.query_one("#p-quant", Input).value.strip() or None,
+        }
         if self._is_edit:
-            self.dismiss(
-                ProfileUpdate(
-                    name=name,
-                    runtime=runtime,
-                    description=description,
-                    tensor_parallel_size=tp,
-                    max_model_len=max_len,
-                    gpu_memory_utilization=gpu_util,
-                    dtype=dtype,
-                    quantization=quant,
-                )
-            )
-        else:
-            self.dismiss(
-                ProfileCreate(
-                    name=name,
-                    runtime=runtime,
-                    description=description,
-                    tensor_parallel_size=tp,
-                    max_model_len=max_len,
-                    gpu_memory_utilization=gpu_util,
-                    dtype=dtype,
-                    quantization=quant,
-                )
-            )
+            return ProfileUpdate(**fields)
+        return ProfileCreate(**fields)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

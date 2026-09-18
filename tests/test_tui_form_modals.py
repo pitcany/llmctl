@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from textual.app import App
-from textual.widgets import Button, Input, Select
+from textual.widgets import Button, Input, Select, Static
 
 from llmctl.db import RuntimeName
 from llmctl.schemas import (
@@ -38,18 +39,23 @@ from llmctl.tui._modals_registry import (
 # --------------------------------------------------------------------------- #
 
 
-def test_optional_int_drops_garbage_to_none() -> None:
+def test_optional_int_rejects_garbage() -> None:
+    """Blank is "unset"; garbage is an error (TUI-UX-FIXPLAN P0 #7).
+
+    It used to be swallowed to None, i.e. silently saved as "no value".
+    """
     assert _optional_int("42") == 42
     assert _optional_int("   ") is None
-    # The audit's concern: "abc" in a number field is swallowed, not rejected.
-    assert _optional_int("abc") is None
-    assert _optional_int("3.5") is None  # not an int
+    for bad in ("abc", "3.5"):
+        with pytest.raises(ValueError, match="whole number"):
+            _optional_int(bad, "Max context")
 
 
-def test_optional_float_drops_garbage_to_none() -> None:
+def test_optional_float_rejects_garbage() -> None:
     assert _optional_float("0.85") == 0.85
     assert _optional_float("") is None
-    assert _optional_float("high") is None
+    with pytest.raises(ValueError, match="number"):
+        _optional_float("high")
 
 
 def test_parse_tags_trims_and_drops_empties() -> None:
@@ -169,22 +175,37 @@ def test_model_form_requires_a_name() -> None:
     assert any("required" in n.lower() for n in notes)
 
 
-def test_model_form_non_numeric_context_is_dropped_not_rejected() -> None:
-    """A typo in max-context yields None, not a validation error.
+def test_model_form_non_numeric_context_is_rejected_inline() -> None:
+    """A typo in max-context shows a red inline error and blocks the save.
 
-    This is a footgun worth having on record: the operator gets a model with
-    no context limit instead of a "that's not a number" message.
+    It used to become None (no context limit) without a word
+    (TUI-UX-FIXPLAN P0 #7).
     """
+    seen: dict = {}
 
     async def steps(app, pilot) -> None:
         _set(app, "m-name", "m")
         _set(app, "m-maxctx", "lots")
         app.screen.query_one("#m-submit", Button).press()
         await pilot.pause()
+        seen["error"] = str(app.screen.query_one("#m-error", Static).render())
 
-    (result,) = _drive(ModelFormModal(), steps)
-    assert isinstance(result, ModelCreate)
-    assert result.max_context is None
+    assert _drive(ModelFormModal(), steps) == []  # not dismissed = not saved
+    assert "Max context" in seen["error"]
+
+
+def test_profile_form_rejects_out_of_range_gpu_fraction_inline() -> None:
+    seen: dict = {}
+
+    async def steps(app, pilot) -> None:
+        _set(app, "p-name", "p")
+        _set(app, "p-gpuutil", "abc")
+        app.screen.query_one("#p-submit", Button).press()
+        await pilot.pause()
+        seen["error"] = str(app.screen.query_one("#p-error", Static).render())
+
+    assert _drive(ProfileFormModal(), steps) == []
+    assert "GPU memory fraction" in seen["error"]
 
 
 def test_model_form_cancel_returns_none() -> None:
