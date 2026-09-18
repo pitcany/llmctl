@@ -31,6 +31,7 @@ even before any are bound, so the user sees what they can `set-alias`.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import time
 from dataclasses import dataclass
@@ -203,12 +204,17 @@ class GatewayService:
         """
         path = self._overlay_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        overlay = self._read_overlay()
-        if target is None:
-            overlay.pop(alias, None)
-        else:
-            overlay[alias] = target
-        atomic_write_text(path, json.dumps(overlay, indent=2, sort_keys=True))
+        # Read-modify-write under an exclusive lock: two concurrent set-alias
+        # calls (CLI + API) otherwise each read the old file and the second
+        # write silently drops the first alias.
+        with open(path.with_name(path.name + ".lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            overlay = self._read_overlay()
+            if target is None:
+                overlay.pop(alias, None)
+            else:
+                overlay[alias] = target
+            atomic_write_text(path, json.dumps(overlay, indent=2, sort_keys=True))
 
     # -- helpers ------------------------------------------------------------
 

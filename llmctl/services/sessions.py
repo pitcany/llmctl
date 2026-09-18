@@ -277,6 +277,31 @@ class SessionService:
                     results[record_id] = None
         return results
 
+    def _resolve_adopt_race(self, record: SessionRecord, endpoint: str) -> None:
+        """Undo our insert if a concurrent adopt of the same endpoint won.
+
+        The duplicate check in :meth:`adopt` runs before a probe that takes
+        seconds, so two adopts (a unit's ExecStartPost hook and a manual
+        ``adopt-managed``) can both pass it. After committing, every
+        contender sees every other; the oldest row (``created_at``, then
+        ``id``) keeps the endpoint and the rest delete themselves.
+        """
+        rivals = self.db.exec(
+            select(SessionRecord).where(
+                SessionRecord.endpoint_url == endpoint,
+                SessionRecord.status.in_(_ADOPT_BLOCKING_STATES),  # type: ignore[attr-defined]
+            )
+        ).all()
+        winner = min(rivals, key=lambda r: (r.created_at, r.id))
+        if winner.id == record.id:
+            return
+        self.db.delete(record)
+        self.db.commit()
+        raise AdoptError(
+            f"Endpoint {endpoint} was adopted concurrently as session {winner.id}; "
+            "this duplicate was discarded."
+        )
+
     def _probe_record_endpoint(self, record: SessionRecord) -> list[str] | None:
         """Probe one record's endpoint with kind-appropriate timeout/debounce."""
         timeout = (
@@ -942,6 +967,7 @@ class SessionService:
         self.db.add(record)
         self.db.commit()
         self.db.refresh(record)
+        self._resolve_adopt_race(record, normalized)
         log_event(
             self.db,
             EventLevel.INFO,

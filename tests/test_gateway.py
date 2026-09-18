@@ -536,3 +536,24 @@ def _block_real_loopback() -> None:
     wrong thing. Fail loudly instead.
     """
     return
+
+
+def test_concurrent_set_alias_loses_no_update(tmp_path, monkeypatch) -> None:
+    """FIXPLAN Phase 3 TOCTOU: parallel read-modify-writes of the overlay."""
+    import json
+    import threading
+
+    from llmctl.services.gateway import GatewayService
+
+    overlay = tmp_path / "router_aliases.json"
+    monkeypatch.setattr(GatewayService, "_overlay_path", lambda self: overlay)
+    service = GatewayService.__new__(GatewayService)
+
+    threads = [
+        threading.Thread(target=service.set_alias, args=(f"a{i}", f"t{i}")) for i in range(20)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(json.loads(overlay.read_text())) == 20

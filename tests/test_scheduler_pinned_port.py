@@ -225,3 +225,39 @@ def test_exhausted_range_warns_when_forced_and_names_the_range(
         assert not any("IN USE" in w for w in unforced.warnings)
     finally:
         db.close()
+
+
+def _planned(db: Session, port: int, *, dry_run: bool) -> None:
+    db.add(
+        SessionRecord(
+            runtime=RuntimeName.LLAMA_CPP,
+            status=SessionStatus.PLANNED,
+            kind=SessionKind.OWNED,
+            port=port,
+            launch_plan={"dry_run": dry_run},
+        )
+    )
+    db.commit()
+
+
+def test_a_real_in_flight_start_reserves_its_port(tmp_path: Path) -> None:
+    """FIXPLAN Phase 3 TOCTOU: two concurrent starts must not share a port."""
+    db = _db(tmp_path)
+    try:
+        first = SchedulerService(db).create_launch_plan(_request(None))
+        _planned(db, first.port, dry_run=False)
+        second = SchedulerService(db).create_launch_plan(_request(None))
+        assert second.port != first.port
+    finally:
+        db.close()
+
+
+def test_a_leftover_dry_run_plan_reserves_nothing(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    try:
+        first = SchedulerService(db).create_launch_plan(_request(None))
+        _planned(db, first.port, dry_run=True)
+        second = SchedulerService(db).create_launch_plan(_request(None))
+        assert second.port == first.port
+    finally:
+        db.close()

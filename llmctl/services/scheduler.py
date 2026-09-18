@@ -656,14 +656,26 @@ class SchedulerService:
         return None
 
     def _used_ports(self) -> set[int]:
-        """Return ports already reserved by active sessions in the database."""
+        """Return ports already reserved by active sessions in the database.
+
+        A PLANNED row from a *real* start also reserves its port: it is the
+        window between planning and binding, and without it two concurrent
+        ``llmctl start`` calls both saw the same port as free. PLANNED rows
+        left by ``--dry-run`` (plan says ``dry_run: true``) reserve nothing.
+        """
         if self.db is None:
             return set()
         ports: set[int] = set()
         records = self.db.exec(
-            select(SessionRecord).where(SessionRecord.status.in_(_ACTIVE_STATES))  # type: ignore[attr-defined]
+            select(SessionRecord).where(
+                SessionRecord.status.in_(_ACTIVE_STATES | {SessionStatus.PLANNED})  # type: ignore[attr-defined]
+            )
         ).all()
         for record in records:
+            if record.status == SessionStatus.PLANNED and (record.launch_plan or {}).get(
+                "dry_run"
+            ):
+                continue
             if record.port:
                 ports.add(record.port)
             elif record.endpoint_url and ":" in record.endpoint_url:

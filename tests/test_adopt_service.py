@@ -1038,3 +1038,32 @@ def test_a_raising_probe_on_the_single_candidate_path_reads_as_down(tmp_path: Pa
         assert refreshed is not None and refreshed.status == SessionStatus.STOPPED
     finally:
         db.close()
+
+
+def test_concurrent_adopt_of_one_endpoint_keeps_a_single_row(tmp_path: Path) -> None:
+    """A rival adopt lands during our probe (FIXPLAN Phase 3 TOCTOU)."""
+    holder: dict[str, Session] = {}
+
+    def probe(url: str, _t: float) -> list[str] | None:
+        db = holder["db"]
+        if not db.exec(select(SessionRecord)).all():
+            db.add(
+                SessionRecord(
+                    runtime=RuntimeName.VLLM,
+                    status=SessionStatus.RUNNING,
+                    kind=SessionKind.ADOPTED,
+                    endpoint_url=url,
+                )
+            )
+            db.commit()
+        return ["m"]
+
+    db, service = _make_service(tmp_path, probe)
+    holder["db"] = db
+    try:
+        with pytest.raises(AdoptError, match="concurrently"):
+            service.adopt(RuntimeName.VLLM, "http://127.0.0.1:8003")
+        rows = db.exec(select(SessionRecord)).all()
+        assert len(rows) == 1
+    finally:
+        db.close()
