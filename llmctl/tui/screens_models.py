@@ -26,7 +26,7 @@ class ModelsScreen(DataScreen):
     """Model registry screen: lists models and plans sessions."""
 
     BINDINGS = [
-        Binding("enter", "start_model", "Plan/Launch", show=True),
+        Binding("enter", "start_model", "Plan/Launch", show=True, priority=True),
         Binding("ctrl+s", "scan", "Scan", show=True),
         Binding("a", "add_model", "Add", show=True),
         Binding("e", "edit_model", "Edit", show=True),

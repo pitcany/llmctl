@@ -65,7 +65,7 @@ class PresetsScreen(DataScreen):
     """Live preset table with one-key launch into the TP fleet unit."""
 
     BINDINGS = [
-        Binding("enter", "launch_selected", "Launch", show=True),
+        Binding("enter", "launch_selected", "Launch", show=True, priority=True),
         Binding("ctrl+r", "refresh_now", "Refresh", show=True),
         Binding("a", "add_preset", "Add", show=True),
         Binding("e", "edit_preset", "Edit", show=True),

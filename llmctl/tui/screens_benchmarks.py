@@ -19,7 +19,7 @@ class BenchmarksScreen(DataScreen):
 
     BINDINGS = [
         Binding("n", "new_benchmark", "New run", show=True),
-        Binding("enter", "rerun", "Re-run", show=True),
+        Binding("enter", "rerun", "Re-run", show=True, priority=True),
         Binding("c", "set_baseline", "Baseline", show=True),
         Binding("x", "clear_baseline", "Clear baseline", show=True),
         Binding("delete", "delete_benchmark", "Delete", show=True, key_display="del"),

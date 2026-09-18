@@ -519,3 +519,28 @@ def test_help_modal_lists_global_and_screen_keys(tmp_path, monkeypatch) -> None:
     assert "Dashboard" in seen["text"] and "Journal" in seen["text"]  # global + Units
     assert seen["alive"]
     assert any("q to quit" in n for n in seen["notes"]), seen["notes"]
+
+
+# --- P2 #17: enter actions are visible in the footer ------------------------
+
+
+def test_enter_action_is_the_screens_not_the_tables(tmp_path, monkeypatch) -> None:
+    from llmctl._testing import isolate_tui
+    from llmctl.tui.app import MissionControlApp
+
+    isolate_tui(monkeypatch, tmp_path)
+    found: dict = {}
+
+    async def _run() -> None:
+        app = MissionControlApp()
+        async with app.run_test() as pilot:
+            for key in ("p", "m", "b"):
+                await pilot.press(key)
+                await pilot.pause()
+                active = app.screen.active_bindings.get("enter")
+                found[key] = (active.binding.description, active.binding.show) if active else None
+
+    asyncio.run(_run())
+    assert found == {
+        "p": ("Launch", True), "m": ("Plan/Launch", True), "b": ("Re-run", True)
+    }
