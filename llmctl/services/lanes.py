@@ -49,6 +49,7 @@ _ENGINE_LABELS = {
     "llama_cpp": "llama.cpp",
     "sglang": "SGLang",
     "openai": "OpenAI-compat",
+    "ollama": "Ollama",
 }
 
 
