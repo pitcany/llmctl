@@ -442,3 +442,45 @@ def test_gpu_cells_use_units_and_dash_for_unknowns() -> None:
 
     empty = GPUInfo(index=1, name="?")
     assert gpu_row_cells(empty)[2:6] == ("—", "—", "—", "—")
+
+
+# --- P1 #14: Units can restart a unit, behind a confirmation ------------------
+
+
+def test_units_restart_is_confirmed_then_runs(monkeypatch) -> None:
+    from llmctl.tui import _data
+    from llmctl.tui._modals_registry import DeleteModal
+    from llmctl.tui.screens_units import UnitsScreen, _UnitRow
+
+    row = _UnitRow(
+        role="vllm-tp", unit_name="vllm-tp", env_path="/x", env_exists=True,
+        port=8003, is_active=True, served=["m"], role_kind="managed",
+    )
+    restarted: list[str] = []
+    monkeypatch.setattr(_data, "restart_managed_unit", lambda u: restarted.append(u) or "system")
+    screen = UnitsScreen()
+    screen.fetch = lambda: [row]  # type: ignore[method-assign]
+    seen: dict = {}
+
+    class _Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(screen)
+
+    async def _run() -> None:
+        app = _Host()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.press("R")
+            await pilot.pause()
+            seen["modal"] = isinstance(app.screen, DeleteModal)
+            seen["before"] = list(restarted)
+            app.screen.query_one("#delete-confirm", Button).press()
+            for _ in range(20):
+                await pilot.pause(0.05)
+                if restarted:
+                    break
+
+    asyncio.run(_run())
+    assert seen["modal"] and seen["before"] == []
+    assert restarted == ["vllm-tp"]

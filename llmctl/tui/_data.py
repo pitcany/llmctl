@@ -281,6 +281,22 @@ def stop_managed_unit(unit_name: str) -> str:
     return "user" if user_scope else "system"
 
 
+def restart_managed_unit(unit_name: str) -> str:
+    """Restart a managed systemd unit in whichever scope owns it; returns scope."""
+    from llmctl.integrations.systemctl import SystemctlRunner
+
+    sysctl = SystemctlRunner()
+    user_scope = sysctl.is_user_unit(unit_name)
+    result = sysctl.restart(unit_name, user=user_scope)
+    if not result.ok:
+        flag = " --user" if user_scope else ""
+        raise RuntimeError(
+            f"`systemctl{flag} restart {unit_name}` failed "
+            f"(exit {result.returncode}): {result.stderr.strip()}"
+        )
+    return "user" if user_scope else "system"
+
+
 def get_preset_views_with_links() -> list[Any]:
     """Return preset views enriched with registry linkage info."""
     from llmctl.services.preset_loader import load_preset_views

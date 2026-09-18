@@ -20,7 +20,7 @@ from textual.widgets import DataTable, Footer, Header, Static
 from llmctl.config import load_settings
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.tui import _data
-from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
+from llmctl.tui._base import C_ACCENT, C_MUTED, C_OK, C_WARN, DataScreen, esc
 from llmctl.tui._modals import TextViewModal
 from llmctl.tui._modals_registry import ConfirmDelete, DeleteModal
 
@@ -59,6 +59,7 @@ class UnitsScreen(DataScreen):
         ("ctrl+r", "refresh_now", "Refresh"),
         ("a", "start_unit", "Start"),
         ("x", "stop_unit", "Stop"),
+        ("R", "restart_unit", "Restart"),
         ("j", "show_journal", "Journal"),
     ]
 
@@ -85,7 +86,8 @@ class UnitsScreen(DataScreen):
         yield Header()
         yield Static(
             f"Managed Units  -  [{C_MUTED}]probes every unit every 3s; "
-            f"j = the unit's journal (its logs), ctrl+r = refresh now[/]",
+            f"a = start, x = stop, shift+R = restart, j = the unit's journal (its "
+            f"logs), ctrl+r = refresh now[/]",
             classes="panel safe",
             id="units-title",
         )
@@ -160,10 +162,6 @@ class UnitsScreen(DataScreen):
                 str(r.port),
                 served_cell,
                 env_cell,
-            )
-        if not rows:
-            table.add_row(
-                f"[{C_ERR}]No units configured[/]", "-", "-", "-", "-", "-"
             )
         if 0 <= cursor < len(rows):
             table.move_cursor(row=cursor)
@@ -253,6 +251,46 @@ class UnitsScreen(DataScreen):
                 "started again with `a`.",
                 allow_file_delete=False,
                 verb="Stop",
+            ),
+            _on_close,
+        )
+
+    def action_restart_unit(self) -> None:
+        """Confirm, then restart the unit under the cursor (starts it if down)."""
+        row = self._selected_row()
+        if row is None:
+            self.app.notify("No unit selected.", severity="warning")
+            return
+        if row.is_active is None:
+            self.app.notify(
+                f"Cannot tell whether {row.unit_name} is running: systemd is unavailable.",
+                severity="warning",
+            )
+            return
+
+        def _on_close(payload: ConfirmDelete | None) -> None:
+            if payload is None:
+                return
+
+            def _after(scope: Any) -> None:
+                self.app.notify(
+                    f"Restarted {row.unit_name} ({scope}). Large models take minutes "
+                    "to answer; press j for its journal."
+                )
+                self.refresh_data()
+
+            self.run_action_worker(
+                lambda: _data.restart_managed_unit(row.unit_name), _after
+            )
+
+        served = ", ".join(row.served) if row.served else "no model probed"
+        self.app.push_screen(
+            DeleteModal(
+                f"unit '{row.unit_name}'",
+                f"Currently serving: {served}. It is stopped and started again with "
+                "its current env file; in-flight requests fail while it reloads.",
+                allow_file_delete=False,
+                verb="Restart",
             ),
             _on_close,
         )
