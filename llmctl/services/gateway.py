@@ -40,6 +40,7 @@ from typing import Any
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
+from llmctl._fsutil import atomic_write_text
 from llmctl.config import Settings, load_settings
 from llmctl.db import ProfileRecord, SessionRecord, SessionStatus
 
@@ -207,7 +208,7 @@ class GatewayService:
             overlay.pop(alias, None)
         else:
             overlay[alias] = target
-        path.write_text(json.dumps(overlay, indent=2, sort_keys=True), encoding="utf-8")
+        atomic_write_text(path, json.dumps(overlay, indent=2, sort_keys=True))
 
     # -- helpers ------------------------------------------------------------
 

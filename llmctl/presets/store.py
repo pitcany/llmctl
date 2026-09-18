@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from llmctl._fsutil import atomic_write_text
 from llmctl.presets.paths import default_preset_dir, user_config_dir
 from llmctl.presets.schema import Model, PresetSchemaError
 
@@ -179,7 +180,7 @@ def save_preset(
 
 def _write_yaml(path: Path, model: Model) -> None:
     payload = model.model_dump(mode="json")
-    path.write_text(yaml.safe_dump(payload, sort_keys=False, default_flow_style=False))
+    atomic_write_text(path, yaml.safe_dump(payload, sort_keys=False, default_flow_style=False))
 
 
 def delete_preset(

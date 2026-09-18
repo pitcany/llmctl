@@ -30,6 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from llmctl._fsutil import atomic_write_text
 from llmctl.config import ManagedUnitConfig
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.integrations.vllm_env import VLLMLaunchSpec, render_vllm_env
@@ -154,8 +155,7 @@ class VLLMSystemdAdapter:
         in tests without re-reading from disk.
         """
         body = self.renderer(spec)
-        self.env_file_path.parent.mkdir(parents=True, exist_ok=True)
-        self.env_file_path.write_text(body)
+        atomic_write_text(self.env_file_path, body)
         return self.env_file_path, body
 
     def stop(self) -> bool:
