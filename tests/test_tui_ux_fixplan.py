@@ -313,3 +313,43 @@ def test_dashboard_guides_a_first_run(tmp_path, monkeypatch) -> None:
     asyncio.run(_run())
     assert "No models registered yet" in seen["text"]
     assert "no registered models affected" not in seen["text"]
+
+
+# --- P1 #11: a reconcile flip is announced ------------------------------------
+
+
+def test_sessions_announce_a_status_flip(tmp_path, monkeypatch) -> None:
+    from llmctl._testing import isolate_tui
+    from llmctl.db import SessionStatus
+    from llmctl.tui import _data
+    from llmctl.tui.app import MissionControlApp
+
+    isolate_tui(monkeypatch, tmp_path)
+    state = {"status": SessionStatus.RUNNING}
+
+    def sessions():
+        s = _adopted_session()
+        return [s.model_copy(update={"status": state["status"]})]
+
+    monkeypatch.setattr(_data, "get_sessions", sessions)
+    monkeypatch.setattr(_data, "tail_log", lambda _id: "")
+    notes: list[str] = []
+
+    async def _run() -> None:
+        app = MissionControlApp()
+        async with app.run_test() as pilot:
+            await pilot.press("s")
+            for _ in range(20):
+                await pilot.pause(0.05)
+                if app.screen._last_status:  # type: ignore[attr-defined]
+                    break
+            state["status"] = SessionStatus.STOPPED
+            app.screen.refresh_data()  # type: ignore[attr-defined]
+            for _ in range(20):
+                await pilot.pause(0.05)
+                notes[:] = [str(n.message) for n in app._notifications]
+                if any("->" in n for n in notes):
+                    break
+
+    asyncio.run(_run())
+    assert any("running -> stopped" in n for n in notes), notes

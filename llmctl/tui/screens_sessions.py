@@ -40,13 +40,19 @@ class SessionsScreen(DataScreen):
         #: Parallel to ``_ids``: (kind, systemd unit) per row.
         self._kinds: list[tuple[str, str | None]] = []
         self._tail_id: str | None = None
+        #: Status per session id at the previous render; ``None`` before the
+        #: first one, so opening the screen does not toast every row.
+        self._last_status: dict[str, str] | None = None
 
     def compose(self) -> ComposeResult:
         """Compose the sessions table + log-tail pane with screen-scoped chrome."""
         yield Header()
         yield Static(
             f"Sessions  -  [{C_MUTED}]x = stop, ctrl+r = restart, "
-            f"c = cleanup (marks dead), shift+C = purge records[/]",
+            f"c = cleanup (marks dead), shift+C = purge records[/]\n"
+            f"[{C_MUTED}]planned = recorded, never launched (dry run) · "
+            f"starting = loading · degraded = process up, endpoint silent · "
+            f"adopted = systemd owns it (stop it on Units)[/]",
             classes="panel safe",
             id="sessions-title",
         )
@@ -97,6 +103,7 @@ class SessionsScreen(DataScreen):
             table.add_row("-", "-", "-", "no sessions yet", "-", "-", "-", "-")
         if 0 <= cursor < len(self._ids):
             table.move_cursor(row=cursor)
+        self._announce_transitions(sessions)
 
         log = self.query_one("#session-log", Static)
         if not self._tail_id:
@@ -107,6 +114,28 @@ class SessionsScreen(DataScreen):
             # Process output is not markup: '[/INST]' templates and '[rank0]:'
             # torch prefixes appear routinely and would crash or vanish.
             log.update(esc(data["tail"]))
+
+    def _announce_transitions(self, sessions: list[Any]) -> None:
+        """Toast rows whose status changed since the last render.
+
+        Every refresh reconciles, so a row can flip (running -> stopped) with
+        nobody pressing anything; without a word the table just changes
+        under the operator's cursor.
+        """
+        current = {(s.id or ""): s.status.value for s in sessions}
+        previous = self._last_status
+        self._last_status = current
+        if previous is None:
+            return
+        for sid, status in current.items():
+            before = previous.get(sid)
+            if before is not None and before != status:
+                bad = status in {"stopped", "failed", "degraded"}
+                self.app.notify(
+                    f"Session {sid[:8]}: {before} -> {status}",
+                    title="Session changed",
+                    severity="warning" if bad else "information",
+                )
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         """Track the highlighted session and refresh its log tail."""
@@ -209,9 +238,10 @@ class SessionsScreen(DataScreen):
         action reads as broken ("I cleaned up, why is the dead session still
         listed?"). Names the key that does remove them.
         """
-        freed = ", ".join(str(p) for p in report.get("freed_ports", [])) or "none"
+        free = ", ".join(str(p) for p in report.get("freed_ports", [])) or "none"
         self.app.notify(
-            f"Cleanup: {report.get('dead_marked', 0)} marked dead, ports freed: {freed}. "
+            f"Cleanup: {report.get('dead_marked', 0)} marked dead; stale sessions' ports "
+            f"already free: {free}. "
             "No records removed — press shift+C to purge stopped/failed rows.",
             title="Cleanup",
         )
