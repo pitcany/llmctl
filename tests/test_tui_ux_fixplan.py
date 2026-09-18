@@ -567,3 +567,127 @@ def test_models_after_callback_toasts_success_and_not_found() -> None:
         screen._after("Deleted model m.")(False)
     assert notes[0] == ("Added model m.", None)
     assert notes[1][1] == "warning"
+
+
+# --- P3 #21: render assertions for GPU / Events / Sessions ------------------------
+
+
+def _render_screen(screen, table_id: str) -> list[list[str]]:
+    from textual.widgets import DataTable
+
+    rows: list[list[str]] = []
+
+    class _Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(screen)
+
+    async def _run() -> None:
+        app = _Host()
+        async with app.run_test() as pilot:
+            for _ in range(20):
+                await pilot.pause(0.05)
+                table = app.screen.query_one(f"#{table_id}", DataTable)
+                if table.row_count:
+                    break
+            rows.extend(
+                [str(c) for c in table.get_row_at(i)] for i in range(table.row_count)
+            )
+
+    asyncio.run(_run())
+    return rows
+
+
+def test_gpu_screen_renders_a_null_telemetry_row() -> None:
+    from llmctl.schemas import GPUInfo
+    from llmctl.tui.screens_gpu import GPUScreen
+
+    screen = GPUScreen()
+    screen.fetch = lambda: [GPUInfo(index=0, name="RTX 5090")]  # type: ignore[method-assign]
+    (row,) = _render_screen(screen, "gpus-table")
+    assert row[0] == "0" and row[2:6] == ["—", "—", "—", "—"]
+
+
+def test_events_screen_renders_empty_state() -> None:
+    from llmctl.tui.screens_logs import LogsScreen
+
+    screen = LogsScreen()
+    screen.fetch = lambda: []  # type: ignore[method-assign]
+    (row,) = _render_screen(screen, "logs-table")
+    assert "No events recorded yet." in row
+
+
+def test_sessions_screen_marks_an_adopted_row(monkeypatch) -> None:
+    from llmctl.tui import _data
+    from llmctl.tui.screens_sessions import SessionsScreen
+
+    monkeypatch.setattr(_data, "tail_log", lambda _id: "")
+    screen = SessionsScreen()
+    screen.fetch = lambda: {"sessions": [_adopted_session()], "tail": ""}  # type: ignore[method-assign]
+    (row,) = _render_screen(screen, "sessions-table")
+    assert "adopted" in row[1]
+    assert "running" in row[3]
+
+
+# --- P3 #22: Profiles CRUD through the UI --------------------------------------
+
+
+def test_profiles_create_edit_delete_through_the_ui(tmp_path, monkeypatch) -> None:
+    from llmctl._testing import isolate_tui
+    from llmctl.tui import _data
+    from llmctl.tui._modals_registry import DeleteModal, ProfileFormModal
+    from llmctl.tui.app import MissionControlApp
+
+    isolate_tui(monkeypatch, tmp_path)
+    log: dict = {}
+
+    def names() -> set[str]:
+        return {p.name for p in _data.get_profiles()}
+
+    async def wait_for(pilot, cond) -> bool:
+        for _ in range(40):
+            await pilot.pause(0.05)
+            if cond():
+                return True
+        return False
+
+    async def _run() -> None:
+        app = MissionControlApp()
+        async with app.run_test() as pilot:
+            await pilot.press("f")
+            await pilot.pause()
+
+            # create
+            await pilot.press("a")
+            await pilot.pause()
+            assert isinstance(app.screen, ProfileFormModal)
+            app.screen.query_one("#p-name", Input).value = "ui-profile"
+            app.screen.query_one("#p-tp", Input).value = "2"
+            app.screen.query_one("#p-submit", Button).press()
+            log["created"] = await wait_for(pilot, lambda: "ui-profile" in names())
+
+            # select it, then edit
+            screen = app.screen
+            pid = next(p.id for p in _data.get_profiles() if p.name == "ui-profile")
+            await wait_for(pilot, lambda: pid in screen._ids)  # type: ignore[attr-defined]
+            screen.query_one("#profiles-table").move_cursor(
+                row=screen._ids.index(pid)  # type: ignore[attr-defined]
+            )
+            await pilot.press("e")
+            await pilot.pause()
+            assert isinstance(app.screen, ProfileFormModal)
+            app.screen.query_one("#p-desc", Input).value = "edited in the UI"
+            app.screen.query_one("#p-submit", Button).press()
+            log["edited"] = await wait_for(
+                pilot,
+                lambda: any(p.description == "edited in the UI" for p in _data.get_profiles()),
+            )
+
+            # delete
+            await pilot.press("delete")
+            await pilot.pause()
+            assert isinstance(app.screen, DeleteModal)
+            app.screen.query_one("#delete-confirm", Button).press()
+            log["deleted"] = await wait_for(pilot, lambda: "ui-profile" not in names())
+
+    asyncio.run(_run())
+    assert log == {"created": True, "edited": True, "deleted": True}
