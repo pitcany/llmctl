@@ -353,3 +353,74 @@ def test_sessions_announce_a_status_flip(tmp_path, monkeypatch) -> None:
 
     asyncio.run(_run())
     assert any("running -> stopped" in n for n in notes), notes
+
+
+# --- P1 #12: launch effects come from settings, and are honest on failure -----
+
+
+def test_launch_effects_follow_settings_and_options() -> None:
+    from llmctl.config import FleetUnitsConfig, ManagedUnitConfig
+    from llmctl.services.vllm_orchestrator import OrchestratorOptions
+    from llmctl.tui._modals_presets import describe_launch_effects
+
+    unit = ManagedUnitConfig(unit_name="vllm-alt", env_file_path="/srv/alt.env")
+    fleet = FleetUnitsConfig(ollama="ollama-x", tp="vllm-alt")
+    steps = describe_launch_effects(
+        unit, fleet, OrchestratorOptions(enable_hermes_verify=False, timeout_s=600)
+    )
+    text = " | ".join(steps)
+    assert "ollama-x" in text and "/srv/alt.env" in text and "vllm-alt" in text
+    assert "10 min" in text
+    assert "Hermes" not in text
+
+
+def test_missing_link_names_the_dangling_model_ref() -> None:
+    from pathlib import Path
+
+    from llmctl.services.preset_loader import PresetView
+    from llmctl.tui.screens_presets import _format_link_cell
+
+    view = PresetView(
+        alias="a", served_name="a", model_id="m", family=None, param_count_b=None,
+        tensor_parallel=2, quantization="awq", source_path=Path("/x"),
+        linkage_state="missing", model_ref="gone-model-id",
+    )
+    assert "gone-model-id" in _format_link_cell(view)
+
+
+def test_edit_asks_before_suspending_into_the_editor(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    from llmctl._testing import isolate_tui
+    from llmctl.services.preset_loader import PresetView
+    from llmctl.tui import _data
+    from llmctl.tui._modals import ConfirmActionModal
+    from llmctl.tui.app import MissionControlApp
+
+    isolate_tui(monkeypatch, tmp_path)
+    preset = tmp_path / "a.yaml"
+    preset.write_text("alias: a\n")
+    view = PresetView(
+        alias="a", served_name="a", model_id="m", family=None, param_count_b=None,
+        tensor_parallel=2, quantization="awq", source_path=Path(preset),
+    )
+    monkeypatch.setattr(_data, "get_preset_views_with_links", lambda: [view])
+    ran: list[Path] = []
+    monkeypatch.setattr(_data, "run_editor_on_preset", lambda p: ran.append(p))
+    seen: dict = {}
+
+    async def _run() -> None:
+        app = MissionControlApp()
+        async with app.run_test() as pilot:
+            await pilot.press("p")
+            for _ in range(20):
+                await pilot.pause(0.05)
+                if app.screen._row_aliases:  # type: ignore[attr-defined]
+                    break
+            await pilot.press("e")
+            await pilot.pause()
+            seen["asked"] = isinstance(app.screen, ConfirmActionModal)
+            seen["ran_before_confirm"] = bool(ran)
+
+    asyncio.run(_run())
+    assert seen["asked"] and not seen["ran_before_confirm"]

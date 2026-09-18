@@ -52,6 +52,8 @@ class PresetView:
     linked_model_id: str | None = None
     linked_model_name: str | None = None
     linkage_state: LinkageState | None = None
+    #: The preset's explicit registry reference, shown when it dangles.
+    model_ref: str | None = None
 
 
 def resolve_preset_link(
@@ -246,6 +248,7 @@ def load_preset_views(
                 linked_model_id=linked_id,
                 linked_model_name=linked_name,
                 linkage_state=state,
+                model_ref=record.model.model_ref,
             )
         )
     return views

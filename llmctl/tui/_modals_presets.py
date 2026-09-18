@@ -17,9 +17,38 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static
 
+from llmctl.config import FleetUnitsConfig, ManagedUnitConfig
+from llmctl.integrations.fleet import FleetRole, units_to_stop
+from llmctl.integrations.harbor import DEFAULT_OLLAMA_CONTAINER
 from llmctl.presets import CANONICAL_QUANTIZATIONS, Model, PresetSchemaError
 from llmctl.services.preset_loader import PresetView
+from llmctl.services.vllm_orchestrator import OrchestratorOptions
 from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_WARN, esc
+
+
+def describe_launch_effects(
+    managed_unit: ManagedUnitConfig,
+    fleet: FleetUnitsConfig,
+    options: OrchestratorOptions,
+) -> list[str]:
+    """What ``start_vllm_tp`` will do with these settings, in order.
+
+    Generated rather than hard-coded, so the dialog names the real units,
+    env file, timeout and Hermes provider, and drops steps an option turns off.
+    """
+    tp_unit = managed_unit.unit_name
+    competing = [u for u in units_to_stop(FleetRole.TP, fleet) if u != tp_unit]
+    steps: list[str] = []
+    if options.enable_fleet_preflight and competing:
+        steps.append(f"stops {', '.join(competing)} (to free VRAM)")
+    if options.enable_harbor_preflight:
+        steps.append(f"stops the Docker container {DEFAULT_OLLAMA_CONTAINER}, if running")
+    steps.append(f"rewrites {managed_unit.resolve_env_file()} and restarts {tp_unit}")
+    if options.wait_for_ready:
+        steps.append(f"waits up to {options.timeout_s / 60:.0f} min for the model to load")
+    if options.enable_hermes_verify:
+        steps.append(f"repoints the Hermes '{options.hermes_provider}' provider")
+    return steps
 
 
 class PresetLaunchTarget(StrEnum):
@@ -52,9 +81,14 @@ class PresetLaunchModal(ModalScreen[PresetLaunchTarget | None]):
         view: PresetView,
         *,
         currently_served: list[str] | None = None,
+        effects: list[str] | None = None,
     ) -> None:
         super().__init__()
         self._view = view
+        #: From :func:`describe_launch_effects`; defaults describe a stock config.
+        self._effects = effects or describe_launch_effects(
+            ManagedUnitConfig(), FleetUnitsConfig(), OrchestratorOptions()
+        )
         #: What the unit is serving right now, so the operator knows what
         #: they are terminating. ``None`` when the probe was not attempted
         #: or failed; ``[]`` when the unit answered with nothing loaded.
@@ -87,14 +121,10 @@ class PresetLaunchModal(ModalScreen[PresetLaunchTarget | None]):
             self._replacing_line(),
             "",
             f"[{C_WARN}]This affects the whole machine:[/]",
-            "  1. stops the ollama service",
-            "  2. stops the Harbor ollama container",
-            "  3. rewrites vllm-tp.env and restarts vllm-tp",
-            "  4. waits up to 5 min for the model to load",
-            "  5. repoints the Hermes 'vllm' provider",
+            *(f"  {i}. {esc(step)}" for i, step in enumerate(self._effects, 1)),
             "",
-            f"[{C_MUTED}]In-flight requests fail. If step 3 or 4 fails, ollama "
-            f"and Harbor stay stopped.[/]",
+            f"[{C_MUTED}]In-flight requests fail. If the launch fails, the previous "
+            f"env file is restored and whatever was stopped is started again.[/]",
         ]
         with Vertical(id="plan-dialog", classes="panel"):
             yield Static("\n".join(lines))

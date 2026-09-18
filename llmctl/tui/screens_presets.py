@@ -27,10 +27,12 @@ from llmctl.services.vllm_orchestrator import (
 )
 from llmctl.tui import _data
 from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, DataScreen, esc
+from llmctl.tui._modals import ConfirmActionModal
 from llmctl.tui._modals_presets import (
     PresetFormModal,
     PresetLaunchModal,
     PresetLaunchTarget,
+    describe_launch_effects,
 )
 from llmctl.tui._modals_registry import (
     CloneModal,
@@ -51,7 +53,8 @@ def _format_link_cell(view: PresetView) -> str:
     if state is None or state == "unlinked":
         return f"[{C_MUTED}]-[/]"
     if state == "missing":
-        return f"[{C_ERR}]⚠ missing[/]"
+        ref = f": {esc(view.model_ref)}" if view.model_ref else ""
+        return f"[{C_ERR}]⚠ missing{ref}[/]"
     glyph = "●" if state == "explicit" else "○"
     color = C_OK if state == "explicit" else C_ACCENT
     label = view.linked_model_name or (view.linked_model_id or "")
@@ -85,8 +88,10 @@ class PresetsScreen(DataScreen):
         """
         yield Header()
         yield Static(
-            f"Presets  -  [{C_MUTED}]enter = launch, a = add, e = edit, "
-            f"c = clone, del = delete, ctrl+r = refresh[/]",
+            f"Presets  -  [{C_MUTED}]enter = launch, a = add, e = edit ($EDITOR), "
+            f"c = clone, del = delete, ctrl+r = refresh[/]\n"
+            f"[{C_MUTED}]Linked: [{C_OK}]●[/] model_ref set · [{C_ACCENT}]○[/] matched by "
+            f"model id · [{C_ERR}]⚠[/] model_ref names no registry model · - none[/]",
             classes="panel safe",
             id="presets-title",
         )
@@ -178,9 +183,17 @@ class PresetsScreen(DataScreen):
                 return
             self._launch(alias, target)
 
+        settings = load_settings()
+        effects = describe_launch_effects(
+            settings.managed_units.vllm_tp,
+            settings.managed_units.fleet,
+            OrchestratorOptions(dry_run=False),
+        )
+
         def _show(served: list[str] | None) -> None:
             self.app.push_screen(
-                PresetLaunchModal(view, currently_served=served), _on_pick
+                PresetLaunchModal(view, currently_served=served, effects=effects),
+                _on_pick,
             )
 
         self.run_action_worker(_data.get_served_on_tp_unit, _show)
@@ -247,26 +260,46 @@ class PresetsScreen(DataScreen):
             self.refresh_data()
             return
 
+        def _on_confirm(confirmed: bool | None) -> None:
+            if confirmed:
+                self._open_editor(alias, path)
+
+        # Suspending hands the whole terminal to another program; without a
+        # word first the TUI just vanished on a single keypress.
+        self.app.push_screen(
+            ConfirmActionModal(
+                f"Edit {alias} in your editor?",
+                f"The TUI is suspended until the editor exits: {path}. The file is "
+                "re-validated when you return.",
+                confirm_label="Open editor",
+            ),
+            _on_confirm,
+        )
+
+    def _open_editor(self, alias: str, path: Any) -> None:
+        """Suspend Textual, run $EDITOR on ``path``, report the outcome."""
         try:
             with self.app.suspend():
                 _data.run_editor_on_preset(path)
         except PresetSchemaError as exc:
+            # Escaped: pydantic's text carries [type=...] brackets, which
+            # parse as markup and used to crash the app.
             self.app.notify(
-                f"Preset YAML is invalid; on-disk file left as-is.\n{exc}",
+                esc(f"Preset YAML is invalid; on-disk file left as-is.\n{exc}"),
                 severity="error",
-                title=f"Edit {alias}",
+                title=f"Edit {esc(alias)}",
             )
             self.refresh_data()
             return
         except OSError as exc:
             self.app.notify(
-                f"Failed to launch editor: {exc}",
+                esc(f"Failed to launch editor: {exc}"),
                 severity="error",
                 title="Edit preset",
             )
             return
 
-        self.app.notify(f"Saved {alias} ({path}).", title="Edit preset")
+        self.app.notify(esc(f"Saved {alias} ({path})."), title="Edit preset")
         self.refresh_data()
 
     def action_clone_preset(self) -> None:
