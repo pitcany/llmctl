@@ -30,7 +30,7 @@ runtimes expect files already on disk, which `scan` then discovers.
 
 | Command | For | What happens |
 | --- | --- | --- |
-| `llmctl vllm <preset>` | The big shared model on the GPUs | Refuses first if the preset's local model path is missing (`--force` overrides); otherwise rewrites the unit's env file and restarts it, stops Ollama first, waits for readiness |
+| `llmctl swap [NAME]` | Whatever should serve on the GPUs: a vLLM preset **or** a lane (FreeToken, llama.cpp, ...) | No NAME = pick from a list. Shows what stops/starts and the last load time, asks, frees the GPUs (other lanes, vllm-tp, Ollama), starts NAME, waits for readiness, rolls back on failure. Lanes come from llm-router's `config/router.yaml` (`$LLMCTL_ROUTER_CONFIG`); `--list` prints the list. `llmctl vllm` is the old name |
 | `llmctl start <model>` | A one-off session for one model | Launches a process, tracks it, and reports `running` only once the endpoint answers |
 
 A **preset** is a recipe at `~/.config/llmctl/presets/<alias>.yaml` — which
@@ -102,7 +102,9 @@ required.
 llmctl runtimes                      # what runtimes exist, versions, loaded models
 llmctl runtimes inspect ollama       # one runtime's capabilities in detail
 llmctl presets                       # list available presets
-llmctl vllm qwen3.8-27b              # restart vllm-tp with this preset
+llmctl swap                          # pick what serves from one list (vLLM + lanes)
+llmctl swap flash                    # Flash-Next on FreeToken (a router.yaml lane)
+llmctl swap qwen3.8-27b              # restart vllm-tp with this preset
 llmctl status                        # managed units + what they serve right now
 llmctl doctor                        # pass/warn/fail environment report
 llmctl tui                           # interactive TUI
@@ -356,7 +358,7 @@ removes paths inside a configured model root.
 
 ## TUI keybindings
 
-Global: `d` dashboard, `p` presets, `u` units, `m` models, `f`
+Global: `d` dashboard, `w` swap, `p` presets, `u` units, `m` models, `f`
 profiles, `s` sessions, `g` GPUs, `l` logs, `o` doctor, `b`
 benchmarks, `r` refresh, `q` quit, `ctrl+\` command palette. The TUI
 auto-refreshes every 3s and never blocks the UI on probes.
@@ -365,6 +367,7 @@ auto-refreshes every 3s and never blocks the UI on probes.
 |--------|------|
 | Models (`m`) | `enter` preview → *Plan only* or *Launch now* (real start; hidden when the plan is refused), `ctrl+s` scan, `a` add, `e` edit, `c` clone, `d` delete, `x` prune missing |
 | Profiles (`f`) | `a` create, `e` edit, `c` clone, `d` delete |
+| Swap (`w`) | `enter` preview (what stops/starts, last load time) → confirm swaps; same list as `llmctl swap` |
 | Presets (`p`) | `enter`/`t` launch preset (restarts the managed unit after confirm), `a` add, `e` edit in `$EDITOR`, `c` clone, `d` delete |
 | Sessions (`s`) | `x` stop, `ctrl+r` restart, `c` cleanup; row-highlight tails the log. Failures (e.g. stopping an adopted session) surface as notifications |
 | Benchmarks (`b`) | `n` new, `enter` re-run, `c` set baseline, `x` clear baseline, `d` delete |

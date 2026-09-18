@@ -19,6 +19,7 @@ from llmctl.tui.screens_models import ModelsScreen
 from llmctl.tui.screens_presets import PresetsScreen
 from llmctl.tui.screens_profiles import ProfilesScreen
 from llmctl.tui.screens_sessions import SessionsScreen
+from llmctl.tui.screens_swap import SwapScreen
 from llmctl.tui.screens_units import UnitsScreen
 
 #: Seconds between automatic data refreshes of the active screen.
@@ -28,6 +29,7 @@ REFRESH_INTERVAL = 3.0
 #: the command palette and the help modal so they cannot drift apart.
 SCREENS: tuple[tuple[str, str, str, str], ...] = (
     ("dashboard", "Dashboard", "Overview: runtimes, sessions, GPUs at a glance", "d"),
+    ("swap", "Swap", "Every model that can serve (vLLM + lanes); switch to one", "w"),
     ("presets", "Presets", "vLLM presets; launch one onto the TP fleet", "p"),
     ("units", "Units", "Managed systemd units and what they serve", "u"),
     ("models", "Models", "Registered models (add, edit, clone, delete)", "m"),
@@ -139,6 +141,7 @@ class MissionControlApp(App[None]):
     COMMAND_PALETTE_BINDING = "ctrl+backslash"
     BINDINGS = [
         Binding("d", "show_dashboard", "Dashboard", show=True),
+        Binding("w", "show_swap", "Swap", show=True),
         Binding("p", "show_presets", "Presets", show=True),
         Binding("u", "show_units", "Units", show=True),
         Binding("m", "show_models", "Models", show=True),
@@ -172,6 +175,7 @@ class MissionControlApp(App[None]):
     def on_mount(self) -> None:
         """Install screens, show the dashboard, and start the refresh timer."""
         self.install_screen(DashboardScreen(), name="dashboard")
+        self.install_screen(SwapScreen(), name="swap")
         self.install_screen(PresetsScreen(), name="presets")
         self.install_screen(UnitsScreen(), name="units")
         self.install_screen(ModelsScreen(), name="models")
@@ -259,6 +263,10 @@ class MissionControlApp(App[None]):
     def action_show_dashboard(self) -> None:
         """Show dashboard screen."""
         self._switch("dashboard")
+
+    def action_show_swap(self) -> None:
+        """Show the swap screen."""
+        self._switch("swap")
 
     def action_show_presets(self) -> None:
         """Show presets screen."""

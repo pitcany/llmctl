@@ -19,6 +19,8 @@ from textual.widgets import DataTable, Footer, Header, Static
 from llmctl.config import load_settings
 from llmctl.presets import Model as PresetModel
 from llmctl.presets import PresetSchemaError
+from llmctl.services.lane_swap import quiet_deps, swap_to_vllm
+from llmctl.services.lanes import gather_state
 from llmctl.services.preset_loader import PresetView
 from llmctl.services.vllm_orchestrator import (
     OrchestratorOptions,
@@ -209,13 +211,23 @@ class PresetsScreen(DataScreen):
         label = f"vLLM TP: {alias}"
 
         def _run() -> OrchestratorResult:
-            return start_vllm_tp(
-                alias,
-                managed_unit=settings.managed_units.vllm_tp,
-                defaults=settings.vllm.defaults,
-                fleet=settings.managed_units.fleet,
-                options=options,
+            # Lanes (FreeToken, llama.cpp) hold GPUs vLLM needs: stop them
+            # first and restart them if the launch fails, like `llmctl swap`.
+            active = gather_state(settings).active_lanes()
+            result, lanes = swap_to_vllm(
+                active,
+                lambda: start_vllm_tp(
+                    alias,
+                    managed_unit=settings.managed_units.vllm_tp,
+                    defaults=settings.vllm.defaults,
+                    fleet=settings.managed_units.fleet,
+                    options=options,
+                ),
+                deps=quiet_deps(),
             )
+            if result is None:
+                raise RuntimeError(f"{lanes.error}; vLLM not started")
+            return result  # type: ignore[return-value]
 
         self.app.notify(f"Starting {label}...", title="Launch")
         self.run_action_worker(_run, lambda res: self._after_launch(label, res))

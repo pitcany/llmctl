@@ -96,7 +96,7 @@ def test_palette_offers_go_to_dashboard(tmp_path, monkeypatch) -> None:
 
     asyncio.run(_run())
     assert "Go to Dashboard" in titles
-    assert sum(t.startswith("Go to ") for t in titles) == 10
+    assert sum(t.startswith("Go to ") for t in titles) == 11  # 10 screens + Swap (2026-09-18)
 
 
 # --- P0 #4: `d` is Dashboard everywhere --------------------------------------

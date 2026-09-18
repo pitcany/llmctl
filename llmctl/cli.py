@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -13,6 +14,7 @@ from rich.markup import escape
 from rich.table import Table
 from sqlmodel import Session
 
+from llmctl import cli_swap
 from llmctl.api.app import create_app
 from llmctl.config import ManagedUnitConfig, Settings, load_settings
 from llmctl.db import (
@@ -31,6 +33,7 @@ from llmctl.schemas import (
     SessionStartRequest,
 )
 from llmctl.services.benchmarks import BenchmarkService
+from llmctl.services.lanes import SwapTarget, gather_state, record_load, resolve
 from llmctl.services.preset_loader import load_preset_views
 from llmctl.services.registry import RegistryService
 from llmctl.services.sessions import AdoptError, SessionService
@@ -1581,10 +1584,11 @@ def help_cmd(
 
 
 _SWAP_HELP = (
-    "Swap the served model: restart the TP-fleet vLLM unit on PRESET. "
-    "MUTATES: stops ollama/Harbor to free VRAM, rewrites vllm-tp.env and "
-    "restarts vllm-tp; a failed launch rolls all of that back. "
-    "Preview with --dry-run."
+    "Swap the served model. NAME is a vLLM preset or a lane from llm-router's "
+    "router.yaml (FreeToken, llama.cpp, ...); with no NAME, pick from a list. "
+    "Shows what stops and starts before asking. MUTATES: frees the GPUs "
+    "(vllm-tp, other lanes, ollama/Harbor) and starts NAME; a failed start "
+    "rolls back to what was serving. --list prints the list; --dry-run previews."
 )
 
 
@@ -1594,9 +1598,14 @@ _SWAP_HELP = (
 def vllm_cmd(
     ctx: typer.Context,
     preset: Annotated[
-        str,
-        typer.Argument(help="Preset alias from ~/.config/llm-models/."),
-    ],
+        str | None,
+        typer.Argument(
+            help="vLLM preset alias or lane name (see --list). Omit to pick from a list."
+        ),
+    ] = None,
+    list_only: Annotated[
+        bool, typer.Option("--list", "-l", help="Print the swap list and exit.")
+    ] = False,
     tq: Annotated[
         bool,
         typer.Option("--tq", help="Force TurboQuant KV cache on for this start."),
@@ -1631,13 +1640,39 @@ def vllm_cmd(
             "the old name keeps working.[/dim]"
         )
     settings = load_settings()
+    state = gather_state(settings)
+    if list_only:
+        cli_swap.render_table(state, console)
+        return
+    target = cli_swap.pick(state, console) if preset is None else resolve(preset, state.catalog)
+    if target is None:
+        # Not in the list: hand it to the vLLM path, which owns preset lookup
+        # and fails with the available presets (exit 2) if it is unknown.
+        target = SwapTarget(
+            key=str(preset), kind="vllm", model=str(preset), engine="vLLM", upstream=""
+        )
+    elif target.kind == "lane" and (tq or no_tq or force or no_wait):
+        raise typer.BadParameter("--tq/--no-tq/--force/--no-wait apply to vLLM presets only")
+    elif not cli_swap.print_preview(state, target, console):
+        return
+    if target.kind == "lane" and dry_run:
+        return
     if not dry_run:
         _confirm_state_change(
-            f"Restart {settings.managed_units.vllm_tp.unit_name} with preset '{preset}' "
-            "(interrupts whatever it is currently serving)",
+            f"Swap to {target.model} ({target.engine})",
             required=settings.scheduler.require_confirmation_for_start,
             assume_yes=yes,
         )
+    if target.kind == "lane":
+        cli_swap.run_lane_swap(state, target, console)
+        return
+    preset = target.key
+    # Only a name from the list frees the GPUs up front: an unlisted one is
+    # almost always a typo, and start_vllm_tp rejects it before touching
+    # anything. Stopping FreeToken first would turn a typo into an outage.
+    listed = target in state.catalog
+    stopped_lanes = cli_swap.stop_lanes_for_vllm(state, console) if listed and not dry_run else []
+    started_at = time.monotonic()
     options = _build_options(tq if tq else None, no_tq, dry_run, no_wait, force)
     try:
         result = start_vllm_tp(
@@ -1650,15 +1685,19 @@ def vllm_cmd(
     except UnknownPresetError as exc:
         unknown = exc.args[0] if exc.args else preset
         console.print(f"[red]Unknown preset:[/red] {escape(str(unknown))}")
+        cli_swap.restore_lanes(stopped_lanes, console)
+        cli_swap.render_table(state, console)
         raise typer.Exit(2) from exc
     except MissingModelPathError as exc:
         console.print(f"[red]Refusing to start {escape(str(preset))}:[/red] {escape(str(exc))}")
+        cli_swap.restore_lanes(stopped_lanes, console)
         raise typer.Exit(2) from exc
 
     if result.dry_run:
         return
     if not result.ok:
         console.print("[red]vLLM start did not complete cleanly.[/red]")
+        cli_swap.restore_lanes(stopped_lanes, console)
         if result.fleet_failed:
             console.print(
                 f"  fleet preflight failed on: {escape(', '.join(result.fleet_failed))}"
@@ -1676,6 +1715,7 @@ def vllm_cmd(
             "Run `llmctl status` once it has loaded."
         )
         return
+    record_load(preset, time.monotonic() - started_at)
     console.print(
         f"[green]vLLM ready[/green] — serving {escape(result.spec.served_name)} "
         f"on port {result.spec.port}"
