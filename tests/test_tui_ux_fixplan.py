@@ -288,3 +288,28 @@ def test_units_j_opens_the_unit_journal(monkeypatch) -> None:
     asyncio.run(_run())
     assert seen["modal"]
     assert "[rank0]: vllm-tp up" in seen["body"]  # brackets shown literally
+
+
+# --- P1 #10: dashboard first-run guidance ------------------------------------
+
+
+def test_dashboard_guides_a_first_run(tmp_path, monkeypatch) -> None:
+    from llmctl._testing import isolate_tui
+    from llmctl.tui.app import MissionControlApp
+
+    isolate_tui(monkeypatch, tmp_path)
+    seen: dict = {}
+
+    async def _run() -> None:
+        app = MissionControlApp()
+        async with app.run_test() as pilot:
+            for _ in range(40):
+                await pilot.pause(0.05)
+                text = str(app.screen.query_one("#dashboard-runtimes", Static).render())
+                if "Runtime health" in text:
+                    break
+            seen["text"] = text
+
+    asyncio.run(_run())
+    assert "No models registered yet" in seen["text"]
+    assert "no registered models affected" not in seen["text"]

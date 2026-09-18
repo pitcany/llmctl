@@ -78,7 +78,7 @@ class DashboardScreen(DataScreen):
             yield StatCard("Sessions total", "card-sessions")
             yield StatCard("Profiles", "card-profiles")
             yield StatCard("GPUs", "card-gpus")
-            yield StatCard("Safe mode", "card-safe")
+            yield StatCard("Safe mode (label only)", "card-safe")
         yield Static("", classes="panel muted", id="dashboard-runtimes")
         yield Footer()
 
@@ -99,13 +99,20 @@ class DashboardScreen(DataScreen):
             str(data["gpu_count"]),
             color=C_OK if data["gpu_count"] else C_WARN,
         )
+        # safe_mode only tags launch plans; it blocks nothing. Muted either
+        # way so it never reads as protection that is (or is not) active.
         self.query_one("#card-safe", StatCard).set_value(
-            "ON" if data["safe_mode"] else "OFF",
-            color=C_OK if data["safe_mode"] else C_WARN,
+            "on" if data["safe_mode"] else "off", color=C_MUTED
         )
 
         runtimes = data.get("runtimes", {})
-        lines = ["[b]Runtime health[/b]"]
+        lines: list[str] = []
+        if not data["models"]:
+            lines.append(
+                f"[{C_WARN}]No models registered yet.[/] Press [b]m[/b] for Models, then "
+                "[b]a[/b] to add one or [b]ctrl+s[/b] to scan this machine.\n"
+            )
+        lines.append("[b]Runtime health[/b]")
         if not runtimes:
             lines.append(f"[{C_MUTED}]No runtime adapters reported.[/]")
         for name, info in runtimes.items():

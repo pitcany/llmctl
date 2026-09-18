@@ -692,8 +692,8 @@ def get_overview() -> dict[str, Any]:
             warnings.append(
                 f"{backend} backend missing - affects {len(affected)} model(s): {shown}{more}"
             )
-        else:
-            warnings.append(f"{backend} backend missing - no registered models affected")
+        # A missing backend no registered model uses is not a warning; the
+        # Doctor screen still lists it (TUI-UX-FIXPLAN P1 #10).
     if not gpus:
         warnings.append("No NVIDIA GPU detected; vLLM launches require --cpu or --force.")
     router_running = _probe_gateway(settings)
