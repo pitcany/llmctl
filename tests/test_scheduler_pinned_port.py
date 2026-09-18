@@ -194,3 +194,34 @@ def test_a_nonsense_string_falls_back(tmp_path: Path) -> None:
         assert not any("pinned" in r.lower() for r in plan.refusal_reasons)
     finally:
         db.close()
+
+
+# --- --force past a busy port must warn (FIXPLAN 2026-09-18 §2.4) ------------
+
+
+def test_forcing_past_a_taken_pinned_port_warns_loudly(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    try:
+        _occupy(db, 8005)
+        request = _request(8005).model_copy(update={"force": True})
+        plan = SchedulerService(db).create_launch_plan(request)
+        assert any("IN USE" in w and "8005" in w for w in plan.warnings), plan.warnings
+    finally:
+        db.close()
+
+
+def test_exhausted_range_warns_when_forced_and_names_the_range(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = _db(tmp_path)
+    try:
+        service = SchedulerService(db)
+        monkeypatch.setattr(service, "_allocate_port", lambda *a, **k: None)
+        plan = service.create_launch_plan(_request(None).model_copy(update={"force": True}))
+        assert any("No free port" in r and "-" in r for r in plan.refusal_reasons)
+        assert any("IN USE" in w for w in plan.warnings), plan.warnings
+
+        unforced = service.create_launch_plan(_request(None))
+        assert not any("IN USE" in w for w in unforced.warnings)
+    finally:
+        db.close()

@@ -45,6 +45,13 @@ _ACTIVE_STATES = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.D
 _SHARDED_GGUF_RE = re.compile(r"^(?P<stem>.+)-(?P<index>\d{5})-of-(?P<total>\d{5})\.gguf$")
 
 
+def _forced_busy_port_warning(port: int) -> str:
+    return (
+        f"--force: launching on port {port}, which is IN USE. The server will "
+        "fail to bind, or collide with whatever already listens there."
+    )
+
+
 class SchedulerError(ValueError):
     """Raised when a launch is refused and not overridden with ``--force``."""
 
@@ -184,12 +191,21 @@ class SchedulerService:
                         "relocate it. Stop whatever holds it, or unset "
                         "`parameters.port` to let the scheduler choose."
                     )
+                    if request.force:
+                        warnings.append(_forced_busy_port_warning(port))
             else:
                 port = self._allocate_port(runtime, runtime_config)
                 if port is None:
-                    refusals.append("No free port available in the configured range.")
                     fallback = self._port_range(runtime, runtime_config)
+                    refusals.append(
+                        "No free port available in the configured range "
+                        f"{fallback[0]}-{fallback[-1]}."
+                    )
+                    # Only --force gets past the refusal, and it must not do so
+                    # quietly: this port is known to be taken.
                     port = fallback[0]
+                    if request.force:
+                        warnings.append(_forced_busy_port_warning(port))
             endpoint = f"http://{host}:{port}"
             health_url = f"{endpoint}/v1/models"
             command = self._build_command(runtime, runtime_config, model, parameters, host, port)
