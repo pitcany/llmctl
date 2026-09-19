@@ -1945,7 +1945,11 @@ def gateway_cmd(
     host: Annotated[str | None, typer.Option(help="Bind host; defaults to router.host.")] = None,
     port: Annotated[int | None, typer.Option(help="Bind port; defaults to router.port.")] = None,
 ) -> None:
-    """Serve the OpenAI-compatible router gateway."""
+    """Serve llmctl's own OpenAI-compatible alias router (:9000).
+
+    Not the LiteLLM front door on :4000 that every client uses; for that see
+    `ccl --status` and ~/AI/docs/GATEWAY-QUICKSTART.md.
+    """
     from llmctl.api.gateway import create_gateway_app
 
     settings = load_settings()
