@@ -9,16 +9,41 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlmodel import Session as DBSession
 from sqlmodel import select
 
 from llmctl.config import Settings, load_model_dirs, load_settings
-from llmctl.db import SessionRecord, SessionStatus, get_engine, init_db
+from llmctl.db import (
+    ModelRecord,
+    ModelStatus,
+    SessionRecord,
+    SessionStatus,
+    get_engine,
+    init_db,
+    utcnow,
+)
 from llmctl.telemetry.process import is_pid_running
 
 _ACTIVE = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
+
+# How long an auto-discovered row may go unseen before doctor calls it orphaned.
+# Every scan re-stamps ``updated_at`` on rows the runtime still reports, so this
+# is a true "last seen" age. The default is generous so a laptop switched off
+# for a few weeks does not get its models flagged; tighten it with
+# ``LLMCTL_ORPHAN_DISCOVERY_DAYS`` on a machine that scans often.
+_ORPHAN_DISCOVERY_DAYS_DEFAULT = 30
+
+
+def _orphan_discovery_days() -> int:
+    """Staleness threshold in days, overridable by env; bad values fall back."""
+    try:
+        days = int(os.environ.get("LLMCTL_ORPHAN_DISCOVERY_DAYS", ""))
+    except ValueError:
+        return _ORPHAN_DISCOVERY_DAYS_DEFAULT
+    return days if days > 0 else _ORPHAN_DISCOVERY_DAYS_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -46,6 +71,7 @@ def run_doctor(settings: Settings | None = None) -> dict[str, Any]:
         ("gpu", _check_gpu),
         ("sessions", lambda: _check_sessions(cfg)),
         ("drift", lambda: _check_drift(cfg)),
+        ("orphans", lambda: _check_orphan_discoveries(cfg)),
         ("gateway", lambda: _check_gateway(cfg)),
     )
     for name, check in named_checks:
@@ -188,6 +214,75 @@ def _check_sessions(cfg: Settings) -> list[DoctorCheck]:
     else:
         checks.append(DoctorCheck("port-collisions", "pass", "no duplicate active ports"))
     return checks
+
+
+def _check_orphan_discoveries(cfg: Settings) -> list[DoctorCheck]:
+    """Auto-discovered rows whose runtime stopped reporting them long ago.
+
+    ``RegistryService.scan`` only retires rows for a runtime it could reach on
+    that pass — a deliberate guard so a daemon that is merely down does not get
+    its whole catalog flagged MISSING. The cost is that a runtime which is gone
+    for good (its unit uninstalled, its weights deleted) leaves DISCOVERED rows
+    that nothing ever retires: ``validate`` skips them because they carry no
+    path, and ``model prune`` only touches MISSING. They sit in the TUI catalog
+    forever.
+
+    Age closes that gap without guessing. Each scan re-stamps ``updated_at`` on
+    every row its runtime still reports, so a DISCOVERED row older than
+    the threshold has not been served by anything in that long.
+    This warns and names the command; it never deletes, because "unseen" can
+    also mean a machine that has been switched off.
+    """
+    try:
+        init_db(cfg.database_url)
+        with DBSession(get_engine(cfg.database_url)) as db:
+            records = db.exec(
+                select(ModelRecord).where(
+                    ModelRecord.status == ModelStatus.DISCOVERED,
+                    ModelRecord.active == True,  # noqa: E712 - SQL, not Python truthiness
+                )
+            ).all()
+    except Exception:
+        return []  # storage check already reported the failure
+    days = _orphan_discovery_days()
+    cutoff = utcnow() - timedelta(days=days)
+    orphans = [r for r in records if _last_seen(r) < cutoff]
+    if not orphans:
+        return [
+            DoctorCheck(
+                "orphan-discoveries",
+                "pass",
+                f"every discovered model was seen within {days}d",
+            )
+        ]
+    shown = sorted(orphans, key=_last_seen)[:5]
+    detail = ", ".join(
+        f"{r.name} ({r.runtime.value if hasattr(r.runtime, 'value') else r.runtime}"
+        f"{'@' + r.host if r.host else ''}, last seen {_last_seen(r):%Y-%m-%d})"
+        for r in shown
+    )
+    if len(orphans) > len(shown):
+        detail += f", +{len(orphans) - len(shown)} more"
+    return [
+        DoctorCheck(
+            "orphan-discoveries",
+            "warn",
+            f"{len(orphans)} discovered model(s) unseen for over {days}d — {detail}",
+            "Their runtime has not reported them in a long time. If the lane is "
+            "retired, run `llmctl model delete <name>`; if the host is merely "
+            "off, bring it up and re-run `llmctl scan --import`.",
+        )
+    ]
+
+
+def _last_seen(record: ModelRecord) -> datetime:
+    """``record.updated_at`` as an aware UTC datetime.
+
+    Rows written before the column was tz-aware come back naive from SQLite;
+    comparing those to an aware ``utcnow()`` raises, so assume UTC.
+    """
+    stamp = record.updated_at
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)
 
 
 def _check_drift(cfg: Settings) -> list[DoctorCheck]:

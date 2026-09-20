@@ -189,3 +189,68 @@ def test_doctor_json_exit_code(isolated_env) -> None:
     result = runner.invoke(app, ["doctor", "--json"])
     report = json.loads(result.output)
     assert result.exit_code == (0 if report["ok"] else 1)
+
+
+def test_doctor_flags_orphan_discoveries(isolated_env) -> None:
+    """A DISCOVERED row nothing has reported for months is warned, not silent."""
+    from datetime import timedelta
+
+    from sqlmodel import Session as DBSession
+
+    from llmctl.config import load_settings
+    from llmctl.db import (
+        ModelRecord,
+        ModelStatus,
+        RuntimeName,
+        get_engine,
+        init_db,
+        utcnow,
+    )
+    from llmctl.services.doctor import run_doctor
+
+    settings = load_settings()
+    init_db(settings.database_url)
+    with DBSession(get_engine(settings.database_url)) as db:
+        db.add(
+            ModelRecord(
+                name="ghost-model",
+                runtime=RuntimeName.VLLM,
+                source="ghost-model",
+                host="yannik-desktop",
+                status=ModelStatus.DISCOVERED,
+                updated_at=utcnow() - timedelta(days=90),
+            )
+        )
+        db.add(
+            ModelRecord(
+                name="live-model",
+                runtime=RuntimeName.VLLM,
+                source="live-model",
+                host="yannik-desktop",
+                status=ModelStatus.DISCOVERED,
+                updated_at=utcnow(),
+            )
+        )
+        db.commit()
+
+    report = run_doctor(settings)
+    warnings = {c["name"]: c for c in report["warnings"]}
+    assert "orphan-discoveries" in warnings
+    detail = warnings["orphan-discoveries"]["detail"]
+    assert "ghost-model" in detail
+    assert "live-model" not in detail
+    assert "llmctl model delete" in warnings["orphan-discoveries"]["remediation"]
+
+
+def test_orphan_threshold_env_override(isolated_env, monkeypatch) -> None:
+    """LLMCTL_ORPHAN_DISCOVERY_DAYS tightens the window; junk values fall back."""
+    from llmctl.services.doctor import (
+        _ORPHAN_DISCOVERY_DAYS_DEFAULT,
+        _orphan_discovery_days,
+    )
+
+    monkeypatch.setenv("LLMCTL_ORPHAN_DISCOVERY_DAYS", "7")
+    assert _orphan_discovery_days() == 7
+    for junk in ("", "abc", "0", "-3"):
+        monkeypatch.setenv("LLMCTL_ORPHAN_DISCOVERY_DAYS", junk)
+        assert _orphan_discovery_days() == _ORPHAN_DISCOVERY_DAYS_DEFAULT
