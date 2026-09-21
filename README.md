@@ -292,6 +292,37 @@ relocated**: silently moving it is the thing a pin exists to prevent,
 and a session whose recorded port is not where the server listens is its
 own kind of lie.
 
+## Adding a lane (new engine on the GPUs)
+
+A **lane** is a self-contained server with its own systemd unit and start
+script (FreeToken, the llama.cpp servers, ...). Four steps, in this order.
+Skipping step 2 is how FreeToken and GLM-5.3 ended up invisible to
+`llmctl status` after they were already serving.
+
+1. **Unit + start script.** A systemd *user* unit, and a `<name>-start`
+   script that frees the GPUs it needs (`--take-gpus`) and blocks until the
+   server answers. The script owns the GPU hand-over — llmctl never
+   reimplements it. Have the unit adopt itself with `ds4-llmctl-sync` in
+   `ExecStartPost` and detach in `ExecStopPost`.
+2. **Row in `~/.config/llmctl/settings.yaml`** under `managed_units.units`:
+   `unit_name`, `default_port`, `runtime`. This is what maps the lane to its
+   unit, and without it `llmctl status` cannot see a running server and
+   `llmctl swap` cannot stop it before starting something else.
+3. **Backend in `llm-router/config/router.yaml`** with `start_cmd`, `upstream`,
+   `served_model`, `gpus:` (the cards it occupies — omitted means every card)
+   and `health_timeout_s`. This is the lane list `llmctl swap` reads, so the
+   lane appears in the picker as soon as this exists.
+4. **Adapter, only if the engine is new** (`llmctl/adapters/<engine>.py`,
+   registered in `db.RuntimeName`, `config.default_runtime_configs` and
+   `services/router.py`). Without one the lane still works, adopted as the
+   generic `openai` runtime, but reports no version and cannot be told apart
+   from any other OpenAI-compatible endpoint. Copy `freetoken.py` or
+   `sglang.py`: discovery, health and version, never process control.
+
+Then check it: `llmctl status` shows the unit, `llmctl swap --list` shows the
+lane, `llmctl runtimes` names the engine, and `llmctl swap <name> --dry-run`
+previews the right stops.
+
 ## Preview a launch
 
 `preview` renders a launch plan without starting anything: backend,
