@@ -325,6 +325,10 @@ previews the right stops.
 
 ## Preview a launch
 
+`start-unit --dry-run` does the same for a unit llmctl does not own: it
+resolves the unit and its scope and says whether it is already active,
+starting nothing (an unknown unit is refused here, not on the run after).
+
 `preview` renders a launch plan without starting anything: backend,
 command, env, selected GPUs, expected VRAM, context length, port, and
 health endpoint.

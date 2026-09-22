@@ -648,6 +648,10 @@ def reconcile() -> None:
 @app.command("start-unit")
 def start_unit(
     unit: Annotated[str, typer.Argument(help="systemd unit name, e.g. gpt-oss-120b.")],
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Resolve the unit and its scope; start nothing."),
+    ] = False,
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
     ] = False,
@@ -663,17 +667,26 @@ def start_unit(
     ExecStartPost, and inventing a row here would race that hook.
     """
     settings = load_settings()
-    _confirm_state_change(
-        f"Start systemd unit {unit}",
-        required=settings.scheduler.require_confirmation_for_start,
-        assume_yes=yes,
-    )
+    if not dry_run:
+        _confirm_state_change(
+            f"Start systemd unit {unit}",
+            required=settings.scheduler.require_confirmation_for_start,
+            assume_yes=yes,
+        )
     with _session() as db:
         try:
-            scope, was_active = SessionService(db).start_unit(unit)
+            scope, was_active = SessionService(db).start_unit(unit, dry_run=dry_run)
         except AdoptError as exc:
             console.print(f"[red]Start refused:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
+    if dry_run:
+        flag = " --user" if scope == "user" else ""
+        state = "already active — nothing would happen" if was_active else "inactive"
+        console.print(
+            f"[cyan]dry-run:[/cyan] {escape(unit)} resolves to {scope} scope ({state}).\n"
+            f"  would run: systemctl{flag} start {escape(unit)}"
+        )
+        return
     if was_active:
         console.print(f"[cyan]{escape(str(unit))} is already active[/cyan] ({scope} scope).")
         return

@@ -988,8 +988,12 @@ class SessionService:
         )
         return record_to_session(record)
 
-    def start_unit(self, unit_name: str) -> tuple[str, bool]:
+    def start_unit(self, unit_name: str, *, dry_run: bool = False) -> tuple[str, bool]:
         """Start a systemd unit llmctl does not own. Returns ``(scope, was_active)``.
+
+        ``dry_run`` resolves the unit and its scope and reports whether it is
+        already active, without starting anything — the same refusals fire, so
+        a typo is caught before the real run.
 
         The counterpart to ``stop --systemd`` that the session verbs cannot
         provide: once a unit is stopped its session row is typically gone
@@ -1014,8 +1018,9 @@ class SessionService:
             )
 
         scope = "user" if user_scope else "system"
-        if self._systemctl.is_active(unit_name, user=user_scope):
-            return scope, True
+        active = self._systemctl.is_active(unit_name, user=user_scope)
+        if dry_run or active:
+            return scope, active
 
         result = self._systemctl.start(unit_name, user=user_scope)
         if not result.ok:

@@ -1067,3 +1067,31 @@ def test_concurrent_adopt_of_one_endpoint_keeps_a_single_row(tmp_path: Path) -> 
         assert len(rows) == 1
     finally:
         db.close()
+
+
+def test_start_unit_dry_run_resolves_scope_without_starting(tmp_path: Path) -> None:
+    """--dry-run answers "which unit, which scope, running already?" only."""
+    calls, runner = _scoped_systemctl(user_unit=True)
+    db, service = _make_service(tmp_path, lambda u, _t: ["m"], systemctl=runner)
+    try:
+        scope, was_active = service.start_unit("gpt-oss-120b", dry_run=True)
+        assert (scope, was_active) == ("user", False)
+        assert not [a for a in calls if "start" in a]
+    finally:
+        db.close()
+
+
+def test_start_unit_dry_run_still_refuses_an_unknown_unit(tmp_path: Path) -> None:
+    """A typo is caught by the preview, not by the run after it."""
+
+    def fake(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, "not-found\n", "")
+
+    db, service = _make_service(
+        tmp_path, lambda u, _t: ["m"], systemctl=SystemctlRunner(runner=fake)
+    )
+    try:
+        with pytest.raises(AdoptError, match="No systemd unit named"):
+            service.start_unit("nosuchunit", dry_run=True)
+    finally:
+        db.close()
