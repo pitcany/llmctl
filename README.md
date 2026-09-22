@@ -310,8 +310,9 @@ so there is nothing left to forget.
    `health_timeout_s`, and `unit:` + `runtime:` (llm-router ignores those two;
    llmctl reads them). This is the lane list, so the lane appears in
    `llmctl swap`, `llmctl status` and the TUI as soon as it exists — no
-   `settings.yaml` row needed. `flash` (FreeToken) and `glm53` are the worked
-   examples. The row's name in `llmctl status` is the lane name.
+   `settings.yaml` row needed. every lane does this as of 2026-09-21, so
+   `settings.yaml` holds only units that are not lanes (`vllm-tp`, `gpt-oss`,
+   `coder1`). The row's name in `llmctl status` is the lane name.
 3. **Only if you need to override it:** a `managed_units.units` row in
    `~/.config/llmctl/settings.yaml` (`unit_name`, `default_port`, `runtime`)
    wins over `unit:`. Units that are not lanes live there too.
