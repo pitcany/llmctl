@@ -67,6 +67,25 @@ from llmctl import cli_registry  # noqa: E402
 cli_registry.register(app)
 
 
+def _session_model_cell(session: object, names: dict[str, str]) -> str:
+    """What this session serves, as a name the operator recognises.
+
+    ``served_name`` is what the endpoint answers with and what every other
+    surface (`status`, `swap --list`) prints, so it wins. A registry model_id
+    is resolved to its name; the raw uuid is never shown, because nothing can
+    be done with it here. The column used to print ``model_id`` alone, which
+    is None for adopted sessions and for the vLLM unit -- an empty column on
+    every row of a table whose whole subject is what is running.
+    """
+    served = getattr(session, "served_name", None)
+    if served:
+        return str(served)
+    model_id = getattr(session, "model_id", None)
+    if model_id:
+        return names.get(str(model_id), str(model_id))
+    return "—"
+
+
 def _id_column(table: Table, header: str, **kwargs: object) -> None:
     """Add a column holding a value the operator types back into a command.
 
@@ -267,6 +286,13 @@ def sessions_cmd(
         if fresh:
             service.reconcile()
         sessions = service.list_sessions()
+        # Registry names for sessions that carry a model_id; the column shows
+        # a name either way, never a bare uuid.
+        names = {
+            model.id: model.name
+            for model in RegistryService(db).list_models()
+            if model.id is not None
+        }
     if json_out:
         _emit_json([session.model_dump(mode="json") for session in sessions])
         return
@@ -286,7 +312,7 @@ def sessions_cmd(
             session.id or "",
             session.runtime.value,
             status_cell,
-            session.model_id or "",
+            _session_model_cell(session, names),
         )
     console.print(table)
 
