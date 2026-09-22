@@ -180,8 +180,15 @@ def test_units_render_unknown_when_systemd_unavailable() -> None:
     from llmctl.tui.screens_units import UnitsScreen, _UnitRow
 
     row = _UnitRow(
-        role="vllm-tp", unit_name="vllm-tp", env_path="/x", env_exists=False,
-        port=8003, is_active=None, served=None, role_kind="managed",
+        role="vllm-tp",
+        unit_name="vllm-tp",
+        env_path="/x",
+        env_exists=False,
+        port=8003,
+        is_active=None,
+        served=None,
+        source="settings",
+        role_kind="managed",
     )
     cells: dict = {}
 
@@ -227,9 +234,14 @@ def test_doctor_summary_has_no_raw_booleans() -> None:
     screen.fetch = lambda: {  # type: ignore[method-assign]
         "backends": [],
         "summary": {
-            "gpu_count": 0, "nvml_available": False, "safe_mode": True,
-            "gpu_policy": "balanced", "safety_margin_gb": 2, "allow_public_bind": False,
-            "default_host": "127.0.0.1", "missing_backends": [],
+            "gpu_count": 0,
+            "nvml_available": False,
+            "safe_mode": True,
+            "gpu_policy": "balanced",
+            "safety_margin_gb": 2,
+            "allow_public_bind": False,
+            "default_host": "127.0.0.1",
+            "missing_backends": [],
         },
     }
 
@@ -259,8 +271,15 @@ def test_units_j_opens_the_unit_journal(monkeypatch) -> None:
     from llmctl.tui.screens_units import UnitsScreen, _UnitRow
 
     row = _UnitRow(
-        role="vllm-tp", unit_name="vllm-tp", env_path="/x", env_exists=False,
-        port=8003, is_active=True, served=["m"], role_kind="managed",
+        role="vllm-tp",
+        unit_name="vllm-tp",
+        env_path="/x",
+        env_exists=False,
+        port=8003,
+        is_active=True,
+        served=["m"],
+        source="settings",
+        role_kind="managed",
     )
     monkeypatch.setattr(_data, "unit_log_tail", lambda unit, lines=60: f"[rank0]: {unit} up")
     screen = UnitsScreen()
@@ -381,9 +400,16 @@ def test_missing_link_names_the_dangling_model_ref() -> None:
     from llmctl.tui.screens_presets import _format_link_cell
 
     view = PresetView(
-        alias="a", served_name="a", model_id="m", family=None, param_count_b=None,
-        tensor_parallel=2, quantization="awq", source_path=Path("/x"),
-        linkage_state="missing", model_ref="gone-model-id",
+        alias="a",
+        served_name="a",
+        model_id="m",
+        family=None,
+        param_count_b=None,
+        tensor_parallel=2,
+        quantization="awq",
+        source_path=Path("/x"),
+        linkage_state="missing",
+        model_ref="gone-model-id",
     )
     assert "gone-model-id" in _format_link_cell(view)
 
@@ -401,8 +427,14 @@ def test_edit_asks_before_suspending_into_the_editor(tmp_path, monkeypatch) -> N
     preset = tmp_path / "a.yaml"
     preset.write_text("alias: a\n")
     view = PresetView(
-        alias="a", served_name="a", model_id="m", family=None, param_count_b=None,
-        tensor_parallel=2, quantization="awq", source_path=Path(preset),
+        alias="a",
+        served_name="a",
+        model_id="m",
+        family=None,
+        param_count_b=None,
+        tensor_parallel=2,
+        quantization="awq",
+        source_path=Path(preset),
     )
     monkeypatch.setattr(_data, "get_preset_views_with_links", lambda: [view])
     ran: list[Path] = []
@@ -434,8 +466,13 @@ def test_gpu_cells_use_units_and_dash_for_unknowns() -> None:
     from llmctl.tui.screens_gpu import gpu_row_cells
 
     full = GPUInfo(
-        index=0, name="RTX 5090", memory_used_mb=12288, memory_total_mb=32768,
-        utilization_gpu_percent=40, temperature_c=55, power_draw_watts=220.4,
+        index=0,
+        name="RTX 5090",
+        memory_used_mb=12288,
+        memory_total_mb=32768,
+        utilization_gpu_percent=40,
+        temperature_c=55,
+        power_draw_watts=220.4,
     )
     cells = gpu_row_cells(full)
     assert cells[2] == "12.0 / 32.0 GiB" and cells[4] == "55 °C" and cells[5] == "220 W"
@@ -453,8 +490,15 @@ def test_units_restart_is_confirmed_then_runs(monkeypatch) -> None:
     from llmctl.tui.screens_units import UnitsScreen, _UnitRow
 
     row = _UnitRow(
-        role="vllm-tp", unit_name="vllm-tp", env_path="/x", env_exists=True,
-        port=8003, is_active=True, served=["m"], role_kind="managed",
+        role="vllm-tp",
+        unit_name="vllm-tp",
+        env_path="/x",
+        env_exists=True,
+        port=8003,
+        is_active=True,
+        served=["m"],
+        source="settings",
+        role_kind="managed",
     )
     restarted: list[str] = []
     monkeypatch.setattr(_data, "restart_managed_unit", lambda u: restarted.append(u) or "system")
@@ -541,9 +585,7 @@ def test_enter_action_is_the_screens_not_the_tables(tmp_path, monkeypatch) -> No
                 found[key] = (active.binding.description, active.binding.show) if active else None
 
     asyncio.run(_run())
-    assert found == {
-        "p": ("Launch", True), "m": ("Plan/Launch", True), "b": ("Re-run", True)
-    }
+    assert found == {"p": ("Launch", True), "m": ("Plan/Launch", True), "b": ("Re-run", True)}
 
 
 # --- P2 #20: Models confirms mutations -----------------------------------------
@@ -589,9 +631,7 @@ def _render_screen(screen, table_id: str) -> list[list[str]]:
                 table = app.screen.query_one(f"#{table_id}", DataTable)
                 if table.row_count:
                     break
-            rows.extend(
-                [str(c) for c in table.get_row_at(i)] for i in range(table.row_count)
-            )
+            rows.extend([str(c) for c in table.get_row_at(i)] for i in range(table.row_count))
 
     asyncio.run(_run())
     return rows

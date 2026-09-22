@@ -45,6 +45,8 @@ class _UnitRow:
     #: Tri-state from the shared probe: a list (possibly empty) means the
     #: endpoint answered, ``None`` means it could not be reached.
     served: list[str] | None
+    #: ``settings`` or ``router.yaml`` — which file puts this unit here.
+    source: str
     role_kind: str  # "managed"
 
 
@@ -93,7 +95,7 @@ class UnitsScreen(DataScreen):
         )
         table: DataTable[str] = DataTable(id="units-table", cursor_type="row")
         table.add_columns(
-            "Role", "Unit", "Active", "Port", "Served (live)", "Env file"
+            "Role", "Unit", "Active", "Port", "Source", "Served (live)", "Env file"
         )
         yield table
         yield Footer()
@@ -122,6 +124,7 @@ class UnitsScreen(DataScreen):
                 port=r.port,
                 is_active=self._is_active_safe(r.unit_name, sysctl),
                 served=r.served,
+                source=r.source,
                 role_kind="managed",
             )
             for r in unit_rows(load_settings(), http_get=self._http_get)
@@ -160,6 +163,7 @@ class UnitsScreen(DataScreen):
                 esc(r.unit_name),
                 active_cell,
                 str(r.port),
+                r.source if r.source == "settings" else f"[{C_ACCENT}]{esc(r.source)}[/]",
                 served_cell,
                 env_cell,
             )

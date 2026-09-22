@@ -136,3 +136,15 @@ def test_a_lane_with_its_own_unit_needs_no_settings_row(tmp_path, monkeypatch) -
     assert "onvllmport" not in rows
     assert "nounit" not in rows
     assert rows["vllm-tp"].unit_name == "vllm-tp"
+
+
+def test_rows_say_which_file_put_them_there(tmp_path, monkeypatch) -> None:
+    """"Why is this row here?" has two answers; the table gives it."""
+    router = tmp_path / "router.yaml"
+    router.write_text(_LANE_YAML)
+    monkeypatch.setenv("LLMCTL_ROUTER_CONFIG", str(router))
+
+    rows = {row.role: row for row in unit_rows(_settings(tmp_path), http_get=_http({"data": []}))}
+
+    assert rows["vllm-tp"].source == "settings"
+    assert rows["glm53"].source == "router.yaml"

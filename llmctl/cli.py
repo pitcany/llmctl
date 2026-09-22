@@ -1884,6 +1884,7 @@ def status_cmd(json_out: _JSON_OPT = False) -> None:
             "env_file": str(r.env_file),
             "env_file_exists": r.env_file_exists,
             "port": r.port,
+            "source": r.source,
             "serving": r.serving,
             "served_models": r.served or [],
         }
@@ -1897,6 +1898,7 @@ def status_cmd(json_out: _JSON_OPT = False) -> None:
     _id_column(table, "unit name")
     _id_column(table, "env file")
     table.add_column("port", justify="right")
+    table.add_column("source")
     _id_column(table, "serving")
     for row in rows:
         # Served model ids and env paths are process/config derived and may
@@ -1907,8 +1909,18 @@ def status_cmd(json_out: _JSON_OPT = False) -> None:
             else ("[green]yes (empty list)[/green]" if row["serving"] else "[red]no[/red]")
         )
         env_cell = escape(row["env_file"]) if row["env_file_exists"] else "[dim]—[/dim]"
+        source = (
+            row["source"]
+            if row["source"] == "settings"
+            else f"[cyan]{escape(row['source'])}[/cyan]"
+        )
         table.add_row(
-            row["role"], escape(row["unit_name"]), env_cell, str(row["port"]), serving
+            row["role"],
+            escape(row["unit_name"]),
+            env_cell,
+            str(row["port"]),
+            source,
+            serving,
         )
     console.print(table)
 

@@ -37,6 +37,11 @@ class UnitRow:
     #: "edit this file" for a file nothing reads, so callers must check.
     env_file_exists: bool
     port: int
+    #: Where this row came from: ``settings`` (a ``managed_units`` entry in
+    #: llmctl's settings.yaml) or ``router.yaml`` (derived from a lane that
+    #: names its own ``unit:``). Worth showing: the two files are edited in
+    #: different places, and "why is this row here?" has two answers.
+    source: str
     #: Tri-state, and the distinction is the point: a list (possibly empty)
     #: means the endpoint answered; ``None`` means it could not be reached.
     #: An idle unit and an unreachable one are different facts, and conflating
@@ -68,10 +73,13 @@ def unit_rows(
         timeout_s: Per-probe timeout.
     """
     roles: dict[str, ManagedUnitConfig] = dict(settings.managed_units.roles())
+    sources = dict.fromkeys(roles, "settings")
     for role, unit in units_from_lanes(
         load_lanes(managed_units=settings.managed_units), settings.managed_units
     ).items():
-        roles.setdefault(role, unit)
+        if role not in roles:
+            roles[role] = unit
+            sources[role] = "router.yaml"
     rows: list[UnitRow] = []
     for role, unit in roles.items():
         served = probe_openai_v1_models(
@@ -85,6 +93,7 @@ def unit_rows(
                 env_file=env_file,
                 env_file_exists=env_file.exists(),
                 port=unit.default_port,
+                source=sources[role],
                 served=served,
             )
         )
