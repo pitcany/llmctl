@@ -16,8 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from llmctl.config import Settings
+from llmctl.config import ManagedUnitConfig, Settings
 from llmctl.services.backends import probe_openai_v1_models
+from llmctl.services.lanes import load_lanes, units_from_lanes
 
 #: Per-unit probe budget. The TUI refreshes every 3s and probes each unit, so
 #: this bounds how far behind a down unit can push a refresh.
@@ -56,14 +57,23 @@ def unit_rows(
 ) -> list[UnitRow]:
     """Describe every configured managed unit, probing each one's port.
 
+    Rows come from ``managed_units`` plus every router.yaml lane that names
+    its own ``unit:`` and is not already covered there, so a lane is visible
+    here as soon as the router knows about it.
+
     Args:
         settings: Resolved settings; ``managed_units.roles()`` drives the rows.
         http_get: Transport override for tests. Production uses the default in
             :mod:`llmctl.services.backends`.
         timeout_s: Per-probe timeout.
     """
+    roles: dict[str, ManagedUnitConfig] = dict(settings.managed_units.roles())
+    for role, unit in units_from_lanes(
+        load_lanes(managed_units=settings.managed_units), settings.managed_units
+    ).items():
+        roles.setdefault(role, unit)
     rows: list[UnitRow] = []
-    for role, unit in settings.managed_units.roles().items():
+    for role, unit in roles.items():
         served = probe_openai_v1_models(
             f"http://127.0.0.1:{unit.default_port}", timeout_s, http_get
         )

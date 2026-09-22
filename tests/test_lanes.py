@@ -267,3 +267,53 @@ def test_overlapping_lanes_are_in_the_way(tmp_path):
     assert names(resolve("qwen3.8-27b", state.catalog)) == ["flash", "gpu1", "undeclared"]
     preview = state.preview(resolve("pair", state.catalog), load_times=tmp_path / "t.json")
     assert sum("service" in stop for stop in preview.stops) == 3
+
+
+ROUTER_YAML_SELF_DESCRIBED = """
+backends:
+  - name: glm53
+    served_model: glm-5.3-flash
+    upstream: http://127.0.0.1:8006
+    start_cmd: ["/bin/glm53-start"]
+    unit: glm-5.3-flash
+    runtime: llama_cpp
+"""
+
+
+def test_lane_takes_its_unit_from_router_yaml_when_settings_has_no_row(tmp_path):
+    path = tmp_path / "router.yaml"
+    path.write_text(ROUTER_YAML_SELF_DESCRIBED)
+    lane = load_lanes(path, _units())[0]
+    assert lane.unit == "glm-5.3-flash.service"  # .service suffix added
+    assert lane.runtime == "llama_cpp"
+
+
+def test_a_settings_row_still_wins_over_router_yaml(tmp_path):
+    """The managed_units row is the override; router.yaml is the fallback."""
+    path = tmp_path / "router.yaml"
+    path.write_text(
+        ROUTER_YAML_SELF_DESCRIBED.replace("8006", "1919").replace(
+            "unit: glm-5.3-flash", "unit: wrong-unit"
+        )
+    )
+    lane = load_lanes(path, _units())[0]
+    assert lane.unit == "qwen3.8-flash-next-ft.service"
+    assert lane.runtime == "freetoken"
+
+
+def test_units_from_lanes_skips_covered_ports_and_unitless_lanes(tmp_path):
+    """Derive a row only for a lane that names a unit on a free port."""
+    from llmctl.services.lanes import units_from_lanes
+
+    self_described = tmp_path / "self.yaml"
+    self_described.write_text(ROUTER_YAML_SELF_DESCRIBED)
+    lanes = _lanes(tmp_path) + load_lanes(self_described, _units())
+
+    derived = units_from_lanes(lanes, _units())
+
+    # flash sits on 1919, which a managed_units row already owns; the glm53
+    # entry from ROUTER_YAML names no unit, so only the self-described one is.
+    assert set(derived) == {"glm53"}
+    assert derived["glm53"].unit_name == "glm-5.3-flash"
+    assert derived["glm53"].default_port == 8006
+    assert derived["glm53"].runtime == "llama_cpp"

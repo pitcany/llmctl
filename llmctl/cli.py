@@ -286,13 +286,16 @@ def sessions_cmd(
         if fresh:
             service.reconcile()
         sessions = service.list_sessions()
-        # Registry names for sessions that carry a model_id; the column shows
-        # a name either way, never a bare uuid.
-        names = {
-            model.id: model.name
-            for model in RegistryService(db).list_models()
-            if model.id is not None
-        }
+        # Registry names, looked up only when some session carries a model_id:
+        # served_name answers for every other row, and an unconditional query
+        # would make listing sessions depend on the registry for nothing.
+        names: dict[str, str] = {}
+        if any(session.model_id for session in sessions):
+            names = {
+                model.id: model.name
+                for model in RegistryService(db).list_models()
+                if model.id is not None
+            }
     if json_out:
         _emit_json([session.model_dump(mode="json") for session in sessions])
         return
@@ -312,7 +315,7 @@ def sessions_cmd(
             session.id or "",
             session.runtime.value,
             status_cell,
-            _session_model_cell(session, names),
+            escape(_session_model_cell(session, names)),
         )
     console.print(table)
 

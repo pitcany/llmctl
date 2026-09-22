@@ -9,8 +9,10 @@ llmctl for exactly that reason).
 
 The lane's start script owns the GPU hand-over (``--take-gpus`` stops vllm-tp
 and evicts Ollama models); llmctl runs it, waits for readiness, and rolls back.
-Lane -> systemd unit comes from ``managed_units`` in llmctl's settings, matched
-by port.
+Lane -> systemd unit comes from ``managed_units`` in llmctl's settings when a
+row there shares the port, else from the lane's own ``unit:`` key in
+router.yaml (llm-router ignores it). A lane therefore needs no settings row:
+``units_from_lanes`` derives one so ``llmctl status`` sees it too.
 
 The router's ``profile_env`` backends are NOT read: vLLM rows come from llmctl's
 own presets, the canonical vLLM schema.
@@ -34,7 +36,7 @@ from urllib.parse import urlparse
 
 import yaml
 
-from llmctl.config import ManagedUnitsConfig
+from llmctl.config import ManagedUnitConfig, ManagedUnitsConfig
 
 #: Override for the router config location (tests, other machines).
 ROUTER_CONFIG_ENV = "LLMCTL_ROUTER_CONFIG"
@@ -114,7 +116,9 @@ class Lane:
     start_cmd: tuple[str, ...]
     health_timeout_s: float = DEFAULT_LANE_TIMEOUT_S
     aliases: tuple[str, ...] = ()
-    #: systemd unit (user scope) serving this lane, from llmctl managed_units.
+    #: systemd unit (user scope) serving this lane. Taken from llmctl's
+    #: managed_units when a row there shares the port, else from router.yaml's
+    #: own ``unit:`` key — a lane needs no settings row to be complete.
     unit: str | None = None
     #: llmctl runtime id of that unit (``freetoken``, ``llama_cpp``, ...).
     runtime: str | None = None
@@ -161,6 +165,12 @@ def load_lanes(
             continue  # profile_env (vLLM) backend, or malformed
         timeout = entry.get("health_timeout_s")
         unit, runtime = by_port.get(_port_of(str(upstream)) or -1, (None, None))
+        if unit is None and entry.get("unit"):
+            # No managed_units row: router.yaml carries the unit itself, which
+            # is what keeps a new lane from needing a hand-written settings
+            # entry repeating the same unit name and port.
+            unit = str(entry["unit"])
+            runtime = str(entry["runtime"]) if entry.get("runtime") else None
         if unit is not None and not unit.endswith(".service"):
             unit = f"{unit}.service"
         lanes.append(
@@ -496,3 +506,29 @@ def gather_state(
         vllm_unit=vllm.unit_name,
         vllm_active=is_active(vllm.unit_name, False),
     )
+
+
+def units_from_lanes(
+    lanes: Iterable[Lane],
+    managed_units: ManagedUnitsConfig,
+) -> dict[str, ManagedUnitConfig]:
+    """Managed-unit rows for lanes that declare their unit in router.yaml.
+
+    A lane already covered by a ``managed_units`` row (matched by port) is
+    skipped, so a hand-written row always wins. Everything else becomes a row
+    derived from router.yaml, which is what lets ``llmctl status`` see a lane
+    that was never added to settings.yaml — the gap that left FreeToken and
+    GLM-5.3 invisible while they were serving.
+    """
+    taken_ports = {unit.default_port for unit in managed_units.roles().values()}
+    derived: dict[str, ManagedUnitConfig] = {}
+    for lane in lanes:
+        port = _port_of(lane.upstream)
+        if lane.unit is None or port is None or port in taken_ports:
+            continue
+        derived[lane.name] = ManagedUnitConfig(
+            unit_name=lane.unit.removesuffix(".service"),
+            default_port=port,
+            runtime=lane.runtime or "openai",
+        )
+    return derived

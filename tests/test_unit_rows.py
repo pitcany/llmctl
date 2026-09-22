@@ -97,3 +97,42 @@ def test_row_carries_the_identifying_fields(tmp_path) -> None:
     assert row.role == "vllm-tp"
     assert row.unit_name == "vllm-tp"
     assert row.port == 8003
+
+
+# --- lanes that declare their own unit in router.yaml -------------------------
+
+_LANE_YAML = """
+backends:
+  - name: glm53
+    served_model: glm-5.3-flash
+    upstream: http://127.0.0.1:8006
+    start_cmd: ["/bin/glm53-start"]
+    unit: glm-5.3-flash
+    runtime: llama_cpp
+  - name: onvllmport
+    served_model: shadow
+    upstream: http://127.0.0.1:8003
+    start_cmd: ["/bin/shadow-start"]
+    unit: shadow
+  - name: nounit
+    served_model: anon
+    upstream: http://127.0.0.1:9999
+    start_cmd: ["/bin/anon-start"]
+"""
+
+
+def test_a_lane_with_its_own_unit_needs_no_settings_row(tmp_path, monkeypatch) -> None:
+    """FreeToken and GLM-5.3 were invisible to `status` for want of that row."""
+    router = tmp_path / "router.yaml"
+    router.write_text(_LANE_YAML)
+    monkeypatch.setenv("LLMCTL_ROUTER_CONFIG", str(router))
+
+    rows = {row.role: row for row in unit_rows(_settings(tmp_path), http_get=_http({"data": []}))}
+
+    assert rows["glm53"].unit_name == "glm-5.3-flash"
+    assert rows["glm53"].port == 8006
+    # A lane on a port a managed_units row already owns does not duplicate it,
+    # and a lane that names no unit cannot be derived at all.
+    assert "onvllmport" not in rows
+    assert "nounit" not in rows
+    assert rows["vllm-tp"].unit_name == "vllm-tp"

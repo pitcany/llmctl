@@ -250,8 +250,15 @@ def test_the_cli_surfaces_it_next_to_the_status(tmp_path: Path, monkeypatch) -> 
         def __exit__(self, *a):
             return False
 
+    class _NullRegistry:
+        def list_models(self) -> list:
+            return []
+
     monkeypatch.setattr(cli, "_session", lambda: _NullCtx())
     monkeypatch.setattr(cli, "SessionService", _Svc)
+    # The Model column resolves a model_id through the registry; this test's
+    # db is a null stub, so the registry gets one too.
+    monkeypatch.setattr(cli, "RegistryService", lambda db: _NullRegistry())
 
     out = CliRunner().invoke(cli.app, ["sessions"])
 

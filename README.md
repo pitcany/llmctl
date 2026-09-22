@@ -296,22 +296,24 @@ own kind of lie.
 
 A **lane** is a self-contained server with its own systemd unit and start
 script (FreeToken, the llama.cpp servers, ...). Four steps, in this order.
-Skipping step 2 is how FreeToken and GLM-5.3 ended up invisible to
-`llmctl status` after they were already serving.
+FreeToken and GLM-5.3 were both invisible to `llmctl status` while serving,
+because they had no `managed_units` row; step 2 now carries that information
+so there is nothing left to forget.
 
 1. **Unit + start script.** A systemd *user* unit, and a `<name>-start`
    script that frees the GPUs it needs (`--take-gpus`) and blocks until the
    server answers. The script owns the GPU hand-over — llmctl never
    reimplements it. Have the unit adopt itself with `ds4-llmctl-sync` in
    `ExecStartPost` and detach in `ExecStopPost`.
-2. **Row in `~/.config/llmctl/settings.yaml`** under `managed_units.units`:
-   `unit_name`, `default_port`, `runtime`. This is what maps the lane to its
-   unit, and without it `llmctl status` cannot see a running server and
-   `llmctl swap` cannot stop it before starting something else.
-3. **Backend in `llm-router/config/router.yaml`** with `start_cmd`, `upstream`,
-   `served_model`, `gpus:` (the cards it occupies — omitted means every card)
-   and `health_timeout_s`. This is the lane list `llmctl swap` reads, so the
-   lane appears in the picker as soon as this exists.
+2. **Backend in `llm-router/config/router.yaml`** with `start_cmd`, `upstream`,
+   `served_model`, `gpus:` (the cards it occupies — omitted means every card),
+   `health_timeout_s`, and `unit:` + `runtime:` (llm-router ignores those two;
+   llmctl reads them). This is the lane list, so the lane appears in
+   `llmctl swap`, `llmctl status` and the TUI as soon as it exists — no
+   `settings.yaml` row needed. `glm53` is the worked example.
+3. **Only if you need to override it:** a `managed_units.units` row in
+   `~/.config/llmctl/settings.yaml` (`unit_name`, `default_port`, `runtime`)
+   wins over `unit:`. Units that are not lanes live there too.
 4. **Adapter, only if the engine is new** (`llmctl/adapters/<engine>.py`,
    registered in `db.RuntimeName`, `config.default_runtime_configs` and
    `services/router.py`). Without one the lane still works, adopted as the
