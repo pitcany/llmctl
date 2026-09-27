@@ -215,6 +215,8 @@ class SwapTarget:
     #: ``session`` rows: the registry row, and the fit decided before any stop.
     model_id: str | None = None
     placement: Any = None
+    #: ``session`` rows: the port the model's default profile pins, if any.
+    port: int | None = None
 
     @property
     def gpus(self) -> Gpus:
@@ -455,7 +457,8 @@ def preview_swap(
         placement = target.placement
         cards = getattr(placement, "cards", 1) or 1
         where = "one GPU" if cards == 1 else f"{cards} GPUs (split)"
-        preview.starts = f"llama-server for {target.key} on {where}; llmctl picks the port"
+        port = f"port {target.port}" if target.port else "llmctl picks the port"
+        preview.starts = f"llama-server for {target.key} on {where}; {port}"
         note = getattr(placement, "note", None)
         if note:
             stops.append(note)
@@ -635,20 +638,23 @@ def load_session_rows(settings: Any, catalog: list[SwapTarget]) -> list[SwapTarg
         from llmctl.db import get_engine, init_db
         from llmctl.services.registry import RegistryService
         from llmctl.services.serve import effective_host, local_host
-        from llmctl.services.session_swap import session_target
+        from llmctl.services.session_swap import pinned_port, session_target
         from llmctl.telemetry.gpu import get_gpu_info
 
         url = settings.database_url
         init_db(url)
         with Session(get_engine(url)) as db:
             models = RegistryService(db).list_models()
+            ports = {m.id: pinned_port(db, m) for m in models if m.runtime.value == "llama_cpp"}
         gpus = get_gpu_info()
         margin = settings.scheduler.safety_margin_gb
         here = local_host()
         return session_rows_for(
             models,
             catalog,
-            target_for=lambda m: session_target(m, margin_gb=margin, gpus=gpus),
+            target_for=lambda m: session_target(
+                m, margin_gb=margin, gpus=gpus, port=ports.get(m.id)
+            ),
             is_local=lambda m: effective_host(m.host) == here,
         )
     except Exception:  # noqa: BLE001 - the picker must render without the DB

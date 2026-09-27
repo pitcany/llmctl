@@ -166,3 +166,19 @@ def test_swap_by_registry_name_uses_the_lane_that_serves_it(db) -> None:
     served = route(db, model, [_lane_row()])
     assert served.kind == "lane"
     assert served.target is not None and served.target.key == "dsv4"
+
+
+def test_route_carries_the_port_the_default_profile_pins(db) -> None:
+    from llmctl.schemas import ModelUpdate, ProfileCreate
+    from llmctl.services.profiles import ProfileService
+
+    registry = RegistryService(db)
+    model = registry.add_model(
+        ModelCreate(name="gpt-oss", runtime=RuntimeName.LLAMA_CPP, source="/m/g.gguf")
+    )
+    assert route(db, model, []).target.port is None
+    profile = ProfileService(db).create_profile(
+        ProfileCreate(name="gpt-oss-swap", runtime=RuntimeName.LLAMA_CPP, parameters={"port": 8005})
+    )
+    model = registry.update_model(model.id, ModelUpdate(default_profile_id=profile.id))
+    assert route(db, model, []).target.port == 8005

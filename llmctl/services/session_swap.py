@@ -279,7 +279,22 @@ def swap_to_session(
     return result
 
 
-def session_target(model: Any, *, margin_gb: float | None = None, gpus: Any = None) -> Any:
+def pinned_port(db: Any, model: Any) -> int | None:
+    """The port ``model``'s default profile pins, or None (llmctl picks one)."""
+    profile_id = getattr(model, "default_profile_id", None)
+    if not profile_id:
+        return None
+    from llmctl.db import ProfileRecord
+    from llmctl.services.profiles import effective_parameters
+    from llmctl.services.scheduler import SchedulerService
+
+    profile = db.get(ProfileRecord, profile_id)
+    return SchedulerService._pinned_port(effective_parameters(profile)) if profile else None
+
+
+def session_target(
+    model: Any, *, margin_gb: float | None = None, gpus: Any = None, port: int | None = None
+) -> Any:
     """The swap-list row for a llama.cpp registry model, fit decided now."""
     from llmctl.services.lanes import SwapTarget
 
@@ -301,6 +316,7 @@ def session_target(model: Any, *, margin_gb: float | None = None, gpus: Any = No
         upstream="",
         model_id=model.id,
         placement=placement,
+        port=port,
     )
 
 

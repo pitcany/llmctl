@@ -127,7 +127,7 @@ def route(db: Session, model: Model, catalog: list[SwapTarget]) -> ServeRoute:
         )
     if engine == RuntimeName.LLAMA_CPP:
         from llmctl.services.lanes import lane_for_model
-        from llmctl.services.session_swap import session_target
+        from llmctl.services.session_swap import pinned_port, session_target
 
         lane = lane_for_model(model.name, model.path, catalog)
         if lane is not None:
@@ -138,7 +138,7 @@ def route(db: Session, model: Model, catalog: list[SwapTarget]) -> ServeRoute:
                 f"swapping to that.",
                 lane,
             )
-        target = session_target(model)
+        target = session_target(model, port=pinned_port(db, model))
         placement = target.placement
         if placement.problem:
             return ServeRoute("cannot", model, placement.problem)

@@ -193,6 +193,16 @@ def test_preview_of_a_session_swap_names_what_stops() -> None:
     assert "coder1.service" in lines
     assert "llama-server for other, port 8001" in lines
     assert "llama-server for gpt-oss on 2 GPUs" in lines
+    assert "llmctl picks the port" in lines
+
+
+def test_preview_of_a_session_swap_shows_a_pinned_port() -> None:
+    target = SwapTarget(
+        key="gpt-oss", kind="session", model="gpt-oss", engine="llama.cpp", upstream="",
+        placement=Placement(cards=2), port=8005,
+    )
+    lines = "\n".join(_state([]).preview(target).lines())
+    assert "gpt-oss on 2 GPUs (split); port 8005" in lines
 
 
 def test_vllm_swap_preview_lists_llama_servers_in_the_way() -> None:
