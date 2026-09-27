@@ -17,6 +17,7 @@ import io
 import json
 import urllib.error
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -214,10 +215,11 @@ def test_vllm_uses_binary_path_when_present(
 
 
 def test_missing_backends_excludes_vllm_when_managed_unit_serves(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """missing_backends drives the scheduler-warning text on the dashboard."""
     monkeypatch.setattr("shutil.which", lambda b: None)  # nothing on PATH
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)  # no ~/.lmstudio/bin/lms
     missing = missing_backends(
         _settings_with_managed_units(),
         http_get=_http_responder(by_port={8003: ["llama-3.3-70b"]}),

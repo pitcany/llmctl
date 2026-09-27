@@ -20,6 +20,7 @@ import json
 import shutil
 import subprocess
 from collections.abc import Callable
+from pathlib import Path
 
 from llmctl.adapters._common import ClientFactory, HttpRuntimeAdapter
 from llmctl.db import ModelStatus, RuntimeName
@@ -38,6 +39,20 @@ DeviceMapFn = Callable[[], dict[str, str]]
 _LMS_TIMEOUT = 10.0
 
 
+def lms_binary() -> str | None:
+    """Path of the ``lms`` CLI, or ``None`` when it is not installed.
+
+    LM Studio installs ``lms`` in ``~/.lmstudio/bin`` and puts that on PATH
+    only from ``~/.bashrc``, so a TUI started from tmux, ssh or a launcher
+    does not see it. Fall back to the install location.
+    """
+    found = shutil.which("lms")
+    if found:
+        return found
+    installed = Path.home() / ".lmstudio" / "bin" / "lms"
+    return str(installed) if installed.is_file() else None
+
+
 def _run_lms_json(args: list[str], timeout: float) -> object | None:
     """Run ``lms <args> --json`` and return parsed JSON, or ``None`` on failure.
 
@@ -45,7 +60,7 @@ def _run_lms_json(args: list[str], timeout: float) -> object | None:
     malformed JSON) because device attribution is an optional enrichment: a
     broken ``lms`` must never fail the underlying HTTP discovery.
     """
-    binary = shutil.which("lms")
+    binary = lms_binary()
     if not binary:
         return None
     try:

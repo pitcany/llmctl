@@ -132,6 +132,10 @@ def detect_backends(
         override = cfg.runtime_config(backend).binary if backend in {"vllm", "llama_cpp"} else None
         binary = override or default_binary
         path = shutil.which(binary)
+        if backend == "lmstudio" and path is None:
+            from llmctl.adapters.lmstudio import lms_binary
+
+            path = lms_binary()
         available = path is not None
 
         # vLLM-specific fallback: also accept "managed unit serving"

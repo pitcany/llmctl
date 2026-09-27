@@ -40,6 +40,7 @@ from typing import Any
 from sqlmodel import Session, select
 
 from llmctl._asyncutil import run_sync
+from llmctl.adapters.lmstudio import lms_binary
 from llmctl.db import ModelRecord, ModelStatus, RuntimeName, SessionRecord, SessionStatus
 from llmctl.schemas import HealthState, Model
 from llmctl.services.registry import (
@@ -469,7 +470,11 @@ def _lmstudio_path(
     )
     try:
         proc = runner(
-            ["lms", "ls", "--json"], capture_output=True, text=True, timeout=20, check=False
+            [lms_binary() or "lms", "ls", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
         )
         entries = json.loads(proc.stdout or "[]")
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -1039,7 +1044,7 @@ class ModelOps:
         say(f"Running: lms get {plan.source} --yes")
         try:
             proc = self.runner(
-                ["lms", "get", plan.source, "--yes"],
+                [lms_binary() or "lms", "get", plan.source, "--yes"],
                 capture_output=True,
                 text=True,
                 timeout=6 * 3600,
