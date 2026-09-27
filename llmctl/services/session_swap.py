@@ -293,7 +293,12 @@ def pinned_port(db: Any, model: Any) -> int | None:
 
 
 def session_target(
-    model: Any, *, margin_gb: float | None = None, gpus: Any = None, port: int | None = None
+    model: Any,
+    *,
+    margin_gb: float | None = None,
+    gpus: Any = None,
+    port: int | None = None,
+    unit: str | None = None,
 ) -> Any:
     """The swap-list row for a llama.cpp registry model, fit decided now."""
     from llmctl.services.lanes import SwapTarget
@@ -317,6 +322,7 @@ def session_target(
         model_id=model.id,
         placement=placement,
         port=port,
+        unit=unit,
     )
 
 

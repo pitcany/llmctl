@@ -104,7 +104,7 @@ def print_preview(state: SwapState, target: SwapTarget, console: Console) -> boo
     )
     for line in preview.lines():
         console.print(f"  {escape(line)}")
-    return not (preview.already_serving and target.kind == "lane")
+    return not (preview.already_serving and target.kind in ("lane", "session"))
 
 
 @dataclass

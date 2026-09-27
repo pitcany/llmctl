@@ -187,7 +187,7 @@ class SwapScreen(DataScreen):
             return
         target = state.catalog[row]
         preview = state.preview(target)
-        if preview.already_serving and target.kind == "lane":
+        if preview.already_serving and target.kind in ("lane", "session"):
             self.app.notify(preview.lines()[0], title="Swap")
             return
 

@@ -182,3 +182,79 @@ def test_route_carries_the_port_the_default_profile_pins(db) -> None:
     )
     model = registry.update_model(model.id, ModelUpdate(default_profile_id=profile.id))
     assert route(db, model, []).target.port == 8005
+
+
+# -- already running under its own systemd unit --------------------------------------
+
+
+def test_unit_for_model_by_the_file_it_loads() -> None:
+    from llmctl.services.lanes import unit_for_model
+
+    assert unit_for_model(DSV4_FILE, ["other.service", "deepseek.service"], unit_text=_units) == (
+        "deepseek.service"
+    )
+    assert unit_for_model("/m/else.gguf", ["deepseek.service"], unit_text=_units) is None
+    assert unit_for_model(None, ["deepseek.service"], unit_text=_units) is None
+
+
+def test_llama_cpp_units_come_from_managed_units() -> None:
+    from llmctl.config import ManagedUnitConfig, ManagedUnitsConfig
+    from llmctl.services.lanes import llama_cpp_units
+
+    managed = ManagedUnitsConfig(
+        units={
+            "gpt-oss": ManagedUnitConfig(unit_name="gpt-oss-120b", runtime="llama_cpp"),
+            "coder1": ManagedUnitConfig(unit_name="ollama-gpu1", runtime="ollama"),
+        }
+    )
+    assert llama_cpp_units(managed) == ["gpt-oss-120b.service"]
+
+
+def _state_with_unit(active: bool):
+    from llmctl.services.lanes import gather_state
+
+    row = SwapTarget(
+        key="gpt-oss", kind="session", model="gpt-oss", engine="llama.cpp", upstream="",
+        placement=Placement(cards=2), port=8005, unit="gpt-oss-120b.service",
+    )
+    settings = SimpleNamespace(
+        managed_units=SimpleNamespace(
+            vllm_tp=SimpleNamespace(unit_name="vllm-tp", default_port=8003)
+        )
+    )
+    state = gather_state(
+        settings,
+        presets={},
+        lanes=[],
+        probe=lambda url: [],
+        is_active=lambda unit, user: active and unit == "gpt-oss-120b.service",
+        gpu_sessions=[],
+        session_rows=lambda catalog: [row],
+    )
+    return state, row
+
+
+def test_a_model_its_unit_serves_reads_serving_and_swap_does_nothing() -> None:
+    state, row = _state_with_unit(active=True)
+    assert state.state_of(row) == "serving"
+    preview = state.preview(row)
+    assert preview.already_serving
+    assert preview.lines() == [
+        "gpt-oss (llama.cpp) is already running as gpt-oss-120b.service on port 8005; "
+        "nothing to do."
+    ]
+
+
+def test_cli_stops_before_swapping_to_a_running_model() -> None:
+    from rich.console import Console
+
+    from llmctl import cli_swap
+
+    state, row = _state_with_unit(active=True)
+    console = Console(record=True, width=200)
+    assert cli_swap.print_preview(state, row, console) is False
+    assert "already running as gpt-oss-120b.service" in console.export_text()
+
+    state, row = _state_with_unit(active=False)
+    assert state.state_of(row) == ""
+    assert cli_swap.print_preview(state, row, Console(record=True, width=200)) is True

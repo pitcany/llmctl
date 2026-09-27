@@ -138,7 +138,14 @@ def route(db: Session, model: Model, catalog: list[SwapTarget]) -> ServeRoute:
                 f"swapping to that.",
                 lane,
             )
-        target = session_target(model, port=pinned_port(db, model))
+        from llmctl.config import load_settings
+        from llmctl.services.lanes import llama_cpp_units, unit_for_model
+
+        target = session_target(
+            model,
+            port=pinned_port(db, model),
+            unit=unit_for_model(model.path, llama_cpp_units(load_settings().managed_units)),
+        )
         placement = target.placement
         if placement.problem:
             return ServeRoute("cannot", model, placement.problem)

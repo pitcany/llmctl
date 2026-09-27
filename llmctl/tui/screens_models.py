@@ -192,6 +192,9 @@ class ModelsScreen(DataScreen):
         from llmctl.tui.screens_swap import run_swap
 
         preview = state.preview(target)
+        if preview.already_serving and target.kind in ("lane", "session"):
+            self.app.notify(esc(preview.lines()[0]), title="Swap")
+            return
 
         def _on_confirm(confirmed: bool | None) -> None:
             if not confirmed:

@@ -217,6 +217,8 @@ class SwapTarget:
     placement: Any = None
     #: ``session`` rows: the port the model's default profile pins, if any.
     port: int | None = None
+    #: ``session`` rows: a systemd unit that serves the same model file.
+    unit: str | None = None
 
     @property
     def gpus(self) -> Gpus:
@@ -317,6 +319,31 @@ def lane_for_model(
     return None
 
 
+def unit_for_model(
+    path: str | None,
+    units: Iterable[str],
+    *,
+    unit_text: Callable[[str], str] = user_unit_text,
+) -> str | None:
+    """The first user unit whose file loads the model at ``path``, if any."""
+    if not path:
+        return None
+    wanted = str(Path(path).expanduser())
+    for unit in units:
+        if wanted in unit_text(unit):
+            return unit
+    return None
+
+
+def llama_cpp_units(managed_units: ManagedUnitsConfig) -> list[str]:
+    """Unit files of the llama.cpp servers in ``managed_units`` (gpt-oss, ...)."""
+    return [
+        cfg.unit_name if "." in cfg.unit_name else f"{cfg.unit_name}.service"
+        for cfg in managed_units.units.values()
+        if cfg.runtime == "llama_cpp"
+    ]
+
+
 Prober = Callable[[str], list[str] | None]
 
 
@@ -405,10 +432,28 @@ class SwapPreview:
         """Plain-text preview lines (the CLI and the TUI both render these)."""
         if self.already_serving and self.target.kind == "lane":
             return [f"{self.target.model} ({self.target.engine}) is already serving."]
+        if self.already_serving and self.target.kind == "session":
+            how = f" as {self.target.unit}" if self.target.unit else ""
+            where = f" on port {self.target.port}" if self.target.port else ""
+            return [
+                f"{self.target.model} ({self.target.engine}) is already running{how}{where}; "
+                "nothing to do."
+            ]
         out = [f"stops:  {', '.join(self.stops) if self.stops else 'nothing is running'}"]
         out.append(f"starts: {self.starts}")
         out.append(f"last load took {format_duration(self.last_load_s)}")
         return out
+
+
+def session_is_running(
+    row: SwapTarget, active_units: set[str], gpu_sessions: Sequence[Any]
+) -> bool:
+    """A session row's model is up: llmctl started it, or its unit is active."""
+    if row.kind != "session":
+        return False
+    if row.unit is not None and row.unit in active_units:
+        return True
+    return any(s.name == row.key for s in gpu_sessions)
 
 
 def preview_swap(
@@ -429,7 +474,8 @@ def preview_swap(
     """
     preview = SwapPreview(
         target=target,
-        already_serving=target.key in serving,
+        already_serving=target.key in serving
+        or session_is_running(target, active_units, gpu_sessions),
         last_load_s=last_load_s(target.key, load_times),
     )
     stops: list[str] = []
@@ -495,7 +541,7 @@ class SwapState:
         """``serving`` / ``loading`` / ``""`` for the picker's State column."""
         if row.key in self.serving:
             return "serving"
-        if row.kind == "session" and any(s.name == row.key for s in self.gpu_sessions):
+        if session_is_running(row, self.active_units, self.gpu_sessions):
             return "serving"
         if row.lane is not None and row.lane.unit in self.active_units:
             return "loading"
@@ -586,9 +632,9 @@ def gather_state(
             return load_session_rows(settings, listed)
 
     catalog += session_rows(catalog)
-    active_units = {
-        lane.unit for lane in lanes if lane.unit is not None and is_active(lane.unit, True)
-    }
+    units = {lane.unit for lane in lanes if lane.unit is not None}
+    units |= {row.unit for row in catalog if row.kind == "session" and row.unit}
+    active_units = {unit for unit in units if is_active(unit, True)}
     if gpu_sessions is None:
         gpu_sessions = _load_gpu_sessions(settings)
     return SwapState(
@@ -648,12 +694,17 @@ def load_session_rows(settings: Any, catalog: list[SwapTarget]) -> list[SwapTarg
             ports = {m.id: pinned_port(db, m) for m in models if m.runtime.value == "llama_cpp"}
         gpus = get_gpu_info()
         margin = settings.scheduler.safety_margin_gb
+        units = llama_cpp_units(settings.managed_units)
         here = local_host()
         return session_rows_for(
             models,
             catalog,
             target_for=lambda m: session_target(
-                m, margin_gb=margin, gpus=gpus, port=ports.get(m.id)
+                m,
+                margin_gb=margin,
+                gpus=gpus,
+                port=ports.get(m.id),
+                unit=unit_for_model(m.path, units),
             ),
             is_local=lambda m: effective_host(m.host) == here,
         )
