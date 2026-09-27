@@ -24,7 +24,8 @@ from llmctl.schemas import (
     ProfileCreate,
     ProfileUpdate,
 )
-from llmctl.tui._base import C_ERR, esc
+from llmctl.services.model_ops import ADDABLE_ENGINES, AddPlan, ModelOpsError, plan_add
+from llmctl.tui._base import C_ERR, C_MUTED, C_OK, esc
 
 _RUNTIME_OPTIONS = [(r.value, r.value) for r in RuntimeName]
 
@@ -183,6 +184,123 @@ class ModelFormModal(ModalScreen[ModelCreate | ModelUpdate | None]):
         if self._is_edit:
             return ModelUpdate(**fields)
         return ModelCreate(**fields, source=path)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+@dataclass(frozen=True)
+class AddRequest:
+    """Result of the add modal: a checked plan, or a request for the manual form."""
+
+    plan: AddPlan | None = None
+    manual: bool = False
+
+
+_ENGINE_LABELS = {
+    RuntimeName.OLLAMA: "Ollama",
+    RuntimeName.VLLM: "vLLM",
+    RuntimeName.SGLANG: "SGLang",
+    RuntimeName.LLAMA_CPP: "llama.cpp",
+    RuntimeName.LMSTUDIO: "LM Studio",
+}
+_ENGINE_OPTIONS = [("auto (from source)", "auto")] + [
+    (_ENGINE_LABELS[e], e.value) for e in ADDABLE_ENGINES
+]
+
+_ADD_EXAMPLES = (
+    "[b]qwen3:8b[/b]                        Ollama\n"
+    "[b]Qwen/Qwen3-8B[/b]                   vLLM (or pick SGLang)\n"
+    "[b]unsloth/Qwen3-8B-GGUF:Q4_K_M[/b]    llama.cpp, one quant\n"
+    "[b]lmstudio:qwen/qwen3-8b[/b]          LM Studio\n"
+    "[b]~/models/my-model[/b]               register a local folder or .gguf"
+)
+
+
+class AddModelModal(ModalScreen[AddRequest | None]):
+    """Add a model from one SOURCE string; the engine follows from its shape.
+
+    The preview line is :func:`plan_add` on every keystroke, so what the
+    operator reads ("Pull qwen3:8b into the Ollama library, same as: ollama
+    pull qwen3:8b") is exactly what Add runs. Add stays refused while the
+    source does not plan. Nothing touches the network until the screen runs
+    the plan.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._plan: AddPlan | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="add-dialog", classes="panel"):
+            yield Static("[b]Add model[/b]", id="add-title")
+            yield Static(
+                "Paste a model name, repo, or path. The engine is picked from its shape.",
+                classes="muted",
+            )
+            yield Label("Source")
+            yield Input(placeholder="e.g. qwen3:8b or Qwen/Qwen3-8B", id="add-source")
+            yield Label("Engine")
+            yield Select(_ENGINE_OPTIONS, value="auto", id="add-engine", allow_blank=False)
+            yield Label("Name (optional)")
+            yield Input(placeholder="defaults to the source", id="add-name")
+            yield Static("", id="add-preview")
+            yield Static(_ADD_EXAMPLES, id="add-examples", classes="muted")
+            with Horizontal(id="add-buttons"):
+                yield Button("Add", variant="success", id="add-submit")
+                yield Button("Manual entry", id="add-manual")
+                yield Button("Cancel", variant="error", id="add-cancel")
+
+    def _replan(self) -> None:
+        source = self.query_one("#add-source", Input).value
+        engine = self.query_one("#add-engine", Select).value
+        name = self.query_one("#add-name", Input).value.strip() or None
+        preview = self.query_one("#add-preview", Static)
+        if not source.strip():
+            self._plan = None
+            preview.update("")
+            return
+        try:
+            self._plan = plan_add(
+                source, None if engine in ("auto", Select.BLANK) else str(engine), name=name
+            )
+        except ModelOpsError as exc:
+            self._plan = None
+            preview.update(f"[{C_ERR}]{esc(str(exc))}[/]")
+            return
+        label = _ENGINE_LABELS.get(self._plan.engine, self._plan.engine.value)
+        preview.update(
+            f"[{C_OK}]→ {esc(label)}:[/] {esc(self._plan.summary)}\n"
+            f"[{C_MUTED}]same as: {esc(self._plan.command)}[/]"
+        )
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._replan()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        self._replan()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "add-cancel":
+            self.dismiss(None)
+        elif event.button.id == "add-manual":
+            self.dismiss(AddRequest(manual=True))
+        else:
+            self._submit()
+
+    def _submit(self) -> None:
+        self._replan()
+        if self._plan is None:
+            self.app.notify(
+                "Enter a source that shows a green preview first.", severity="error"
+            )
+            return
+        self.dismiss(AddRequest(plan=self._plan))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -347,6 +465,7 @@ class DeleteModal(ModalScreen[ConfirmDelete | None]):
         *,
         allow_file_delete: bool = False,
         file_delete_target: str | None = None,
+        file_delete_label: str | None = None,
         verb: str = "Delete",
     ) -> None:
         super().__init__()
@@ -354,6 +473,9 @@ class DeleteModal(ModalScreen[ConfirmDelete | None]):
         self._consequence = consequence
         self._allow_file_delete = allow_file_delete
         self._file_delete_target = file_delete_target
+        # Engine-specific wording ("Also remove it from Ollama (ollama rm
+        # ...)"); the generic file wording is wrong for a daemon-held model.
+        self._file_delete_label = file_delete_label
         # The modal is reused for any confirmed action, not just deletion.
         # Asking "Delete unit 'gpt-oss-120b'?" before a *stop* reads as though
         # the unit file is about to be removed, which is far more alarming
@@ -369,7 +491,8 @@ class DeleteModal(ModalScreen[ConfirmDelete | None]):
             if self._allow_file_delete:
                 target = self._file_delete_target or "(no path recorded)"
                 yield Checkbox(
-                    f"Also delete files on disk, irreversibly: {target}",
+                    self._file_delete_label
+                    or f"Also delete files on disk, irreversibly: {target}",
                     value=False,
                     id="delete-files-cb",
                 )
@@ -391,6 +514,8 @@ class DeleteModal(ModalScreen[ConfirmDelete | None]):
 
 
 __all__ = [
+    "AddModelModal",
+    "AddRequest",
     "CloneModal",
     "CloneRequest",
     "ConfirmDelete",

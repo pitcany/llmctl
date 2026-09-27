@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from typing import Any
 
 from textual.app import ComposeResult
@@ -14,6 +15,8 @@ from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 from llmctl.tui._modals import ConfirmActionModal, LaunchPlanModal
 from llmctl.tui._modals_registry import (
+    AddModelModal,
+    AddRequest,
     CloneModal,
     CloneRequest,
     ConfirmDelete,
@@ -30,7 +33,7 @@ class ModelsScreen(DataScreen):
         Binding("ctrl+s", "scan", "Scan", show=True),
         Binding("a", "add_model", "Add", show=True),
         Binding("e", "edit_model", "Edit", show=True),
-        Binding("delete", "delete_model", "Delete", show=True, key_display="del"),
+        Binding("delete", "delete_model", "Remove", show=True, key_display="del"),
         Binding("x", "prune_missing", "Prune missing", show=True),
         Binding("c", "clone_model", "Clone", show=True),
     ]
@@ -50,7 +53,8 @@ class ModelsScreen(DataScreen):
         """Compose the models table with screen-scoped Header/Footer."""
         yield Header()
         yield Static(
-            f"Models Registry  -  [{C_MUTED}]enter = preview / plan / launch, ctrl+s = scan[/]",
+            f"Models Registry  -  [{C_MUTED}]a = add (any engine), del = remove, "
+            "enter = preview / plan / launch, ctrl+s = scan[/]",
             classes="panel safe",
             id="models-title",
         )
@@ -122,7 +126,7 @@ class ModelsScreen(DataScreen):
             )
         if not models:
             table.add_row(
-                "-", "No models registered (ctrl+s to scan)", "-", "-", "-", "-", "-", "-"
+                "-", "No models yet: a to add one, ctrl+s to scan", "-", "-", "-", "-", "-", "-"
             )
         if 0 <= cursor < len(self._ids):
             table.move_cursor(row=cursor)
@@ -278,7 +282,39 @@ class ModelsScreen(DataScreen):
         return None
 
     def action_add_model(self) -> None:
-        """Open the add-model form."""
+        """Open the add dialog: one source string, any engine."""
+
+        def _on_close(request: AddRequest | None) -> None:
+            if request is None:
+                return
+            if request.manual:
+                self._open_manual_form()
+            elif request.plan is not None:
+                self._run_add(request.plan)
+
+        self.app.push_screen(AddModelModal(), _on_close)
+
+    def _run_add(self, plan: Any) -> None:
+        """Fetch + register ``plan`` off-thread, reporting progress as toasts.
+
+        Pulls and downloads run minutes to hours; the worker keeps the screen
+        responsive and each progress line lands as a short toast.
+        """
+        app = self.app
+        app.notify(esc(plan.summary), title="Adding model")
+
+        def progress(message: str) -> None:
+            self._on_ui(
+                app, functools.partial(app.notify, esc(message), title=plan.name, timeout=4)
+            )
+
+        self.run_action_worker(
+            lambda: _data.add_model_from_source(plan, on_progress=progress),
+            self._after(f"Added {plan.name} ({plan.engine.value})."),
+        )
+
+    def _open_manual_form(self) -> None:
+        """The field-by-field form, for records llmctl cannot fetch."""
 
         def _on_close(payload: ModelCreate | ModelUpdate | None) -> None:
             if isinstance(payload, ModelCreate):
@@ -323,35 +359,62 @@ class ModelsScreen(DataScreen):
         self.app.push_screen(CloneModal(model.id, model.name), _on_close)
 
     def action_delete_model(self) -> None:
-        """Confirm and delete the cursor-row model."""
+        """Confirm and remove the cursor-row model, saying what each choice does.
+
+        The checkbox is engine-specific: "remove it from Ollama" for an Ollama
+        tag, "delete the files (N GB)" for a checkpoint. When llmctl cannot
+        remove the model itself (outside the model roots, LM Studio did not
+        report a folder, ...) the dialog says so and offers only the row.
+        """
         model = self._selected_model()
         if model is None:
             self.app.notify("No model selected.", severity="warning")
             return
+        plan = self.query_data(
+            lambda: _data.plan_model_removal(model.id), what="Removal check"
+        )
+        if plan is None:
+            return
+        consequence = (
+            "Hides it from llmctl. Without the box ticked the model stays in "
+            f"{model.runtime.value} and on disk; Add brings the row back."
+        )
+        if not plan.can_purge:
+            consequence += f"\n\n{plan.purge_summary}"
+        elif plan.blockers:
+            consequence += "\n\nCan't remove the model itself right now: " + " ".join(
+                plan.blockers
+            )
 
         def _on_close(payload: ConfirmDelete | None) -> None:
             if payload is None:
                 return
             self.run_action_worker(
-                lambda: _data.delete_model(
-                    model.id, delete_files=payload.delete_files
-                ),
-                self._after(
-                    f"Deleted model {model.name}"
-                    + (" and its files." if payload.delete_files else ".")
-                ),
+                lambda: _data.remove_model(model.id, purge=payload.delete_files),
+                self._after_remove,
             )
 
         self.app.push_screen(
             DeleteModal(
                 f"model '{model.name}'",
-                "The registry row is hidden from listings. llmctl has no undelete "
-                "and a rescan will not revive it.",
-                allow_file_delete=True,
-                file_delete_target=model.path,
+                consequence,
+                allow_file_delete=plan.can_purge and not plan.blockers,
+                file_delete_label=plan.purge_label,
+                verb="Remove",
             ),
             _on_close,
         )
+
+    def _after_remove(self, result: Any) -> None:
+        """Report the removal as the service stated it, then refresh."""
+        if result is None or not result.removed_row:
+            self.app.notify(
+                "Nothing changed: the model was not found (deleted elsewhere?).",
+                severity="warning",
+            )
+        else:
+            self.app.notify(esc(result.message), title="Models")
+        self.refresh_data()
 
     def _after(self, success: str) -> Any:
         """Callback for add/edit/clone/delete: say what happened, then refresh.

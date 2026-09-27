@@ -113,7 +113,7 @@ def test_model_show_clone_edit_disable_enable_delete(cli_env: Path) -> None:
 
     result = runner.invoke(app, ["model", "delete", "m1-copy"])
     assert result.exit_code == 0
-    assert "Soft-deleted" in result.output
+    assert "Removed m1-copy from llmctl" in result.output
 
 
 def test_model_delete_files_only_when_flagged(cli_env: Path) -> None:

@@ -29,6 +29,7 @@ import typer
 import yaml
 from pydantic import ValidationError
 from rich.console import Console
+from rich.markup import escape
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from sqlmodel import Session
@@ -206,13 +207,47 @@ def model_show(
     console.print(table)
 
 
-@model_app.command("add")
+_ADD_HELP = """Add a model: fetch it with its engine's own tool, then register it.
+
+SOURCE picks the engine; --engine overrides the guess.
+
+\b
+  llmctl model add qwen3:8b                          Ollama (ollama pull)
+  llmctl model add Qwen/Qwen3-8B                     vLLM (Hugging Face download)
+  llmctl model add Qwen/Qwen3-8B --engine sglang     SGLang (same download)
+  llmctl model add unsloth/Qwen3-8B-GGUF:Q4_K_M      llama.cpp (one GGUF quant)
+  llmctl model add lmstudio:qwen/qwen3-8b            LM Studio (lms get)
+  llmctl model add ~/models/foo.gguf                 register a local file/folder
+
+\b
+Prefixes force an engine: ollama:TAG, hf:ORG/REPO, lmstudio:KEY.
+Remove with `llmctl model rm NAME` (add --purge to delete the model itself).
+
+Without SOURCE this registers a record from flags or prompts, as before.
+"""
+
+
+@model_app.command("add", help=_ADD_HELP)
 def model_add(
+    source: Annotated[
+        str | None,
+        typer.Argument(
+            help="Ollama tag, Hugging Face ORG/REPO[:QUANT], lmstudio:KEY, or a local path.",
+            show_default=False,
+        ),
+    ] = None,
     name: Annotated[str | None, typer.Option(help="Display name (skips prompt).")] = None,
     backend: Annotated[
         str | None,
-        typer.Option(help=f"Backend: {', '.join(_RUNTIME_CHOICES)} (skips prompt)."),
+        typer.Option(
+            "--engine",
+            "--backend",
+            help=f"Engine: {', '.join(_RUNTIME_CHOICES)} (default: guessed from SOURCE).",
+        ),
     ] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Download without asking first.")
+    ] = False,
     path: Annotated[Path | None, typer.Option(help="Local filesystem path.")] = None,
     quantization: Annotated[str | None, typer.Option(help="Quantization label.")] = None,
     max_context: Annotated[int | None, typer.Option(help="Maximum context length.")] = None,
@@ -230,12 +265,12 @@ def model_add(
         typer.Option("--non-interactive", help="Fail instead of prompting."),
     ] = False,
 ) -> None:
-    """Register a model, prompting for any unspecified fields.
-
-    ``--notes`` matches ``model edit --notes``: ``ModelCreate`` has always
-    carried the field, but only ``edit`` exposed it, so a scripted restore
-    recreated a row and silently dropped the operational context attached to it.
-    """
+    # ``--notes`` matches ``model edit --notes``: ``ModelCreate`` has always
+    # carried the field, but only ``edit`` exposed it, so a scripted restore
+    # recreated a row and silently dropped the operational context attached to it.
+    if source is not None:
+        _add_from_source(source, backend, name, yes=yes or non_interactive)
+        return
     if non_interactive:
         if not name or not backend:
             raise typer.BadParameter(
@@ -291,6 +326,35 @@ def model_add(
     console.print(f"[green]Registered model[/green] {model.name} ({model.id})")
 
 
+def _add_from_source(source: str, engine: str | None, name: str | None, *, yes: bool) -> None:
+    """``model add SOURCE``: show the plan, confirm a download, run it."""
+    from llmctl.services.model_ops import ModelOps, ModelOpsError, human_size, plan_add
+
+    try:
+        plan = plan_add(source, engine, name=name)
+    except ModelOpsError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(f"[bold]{escape(plan.summary)}[/bold]")
+    console.print(f"[dim]same as: {escape(plan.command)}[/dim]")
+    with _session() as db:
+        ops = ModelOps(db)
+        try:
+            if plan.method == "hf-download":
+                files, need = ops.resolve_hf_files(plan)
+                console.print(f"{len(files)} file(s), {human_size(need)}")
+            if plan.method != "register" and not yes:
+                if not Confirm.ask("Download now?", default=True):
+                    console.print("[yellow]Aborted; nothing changed.[/yellow]")
+                    raise typer.Exit(code=0)
+            model = ops.add(plan, on_progress=lambda msg: console.print(f"  {escape(msg)}"))
+        except ModelOpsError as exc:
+            err_console.print(f"[red]{escape(str(exc))}[/red]")
+            raise typer.Exit(code=1) from exc
+    console.print(
+        f"[green]Added[/green] {escape(model.name)} ({model.runtime.value}, {model.id})"
+    )
+
+
 @model_app.command("edit")
 def model_edit(
     model_id: Annotated[str, typer.Argument(help="Model id or unique name.")],
@@ -333,21 +397,31 @@ def model_edit(
     console.print(f"[green]Updated[/green] {updated.name} ({updated.id})")
 
 
-@model_app.command("delete")
 def model_delete(
     model_id: Annotated[str, typer.Argument(help="Model id or unique name.")],
-    delete_files: Annotated[
+    purge: Annotated[
         bool,
         typer.Option(
+            "--purge",
             "--delete-files",
-            help="Also remove the on-disk artifact at the model's path.",
+            help=(
+                "Also remove the model itself: `ollama rm` for Ollama, the files "
+                "(or Hugging Face cache entry) for vLLM/SGLang/llama.cpp, the model "
+                "folder for LM Studio."
+            ),
         ),
     ] = False,
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")
     ] = False,
 ) -> None:
-    """Soft-delete a model. ``--delete-files`` additionally removes the artifact."""
+    """Remove a model from llmctl; --purge also removes it from its engine.
+
+    Alias: `llmctl model rm`. Without --purge the model stays on disk and in
+    its engine; `llmctl model add` brings the row back.
+    """
+    from llmctl.services.model_ops import ModelOps, ModelOpsError, plan_remove
+
     with _session() as db:
         service = RegistryService(db)
         resolved = _resolve_model_or_die(service, model_id)
@@ -357,20 +431,37 @@ def model_delete(
             # Don't ``assert`` — that gets stripped under ``python -O`` and the
             # next line's attribute access would crash.
             raise typer.BadParameter(f"Model not found: {model_id}")
-        if delete_files and not yes:
-            ok = Confirm.ask(
-                f"This will permanently delete files at {model.path!r}. Continue?",
-                default=False,
-            )
-            if not ok:
-                console.print("[yellow]Aborted; nothing changed.[/yellow]")
-                raise typer.Exit(code=0)
-        deleted = service.delete_model(resolved, delete_files=delete_files)
-    if deleted:
-        suffix = " (files removed)" if delete_files else ""
-        console.print(f"[green]Soft-deleted model[/green] {model_id}{suffix}")
-    else:
+        plan = plan_remove(model, db=db)
+        if purge:
+            if plan.blockers or not plan.can_purge:
+                reason = " ".join(plan.blockers) or plan.purge_summary
+                err_console.print(f"[red]Not removed: {escape(reason)}[/red]")
+                raise typer.Exit(code=1)
+            if not yes:
+                ok = Confirm.ask(
+                    f"{escape(plan.purge_summary)} This cannot be undone. Continue?",
+                    default=False,
+                )
+                if not ok:
+                    console.print("[yellow]Aborted; nothing changed.[/yellow]")
+                    raise typer.Exit(code=0)
+        try:
+            result = ModelOps(db).remove(resolved, purge=purge)
+        except ModelOpsError as exc:
+            err_console.print(f"[red]{escape(str(exc))}[/red]")
+            raise typer.Exit(code=1) from exc
+    if not result.removed_row:
         raise typer.BadParameter(f"Model not found: {model_id}")
+    console.print(f"[green]{escape(result.message)}[/green]")
+    if not purge and plan.can_purge:
+        console.print(
+            f"[dim]To remove the model itself too: llmctl model rm {escape(model_id)} "
+            f"--purge ({escape(plan.purge_summary)})[/dim]"
+        )
+
+
+model_app.command("delete")(model_delete)
+model_app.command("rm", hidden=True, help="Alias of `model delete`.")(model_delete)
 
 
 @model_app.command("prune")

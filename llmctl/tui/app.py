@@ -32,7 +32,7 @@ SCREENS: tuple[tuple[str, str, str, str], ...] = (
     ("swap", "Swap", "Every model that can serve (vLLM + lanes); switch to one", "w"),
     ("presets", "Presets", "vLLM presets; launch one onto the TP fleet", "p"),
     ("units", "Units", "Managed systemd units and what they serve", "u"),
-    ("models", "Models", "Registered models (add, edit, clone, delete)", "m"),
+    ("models", "Models", "Add or remove models for any engine (a, del)", "m"),
     ("profiles", "Profiles", "Reusable launch parameters", "f"),
     ("sessions", "Sessions", "Running and adopted sessions", "s"),
     ("gpus", "GPUs", "Per-GPU utilization, memory, temperature", "g"),
@@ -124,6 +124,13 @@ class MissionControlApp(App[None]):
     TextViewModal { align: center middle; }
     #textview-dialog { width: 90%; height: 80%; background: #0c1a1c; }
     #textview-scroll { height: 1fr; }
+
+    AddModelModal { align: center middle; }
+    #add-dialog { width: 90; height: auto; max-height: 95%; background: #0c1a1c; }
+    #add-preview { margin-top: 1; height: auto; }
+    #add-examples { margin-top: 1; }
+    #add-buttons { height: auto; margin-top: 1; }
+    #add-buttons Button { margin-right: 2; }
 
     ConfirmActionModal { align: center middle; }
     #confirm-dialog { width: 70; height: auto; max-height: 90%; background: #0c1a1c; }

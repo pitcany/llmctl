@@ -126,6 +126,10 @@ class _FakePullAdapter(OllamaAdapter):
             message=f"pull of '{name}' finished ({self._result_state.value}).",
         )
 
+    async def discover_models(self):  # type: ignore[override]
+        # ``pull`` now registers the model; keep the lookup off the real daemon.
+        return []
+
 
 def _patch_router(monkeypatch: pytest.MonkeyPatch, adapter: OllamaAdapter) -> None:
     from llmctl.services import router as router_mod
@@ -142,7 +146,9 @@ def test_cli_pull_prints_progress(monkeypatch: pytest.MonkeyPatch, tmp_path) -> 
     assert result.exit_code == 0
     assert "pulling manifest" in result.output
     assert "50%" in result.output
-    assert "llmctl scan" in result.output
+    # pull registers the model itself now; no "run llmctl scan" follow-up.
+    assert "Added" in result.output
+    assert "llmctl scan" not in result.output
 
 
 def test_cli_pull_failure_exits_nonzero(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

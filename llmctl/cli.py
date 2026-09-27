@@ -28,7 +28,6 @@ from llmctl.db import (
 from llmctl.gpu_arg import GPU_MODES, parse_gpus
 from llmctl.schemas import (
     BenchmarkRunRequest,
-    HealthState,
     ModelCreate,
     SessionStartRequest,
 )
@@ -799,41 +798,11 @@ def restart(
 def pull(
     model: Annotated[str, typer.Argument(help="Ollama model tag, e.g. qwen3:32b.")],
 ) -> None:
-    """Pull a model into the local Ollama library (streaming progress)."""
-    import asyncio
+    """Pull an Ollama model and register it (`model add` covers every engine)."""
+    from llmctl.cli_registry import _add_from_source
 
-    from llmctl.adapters.ollama import OllamaAdapter
-    from llmctl.services.router import RuntimeRouter
-
-    settings = load_settings()
-    adapter = RuntimeRouter(settings).get_adapter(RuntimeName.OLLAMA)
-    if not isinstance(adapter, OllamaAdapter):  # stripped asserts can't guard
-        console.print("[red]The ollama runtime adapter does not support pull.[/red]")
-        raise typer.Exit(1)
-
-    # Print each phase once, then byte progress at most every 10% so long
-    # pulls stay readable in scripts and terminals alike.
-    progress_state: dict[str, object] = {"status": None, "decade": -1}
-
-    def on_progress(status: str, completed: int | None, total: int | None) -> None:
-        if status and status != progress_state["status"]:
-            progress_state["status"] = status
-            progress_state["decade"] = -1
-            console.print(f"[cyan]{status}[/cyan]")
-        if total and completed is not None:
-            decade = min(10, completed * 10 // total)
-            if decade > progress_state["decade"]:  # type: ignore[operator]
-                progress_state["decade"] = decade
-                gib = 1024**3
-                console.print(
-                    f"  {completed / gib:.2f}/{total / gib:.2f} GiB ({decade * 10}%)"
-                )
-
-    status = asyncio.run(adapter.pull_model(model, on_progress=on_progress))
-    if status.state != HealthState.OK:
-        console.print(f"[red]{escape(str(status.message))}[/red]")
-        raise typer.Exit(1)
-    console.print(f"[green]{escape(str(status.message))}[/green] Run `llmctl scan` to register it.")
+    source = model if model.lower().startswith("ollama:") else f"ollama:{model}"
+    _add_from_source(source, None, None, yes=True)
 
 
 @app.command()

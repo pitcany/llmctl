@@ -22,9 +22,12 @@ about — where the files are, which runtime serves it, how big it is.
 by hand. `llmctl validate` checks that everything the catalog claims still
 exists where it says.
 
-**Getting models.** `llmctl pull <name>` downloads a model into the local
-Ollama library with streaming progress. This is Ollama-only — the other
-runtimes expect files already on disk, which `scan` then discovers.
+**Getting and removing models.** One verb pair for every engine:
+`llmctl model add SOURCE` fetches the model with that engine's own tool and
+registers it; `llmctl model rm NAME --purge` removes it again. The shape of
+SOURCE picks the engine (see [Adding and removing models](#adding-and-removing-models)).
+In the TUI it is `m`, then `a` to add or `del` to remove. `llmctl pull TAG` is
+the Ollama-only shortcut.
 
 **Running models.** Two paths, for two different situations:
 
@@ -200,17 +203,51 @@ read commands accept `--json` for stable, script-friendly output.
 llmctl keeps a SQLite-backed registry of every local model so the CLI,
 TUI, and API share the same view.
 
+### Adding and removing models
+
+Same two commands whatever the engine. The source's shape picks the engine;
+`--engine` overrides the guess.
+
+| Engine | Add | What runs |
+| --- | --- | --- |
+| Ollama | `llmctl model add qwen3:8b` | `ollama pull qwen3:8b` |
+| vLLM | `llmctl model add Qwen/Qwen3-8B` | `hf download Qwen/Qwen3-8B` (safetensors only) |
+| SGLang | `llmctl model add Qwen/Qwen3-8B --engine sglang` | same download |
+| llama.cpp | `llmctl model add unsloth/Qwen3-8B-GGUF:Q4_K_M` | `hf download` of that quant's file(s) only |
+| LM Studio | `llmctl model add lmstudio:qwen/qwen3-8b` | `lms get qwen/qwen3-8b --yes` |
+| any local | `llmctl model add ~/models/foo.gguf` (or a folder) | registers in place, downloads nothing |
+
+Removing is `llmctl model rm NAME` (`model delete` is the same command). Alone
+it only hides the row. The model stays in its engine and on disk, and adding it
+again brings the row back. `--purge` removes the model itself: `ollama rm` for
+Ollama, the Hugging Face cache entry or files for vLLM/SGLang/llama.cpp, and the
+model folder for LM Studio. `--delete-files` is the old name for `--purge`.
+
+Rules to remember:
+
+- A slash means Hugging Face (`ORG/REPO`). No slash means an Ollama tag. Use
+  `ollama:user/model` for a namespaced Ollama model, and `hf:ORG/REPO` with
+  `--engine ollama` to pull a Hugging Face repo through Ollama.
+- `:QUANT` (or `@QUANT`) picks one GGUF build. A GGUF repo with no quant lists
+  the builds it has.
+- Downloads go to the Hugging Face cache (`$HF_HOME/hub`). A download that
+  would leave less than 10 GB free is refused before it starts.
+- `--purge` refuses when a preset names the weights (the deployed generator is
+  one), while a session runs the model, for rows from another machine, and for
+  paths outside `model_dirs.yaml`'s roots. Hard-linked files count as "stays",
+  not "freed". Catalog symlinks are unlinked, never followed.
+
+The other registry commands:
+
 ```bash
 llmctl models                    # list active models
 llmctl model show MODEL_ID       # full record (by id OR unique name)
-llmctl model add                 # interactive add (prompts for missing fields)
-llmctl model add --non-interactive --name X --backend vllm --path /srv/...
+llmctl model add                 # no SOURCE: register a record from prompts
+llmctl model add --non-interactive --name X --engine vllm --path /srv/...
 llmctl model edit MODEL_ID --notes "primary 70B" --max-context 32768
 llmctl model clone MODEL_ID new-name
 llmctl model disable MODEL_ID    # hide from default listings (status unchanged)
 llmctl model enable MODEL_ID
-llmctl model delete MODEL_ID                 # soft-delete; files preserved
-llmctl model delete MODEL_ID --delete-files  # also remove the artifact (asks for y/n)
 ```
 
 Scan filesystem & adapter sources, optionally registering the results:
@@ -393,7 +430,7 @@ Related hardening: `api.cors_origins` rejects `"*"` at load (the
 middleware allows credentials, so a wildcard would let any page the
 operator visits call this API); `runtime=python_script` refuses a
 `script` beginning with `-` (the interpreter would read it as a flag,
-making the arguments executable code); and `--delete-files` only
+making the arguments executable code); and `--purge` (`--delete-files`) only
 removes paths inside a configured model root.
 
 ## TUI keybindings
@@ -405,7 +442,7 @@ auto-refreshes every 3s and never blocks the UI on probes.
 
 | Screen | Keys |
 |--------|------|
-| Models (`m`) | `enter` preview → *Plan only* or *Launch now* (real start; hidden when the plan is refused), `ctrl+s` scan, `a` add, `e` edit, `c` clone, `d` delete, `x` prune missing |
+| Models (`m`) | `a` add (one source box, any engine, live preview; *Manual entry* for the field form), `del` remove (engine-specific "also remove it" box), `enter` preview → *Plan only* or *Launch now*, `ctrl+s` scan, `e` edit, `c` clone, `x` prune missing |
 | Profiles (`f`) | `a` create, `e` edit, `c` clone, `d` delete |
 | Swap (`w`) | `enter` preview (what stops/starts, last load time) → confirm swaps; same list as `llmctl swap` |
 | Presets (`p`) | `enter`/`t` launch preset (restarts the managed unit after confirm), `a` add, `e` edit in `$EDITOR`, `c` clone, `d` delete |

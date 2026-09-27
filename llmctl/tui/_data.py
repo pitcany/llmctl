@@ -227,6 +227,40 @@ def delete_model(model_id: str, *, delete_files: bool = False) -> bool:
         return RegistryService(db).delete_model(model_id, delete_files=delete_files)
 
 
+def add_model_from_source(plan: Any, on_progress: Any = None) -> Model:
+    """Fetch and register ``plan`` (a :class:`~llmctl.services.model_ops.AddPlan`).
+
+    Hugging Face progress bars are silenced: tqdm writes to the terminal the
+    TUI is drawing on. The screen reports progress through ``on_progress``.
+    """
+    from huggingface_hub.utils import disable_progress_bars
+
+    from llmctl.services.model_ops import ModelOps
+
+    disable_progress_bars()
+    with db_session() as db:
+        return ModelOps(db).add(plan, on_progress=on_progress)
+
+
+def plan_model_removal(model_id: str) -> Any:
+    """Describe what removing ``model_id`` does (for the confirm dialog)."""
+    from llmctl.services.model_ops import plan_remove
+
+    with db_session() as db:
+        model = RegistryService(db).get_model(model_id)
+        if model is None:
+            return None
+        return plan_remove(model, db=db)
+
+
+def remove_model(model_id: str, *, purge: bool = False) -> Any:
+    """Hide the model row; with ``purge`` remove it from its engine too."""
+    from llmctl.services.model_ops import ModelOps
+
+    with db_session() as db:
+        return ModelOps(db).remove(model_id, purge=purge)
+
+
 def prune_missing_models(
     runtime: str | None = None, *, ids: list[str] | None = None
 ) -> int:
