@@ -1771,7 +1771,7 @@ def _swap_registry_model(
         console.print(escape(served.message))
         if served.kind == "preset" and served.target is not None:
             return served.target, state
-        if served.kind == "session" and served.target is not None:
+        if served.kind in ("session", "lane") and served.target is not None:
             # The normal preview -> confirm -> swap path takes it from here.
             return served.target, state
         if served.kind == "on-demand":

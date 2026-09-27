@@ -180,7 +180,7 @@ class ModelsScreen(DataScreen):
             return
         if served.kind == "start":
             self._show_plan(model_id, plan)
-        elif served.kind in ("preset", "session") and served.target is not None:
+        elif served.kind in ("preset", "session", "lane") and served.target is not None:
             self._confirm_swap(state, served.target)
         elif served.kind == "no-preset":
             self._offer_starter_preset(model_id, served.model.name)

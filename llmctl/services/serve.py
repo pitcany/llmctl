@@ -38,7 +38,7 @@ class ServeRoute:
     kind: str
     model: Model
     message: str
-    #: ``preset`` only: the swap-list row to swap to.
+    #: ``preset`` / ``session`` / ``lane``: the swap-list row to swap to.
     target: SwapTarget | None = None
 
 
@@ -126,8 +126,18 @@ def route(db: Session, model: Model, catalog: list[SwapTarget]) -> ServeRoute:
             f"before it can run {model.name}, and none exists yet.",
         )
     if engine == RuntimeName.LLAMA_CPP:
+        from llmctl.services.lanes import lane_for_model
         from llmctl.services.session_swap import session_target
 
+        lane = lane_for_model(model.name, model.path, catalog)
+        if lane is not None:
+            return ServeRoute(
+                "lane",
+                model,
+                f"{model.name} is served by the {lane.key} lane (its own service); "
+                f"swapping to that.",
+                lane,
+            )
         target = session_target(model)
         placement = target.placement
         if placement.problem:

@@ -86,6 +86,14 @@ def format_gpus(gpus: Gpus) -> str:
     return "+".join(str(i) for i in sorted(gpus))
 
 
+def cards_label(row: Any) -> str:
+    """The swap list's Cards cell. A session row's cards are chosen at start."""
+    placement = getattr(row, "placement", None)
+    if getattr(row, "kind", "") == "session" and placement is not None:
+        return f"any {placement.cards}" if placement.cards == 1 else f"{placement.cards} (split)"
+    return format_gpus(row.gpus)
+
+
 def _parse_gpus(raw: Any) -> Gpus:
     """router.yaml ``gpus:`` -> footprint. Missing or malformed -> every card.
 
@@ -272,6 +280,41 @@ def resolve(wanted: str, catalog: list[SwapTarget]) -> SwapTarget | None:
     return None
 
 
+def user_unit_text(unit: str) -> str:
+    """A user unit file's text, ``%h`` expanded; ``""`` when it cannot be read."""
+    base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    try:
+        text = (base / "systemd" / "user" / unit).read_text()
+    except OSError:
+        return ""
+    return text.replace("%h", str(Path.home()))
+
+
+def lane_for_model(
+    name: str,
+    path: str | None,
+    catalog: list[SwapTarget],
+    *,
+    unit_text: Callable[[str], str] = user_unit_text,
+) -> SwapTarget | None:
+    """The lane row that already serves a registered model, if one does.
+
+    Matched by name, or by the model file the lane's unit loads: registry
+    names (``deepseek-v4-flash-0731-mxfp4``) rarely match lane names (``dsv4``).
+    Swapping to the lane keeps one server per model instead of starting a
+    second, untracked llama-server on the same weights.
+    """
+    wanted = str(Path(path).expanduser()) if path else ""
+    for row in catalog:
+        if row.lane is None:
+            continue
+        if row.matches(name):
+            return row
+        if wanted and row.lane.unit and wanted in unit_text(row.lane.unit):
+            return row
+    return None
+
+
 Prober = Callable[[str], list[str] | None]
 
 
@@ -284,6 +327,8 @@ def serving_keys(catalog: list[SwapTarget], probe: Prober) -> set[str]:
     served_by: dict[str, list[str] | None] = {}
     keys: set[str] = set()
     for row in catalog:
+        if not row.upstream:
+            continue  # a session row: its port is picked at start
         if row.upstream not in served_by:
             served_by[row.upstream] = probe(row.upstream)
         ids = served_by[row.upstream] or []
@@ -447,6 +492,8 @@ class SwapState:
         """``serving`` / ``loading`` / ``""`` for the picker's State column."""
         if row.key in self.serving:
             return "serving"
+        if row.kind == "session" and any(s.name == row.key for s in self.gpu_sessions):
+            return "serving"
         if row.lane is not None and row.lane.unit in self.active_units:
             return "loading"
         return ""
@@ -501,8 +548,12 @@ def gather_state(
     probe: Prober | None = None,
     is_active: Callable[[str, bool], bool] | None = None,
     gpu_sessions: list[Any] | None = None,
+    session_rows: Callable[[list[SwapTarget]], list[SwapTarget]] | None = None,
 ) -> SwapState:
     """Build the catalog and probe it. Read-only; every seam is injectable.
+
+    ``session_rows(catalog)`` returns the llama.cpp registry models to list
+    after the lanes (default: :func:`load_session_rows`).
 
     ``is_active(unit, user_scope)`` answers systemd's is-active.
     """
@@ -526,6 +577,12 @@ def gather_state(
 
     vllm = settings.managed_units.vllm_tp
     catalog = build_catalog(presets, lanes, vllm_port=vllm.default_port)
+    if session_rows is None:
+
+        def session_rows(listed: list[SwapTarget]) -> list[SwapTarget]:
+            return load_session_rows(settings, listed)
+
+    catalog += session_rows(catalog)
     active_units = {
         lane.unit for lane in lanes if lane.unit is not None and is_active(lane.unit, True)
     }
@@ -539,6 +596,63 @@ def gather_state(
         vllm_active=is_active(vllm.unit_name, False),
         gpu_sessions=gpu_sessions,
     )
+
+
+def session_rows_for(
+    models: Iterable[Any],
+    catalog: list[SwapTarget],
+    *,
+    target_for: Callable[[Any], SwapTarget],
+    is_local: Callable[[Any], bool],
+    unit_text: Callable[[str], str] = user_unit_text,
+) -> list[SwapTarget]:
+    """Swap-list rows for llama.cpp models llmctl starts itself, sorted by name.
+
+    Skipped: other engines, models on another machine, models a listed row
+    already serves (same name, or a lane whose unit loads the same file), and
+    models that fit on no combination of cards.
+    """
+    rows: list[SwapTarget] = []
+    for model in models:
+        if getattr(model.runtime, "value", model.runtime) != "llama_cpp" or not is_local(model):
+            continue
+        if resolve(model.name, catalog) is not None:
+            continue
+        if lane_for_model(model.name, model.path, catalog, unit_text=unit_text) is not None:
+            continue
+        row = target_for(model)
+        if row.placement is not None and row.placement.problem:
+            continue
+        rows.append(row)
+    return sorted(rows, key=lambda row: row.key)
+
+
+def load_session_rows(settings: Any, catalog: list[SwapTarget]) -> list[SwapTarget]:
+    """:func:`session_rows_for` over the real registry. [] if it is unreadable."""
+    try:
+        from sqlmodel import Session
+
+        from llmctl.db import get_engine, init_db
+        from llmctl.services.registry import RegistryService
+        from llmctl.services.serve import effective_host, local_host
+        from llmctl.services.session_swap import session_target
+        from llmctl.telemetry.gpu import get_gpu_info
+
+        url = settings.database_url
+        init_db(url)
+        with Session(get_engine(url)) as db:
+            models = RegistryService(db).list_models()
+        gpus = get_gpu_info()
+        margin = settings.scheduler.safety_margin_gb
+        here = local_host()
+        return session_rows_for(
+            models,
+            catalog,
+            target_for=lambda m: session_target(m, margin_gb=margin, gpus=gpus),
+            is_local=lambda m: effective_host(m.host) == here,
+        )
+    except Exception:  # noqa: BLE001 - the picker must render without the DB
+        return []
 
 
 def _load_gpu_sessions(settings: Any) -> list[Any]:

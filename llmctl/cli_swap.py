@@ -29,8 +29,8 @@ from llmctl.services.lanes import (
     Lane,
     SwapState,
     SwapTarget,
+    cards_label,
     format_duration,
-    format_gpus,
     last_load_s,
     resolve,
 )
@@ -63,7 +63,7 @@ def render_table(state: SwapState, console: Console) -> None:
             escape(row.model),
             row.engine,
             escape(row.key),
-            format_gpus(row.gpus),
+            cards_label(row),
             f"[{style}]{status}[/{style}]" if style else "—",
             format_duration(last_load_s(row.key)) if last_load_s(row.key) else "—",
         )

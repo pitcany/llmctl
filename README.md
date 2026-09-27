@@ -105,7 +105,7 @@ required.
 llmctl runtimes                      # what runtimes exist, versions, loaded models
 llmctl runtimes inspect ollama       # one runtime's capabilities in detail
 llmctl presets                       # list available presets
-llmctl swap                          # pick what serves from one list (vLLM + lanes)
+llmctl swap                          # pick what serves from one list (vLLM, lanes, llama.cpp models)
 llmctl swap flash                    # Flash-Next on FreeToken (a router.yaml lane)
 llmctl swap qwen3.8-27b              # restart vllm-tp with this preset
 llmctl swap Qwen/Qwen3-8B            # a registered checkpoint: swaps to its preset

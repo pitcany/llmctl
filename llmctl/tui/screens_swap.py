@@ -22,8 +22,8 @@ from llmctl.services.lane_swap import quiet_deps, swap_to_lane, swap_to_vllm
 from llmctl.services.lanes import (
     SwapState,
     SwapTarget,
+    cards_label,
     format_duration,
-    format_gpus,
     gather_state,
     last_load_s,
     record_load,
@@ -164,7 +164,7 @@ class SwapScreen(DataScreen):
                 esc(row.model),
                 row.engine,
                 esc(row.key),
-                format_gpus(row.gpus),
+                cards_label(row),
                 f"[{color}]{status}[/]" if color else f"[{C_MUTED}]—[/]",
                 format_duration(seconds) if seconds else f"[{C_MUTED}]—[/]",
             )
