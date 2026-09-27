@@ -52,10 +52,23 @@ def update_model(
 @router.delete("/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_model(
     model_id: str,
+    purge: bool = False,
     delete_files: bool = False,
     db: Session = Depends(get_db_session),
 ) -> None:
-    """Soft-delete a model. ``?delete_files=true`` also removes the artifact."""
-    deleted = RegistryService(db).delete_model(model_id, delete_files=delete_files)
-    if not deleted:
+    """Remove a model from llmctl; ``?purge=true`` also removes it from its engine.
+
+    Same as ``llmctl model rm [--purge]``: ``ollama rm`` for Ollama, the files
+    or Hugging Face cache entry for vLLM/SGLang/llama.cpp, the folder for LM
+    Studio. A purge that is refused (a running session, a hand-written preset,
+    another machine, a path outside the model roots) or fails returns 409 with
+    the reason and leaves the model listed. ``delete_files`` is the old name.
+    """
+    from llmctl.services.model_ops import ModelOps, ModelOpsError
+
+    try:
+        result = ModelOps(db).remove(model_id, purge=purge or delete_files)
+    except ModelOpsError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if not result.removed_row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found")

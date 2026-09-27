@@ -435,7 +435,7 @@ GET    /models                # ?include_inactive=true to see disabled rows
 POST   /models
 GET    /models/{id}
 PUT    /models/{id}
-DELETE /models/{id}           # ?delete_files=true to also remove files
+DELETE /models/{id}           # ?purge=true also removes it from its engine (= model rm --purge); 409 + reason if refused
 
 GET    /profiles
 POST   /profiles              # 422 with ValidationIssue[] on errors
