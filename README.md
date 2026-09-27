@@ -33,7 +33,7 @@ the Ollama-only shortcut.
 
 | Command | For | What happens |
 | --- | --- | --- |
-| `llmctl swap [NAME]` | Serving anything: a vLLM preset, a lane (FreeToken, llama.cpp, ...), **or any registered model** | A registered model is routed by engine: a vLLM checkpoint swaps to its preset (offering to write a starter one), a llama.cpp row starts as a session, Ollama/LM Studio say they load on the first request. No NAME = pick from a list. Shows what stops/starts and the last load time, asks, frees the GPUs (other lanes, vllm-tp, Ollama), starts NAME, waits for readiness, rolls back on failure. Lanes come from llm-router's `config/router.yaml` (`$LLMCTL_ROUTER_CONFIG`); `--list` prints the list. `llmctl vllm` is the old name |
+| `llmctl swap [NAME]` | Serving anything: a vLLM preset, a lane (FreeToken, llama.cpp, ...), **or any registered model** | A registered model is routed by engine (see [Serving](#serving-a-model-what-swap-does-per-engine)). No NAME = pick from a list. Shows what stops/starts and the last load time, asks, frees the GPUs (other lanes, vllm-tp, Ollama), starts NAME, waits for readiness, rolls back on failure. Lanes come from llm-router's `config/router.yaml` (`$LLMCTL_ROUTER_CONFIG`); `--list` prints the list. `llmctl vllm` is the old name |
 | `llmctl start <model>` | A one-off session for one model | Launches a process, tracks it, and reports `running` only once the endpoint answers |
 
 A **preset** is a recipe at `~/.config/llmctl/presets/<alias>.yaml` — which
@@ -229,6 +229,28 @@ same weights is reused. `--purge` deletes a starter preset along with the
 weights; a hand-written preset still blocks the purge. SGLang adds are
 download-only: SGLang serves through a router.yaml lane, and llmctl cannot
 write one.
+
+### Serving a model: what `swap` does per engine
+
+The GPUs are served in three ways, and `llmctl swap NAME` covers all three:
+
+| NAME is… | What `swap` does |
+| --- | --- |
+| a vLLM preset, or a vLLM model | Stops what vLLM serves now and restarts `vllm-tp` on this preset (about 2 min). No preset yet: offers to write a starter one first. |
+| a lane (FreeToken, GLM, the GPU1 coder) | Stops what shares its cards, runs the lane's start script, waits until it answers. |
+| a llama.cpp model | Checks the model fits (one card, or split across both) **before stopping anything**. Then stops vLLM, active lanes and other llama-servers llmctl started, starts `llama-server`, and waits until it answers. |
+| an Ollama or LM Studio model | Nothing. Those servers are always running and load a model the first time a request names it (`ollama run qwen3:8b "hi"`, `lms load KEY`). The GPUs are left alone. |
+| SGLang, a model on another machine, an adopted endpoint | Nothing, with the reason. |
+
+Every swap that stops something shows the list first and asks. If the new
+model does not come up, everything it stopped is started again. Swapping to vLLM
+or a lane also stops llama-servers llmctl started, since vLLM will not load next
+to them.
+
+**llama-servers are "sessions".** llmctl runs `llama-server` itself (no systemd
+unit) and keeps a record of it: its process id, port, and status. That record is
+a session. `llmctl sessions` lists them, and `llmctl stop ID` ends one. To go
+back to vLLM, run `llmctl swap PRESET`.
 
 Removing is `llmctl model rm NAME` (`model delete` is the same command). Alone
 it only hides the row. The model stays in its engine and on disk, and adding it
@@ -455,7 +477,7 @@ auto-refreshes every 3s and never blocks the UI on probes.
 
 | Screen | Keys |
 |--------|------|
-| Models (`m`) | `a` add (one source box, any engine, live preview; *Manual entry* for the field form), `del` remove (engine-specific "also remove it" box), `enter` serve (same routing as `llmctl swap NAME`: vLLM → swap confirm for its preset, or write one first; llama.cpp → launch plan; Ollama/LM Studio → loads on demand), `ctrl+s` scan, `e` edit, `c` clone, `x` prune missing |
+| Models (`m`) | `a` add (one source box, any engine, live preview; *Manual entry* for the field form), `del` remove (engine-specific "also remove it" box), `enter` serve (same routing as `llmctl swap NAME`: vLLM → swap confirm for its preset, or write one first; llama.cpp → swap confirm that frees the GPUs; scripts → launch plan; Ollama/LM Studio → says it loads on demand), `ctrl+s` scan, `e` edit, `c` clone, `x` prune missing |
 | Profiles (`f`) | `a` create, `e` edit, `c` clone, `d` delete |
 | Swap (`w`) | `enter` preview (what stops/starts, last load time) → confirm swaps; same list as `llmctl swap` |
 | Presets (`p`) | `enter`/`t` launch preset (restarts the managed unit after confirm), `a` add, `e` edit in `$EDITOR`, `c` clone, `d` delete |

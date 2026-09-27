@@ -36,8 +36,12 @@ from llmctl.services.serve import AmbiguousModel, find_model, route
 
 @pytest.fixture(autouse=True)
 def _presets_in_tmp(tmp_path, monkeypatch) -> None:
-    """Every preset read/write lands under tmp, never ~/.config."""
+    """Every preset read/write lands under tmp, never ~/.config; two fake 32 GB GPUs."""
+    from llmctl.schemas import GPUInfo
+
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    cards = [GPUInfo(index=i, name="fake", memory_total_mb=32 * 1024) for i in (0, 1)]
+    monkeypatch.setattr("llmctl.telemetry.gpu.get_gpu_info", lambda: cards)
 
 
 @pytest.fixture
@@ -180,7 +184,8 @@ def _catalog(*aliases: str) -> list[SwapTarget]:
     [
         (RuntimeName.OLLAMA, "on-demand"),
         (RuntimeName.LMSTUDIO, "on-demand"),
-        (RuntimeName.LLAMA_CPP, "start"),
+        (RuntimeName.LLAMA_CPP, "session"),
+        (RuntimeName.PYTHON_SCRIPT, "start"),
         (RuntimeName.SGLANG, "cannot"),
         (RuntimeName.FREETOKEN, "cannot"),
     ],
@@ -252,24 +257,31 @@ def test_cli_swap_ollama_model_says_it_loads_on_demand(cli) -> None:
     _add(RuntimeName.OLLAMA, "qwen3:8b")
     result = CliRunner().invoke(cli.app, ["swap", "qwen3:8b"])
     assert result.exit_code == 0, result.output
-    assert "first request" in result.output
+    assert "Nothing to start" in result.output
+    assert "ollama run qwen3:8b" in result.output
 
 
-def test_cli_swap_llama_cpp_row_starts_a_session(cli, monkeypatch, tmp_path) -> None:
+def test_cli_swap_llama_cpp_row_frees_the_gpus_for_it(cli, monkeypatch, tmp_path) -> None:
+    import llmctl.cli_swap as cli_swap
+    from llmctl.services.session_swap import SessionSwapResult
+
     gguf = tmp_path / "m.gguf"
     gguf.write_bytes(b"x")
-    model = _add(RuntimeName.LLAMA_CPP, "tiny-gguf", str(gguf))
-    calls: list[tuple[str, dict]] = []
-    monkeypatch.setattr(cli, "start", lambda **kw: calls.append(("start", kw)))
-    monkeypatch.setattr(cli, "plan", lambda **kw: calls.append(("plan", kw)))
-    # --dry-run previews with `plan` (writes nothing), never `start --dry-run`.
+    _add(RuntimeName.LLAMA_CPP, "tiny-gguf", str(gguf))
+    ran: list = []
+    monkeypatch.setattr(
+        cli_swap,
+        "run_session_swap_service",
+        lambda state, target, **kw: ran.append(target) or SessionSwapResult(ok=True),
+    )
     result = CliRunner().invoke(cli.app, ["swap", "tiny-gguf", "--dry-run"])
     assert result.exit_code == 0, result.output
-    assert [c[0] for c in calls] == ["plan"] and calls[0][1]["model_id"] == model.id
-    calls.clear()
+    assert "llama-server for tiny-gguf on one GPU" in result.output
+    assert ran == []  # a dry run stops and starts nothing
+
     result = CliRunner().invoke(cli.app, ["swap", "tiny-gguf", "--yes"])
     assert result.exit_code == 0, result.output
-    assert calls[0][0] == "start" and calls[0][1]["dry_run"] is False
+    assert [t.kind for t in ran] == ["session"] and "Ready" in result.output
 
 
 def test_cli_swap_vllm_checkpoint_without_preset_offers_one(cli, tmp_path) -> None:
@@ -277,7 +289,7 @@ def test_cli_swap_vllm_checkpoint_without_preset_offers_one(cli, tmp_path) -> No
     _add(RuntimeName.VLLM, "ck", str(ckpt))
     result = CliRunner().invoke(cli.app, ["swap", "ck", "--dry-run"])
     assert result.exit_code == 0, result.output
-    assert "No preset serves ck" in result.output
+    assert "vLLM needs a preset" in result.output
     assert "Would write a starter preset" in result.output
     assert load_all_records() == {}  # dry run wrote nothing
 

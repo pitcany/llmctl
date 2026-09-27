@@ -1671,11 +1671,11 @@ def vllm_cmd(
         target = SwapTarget(
             key=str(preset), kind="vllm", model=str(preset), engine="vLLM", upstream=""
         )
-    elif target.kind == "lane" and (tq or no_tq or force or no_wait):
+    elif target.kind in ("lane", "session") and (tq or no_tq or force or no_wait):
         raise typer.BadParameter("--tq/--no-tq/--force/--no-wait apply to vLLM presets only")
     elif not cli_swap.print_preview(state, target, console):
         return
-    if target.kind == "lane" and dry_run:
+    if target.kind in ("lane", "session") and dry_run:
         return
     if not dry_run:
         _confirm_state_change(
@@ -1683,6 +1683,9 @@ def vllm_cmd(
             required=settings.scheduler.require_confirmation_for_start,
             assume_yes=yes,
         )
+    if target.kind == "session":
+        cli_swap.run_session_swap(state, target, console)
+        return
     if target.kind == "lane":
         cli_swap.run_lane_swap(state, target, console)
         return
@@ -1749,10 +1752,10 @@ def _swap_registry_model(
 ) -> tuple[SwapTarget, Any] | None:
     """Serve a registered model that is not itself a preset or lane.
 
-    Returns the swap-list row to continue with (a vLLM preset), or None when
-    NAME is not a registered model. Every other engine is handled here and
-    exits: llama.cpp rows start as sessions, Ollama and LM Studio need nothing,
-    and the rest say why they cannot be started.
+    Returns the swap-list row to continue with (a vLLM preset, or a llama.cpp
+    model that swap frees the GPUs for), or None when NAME is not a registered
+    model. The rest exit here: Ollama and LM Studio need nothing started, and
+    the others say why llmctl cannot start them.
     """
     from llmctl.services.preset_scaffold import ensure_starter_preset
     from llmctl.services.serve import AmbiguousModel, find_model, route
@@ -1767,6 +1770,9 @@ def _swap_registry_model(
         served = route(db, model, state.catalog)
         console.print(escape(served.message))
         if served.kind == "preset" and served.target is not None:
+            return served.target, state
+        if served.kind == "session" and served.target is not None:
+            # The normal preview -> confirm -> swap path takes it from here.
             return served.target, state
         if served.kind == "on-demand":
             raise typer.Exit(0)

@@ -9,12 +9,15 @@ is.
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass, field
+from typing import Any
 
 import typer
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from llmctl.config import load_settings
 from llmctl.services.lane_swap import (
     LaneSwapDeps,
     LaneSwapResult,
@@ -30,6 +33,13 @@ from llmctl.services.lanes import (
     format_gpus,
     last_load_s,
     resolve,
+)
+from llmctl.services.session_swap import (
+    pause_for_swap,
+    resume_after_failed_swap,
+)
+from llmctl.services.session_swap import (
+    run_session_swap as run_session_swap_service,
 )
 
 
@@ -97,33 +107,60 @@ def print_preview(state: SwapState, target: SwapTarget, console: Console) -> boo
     return not (preview.already_serving and target.kind == "lane")
 
 
-def stop_lanes_for_vllm(state: SwapState, console: Console) -> list[Lane]:
-    """Stop every active lane unit before vLLM takes both GPUs.
+@dataclass
+class Paused:
+    """What a vLLM swap stopped up front, to put back if vLLM fails."""
 
-    Returns the lanes that were stopped (to restart if vLLM fails). Raises
-    ``typer.Exit(1)`` if one will not stop, having restarted the ones that
-    already did — vLLM would OOM next to it.
+    lanes: list[Lane] = field(default_factory=list)
+    sessions: list[Any] = field(default_factory=list)
+
+
+def stop_lanes_for_vllm(state: SwapState, console: Console) -> Paused:
+    """Stop every active lane, and llama.cpp processes llmctl started, before vLLM.
+
+    vLLM takes both GPUs, so anything else on them makes it fail to load.
+    Returns what was stopped (restarted if vLLM fails). Raises
+    ``typer.Exit(1)`` if something will not stop, having restarted what
+    already did.
     """
+    paused = Paused()
+    if state.gpu_sessions:  # vLLM takes every card, so all of them are in the way
+        vllm_row = SwapTarget(key="", kind="vllm", model="", engine="vLLM", upstream="")
+        paused.sessions, error = pause_for_swap(
+            state, vllm_row, settings=load_settings(), log=lambda m: console.print(escape(m))
+        )
+        if error:
+            console.print(f"[red]{escape(error)}; not starting vLLM.[/red]")
+            restore_lanes(paused, console)
+            raise typer.Exit(1)
     deps = LaneSwapDeps()
-    stopped: list[Lane] = []
     for lane in state.active_lanes():
         assert lane.unit is not None
         console.print(f"stopping {escape(lane.unit)} ...")
         if stop_user_unit(lane.unit, deps):
-            stopped.append(lane)
+            paused.lanes.append(lane)
             continue
         console.print(f"[red]Could not stop {escape(lane.unit)}; not starting vLLM.[/red]")
-        restore_lanes(stopped, console)
+        restore_lanes(paused, console)
         raise typer.Exit(1)
-    return stopped
+    return paused
 
 
-def restore_lanes(lanes: list[Lane], console: Console) -> None:
-    """Restart lanes a failed vLLM swap had stopped."""
-    if not lanes:
-        return
+def restore_lanes(paused: Paused | list[Lane], console: Console) -> None:
+    """Restart what a failed vLLM swap had stopped: lanes, then llama.cpp processes."""
+    if isinstance(paused, list):
+        paused = Paused(lanes=paused)
     result = LaneSwapResult(ok=False)
-    restore_previous(lanes, restart_vllm=False, vllm_unit="", deps=LaneSwapDeps(), result=result)
+    if paused.lanes:
+        restore_previous(
+            paused.lanes, restart_vllm=False, vllm_unit="", deps=LaneSwapDeps(), result=result
+        )
+    if paused.sessions:
+        again = resume_after_failed_swap(
+            paused.sessions, settings=load_settings(), log=lambda m: console.print(escape(m))
+        )
+        result.restored += again.restored
+        result.restore_failed += again.restore_failed
     if result.restored:
         console.print(
             f"  [green]rollback: started again:[/green] {escape(', '.join(result.restored))}"
@@ -137,6 +174,15 @@ def restore_lanes(lanes: list[Lane], console: Console) -> None:
 def run_lane_swap(state: SwapState, target: SwapTarget, console: Console) -> None:
     """Swap onto a lane; exit 1 on failure after rolling back."""
     assert target.lane is not None
+    sessions: list[Any] = []
+    if state.sessions_in_the_way(target):
+        sessions, error = pause_for_swap(
+            state, target, settings=load_settings(), log=lambda m: console.print(escape(m))
+        )
+        if error:
+            console.print(f"[red]Swap failed:[/red] {escape(error)}")
+            restore_lanes(Paused(sessions=sessions), console)
+            raise typer.Exit(1)
     result = swap_to_lane(
         target.lane,
         other_active=state.lanes_in_the_way(target),
@@ -150,6 +196,8 @@ def run_lane_swap(state: SwapState, target: SwapTarget, console: Console) -> Non
         )
         return
     console.print(f"[red]Swap failed:[/red] {escape(result.error or 'unknown error')}")
+    if sessions:
+        restore_lanes(Paused(sessions=sessions), console)
     if result.restored:
         console.print(
             f"  [green]rolled back:[/green] {escape(', '.join(result.restored))} serving again"
@@ -160,3 +208,38 @@ def run_lane_swap(state: SwapState, target: SwapTarget, console: Console) -> Non
             "(commands printed above)"
         )
     raise typer.Exit(1)
+
+
+def run_session_swap(state: SwapState, target: SwapTarget, console: Console) -> None:
+    """Free the GPUs and start a llama.cpp model; exit 1 after rolling back."""
+    deps = LaneSwapDeps(log=lambda m: console.print(escape(m)))
+    result = run_session_swap_service(state, target, settings=load_settings(), deps=deps)
+    if result.ok:
+        session = result.session
+        sid = (getattr(session, "id", "") or "")[:8]
+        url = getattr(session, "endpoint_url", None) or "its port"
+        console.print(
+            f"[green]Ready[/green] — {escape(target.model)} answers at {escape(str(url))} "
+            f"({format_duration(result.seconds)})."
+        )
+        console.print(
+            f"  Stop it: llmctl stop {sid}   ·   go back to what was serving: "
+            f"llmctl swap {escape(_previous_preset(state) or 'PRESET')}"
+        )
+        return
+    console.print(f"[red]Swap failed:[/red] {escape(result.error or 'unknown error')}")
+    if result.restored:
+        console.print(
+            f"  [green]rolled back:[/green] {escape(', '.join(result.restored))} serving again"
+        )
+    if result.restore_failed:
+        console.print(
+            f"  [red]not restored:[/red] {escape(', '.join(result.restore_failed))} "
+            "(commands printed above)"
+        )
+    raise typer.Exit(1)
+
+
+def _previous_preset(state: SwapState) -> str | None:
+    """The vLLM preset that was serving before the swap, if any."""
+    return next((r.key for r in state.catalog if r.kind == "vllm" and r.key in state.serving), None)

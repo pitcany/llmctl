@@ -10,9 +10,12 @@ kind       what ``swap`` does
 ========== ==================================================================
 preset     swap the vLLM unit to the preset that serves this checkpoint
 no-preset  vLLM checkpoint with no preset: offer to write a starter preset
-start      llama.cpp / python_script row: start it as a session
+session    llama.cpp row: free the GPUs, start llama-server, roll back on
+           failure (:mod:`llmctl.services.session_swap`)
+start      python_script row: run it next to everything else, no swap
 on-demand  Ollama / LM Studio: nothing to start, the first request loads it
-cannot     SGLang, FreeToken, adopted endpoints, other machines: says why
+cannot     SGLang, adopted endpoints, other machines, a model too
+           big for every GPU: says why, changes nothing
 ========== ==================================================================
 """
 
@@ -76,49 +79,88 @@ def find_model(db: Session, name: str) -> Model | None:
 
 
 def route(db: Session, model: Model, catalog: list[SwapTarget]) -> ServeRoute:
-    """Decide how ``model`` is served. Reads presets; writes nothing."""
+    """Decide how ``model`` is served. Reads presets and GPU sizes; writes nothing.
+
+    Messages are for the operator, so they say what happens to the GPUs and
+    what to type next, not which llmctl subsystem is involved.
+    """
     host = effective_host(model.host)
     if host != local_host():
         return ServeRoute(
-            "cannot", model, f"{model.name} lives on {host}; serve it there."
+            "cannot",
+            model,
+            f"{model.name} is on {host}, not this machine. Nothing here was changed; "
+            "serve it from that machine.",
         )
     engine = model.runtime
-    if engine in (RuntimeName.OLLAMA, RuntimeName.LMSTUDIO):
-        label = "Ollama" if engine == RuntimeName.OLLAMA else "LM Studio"
+    if engine == RuntimeName.OLLAMA:
         return ServeRoute(
             "on-demand",
             model,
-            f"{label} loads {model.name} on its first request; there is nothing to "
-            "start and no GPU is freed.",
+            f"Nothing to start: Ollama is already running and loads {model.name} into "
+            "memory the first time something asks for it, for example "
+            f'`ollama run {model.name} "hi"`. The GPUs were left as they are.',
+        )
+    if engine == RuntimeName.LMSTUDIO:
+        return ServeRoute(
+            "on-demand",
+            model,
+            f"Nothing to start: LM Studio's server (port 1234) loads {model.name} the "
+            f"first time a request names it, or now with `lms load {model.source or model.name}`. "
+            "The GPUs were left as they are.",
         )
     if engine == RuntimeName.VLLM:
         alias = _serving_preset(db, model)
         target = next((t for t in catalog if t.kind == "vllm" and t.key == alias), None)
         if target is not None:
             return ServeRoute(
-                "preset", model, f"{model.name} is served by preset {alias}.", target
+                "preset",
+                model,
+                f"{model.name} runs on vLLM with the settings in preset {alias}.",
+                target,
             )
         return ServeRoute(
             "no-preset",
             model,
-            f"No preset serves {model.name} yet; `llmctl swap` needs one.",
+            f"vLLM needs a preset (a small settings file: which GPUs, how much context) "
+            f"before it can run {model.name}, and none exists yet.",
         )
-    if engine in (RuntimeName.LLAMA_CPP, RuntimeName.PYTHON_SCRIPT):
+    if engine == RuntimeName.LLAMA_CPP:
+        from llmctl.services.session_swap import session_target
+
+        target = session_target(model)
+        placement = target.placement
+        if placement.problem:
+            return ServeRoute("cannot", model, placement.problem)
         return ServeRoute(
-            "start",
+            "session",
             model,
-            f"{model.name} starts as a {engine.value} session (llmctl start "
-            f"{(model.id or '')[:8]}), on a port and GPU the scheduler picks.",
+            f"{model.name} runs as a llama-server that llmctl starts and tracks "
+            "(`llmctl sessions` lists it, `llmctl stop ID` ends it). The swap frees "
+            "the GPUs for it first.",
+            target,
         )
     if engine == RuntimeName.SGLANG:
         return ServeRoute(
             "cannot",
             model,
-            "SGLang models run as a router.yaml lane; add a lane for it or serve the "
-            "same checkpoint with vLLM.",
+            "llmctl cannot start SGLang models yet: SGLang runs from a start script "
+            "listed in llm-router's router.yaml. Nothing was changed. Serve the same "
+            f"checkpoint with vLLM instead: llmctl model add {model.source or model.name}",
+        )
+    if engine == RuntimeName.PYTHON_SCRIPT:
+        return ServeRoute(
+            "start",
+            model,
+            f"{model.name} is a script: llmctl runs it as a background process it "
+            "tracks (`llmctl sessions` lists it, `llmctl stop ID` ends it). Nothing "
+            "else is stopped.",
         )
     return ServeRoute(
-        "cannot", model, f"{engine.value} endpoints are adopted; llmctl does not start them."
+        "cannot",
+        model,
+        f"{model.name} is served by something outside llmctl ({engine.value}); llmctl "
+        "only tracks it. Nothing was changed.",
     )
 
 

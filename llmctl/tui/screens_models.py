@@ -143,8 +143,8 @@ class ModelsScreen(DataScreen):
         """Serve the cursor row the way ``llmctl swap NAME`` would.
 
         A vLLM checkpoint swaps to its preset (offering to write one first), a
-        llama.cpp row gets the launch-plan dialog, and Ollama / LM Studio say
-        they load on demand. Routing probes what is serving, so it runs off
+        llama.cpp row swaps the GPUs over to a llama-server, and Ollama / LM
+        Studio say they load on demand. Routing probes what is serving, so it runs off
         the UI thread.
         """
         model_id = self._selected_id()
@@ -180,7 +180,7 @@ class ModelsScreen(DataScreen):
             return
         if served.kind == "start":
             self._show_plan(model_id, plan)
-        elif served.kind == "preset" and served.target is not None:
+        elif served.kind in ("preset", "session") and served.target is not None:
             self._confirm_swap(state, served.target)
         elif served.kind == "no-preset":
             self._offer_starter_preset(model_id, served.model.name)
@@ -188,7 +188,7 @@ class ModelsScreen(DataScreen):
             self.app.notify(esc(served.message), title="Serve")
 
     def _confirm_swap(self, state: Any, target: Any) -> None:
-        """The Swap screen's confirm, for the preset that serves this row."""
+        """The Swap screen's confirm, for this row's preset or llama-server."""
         from llmctl.tui.screens_swap import run_swap
 
         preview = state.preview(target)

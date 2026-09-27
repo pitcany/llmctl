@@ -18,7 +18,7 @@ from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.config import load_settings
-from llmctl.services.lane_swap import LaneSwapResult, quiet_deps, swap_to_lane, swap_to_vllm
+from llmctl.services.lane_swap import quiet_deps, swap_to_lane, swap_to_vllm
 from llmctl.services.lanes import (
     SwapState,
     SwapTarget,
@@ -27,6 +27,11 @@ from llmctl.services.lanes import (
     gather_state,
     last_load_s,
     record_load,
+)
+from llmctl.services.session_swap import (
+    pause_for_swap,
+    resume_after_failed_swap,
+    run_session_swap,
 )
 from llmctl.services.vllm_orchestrator import OrchestratorOptions, start_vllm_tp
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
@@ -40,6 +45,24 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
     the lanes before vLLM takes the GPUs.
     """
     deps = quiet_deps()
+    settings = load_settings()
+    if target.kind == "session":
+        done = run_session_swap(state, target, settings=settings, deps=deps)
+        if done.ok:
+            sid = (getattr(done.session, "id", "") or "")[:8]
+            url = getattr(done.session, "endpoint_url", None) or "its port"
+            return True, (
+                f"{target.model} answers at {url} ({format_duration(done.seconds)}). "
+                f"Stop it: llmctl stop {sid}"
+            )
+        return False, _failure(done.error, done)
+
+    # llama.cpp processes llmctl started are in the way of vLLM and lanes too.
+    paused, error = pause_for_swap(state, target, settings=settings, log=deps.log)
+    if error:
+        again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
+        return False, _failure(error, again)
+
     if target.kind == "lane":
         assert target.lane is not None
         result = swap_to_lane(
@@ -51,9 +74,11 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
         )
         if result.ok:
             return True, f"{target.model} ready ({format_duration(result.seconds)})"
+        again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
+        result.restored += again.restored
+        result.restore_failed += again.restore_failed
         return False, _failure(result.error, result)
 
-    settings = load_settings()
     started = time.monotonic()
 
     def _start() -> Any:
@@ -67,6 +92,9 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
 
     vllm, lanes = swap_to_vllm(state.active_lanes(), _start, deps=deps)
     if vllm is None:
+        again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
+        lanes.restored += again.restored
+        lanes.restore_failed += again.restore_failed
         return False, _failure(lanes.error, lanes)
     if getattr(vllm, "ok", False):
         record_load(target.key, time.monotonic() - started)
@@ -77,10 +105,13 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
         return True, message
     restart = getattr(vllm, "restart", None)
     reason = getattr(restart, "error", None) or "vLLM start did not complete cleanly"
+    again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
+    lanes.restored += again.restored
+    lanes.restore_failed += again.restore_failed
     return False, _failure(reason, lanes)
 
 
-def _failure(reason: str | None, lanes: LaneSwapResult) -> str:
+def _failure(reason: str | None, lanes: Any) -> str:
     text = esc(reason or "unknown error")
     if lanes.restored:
         text += f"\nStarted again: {esc(', '.join(lanes.restored))}"

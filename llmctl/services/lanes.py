@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -198,12 +198,15 @@ class SwapTarget:
     key: str
     """What you type: the preset alias or the router backend name."""
     kind: str
-    """``"vllm"`` or ``"lane"``."""
+    """``"vllm"``, ``"lane"``, or ``"session"`` (a llama.cpp model llmctl starts)."""
     model: str
     """Served model name (what clients ask for)."""
     engine: str
     upstream: str
     lane: Lane | None = None
+    #: ``session`` rows: the registry row, and the fit decided before any stop.
+    model_id: str | None = None
+    placement: Any = None
 
     @property
     def gpus(self) -> Gpus:
@@ -370,6 +373,7 @@ def preview_swap(
     vllm_unit: str,
     vllm_active: bool,
     load_times: Path | None = None,
+    gpu_sessions: Sequence[Any] = (),
 ) -> SwapPreview:
     """Describe the swap to ``target`` given what is running now.
 
@@ -385,10 +389,10 @@ def preview_swap(
     if vllm_active:
         current = next((r.model for r in catalog if r.kind == "vllm" and r.key in serving), None)
         label = f"{vllm_unit} ({current})" if current else vllm_unit
-        if target.kind == "lane":
-            stops.append(label)
-        else:
+        if target.kind == "vllm":
             stops.append(f"{label}, restarted on preset {target.key}")
+        else:
+            stops.append(label)
     for row in catalog:
         if row.kind != "lane" or row.lane is None or row.lane.unit is None:
             continue
@@ -397,7 +401,20 @@ def preview_swap(
         if not gpus_overlap(row.gpus, target.gpus):
             continue
         stops.append(f"{row.lane.unit} ({row.model})")
-    if target.kind == "vllm":
+    for session in gpu_sessions:
+        if target.kind == "session" and session.name == target.key:
+            continue
+        if gpus_overlap(frozenset(session.gpu_ids), target.gpus):
+            stops.append(session.label())
+    if target.kind == "session":
+        placement = target.placement
+        cards = getattr(placement, "cards", 1) or 1
+        where = "one GPU" if cards == 1 else f"{cards} GPUs (split)"
+        preview.starts = f"llama-server for {target.key} on {where}; llmctl picks the port"
+        note = getattr(placement, "note", None)
+        if note:
+            stops.append(note)
+    elif target.kind == "vllm":
         stops.append("Ollama/Harbor (paused while vLLM loads, started again after)")
         preview.starts = f"{vllm_unit} on preset {target.key}"
     else:
@@ -423,6 +440,8 @@ class SwapState:
     active_units: set[str]
     vllm_unit: str
     vllm_active: bool
+    #: Processes llmctl started that hold GPU memory (llama.cpp models).
+    gpu_sessions: list[Any] = field(default_factory=list)
 
     def state_of(self, row: SwapTarget) -> str:
         """``serving`` / ``loading`` / ``""`` for the picker's State column."""
@@ -461,7 +480,17 @@ class SwapState:
             vllm_unit=self.vllm_unit,
             vllm_active=self.vllm_active,
             load_times=load_times,
+            gpu_sessions=self.gpu_sessions,
         )
+
+    def sessions_in_the_way(self, target: SwapTarget) -> list[Any]:
+        """llmctl-started GPU processes a swap to ``target`` must stop."""
+        return [
+            s
+            for s in self.gpu_sessions
+            if gpus_overlap(frozenset(s.gpu_ids), target.gpus)
+            and not (target.kind == "session" and s.name == target.key)
+        ]
 
 
 def gather_state(
@@ -471,6 +500,7 @@ def gather_state(
     lanes: list[Lane] | None = None,
     probe: Prober | None = None,
     is_active: Callable[[str, bool], bool] | None = None,
+    gpu_sessions: list[Any] | None = None,
 ) -> SwapState:
     """Build the catalog and probe it. Read-only; every seam is injectable.
 
@@ -499,13 +529,32 @@ def gather_state(
     active_units = {
         lane.unit for lane in lanes if lane.unit is not None and is_active(lane.unit, True)
     }
+    if gpu_sessions is None:
+        gpu_sessions = _load_gpu_sessions(settings)
     return SwapState(
         catalog=catalog,
         serving=serving_keys(catalog, probe),
         active_units=active_units,
         vllm_unit=vllm.unit_name,
         vllm_active=is_active(vllm.unit_name, False),
+        gpu_sessions=gpu_sessions,
     )
+
+
+def _load_gpu_sessions(settings: Any) -> list[Any]:
+    """GPU processes llmctl started, from the registry. [] if it is unreadable."""
+    try:
+        from sqlmodel import Session
+
+        from llmctl.db import get_engine, init_db
+        from llmctl.services.session_swap import load_gpu_sessions
+
+        url = settings.database_url
+        init_db(url)
+        with Session(get_engine(url)) as db:
+            return load_gpu_sessions(db)
+    except Exception:  # noqa: BLE001 - the picker must render without the DB
+        return []
 
 
 def units_from_lanes(
