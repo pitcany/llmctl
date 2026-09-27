@@ -347,20 +347,26 @@ def llama_cpp_units(managed_units: ManagedUnitsConfig) -> list[str]:
 Prober = Callable[[str], list[str] | None]
 
 
-def serving_keys(catalog: list[SwapTarget], probe: Prober) -> set[str]:
+def serving_keys(
+    catalog: list[SwapTarget], probe: Prober, loaded_probe: Prober | None = None
+) -> set[str]:
     """Keys of rows whose upstream lists their served model right now.
 
     Each upstream is probed once, however many rows share it (every vLLM
-    preset shares :8003).
+    preset shares :8003). Ollama lanes use ``loaded_probe`` (``/api/ps``)
+    when given: Ollama's ``/v1/models`` lists every installed model, so two
+    lanes on one Ollama server would both read serving.
     """
-    served_by: dict[str, list[str] | None] = {}
+    served_by: dict[tuple[str, bool], list[str] | None] = {}
     keys: set[str] = set()
     for row in catalog:
         if not row.upstream:
             continue  # a session row: its port is picked at start
-        if row.upstream not in served_by:
-            served_by[row.upstream] = probe(row.upstream)
-        ids = served_by[row.upstream] or []
+        loaded = loaded_probe is not None and row.lane is not None and row.lane.runtime == "ollama"
+        cache_key = (row.upstream, loaded)
+        if cache_key not in served_by:
+            served_by[cache_key] = (loaded_probe if loaded else probe)(row.upstream)
+        ids = served_by[cache_key] or []
         if row.model in ids:
             keys.add(row.key)
     return keys
@@ -489,7 +495,7 @@ def preview_swap(
     for row in catalog:
         if row.kind != "lane" or row.lane is None or row.lane.unit is None:
             continue
-        if row.key == target.key or row.lane.unit not in active_units:
+        if row.key == target.key or not lane_holds_unit(row, catalog, serving, active_units):
             continue
         if not gpus_overlap(row.gpus, target.gpus):
             continue
@@ -522,6 +528,26 @@ def preview_swap(
     return preview
 
 
+def lane_holds_unit(
+    row: SwapTarget, catalog: list[SwapTarget], serving: set[str], active_units: set[str]
+) -> bool:
+    """The lane's unit is up and running this lane, not a sibling's model.
+
+    Lanes can share a unit (``coder1`` and ``gemma1`` are two models on
+    ollama-gpu1). While a sibling on the unit is serving, this lane is not
+    the one up; with none serving, every lane on it may be loading.
+    """
+    if row.lane is None or row.lane.unit not in active_units:
+        return False
+    if row.key in serving:
+        return True
+    return not any(
+        other.key in serving
+        for other in catalog
+        if other.lane is not None and other.lane.unit == row.lane.unit
+    )
+
+
 # -- live state -------------------------------------------------------------------
 
 
@@ -543,16 +569,19 @@ class SwapState:
             return "serving"
         if session_is_running(row, self.active_units, self.gpu_sessions):
             return "serving"
-        if row.lane is not None and row.lane.unit in self.active_units:
+        if self._holds_unit(row):
             return "loading"
         return ""
+
+    def _holds_unit(self, row: SwapTarget) -> bool:
+        return lane_holds_unit(row, self.catalog, self.serving, self.active_units)
 
     def active_lanes(self, exclude: str | None = None) -> list[Lane]:
         """Lanes whose unit is active, except ``exclude`` (a catalog key)."""
         return [
             row.lane
             for row in self.catalog
-            if row.lane is not None and row.lane.unit in self.active_units and row.key != exclude
+            if row.lane is not None and self._holds_unit(row) and row.key != exclude
         ]
 
     def lanes_in_the_way(self, target: SwapTarget) -> list[Lane]:
@@ -561,7 +590,7 @@ class SwapState:
             row.lane
             for row in self.catalog
             if row.lane is not None
-            and row.lane.unit in self.active_units
+            and self._holds_unit(row)
             and row.key != target.key
             and gpus_overlap(row.gpus, target.gpus)
         ]
@@ -598,6 +627,7 @@ def gather_state(
     is_active: Callable[[str, bool], bool] | None = None,
     gpu_sessions: list[Any] | None = None,
     session_rows: Callable[[list[SwapTarget]], list[SwapTarget]] | None = None,
+    loaded_probe: Prober | None = None,
 ) -> SwapState:
     """Build the catalog and probe it. Read-only; every seam is injectable.
 
@@ -613,9 +643,10 @@ def gather_state(
     if lanes is None:
         lanes = load_lanes(managed_units=settings.managed_units)
     if probe is None:
-        from llmctl.services.backends import probe_openai_v1_models
+        from llmctl.services.backends import probe_ollama_loaded, probe_openai_v1_models
 
         probe = probe_openai_v1_models
+        loaded_probe = loaded_probe or probe_ollama_loaded
     if is_active is None:
         from llmctl.integrations.systemctl import SystemctlRunner
 
@@ -639,7 +670,7 @@ def gather_state(
         gpu_sessions = _load_gpu_sessions(settings)
     return SwapState(
         catalog=catalog,
-        serving=serving_keys(catalog, probe),
+        serving=serving_keys(catalog, probe, loaded_probe),
         active_units=active_units,
         vllm_unit=vllm.unit_name,
         vllm_active=is_active(vllm.unit_name, False),

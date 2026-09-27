@@ -70,6 +70,31 @@ def probe_openai_v1_models(
     return ids
 
 
+def probe_ollama_loaded(
+    base_url: str,
+    timeout: float = _PROBE_TIMEOUT_S,
+    http_get: Callable[[str, float], Any] | None = None,
+) -> list[str] | None:
+    """Models an Ollama server holds in memory now (``<base_url>/api/ps``).
+
+    Ollama's ``/v1/models`` lists every installed model, loaded or not, so it
+    cannot tell which of two lanes on one Ollama server is serving. Returns
+    ``None`` on any failure, like :func:`probe_openai_v1_models`.
+    """
+    http_get = http_get or _default_http_get
+    url = f"{base_url.rstrip('/')}/api/ps"
+    try:
+        resp = http_get(url, timeout)
+        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return None
+    names: list[str] = []
+    for m in payload.get("models", []) if isinstance(payload, dict) else []:
+        if isinstance(m, dict):
+            names += [v for v in (m.get("name"), m.get("model")) if isinstance(v, str)]
+    return names
+
+
 def _probe_managed_unit(
     unit: ManagedUnitConfig,
     http_get: Callable[[str, float], Any] | None = None,
