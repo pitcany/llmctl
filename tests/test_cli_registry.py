@@ -375,3 +375,30 @@ def test_import_registry_bad_file_is_a_usage_error(tmp_path, body: str) -> None:
     res = CliRunner().invoke(app, ["import-registry", str(bad)])
     assert res.exit_code == 2, res.output
     assert res.exception is None or isinstance(res.exception, SystemExit)
+
+
+def test_model_edit_sets_and_clears_the_default_profile(cli_env: Path) -> None:
+    runner = CliRunner()
+    with _engine_session(cli_env) as db:
+        RegistryService(db).add_model(
+            ModelCreate(name="m1", runtime=RuntimeName.LLAMA_CPP, source="/x", path="/x")
+        )
+        profile = ProfileService(db).create_profile(
+            ProfileCreate(name="m1-port", runtime=RuntimeName.LLAMA_CPP, parameters={"port": 8005})
+        )
+
+    result = runner.invoke(app, ["model", "edit", "m1", "--default-profile", "m1-port"])
+    assert result.exit_code == 0, result.output
+    with _engine_session(cli_env) as db:
+        row = db.exec(select(ModelRecord).where(ModelRecord.name == "m1")).one()
+        assert row.default_profile_id == profile.id
+
+    result = runner.invoke(app, ["model", "edit", "m1", "--default-profile", "nope"])
+    assert result.exit_code != 0
+    assert "Profile not found" in result.output
+
+    result = runner.invoke(app, ["model", "edit", "m1", "--default-profile", "none"])
+    assert result.exit_code == 0, result.output
+    with _engine_session(cli_env) as db:
+        row = db.exec(select(ModelRecord).where(ModelRecord.name == "m1")).one()
+        assert row.default_profile_id is None

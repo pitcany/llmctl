@@ -374,6 +374,15 @@ def model_edit(
     tags: Annotated[
         str | None, typer.Option(help="Comma-separated tags (replaces existing).")
     ] = None,
+    default_profile: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "Profile used by `llmctl start` and `llmctl swap` for this model "
+                "(name or id); `none` clears it."
+            )
+        ),
+    ] = None,
 ) -> None:
     """Apply a partial update to a model record."""
     with _session() as db:
@@ -394,6 +403,12 @@ def model_edit(
             updates_dict["notes"] = notes
         if tags is not None:
             updates_dict["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+        if default_profile is not None:
+            updates_dict["default_profile_id"] = (
+                None
+                if default_profile.lower() == "none"
+                else _resolve_profile_or_die(ProfileService(db), default_profile).id
+            )
         if not updates_dict:
             raise typer.BadParameter("provide at least one --field to update")
         updated = service.update_model(resolved, ModelUpdate(**updates_dict))

@@ -17,6 +17,7 @@ from llmctl.services.session_swap import (
     GpuSession,
     Placement,
     place,
+    start_request_fields,
     swap_to_session,
 )
 
@@ -225,3 +226,21 @@ def test_cli_vllm_swap_pauses_llama_servers_and_restores_them(monkeypatch) -> No
     assert seen == ["pause"] and paused.sessions == [OTHER]
     cli_swap.restore_lanes(paused, Console(quiet=True))
     assert seen[-1] == "resume ['s-other']"
+
+
+# -- start request ---------------------------------------------------------------
+
+
+def test_swap_start_uses_the_models_default_profile() -> None:
+    record = SimpleNamespace(id="m1", runtime="llama_cpp", default_profile_id="p1")
+    fields = start_request_fields(record, 2)
+    assert fields["profile_id"] == "p1"
+    assert fields["parameters"] == {"tensor_parallel_size": 2}
+
+
+def test_swap_start_card_count_overrides_the_profile() -> None:
+    record = SimpleNamespace(id="m1", runtime="llama_cpp", default_profile_id=None)
+    fields = start_request_fields(record, 1)
+    assert fields["profile_id"] is None
+    # Explicit even for one card, so a profile's tensor_parallel_size cannot win.
+    assert fields["parameters"] == {"tensor_parallel_size": 1}
