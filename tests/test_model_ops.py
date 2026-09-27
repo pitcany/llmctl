@@ -190,7 +190,7 @@ def test_add_ollama_pulls_and_registers_one_row(db) -> None:
     fake = _FakeOllama()
     ops = ModelOps(db, router=_router(fake))
     messages: list[str] = []
-    model = ops.add(plan_add("qwen3"), on_progress=messages.append)
+    model = ops.add(plan_add("qwen3"), on_progress=messages.append).model
     assert fake.pulled == ["qwen3:latest"]
     assert (model.runtime, model.source, model.size_bytes) == (
         RuntimeName.OLLAMA,
@@ -207,10 +207,10 @@ def test_add_ollama_pulls_and_registers_one_row(db) -> None:
 def test_add_revives_a_removed_row(db) -> None:
     fake = _FakeOllama()
     ops = ModelOps(db, router=_router(fake))
-    first = ops.add(plan_add("qwen3:8b"))
+    first = ops.add(plan_add("qwen3:8b")).model
     ops.remove(first.id)
     assert RegistryService(db).get_model(first.id) is None
-    again = ops.add(plan_add("qwen3:8b"))
+    again = ops.add(plan_add("qwen3:8b")).model
     assert again.id == first.id
     assert again.status == ModelStatus.DISCOVERED
 
@@ -242,7 +242,7 @@ def test_add_gguf_downloads_only_the_chosen_quant(db, tmp_path: Path) -> None:
         disk_free=lambda p: 10**15,
         hub_cache=hub,
     )
-    model = ops.add(plan_add("org/M-GGUF:q4_k_m"))
+    model = ops.add(plan_add("org/M-GGUF:q4_k_m")).model
     assert calls[0]["allow_patterns"] == ["M-Q4_K_M.gguf"]
     assert model.runtime == RuntimeName.LLAMA_CPP
     assert model.path.endswith("M-Q4_K_M.gguf")
@@ -286,7 +286,7 @@ def test_add_safetensors_skips_other_formats(db) -> None:
 def test_remove_without_purge_leaves_the_engine_alone(db) -> None:
     fake = _FakeOllama()
     ops = ModelOps(db, router=_router(fake))
-    model = ops.add(plan_add("qwen3:8b"))
+    model = ops.add(plan_add("qwen3:8b")).model
     result = ops.remove(model.id)
     assert result.removed_row and not result.purged
     assert fake.deleted == []
@@ -296,7 +296,7 @@ def test_remove_without_purge_leaves_the_engine_alone(db) -> None:
 def test_purge_ollama_runs_ollama_rm(db) -> None:
     fake = _FakeOllama()
     ops = ModelOps(db, router=_router(fake))
-    model = ops.add(plan_add("qwen3:8b"))
+    model = ops.add(plan_add("qwen3:8b")).model
     plan = plan_remove(model, db=db)
     assert plan.can_purge and "ollama rm qwen3:8b" in plan.purge_label
     result = ops.remove(model.id, purge=True)
@@ -307,7 +307,7 @@ def test_purge_ollama_runs_ollama_rm(db) -> None:
 def test_failed_purge_keeps_the_row(db) -> None:
     fake = _FakeOllama(delete_ok=False)
     ops = ModelOps(db, router=_router(fake))
-    model = ops.add(plan_add("qwen3:8b"))
+    model = ops.add(plan_add("qwen3:8b")).model
     with pytest.raises(ModelOpsError, match="daemon said no"):
         ops.remove(model.id, purge=True)
     assert RegistryService(db).get_model(model.id) is not None

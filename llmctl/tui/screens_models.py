@@ -29,7 +29,7 @@ class ModelsScreen(DataScreen):
     """Model registry screen: lists models and plans sessions."""
 
     BINDINGS = [
-        Binding("enter", "start_model", "Plan/Launch", show=True, priority=True),
+        Binding("enter", "start_model", "Serve", show=True, priority=True),
         Binding("ctrl+s", "scan", "Scan", show=True),
         Binding("a", "add_model", "Add", show=True),
         Binding("e", "edit_model", "Edit", show=True),
@@ -54,7 +54,7 @@ class ModelsScreen(DataScreen):
         yield Header()
         yield Static(
             f"Models Registry  -  [{C_MUTED}]a = add (any engine), del = remove, "
-            "enter = preview / plan / launch, ctrl+s = scan[/]",
+            "enter = serve (any engine), ctrl+s = scan[/]",
             classes="panel safe",
             id="models-title",
         )
@@ -140,7 +140,13 @@ class ModelsScreen(DataScreen):
         return None
 
     def action_start_model(self) -> None:
-        """Preview a launch plan, or surface an install hint when unavailable."""
+        """Serve the cursor row the way ``llmctl swap NAME`` would.
+
+        A vLLM checkpoint swaps to its preset (offering to write one first), a
+        llama.cpp row gets the launch-plan dialog, and Ollama / LM Studio say
+        they load on demand. Routing probes what is serving, so it runs off
+        the UI thread.
+        """
         model_id = self._selected_id()
         if not model_id:
             self.app.notify("No model selected.", severity="warning")
@@ -152,9 +158,104 @@ class ModelsScreen(DataScreen):
             self.app.notify(message, severity="warning", title="Backend unavailable")
             return
         self.run_action_worker(
-            lambda: _data.get_launch_plan(model_id),
-            lambda plan: self._show_plan(model_id, plan),
+            lambda: self._route(model_id),
+            lambda routed: self._serve(model_id, *routed),
         )
+
+    @staticmethod
+    def _route(model_id: str) -> tuple[Any, Any, Any]:
+        """Worker: the route, the swap state, and a launch plan when one applies.
+
+        Everything a follow-up needs is fetched here, in one worker: a second
+        worker started from this one's callback is refused as "busy".
+        """
+        served, state = _data.serve_route(model_id)
+        plan = _data.get_launch_plan(model_id) if served and served.kind == "start" else None
+        return served, state, plan
+
+    def _serve(self, model_id: str, served: Any, state: Any, plan: Any = None) -> None:
+        """Act on a :class:`~llmctl.services.serve.ServeRoute`."""
+        if served is None:
+            self.app.notify("Nothing changed: the model was not found.", severity="warning")
+            return
+        if served.kind == "start":
+            self._show_plan(model_id, plan)
+        elif served.kind == "preset" and served.target is not None:
+            self._confirm_swap(state, served.target)
+        elif served.kind == "no-preset":
+            self._offer_starter_preset(model_id, served.model.name)
+        else:
+            self.app.notify(esc(served.message), title="Serve")
+
+    def _confirm_swap(self, state: Any, target: Any) -> None:
+        """The Swap screen's confirm, for the preset that serves this row."""
+        from llmctl.tui.screens_swap import run_swap
+
+        preview = state.preview(target)
+
+        def _on_confirm(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            self.app.notify(f"Swapping to {esc(target.model)}...", title="Swap")
+            self.run_action_worker(lambda: run_swap(state, target), self._after_swap)
+
+        self.app.push_screen(
+            ConfirmActionModal(
+                f"Swap to {target.model} ({target.engine})",
+                "\n".join(preview.lines()),
+                confirm_label="Swap",
+            ),
+            _on_confirm,
+        )
+
+    def _after_swap(self, outcome: tuple[bool, str]) -> None:
+        ok, message = outcome
+        if ok:
+            self.app.notify(f"[{C_OK}]{esc(message)}[/]", title="Swap succeeded")
+        else:
+            self.app.notify(
+                f"[{C_ERR}]Swap failed[/]: {esc(message)}", severity="error", title="Swap failed"
+            )
+        self.refresh_data()
+
+    def _offer_starter_preset(self, model_id: str, name: str) -> None:
+        """No preset serves this checkpoint: write one, then offer the swap."""
+
+        def _on_confirm(confirmed: bool | None) -> None:
+            if not confirmed:
+                return
+            def _work() -> tuple[Any, Any, Any]:
+                starter = _data.write_starter_preset(model_id)
+                served, state = _data.serve_route(model_id)
+                return starter, served, state
+
+            self.run_action_worker(_work, lambda out: self._after_starter(*out))
+
+        self.app.push_screen(
+            ConfirmActionModal(
+                f"Write a preset for {name}?",
+                "vLLM serves presets, and none names this checkpoint yet. llmctl "
+                "writes a starter one from its config.json (context capped at "
+                "settings.yaml's default, no tool parser), then shows the swap.",
+                confirm_label="Write preset",
+            ),
+            _on_confirm,
+        )
+
+    def _after_starter(self, starter: Any, served: Any, state: Any) -> None:
+        """Report the preset, then show the swap it enables (a modal, no worker)."""
+        if starter is None:
+            self.app.notify("Nothing changed: the model was not found.", severity="warning")
+            return
+        first = (
+            f"Wrote starter preset {starter.alias}."
+            if starter.created
+            else f"Preset {starter.alias} already serves it."
+        )
+        self.app.notify(esc("\n".join([first, *starter.notes])), title="Presets", timeout=15)
+        self.refresh_data()
+        if served is not None and served.kind == "preset" and served.target is not None:
+            self._confirm_swap(state, served.target)
 
     def _show_plan(self, model_id: str, plan: Any) -> None:
         """Push the launch-plan modal; plan or launch based on the choice."""
@@ -310,8 +411,17 @@ class ModelsScreen(DataScreen):
 
         self.run_action_worker(
             lambda: _data.add_model_from_source(plan, on_progress=progress),
-            self._after(f"Added {plan.name} ({plan.engine.value})."),
+            self._after_add,
         )
+
+    def _after_add(self, result: Any) -> None:
+        """Say what was added and the one command that serves it."""
+        lines = [f"Added {result.model.name} ({result.model.runtime.value})."]
+        lines += list(result.notes)
+        if result.serve:
+            lines.append(f"Serve it: {result.serve} (or Swap screen, w).")
+        self.app.notify(esc("\n".join(lines)), title="Models", timeout=15)
+        self.refresh_data()
 
     def _open_manual_form(self) -> None:
         """The field-by-field form, for records llmctl cannot fetch."""

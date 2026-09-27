@@ -224,7 +224,8 @@ def _plan_local(source: str, engine: RuntimeName | None, name: str | None) -> Ad
         method="register",
         source=str(path),
         name=display,
-        summary=f"Register {path} for {engine.value} (nothing is downloaded).",
+        summary=f"Register {path} for {engine.value} (nothing is downloaded)"
+        + (", and write a starter preset for it." if engine == RuntimeName.VLLM else "."),
         command=f"llmctl model add {path} --engine {engine.value}",
     )
 
@@ -330,7 +331,11 @@ def plan_add(
         source=repo,
         name=name or repo,
         summary=(
-            f"Download the safetensors checkpoint {repo} from Hugging Face for {chosen.value}."
+            f"Download the safetensors checkpoint {repo} from Hugging Face, then write "
+            "a starter preset so `llmctl swap` can serve it."
+            if chosen == RuntimeName.VLLM
+            else f"Download the safetensors checkpoint {repo} from Hugging Face. "
+            "Download only: llmctl cannot start SGLang models yet."
         ),
         command=f"hf download {repo}",
     )
@@ -356,6 +361,8 @@ class RemovePlan:
     size_bytes: int | None = None
     #: Reasons purge is refused right now (a running session, ...).
     blockers: tuple[str, ...] = ()
+    #: Starter presets ``add`` wrote for this model; purge deletes them too.
+    presets_to_delete: tuple[str, ...] = ()
 
 
 def human_size(size: int | None) -> str:
@@ -504,7 +511,12 @@ def _active_sessions(db: Session, model_id: str) -> list[str]:
     return [(r.id or "")[:8] for r in rows]
 
 
-def _preset_users(model: Model, targets: tuple[Path, ...], db: Session | None) -> list[str]:
+def _preset_users(
+    model: Model,
+    targets: tuple[Path, ...],
+    db: Session | None,
+    config_dir: Path | None = None,
+) -> list[str]:
     """Aliases of vLLM presets that would break if ``model`` were purged.
 
     A preset is what ``llmctl swap`` and llm-router start, so purging weights
@@ -517,7 +529,7 @@ def _preset_users(model: Model, targets: tuple[Path, ...], db: Session | None) -
         from llmctl.presets import load_all_records
         from llmctl.services.preset_loader import resolve_preset_link
 
-        records = load_all_records()
+        records = load_all_records(**({"config_dir": config_dir} if config_dir else {}))
     except Exception:
         return []
     models = RegistryService(db).list_models() if db is not None else [model]
@@ -543,6 +555,7 @@ def plan_remove(
     roots: list[Path] | None = None,
     hub_cache: Path | None = None,
     runner: Callable[..., Any] = subprocess.run,
+    preset_dir: Path | None = None,
 ) -> RemovePlan:
     """Describe what removing ``model`` does. Reads the disk, writes nothing."""
     engine = model.runtime
@@ -634,12 +647,17 @@ def plan_remove(
             "(model_dirs.yaml), so llmctl will not delete it. Only the row is hidden.",
             purge_label="",
         )
-    presets = _preset_users(model, targets, db)
+    presets = _preset_users(model, targets, db, preset_dir)
+    # A preset `add` wrote goes with the weights; a hand-written one blocks.
+    starter = (model.metadata or {}).get("starter_preset")
+    own = tuple(p for p in presets if p == starter)
+    presets = [p for p in presets if p not in own]
     if presets:
         blockers += (
             f"preset {', '.join(presets)} uses it; delete the preset first "
             "(Presets screen, del).",
         )
+    also = f" and its starter preset {', '.join(own)}" if own else ""
     shown = str(targets[0]) + (f" (+{len(targets) - 1} more)" if len(targets) > 1 else "")
     links = [t for t in targets if t.is_symlink() and "snapshots" not in t.parts]
     if links:
@@ -649,13 +667,14 @@ def plan_remove(
         return RemovePlan(
             model=model,
             can_purge=True,
-            purge_summary=f"Deletes the link {shown} only; the files it points to "
-            f"({links[0].resolve()}) stay.",
-            purge_label=f"Also delete the link {shown} (its target stays)",
+            purge_summary=f"Deletes the link {shown}{also} only; the files it points "
+            f"to ({links[0].resolve()}) stay.",
+            purge_label=f"Also delete the link {shown}{also} (its target stays)",
             command=f"rm {targets[0]}",
             targets=targets,
             size_bytes=0,
             blockers=blockers,
+            presets_to_delete=own,
         )
     sizes = [_blob_aware_sizes(t) for t in targets]
     size, shared = sum(f for f, _ in sizes), sum(sh for _, sh in sizes)
@@ -665,8 +684,9 @@ def plan_remove(
     return RemovePlan(
         model=model,
         can_purge=True,
-        purge_summary=f"Deletes {shown} ({freed_text}).",
-        purge_label=f"Also delete the files ({freed_text}): {shown}",
+        purge_summary=f"Deletes {shown}{also} ({freed_text}).",
+        purge_label=f"Also delete the files{also} ({freed_text}): {shown}",
+        presets_to_delete=own,
         command=f"rm -r {targets[0]}" if len(targets) == 1 else None,
         targets=targets,
         size_bytes=size,
@@ -704,6 +724,18 @@ def _unlink_target(target: Path) -> None:
 
 
 @dataclass
+class AddResult:
+    """Outcome of :meth:`ModelOps.add`: the row, and how to serve it."""
+
+    model: Model
+    #: The vLLM preset that serves it (written now, or already there).
+    preset: str | None = None
+    #: The one command that serves it, when there is one.
+    serve: str | None = None
+    notes: tuple[str, ...] = ()
+
+
+@dataclass
 class RemoveResult:
     """Outcome of :meth:`ModelOps.remove`, stated plainly."""
 
@@ -730,6 +762,8 @@ class ModelOps:
         default=lambda p: shutil.disk_usage(p).free
     )
     hub_cache: Path | None = None
+    #: Where starter presets go; None = the canonical preset directory.
+    preset_dir: Path | None = None
 
     def _router(self) -> RuntimeRouter:
         if self.router is None:
@@ -738,17 +772,21 @@ class ModelOps:
 
     # -- add ---------------------------------------------------------------
 
-    def add(self, plan: AddPlan, *, on_progress: Progress | None = None) -> Model:
-        """Fetch (if needed) and register ``plan``'s model; return the row."""
+    def add(self, plan: AddPlan, *, on_progress: Progress | None = None) -> AddResult:
+        """Fetch (if needed) and register ``plan``'s model, then make it servable.
+
+        For vLLM that means a starter preset, so ``llmctl swap NAME`` can
+        serve it the moment ``add`` returns.
+        """
         say = on_progress or (lambda _msg: None)
         if plan.method == "ollama-pull":
-            return self._add_ollama(plan, say)
-        if plan.method == "hf-download":
-            return self._add_hf(plan, say)
-        if plan.method == "lmstudio-get":
-            return self._add_lmstudio(plan, say)
-        if plan.method == "register":
-            return self.register(
+            model = self._add_ollama(plan, say)
+        elif plan.method == "hf-download":
+            model = self._add_hf(plan, say)
+        elif plan.method == "lmstudio-get":
+            model = self._add_lmstudio(plan, say)
+        elif plan.method == "register":
+            model = self.register(
                 Model(
                     name=plan.name,
                     runtime=plan.engine,
@@ -759,7 +797,50 @@ class ModelOps:
                     status=ModelStatus.REGISTERED,
                 )
             )
-        raise ModelOpsError(f"Unknown add method {plan.method!r}.")  # pragma: no cover
+        else:  # pragma: no cover
+            raise ModelOpsError(f"Unknown add method {plan.method!r}.")
+        return self._make_servable(model)
+
+    def _make_servable(self, model: Model) -> AddResult:
+        """Say how to serve ``model``; write the vLLM starter preset it needs."""
+        if model.runtime == RuntimeName.VLLM:
+            from llmctl.services.preset_scaffold import ensure_starter_preset
+
+            try:
+                starter = ensure_starter_preset(
+                    self.db, model, config_dir=self.preset_dir
+                )
+            except ValueError as exc:
+                return AddResult(
+                    model,
+                    notes=(f"No preset written: {exc}. Write one on the Presets screen (a).",),
+                )
+            verb = "Wrote starter preset" if starter.created else "Uses preset"
+            refreshed = RegistryService(self.db).get_model(model.id) if model.id else None
+            return AddResult(
+                refreshed or model,
+                preset=starter.alias,
+                serve=f"llmctl swap {starter.alias}",
+                notes=(f"{verb} {starter.alias}" + (f" ({starter.path})" if starter.path else ""),)
+                + starter.notes,
+            )
+        if model.runtime in (RuntimeName.OLLAMA, RuntimeName.LMSTUDIO):
+            return AddResult(
+                model,
+                notes=(f"{model.runtime.value} loads it on the first request; nothing to start.",),
+            )
+        if model.runtime == RuntimeName.LLAMA_CPP:
+            return AddResult(model, serve=f"llmctl swap {model.name}")
+        if model.runtime == RuntimeName.SGLANG:
+            return AddResult(
+                model,
+                notes=(
+                    "SGLang runs as a systemd lane (router.yaml + a start script), and "
+                    "llmctl cannot create one yet. Serve it with vLLM instead: "
+                    f"llmctl model add {model.source or model.name}.",
+                ),
+            )
+        return AddResult(model)
 
     def register(self, model: Model) -> Model:
         """Insert or refresh the row for ``model``; revive it if it was deleted.
@@ -994,7 +1075,11 @@ class ModelOps:
         purged = False
         if purge:
             plan = plan_remove(
-                model, db=self.db, hub_cache=self.hub_cache, runner=self.runner
+                model,
+                db=self.db,
+                hub_cache=self.hub_cache,
+                runner=self.runner,
+                preset_dir=self.preset_dir,
             )
             if plan.blockers:
                 raise ModelOpsError("Not removed: " + " ".join(plan.blockers))
@@ -1008,11 +1093,20 @@ class ModelOps:
             else:
                 for target in plan.targets:
                     _unlink_target(target)
+            if plan.presets_to_delete:
+                from llmctl.presets import delete_preset
+
+                for alias in plan.presets_to_delete:
+                    delete_preset(
+                        alias, **({"config_dir": self.preset_dir} if self.preset_dir else {})
+                    )
             freed, purged = plan.size_bytes, True
         registry.delete_model(model_id)
         if purged:
             what = "removed from Ollama" if model.runtime == RuntimeName.OLLAMA else "files deleted"
             size = f", {human_size(freed)} freed" if freed else ""
+            if plan.presets_to_delete:
+                what += f", preset {', '.join(plan.presets_to_delete)} deleted"
             return RemoveResult(True, True, f"Removed {model.name}: {what}{size}.", freed)
         return RemoveResult(
             True,
@@ -1037,6 +1131,7 @@ def _gguf_menu(files: list[str]) -> str:
 __all__ = [
     "ADDABLE_ENGINES",
     "AddPlan",
+    "AddResult",
     "ModelOps",
     "ModelOpsError",
     "RemovePlan",

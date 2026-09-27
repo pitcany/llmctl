@@ -346,13 +346,18 @@ def _add_from_source(source: str, engine: str | None, name: str | None, *, yes: 
                 if not Confirm.ask("Download now?", default=True):
                     console.print("[yellow]Aborted; nothing changed.[/yellow]")
                     raise typer.Exit(code=0)
-            model = ops.add(plan, on_progress=lambda msg: console.print(f"  {escape(msg)}"))
+            result = ops.add(plan, on_progress=lambda msg: console.print(f"  {escape(msg)}"))
         except ModelOpsError as exc:
             err_console.print(f"[red]{escape(str(exc))}[/red]")
             raise typer.Exit(code=1) from exc
+    model = result.model
     console.print(
         f"[green]Added[/green] {escape(model.name)} ({model.runtime.value}, {model.id})"
     )
+    for note in result.notes:
+        console.print(f"  {escape(note)}")
+    if result.serve:
+        console.print(f"Serve it: [bold]{escape(result.serve)}[/bold]")
 
 
 @model_app.command("edit")

@@ -227,7 +227,7 @@ def delete_model(model_id: str, *, delete_files: bool = False) -> bool:
         return RegistryService(db).delete_model(model_id, delete_files=delete_files)
 
 
-def add_model_from_source(plan: Any, on_progress: Any = None) -> Model:
+def add_model_from_source(plan: Any, on_progress: Any = None) -> Any:
     """Fetch and register ``plan`` (a :class:`~llmctl.services.model_ops.AddPlan`).
 
     Hugging Face progress bars are silenced: tqdm writes to the terminal the
@@ -259,6 +259,30 @@ def remove_model(model_id: str, *, purge: bool = False) -> Any:
 
     with db_session() as db:
         return ModelOps(db).remove(model_id, purge=purge)
+
+
+def serve_route(model_id: str) -> Any:
+    """``(route, swap_state)`` for serving ``model_id`` — same as ``llmctl swap``."""
+    from llmctl.services.lanes import gather_state
+    from llmctl.services.serve import route
+
+    state = gather_state(load_settings())
+    with db_session() as db:
+        model = RegistryService(db).get_model(model_id)
+        if model is None:
+            return None, state
+        return route(db, model, state.catalog), state
+
+
+def write_starter_preset(model_id: str) -> Any:
+    """Write (or find) the vLLM preset that serves ``model_id``."""
+    from llmctl.services.preset_scaffold import ensure_starter_preset
+
+    with db_session() as db:
+        model = RegistryService(db).get_model(model_id)
+        if model is None:
+            return None
+        return ensure_starter_preset(db, model)
 
 
 def prune_missing_models(

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import click
 import typer
 import uvicorn
 from rich.console import Console
 from rich.markup import escape
+from rich.prompt import Confirm
 from rich.table import Table
 from sqlmodel import Session
 
@@ -1595,8 +1596,11 @@ def help_cmd(
 
 
 _SWAP_HELP = (
-    "Swap the served model. NAME is a vLLM preset or a lane from llm-router's "
-    "router.yaml (FreeToken, llama.cpp, ...); with no NAME, pick from a list. "
+    "Serve a model: the one verb for every engine. NAME is a vLLM preset, a lane "
+    "from llm-router's router.yaml (FreeToken, llama.cpp, ...), or any registered "
+    "model (`llmctl models`): a vLLM checkpoint swaps to its preset (offering to "
+    "write one), a llama.cpp row starts as a session, Ollama/LM Studio say they "
+    "load on demand. With no NAME, pick from a list. "
     "Shows what stops and starts before asking. MUTATES: frees the GPUs "
     "(vllm-tp, other lanes, ollama/Harbor) and starts NAME; a failed start "
     "rolls back to what was serving. --list prints the list; --dry-run previews."
@@ -1611,7 +1615,7 @@ def vllm_cmd(
     preset: Annotated[
         str | None,
         typer.Argument(
-            help="vLLM preset alias or lane name (see --list). Omit to pick from a list."
+            help="Preset, lane, or registered model name (see --list). Omit to pick."
         ),
     ] = None,
     list_only: Annotated[
@@ -1656,6 +1660,11 @@ def vllm_cmd(
         cli_swap.render_table(state, console)
         return
     target = cli_swap.pick(state, console) if preset is None else resolve(preset, state.catalog)
+    if target is None and preset is not None:
+        # Not a preset or lane: maybe a registered model of another engine.
+        routed = _swap_registry_model(preset, state, settings, dry_run=dry_run, yes=yes)
+        if routed is not None:
+            target, state = routed
     if target is None:
         # Not in the list: hand it to the vLLM path, which owns preset lookup
         # and fails with the available presets (exit 2) if it is unknown.
@@ -1733,6 +1742,76 @@ def vllm_cmd(
         f"on port {result.spec.port}"
     )
     _print_companions(result)
+
+
+def _swap_registry_model(
+    name: str, state: Any, settings: Any, *, dry_run: bool, yes: bool
+) -> tuple[SwapTarget, Any] | None:
+    """Serve a registered model that is not itself a preset or lane.
+
+    Returns the swap-list row to continue with (a vLLM preset), or None when
+    NAME is not a registered model. Every other engine is handled here and
+    exits: llama.cpp rows start as sessions, Ollama and LM Studio need nothing,
+    and the rest say why they cannot be started.
+    """
+    from llmctl.services.preset_scaffold import ensure_starter_preset
+    from llmctl.services.serve import AmbiguousModel, find_model, route
+
+    with _session() as db:
+        try:
+            model = find_model(db, name)
+        except AmbiguousModel as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        if model is None:
+            return None
+        served = route(db, model, state.catalog)
+        console.print(escape(served.message))
+        if served.kind == "preset" and served.target is not None:
+            return served.target, state
+        if served.kind == "on-demand":
+            raise typer.Exit(0)
+        if served.kind == "cannot":
+            raise typer.Exit(1)
+        if served.kind == "start":
+            if dry_run:
+                # `plan`, not `start --dry-run`: a swap preview writes nothing.
+                plan(model_id=model.id or name, profile=None, gpus="auto", cpu=False)
+                raise typer.Exit(0)
+            _confirm_state_change(
+                f"Start {model.name} ({model.runtime.value})",
+                required=settings.scheduler.require_confirmation_for_start,
+                assume_yes=yes,
+            )
+            start(
+                model_id=model.id or name,
+                profile=None,
+                gpus="auto",
+                cpu=False,
+                force=False,
+                dry_run=False,
+            )
+            raise typer.Exit(0)
+        # no-preset: a vLLM checkpoint swap cannot serve until a preset exists.
+        if dry_run:
+            console.print("Would write a starter preset for it, then swap to it.")
+            raise typer.Exit(0)
+        if not yes and not Confirm.ask("Write a starter preset for it now?", default=True):
+            console.print("[yellow]Nothing changed.[/yellow]")
+            raise typer.Exit(0)
+        try:
+            starter = ensure_starter_preset(db, model)
+        except ValueError as exc:
+            console.print(f"[red]{escape(str(exc))}[/red]")
+            raise typer.Exit(1) from exc
+    console.print(f"[green]Wrote starter preset[/green] {escape(starter.alias)}")
+    for note in starter.notes:
+        console.print(f"  {escape(note)}")
+    fresh = gather_state(settings)
+    target = resolve(starter.alias, fresh.catalog)
+    if target is None:
+        console.print(f"[red]Preset {escape(starter.alias)} was written but is not listed.[/red]")
+        raise typer.Exit(1)
+    return target, fresh
 
 
 def _print_companions(result: object) -> None:

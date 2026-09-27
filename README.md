@@ -33,7 +33,7 @@ the Ollama-only shortcut.
 
 | Command | For | What happens |
 | --- | --- | --- |
-| `llmctl swap [NAME]` | Whatever should serve on the GPUs: a vLLM preset **or** a lane (FreeToken, llama.cpp, ...) | No NAME = pick from a list. Shows what stops/starts and the last load time, asks, frees the GPUs (other lanes, vllm-tp, Ollama), starts NAME, waits for readiness, rolls back on failure. Lanes come from llm-router's `config/router.yaml` (`$LLMCTL_ROUTER_CONFIG`); `--list` prints the list. `llmctl vllm` is the old name |
+| `llmctl swap [NAME]` | Serving anything: a vLLM preset, a lane (FreeToken, llama.cpp, ...), **or any registered model** | A registered model is routed by engine: a vLLM checkpoint swaps to its preset (offering to write a starter one), a llama.cpp row starts as a session, Ollama/LM Studio say they load on the first request. No NAME = pick from a list. Shows what stops/starts and the last load time, asks, frees the GPUs (other lanes, vllm-tp, Ollama), starts NAME, waits for readiness, rolls back on failure. Lanes come from llm-router's `config/router.yaml` (`$LLMCTL_ROUTER_CONFIG`); `--list` prints the list. `llmctl vllm` is the old name |
 | `llmctl start <model>` | A one-off session for one model | Launches a process, tracks it, and reports `running` only once the endpoint answers |
 
 A **preset** is a recipe at `~/.config/llmctl/presets/<alias>.yaml` — which
@@ -108,6 +108,7 @@ llmctl presets                       # list available presets
 llmctl swap                          # pick what serves from one list (vLLM + lanes)
 llmctl swap flash                    # Flash-Next on FreeToken (a router.yaml lane)
 llmctl swap qwen3.8-27b              # restart vllm-tp with this preset
+llmctl swap Qwen/Qwen3-8B            # a registered checkpoint: swaps to its preset
 llmctl status                        # managed units + what they serve right now
 llmctl doctor                        # pass/warn/fail environment report
 llmctl tui                           # interactive TUI
@@ -216,6 +217,18 @@ Same two commands whatever the engine. The source's shape picks the engine;
 | llama.cpp | `llmctl model add unsloth/Qwen3-8B-GGUF:Q4_K_M` | `hf download` of that quant's file(s) only |
 | LM Studio | `llmctl model add lmstudio:qwen/qwen3-8b` | `lms get qwen/qwen3-8b --yes` |
 | any local | `llmctl model add ~/models/foo.gguf` (or a folder) | registers in place, downloads nothing |
+
+Serving is `llmctl swap NAME` for every engine (see the table above). A vLLM
+`add` also writes a **starter preset** (`~/.config/llmctl/presets/<name>.yaml`)
+so the model is swappable at once. It holds only what `config.json` proves:
+repo id, native context capped at `vllm.defaults.max_model_len`, TP from
+`vllm.defaults` (1 when the heads do not split), an empty quantization flag so
+vLLM reads `quantization_config` itself, and **no tool or reasoning parser**.
+Set those before tool use. A taken alias gets `-2`; an existing preset for the
+same weights is reused. `--purge` deletes a starter preset along with the
+weights; a hand-written preset still blocks the purge. SGLang adds are
+download-only: SGLang serves through a router.yaml lane, and llmctl cannot
+write one.
 
 Removing is `llmctl model rm NAME` (`model delete` is the same command). Alone
 it only hides the row. The model stays in its engine and on disk, and adding it
@@ -442,7 +455,7 @@ auto-refreshes every 3s and never blocks the UI on probes.
 
 | Screen | Keys |
 |--------|------|
-| Models (`m`) | `a` add (one source box, any engine, live preview; *Manual entry* for the field form), `del` remove (engine-specific "also remove it" box), `enter` preview → *Plan only* or *Launch now*, `ctrl+s` scan, `e` edit, `c` clone, `x` prune missing |
+| Models (`m`) | `a` add (one source box, any engine, live preview; *Manual entry* for the field form), `del` remove (engine-specific "also remove it" box), `enter` serve (same routing as `llmctl swap NAME`: vLLM → swap confirm for its preset, or write one first; llama.cpp → launch plan; Ollama/LM Studio → loads on demand), `ctrl+s` scan, `e` edit, `c` clone, `x` prune missing |
 | Profiles (`f`) | `a` create, `e` edit, `c` clone, `d` delete |
 | Swap (`w`) | `enter` preview (what stops/starts, last load time) → confirm swaps; same list as `llmctl swap` |
 | Presets (`p`) | `enter`/`t` launch preset (restarts the managed unit after confirm), `a` add, `e` edit in `$EDITOR`, `c` clone, `d` delete |
