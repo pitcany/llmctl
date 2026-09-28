@@ -78,7 +78,12 @@ class OrchestratorOptions:
     #: own unit is worse than one doomed restart.
     force: bool = False
     wait_for_ready: bool = True
-    timeout_s: float = 300.0
+    #: Readiness wait for a healthy but slow load. Was 300 s, and it had been
+    #: kept short because a start that died still ran out the whole wait. The
+    #: adapter now ends the wait as soon as the unit crashes, so this only
+    #: bounds loads that are progressing: muse-glimmer-30b with DFlash needs
+    #: ~330 s (compile + drafter capture), qwen3.8-27b-uncensored ~260 s.
+    timeout_s: float = 900.0
     enable_fleet_preflight: bool = True
     enable_harbor_preflight: bool = True
     enable_hermes_verify: bool = True
