@@ -39,6 +39,34 @@ LifecycleHook = Callable[[VLLMLaunchSpec], None]
 EnvRenderer = Callable[[VLLMLaunchSpec], str]
 
 
+def _restarts(state: dict[str, str]) -> int:
+    try:
+        return int(state.get("NRestarts", "0"))
+    except ValueError:
+        return 0
+
+
+def unit_crash(state: dict[str, str], restarts_before: int) -> str | None:
+    """Why the unit is known dead after a restart, or None if it may still load.
+
+    vllm-tp is Restart=on-failure: a crashed server reads ``failed``, SubState
+    ``auto-restart`` while systemd waits to relaunch it, or, once relaunched, a
+    higher NRestarts than before the restart. Waiting on HTTP alone let a server
+    that died in 6 s run out the whole readiness timeout while systemd relaunched
+    it every 15 s, using up StartLimitBurst so the rollback start was refused too
+    (muse, 2026-09-28).
+    """
+    if not state:
+        return None
+    if state.get("ActiveState") == "failed":
+        return "the unit failed"
+    if state.get("SubState") == "auto-restart":
+        return "the server exited and systemd is about to restart it"
+    if _restarts(state) > restarts_before:
+        return f"systemd restarted it {_restarts(state) - restarts_before} time(s)"
+    return None
+
+
 class LegacyUnitError(RuntimeError):
     """Raised when the installed unit predates the launcher-script ExecStart.
 
@@ -198,6 +226,7 @@ class VLLMSystemdAdapter:
             hook(spec)
         env_path, body = self.write_env(spec)
 
+        restarts_before = _restarts(self.systemctl.unit_state(self.unit_name))
         restart_result = self.systemctl.restart(self.unit_name)
         if not restart_result.ok:
             return ManagedRestartResult(
@@ -219,10 +248,11 @@ class VLLMSystemdAdapter:
                 hook(spec)
             return ManagedRestartResult(env_path=env_path, env_body=body, ready=None)
 
-        ready = self._wait_for_ready(
+        ready, crashed = self._wait_for_ready(
             spec.port,
             timeout_s=timeout_s,
             poll_interval_s=poll_interval_s,
+            restarts_before=restarts_before,
         )
         # Post-start hooks fire only when ready — verification against a
         # half-started service produces misleading diagnostics.
@@ -233,7 +263,13 @@ class VLLMSystemdAdapter:
             env_path=env_path,
             env_body=body,
             ready=ready,
-            error=None if ready else f"vLLM did not become ready within {timeout_s:.0f}s",
+            error=(
+                None
+                if ready
+                else f"vLLM did not start: {crashed} (journalctl -u {self.unit_name} -n 80)"
+                if crashed
+                else f"vLLM did not become ready within {timeout_s:.0f}s"
+            ),
         )
 
     def _wait_for_ready(
@@ -242,8 +278,13 @@ class VLLMSystemdAdapter:
         *,
         timeout_s: float,
         poll_interval_s: float,
-    ) -> bool:
-        """Poll ``http://localhost:<port>/v1/models`` until it responds."""
+        restarts_before: int = 0,
+    ) -> tuple[bool, str | None]:
+        """Poll ``http://localhost:<port>/v1/models`` until it responds.
+
+        Returns ``(ready, crash)``: stops early with the reason once the unit
+        is known dead (see :func:`unit_crash`).
+        """
         url = f"http://localhost:{port}/v1/models"
         deadline = self._clock() + timeout_s
         # Initial pause matches gpu-models: gives the worker time to
@@ -253,10 +294,13 @@ class VLLMSystemdAdapter:
         while self._clock() < deadline:
             try:
                 self._http_get(url, 5.0)
-                return True
+                return True, None
             except (urllib.error.URLError, OSError):
+                crash = unit_crash(self.systemctl.unit_state(self.unit_name), restarts_before)
+                if crash:
+                    return False, crash
                 self._sleep(poll_interval_s)
-        return False
+        return False, None
 
 
 def _default_http_get(url: str, timeout: float) -> object:

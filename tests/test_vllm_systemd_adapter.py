@@ -114,8 +114,9 @@ def test_restart_with_spec_happy_path(tmp_path: Path) -> None:
     assert result.error is None
     assert (tmp_path / "vllm-tp.env").read_text() == result.env_body
     # systemctl call sequence: cat (guard) then restart
-    verbs = [c[-2] for c in calls]
-    assert verbs == ["cat", "restart"]
+    # cat, the pre-restart unit-state read (`show -p ...`), restart.
+    verbs = [next(a for a in c if a in {"cat", "show", "restart", "is-active"}) for c in calls]
+    assert verbs == ["cat", "show", "restart"]
     # http_get was invoked exactly once (succeeds on first try)
     assert state["calls"] == 1
     # The initial 5s pre-poll sleep is always issued

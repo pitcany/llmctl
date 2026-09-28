@@ -166,6 +166,23 @@ class SystemctlRunner:
         result = self.run(SystemctlVerb.SHOW, unit, "-p", "LoadState", "--value", user=user)
         return result.stdout.strip() if result.ok else ""
 
+    def unit_state(self, unit: str, *, user: bool = False) -> dict[str, str]:
+        """``ActiveState`` / ``SubState`` / ``NRestarts`` for ``unit`` ({} if unreadable)."""
+        result = self.run(
+            SystemctlVerb.SHOW,
+            unit,
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "NRestarts",
+            user=user,
+        )
+        if not result.ok:
+            return {}
+        return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
     def _manager_knows(self, unit: str, *, user: bool = False) -> bool:
         """``True`` when the manager in this scope has the unit loaded at all."""
         state = self.load_state(unit, user=user)
