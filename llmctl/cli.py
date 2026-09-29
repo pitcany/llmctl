@@ -66,6 +66,10 @@ from llmctl import cli_registry  # noqa: E402
 
 cli_registry.register(app)
 
+from llmctl import cli_lab  # noqa: E402
+
+cli_lab.register(app)
+
 
 def _session_model_cell(session: object, names: dict[str, str]) -> str:
     """What this session serves, as a name the operator recognises.
