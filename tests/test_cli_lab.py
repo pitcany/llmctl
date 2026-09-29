@@ -23,7 +23,7 @@ def _write_lab(tmp_path):
             {"role": "rag", "think": "off", "current": "qwen3.8-27b", "best": "qwen3.8-27b",
              "advice": "keep qwen3.8-27b (measured best)"},
         ],
-        "redundant": [{"redundant": "a", "given": "b", "think": "off"}],
+        "redundant": [{"redundant": "a", "modes": ["off"], "dominated_by": [{"by": "b"}]}],
     }))
 
 

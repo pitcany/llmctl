@@ -64,9 +64,11 @@ def recommend_cmd(
         )
     console.print(table)
     for d in data.get("redundant", []):
+        by = ", ".join(x.get("by", "?") for x in d.get("dominated_by", []))
         console.print(
-            f"[yellow]redundant?[/] {escape(d['redundant'])} (think {escape(d['think'])}) "
-            f"is never measurably better than {escape(d['given'])}"
+            f"[yellow]redundant?[/] {escape(d['redundant'])} "
+            f"(think {escape('/'.join(d.get('modes', [])))}) is never measurably better than "
+            f"{escape(by)}"
         )
 
 
