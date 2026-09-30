@@ -213,9 +213,9 @@ def test_launcher_env_raises_when_no_python_root_resolvable(
         render_vllm_env(VLLMLaunchSpec(model="m", served_name="s"))
 
 
-def test_default_hf_home_uses_user_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When $HF_HOME is unset, fall back to ~/.cache/huggingface."""
+def test_default_hf_home_uses_canonical_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When $HF_HOME is unset, fall back to the canonical ~/AI/cache/huggingface store."""
     monkeypatch.delenv("HF_HOME", raising=False)
     body = render_vllm_env(VLLMLaunchSpec(model="m", served_name="s"))
-    expected = f"HF_HOME={os.path.expanduser('~/.cache/huggingface')}"
+    expected = f"HF_HOME={os.path.expanduser('~/AI/cache/huggingface')}"
     assert expected in body
