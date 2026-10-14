@@ -56,7 +56,7 @@ class SGLangAdapter(LaunchableHttpAdapter):
             "SGLang",
             config or default_runtime_configs()["sglang"],
             supervisor,
-            endpoint=endpoint or DEFAULT_ENDPOINT,
+            endpoint=endpoint,
             health_path="/health",
             client_factory=client_factory,
         )

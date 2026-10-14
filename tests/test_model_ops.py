@@ -108,6 +108,8 @@ def test_plan_add_picks_the_engine_from_the_source(
         ("x", "warp-drive", "Unknown engine"),
         ("/definitely/not/here", None, "No such file"),
         ("ollama:qwen3", "vllm", "conflicts"),
+        ("org/strata-model", "strata", "local config JSON"),
+        ("hf:org/strata-model", "strata", "local config JSON"),
     ],
 )
 def test_plan_add_refuses_with_a_reason(source, engine, fragment) -> None:

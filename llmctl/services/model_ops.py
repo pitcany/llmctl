@@ -305,6 +305,11 @@ def plan_add(
     text = text.strip()
     if not text:
         raise ModelOpsError("The source after the prefix is empty.")
+    if chosen == RuntimeName.STRATA:
+        raise ModelOpsError(
+            "strata serves a local config JSON (written by its setup.sh), not a "
+            "download. Give the path to that .json file."
+        )
 
     if chosen == RuntimeName.OLLAMA:
         tag = normalize_ollama_tag(text)

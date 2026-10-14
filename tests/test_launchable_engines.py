@@ -189,6 +189,27 @@ async def test_health_is_three_state(adapter_cls, monkeypatch) -> None:
     assert "not running" in status.message and "/opt/engine/bin/x" in status.message
 
 
+@pytest.mark.parametrize("adapter_cls", [SGLangAdapter, FreeTokenAdapter, StrataAdapter])
+def test_the_configured_endpoint_is_used(adapter_cls) -> None:
+    adapter = adapter_cls(RuntimeConfig(endpoint="http://10.0.0.5:4242/"))
+    assert adapter.endpoint == "http://10.0.0.5:4242"
+
+
+def test_strata_server_is_found_through_a_symlinked_venv_python(tmp_path: Path) -> None:
+    repo = tmp_path / "Strata"
+    (repo / "serve").mkdir(parents=True)
+    (repo / "serve" / "server.py").write_text("")
+    base = tmp_path / "base" / "bin"
+    base.mkdir(parents=True)
+    (base / "python3").write_text("")
+    (repo / ".venv" / "bin").mkdir(parents=True)
+    venv_python = repo / ".venv" / "bin" / "python"
+    venv_python.symlink_to(base / "python3")
+    assert scheduler_mod._strata_server_for(str(venv_python)) == (
+        repo / "serve" / "server.py"
+    )
+
+
 def test_old_endpoint_signature_still_works() -> None:
     adapter = SGLangAdapter("http://sglang.test")
     assert adapter.endpoint == "http://sglang.test"
