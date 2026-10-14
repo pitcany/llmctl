@@ -380,9 +380,15 @@ def _plan_llama_cpp(target: Path, deps: SetupDeps) -> SetupPlan:
     except Exception as exc:  # noqa: BLE001 - network
         plan.problem = f"Could not list llama.cpp releases: {exc}"
         return plan
-    release = next((r for r in releases if r.get("assets")), None)
+    release = _latest_release(releases)
     if release is None:
-        plan.problem = "No llama.cpp release with downloadable builds was found."
+        plan.problem = "No published llama.cpp release was found."
+        return plan
+    if not release.get("assets"):
+        plan.problem = (
+            f"llama.cpp {release.get('tag_name')} has no downloadable builds yet; try again "
+            "later, or build it: llmctl setup llama.cpp --from-source"
+        )
         return plan
     picked, flavour = _llama_cpp_assets(release["assets"], deps.driver_cuda(), deps.machine())
     if not picked:
@@ -400,6 +406,21 @@ def _plan_llama_cpp(target: Path, deps: SetupDeps) -> SetupPlan:
         "flavour": flavour,
     }
     return plan
+
+
+_SRC = "src"
+_STAGE = "src.new"
+
+
+def _latest_release(releases: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
+    """The newest published (non-draft) release.
+
+    Both install paths use it, so the prebuilt download and a source build
+    always name the same release. Prereleases are kept on purpose: llama.cpp
+    marks every ``bNNNNN`` build as a prerelease and attaches the platform
+    builds only to those, while its few stable releases carry none.
+    """
+    return next((r for r in releases if r.get("tag_name") and not r.get("draft")), None)
 
 
 def _plan_llama_cpp_source(target: Path, deps: SetupDeps, *, reason: str | None) -> SetupPlan:
@@ -428,15 +449,21 @@ def _plan_llama_cpp_source(target: Path, deps: SetupDeps, *, reason: str | None)
     except Exception as exc:  # noqa: BLE001 - network
         plan.problem = f"Could not list llama.cpp releases: {exc}"
         return plan
-    tag = next((r.get("tag_name") for r in releases if r.get("tag_name")), None)
+    release = _latest_release(releases)
+    tag = release.get("tag_name") if release else None
     if tag is None:
-        plan.problem = "No llama.cpp release was found to build."
+        plan.problem = "No published llama.cpp release was found to build."
         return plan
-    src = target / "src"
-    build = src / "build"
+    # Built in a staging folder and moved over the installed one only once the
+    # new binary runs, so a failed rebuild leaves the working install alone.
+    # $ORIGIN RPATHs keep the binary finding its libggml after that move.
+    src = target / _SRC
+    stage = target / _STAGE
+    build = stage / "build"
     configure = [
-        "cmake", "-S", str(src), "-B", str(build),
+        "cmake", "-S", str(stage), "-B", str(build),
         "-DCMAKE_BUILD_TYPE=Release", "-DLLAMA_CURL=OFF", "-DLLAMA_BUILD_TESTS=OFF",
+        "-DCMAKE_BUILD_RPATH_USE_ORIGIN=ON",
     ]
     if nvcc:
         configure += ["-DGGML_CUDA=ON", f"-DCMAKE_CUDA_COMPILER={nvcc}"]
@@ -448,7 +475,7 @@ def _plan_llama_cpp_source(target: Path, deps: SetupDeps, *, reason: str | None)
         flavour = "source, CPU"
     plan.commands = [
         ["git", "clone", "--depth", "1", "--branch", tag,
-         f"https://github.com/{LLAMA_CPP_REPO}.git", str(src)],
+         f"https://github.com/{LLAMA_CPP_REPO}.git", str(stage)],
         configure,
         ["cmake", "--build", str(build), "--config", "Release",
          "-j", str(deps.cpus()), "--target", "llama-server"],
@@ -456,7 +483,8 @@ def _plan_llama_cpp_source(target: Path, deps: SetupDeps, *, reason: str | None)
     if reason:
         plan.steps.append(reason)
     plan.steps.append(
-        f"build llama.cpp {tag} ({flavour}) in {src}; a CUDA build takes 10-30 minutes"
+        f"build llama.cpp {tag} ({flavour}) in {stage}, then move it to {src}; "
+        "a CUDA build takes 10-30 minutes"
     )
     # gcc finds its linker on PATH. A second toolchain earlier on PATH (Homebrew's
     # binutils, say) links against that toolchain's libraries, which can need a
@@ -472,7 +500,7 @@ def _plan_llama_cpp_source(target: Path, deps: SetupDeps, *, reason: str | None)
         )
     plan.steps.extend(" ".join(cmd) for cmd in plan.commands)
     plan.record = {
-        "binary": str(build / "bin" / "llama-server"),
+        "binary": str(src / "build" / "bin" / "llama-server"),
         "version": tag,
         "flavour": flavour,
     }
@@ -591,16 +619,26 @@ def _install_llama_cpp(plan: SetupPlan, deps: SetupDeps) -> None:
 def _build_llama_cpp(plan: SetupPlan, deps: SetupDeps) -> None:
     assert plan.install_dir is not None
     plan.install_dir.mkdir(parents=True, exist_ok=True)
-    src = plan.install_dir / "src"
-    if src.exists():
-        # A previous build of ours: `git clone` refuses a non-empty folder.
-        shutil.rmtree(src)
+    src = plan.install_dir / _SRC
+    stage = plan.install_dir / _STAGE
+    if stage.exists():
+        # Left by an earlier failed build: `git clone` refuses a non-empty folder.
+        shutil.rmtree(stage)
     env = {**os.environ, **plan.env} if plan.env else None
     for argv in plan.commands:
         _must_stream(deps, argv, env=env)
-    binary = Path(plan.record["binary"])
-    if not binary.is_file():
-        raise SetupError(f"The build finished but {binary} is missing.")
+    staged = stage / "build" / "bin" / "llama-server"
+    if not staged.is_file():
+        raise SetupError(f"The build finished but {staged} is missing.")
+    check = deps.run([str(staged), "--version"])
+    if check.returncode != 0:
+        detail = (check.stderr or check.stdout or "").strip()[-400:]
+        raise SetupError(
+            f"The new build does not run ({detail}); the installed one was left in place."
+        )
+    if src.exists():
+        shutil.rmtree(src)
+    stage.rename(src)
 
 
 def _install_strata(plan: SetupPlan, deps: SetupDeps) -> None:

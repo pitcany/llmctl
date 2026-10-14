@@ -45,11 +45,14 @@ def test_engine_names_are_canonicalised() -> None:
         eng.canonical_engine("warp")
 
 
-@pytest.mark.parametrize("engine,requirement,binary", [
-    ("vllm", "vllm", "vllm"),
-    ("sglang", "sglang[all]", "python"),
-    ("freetoken", "freetoken[accel]", "ft"),
-])
+@pytest.mark.parametrize(
+    "engine,requirement,binary",
+    [
+        ("vllm", "vllm", "vllm"),
+        ("sglang", "sglang[all]", "python"),
+        ("freetoken", "freetoken[accel]", "ft"),
+    ],
+)
 def test_python_engines_get_their_own_venv(tmp_path, engine, requirement, binary) -> None:
     plan = eng.plan_setup(engine, settings=_settings(tmp_path), deps=_deps())
     venv = tmp_path / "data" / "engines" / engine / ".venv"
@@ -194,9 +197,7 @@ def test_launcher_python_root_falls_back_to_the_vllm_env_setup_made(tmp_path, mo
         monkeypatch.delenv(var, raising=False)
     venv = tmp_path / "venv"
     venv.mkdir()
-    monkeypatch.setattr(
-        eng, "load_engines", lambda path=None: {"vllm": {"python_root": str(venv)}}
-    )
+    monkeypatch.setattr(eng, "load_engines", lambda path=None: {"vllm": {"python_root": str(venv)}})
     assert resolve_python_root() == str(venv)
 
 
@@ -204,10 +205,14 @@ def test_doctor_reports_engines(tmp_path, monkeypatch) -> None:
     from llmctl.services.doctor import _check_engines
 
     settings = _settings(tmp_path)
-    monkeypatch.setattr(eng, "engine_statuses", lambda cfg: [
-        SimpleNamespace(engine="vllm", source="llmctl", binary="/x/vllm", version="0.30.0"),
-        SimpleNamespace(engine="ollama", source="missing", binary=None, version=None),
-    ])
+    monkeypatch.setattr(
+        eng,
+        "engine_statuses",
+        lambda cfg: [
+            SimpleNamespace(engine="vllm", source="llmctl", binary="/x/vllm", version="0.30.0"),
+            SimpleNamespace(engine="ollama", source="missing", binary=None, version=None),
+        ],
+    )
     checks = {c.name: c for c in _check_engines(settings)}
     assert checks["engine:vllm"].verdict == "pass" and "0.30.0" in checks["engine:vllm"].detail
     assert checks["engine:ollama"].verdict == "warn"
@@ -261,11 +266,13 @@ def test_an_old_glibc_builds_llama_cpp_from_source(tmp_path) -> None:
         "llama_cpp", settings=_settings(tmp_path), deps=_source_deps(glibc=lambda: (2, 35))
     )
     src = tmp_path / "data" / "engines" / "llama_cpp" / "src"
+    stage = src.with_name("src.new")
     assert plan.problem is None and plan.downloads == []
     assert "glibc 2.35" in plan.steps[0] and "2.38" in plan.steps[0]
     clone, configure, build = plan.commands
     assert clone[:5] == ["git", "clone", "--depth", "1", "--branch"] and clone[5] == "b11624"
-    assert clone[-1] == str(src)
+    assert clone[-1] == str(stage)  # built aside, moved over src on success
+    assert "-DCMAKE_BUILD_RPATH_USE_ORIGIN=ON" in configure
     assert "-DGGML_CUDA=ON" in configure
     assert "-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc" in configure
     assert "-DCMAKE_CUDA_ARCHITECTURES=120" in configure
@@ -312,42 +319,72 @@ def test_from_source_is_for_llama_cpp_only(tmp_path) -> None:
         eng.plan_setup("vllm", settings=_settings(tmp_path), deps=_deps(), from_source=True)
 
 
-def test_run_setup_builds_and_records_the_built_binary(tmp_path) -> None:
-    settings = _settings(tmp_path)
-    plan = eng.plan_setup("llama_cpp", settings=settings, deps=_source_deps(), from_source=True)
-    src = Path(plan.commands[0][-1])
-    src.mkdir(parents=True)
-    (src / "stale").write_text("from an earlier build")
-    ran: list[list[str]] = []
+def _fake_build(plan, ran=None, *, binary_runs=True):
+    """A `stream` that pretends to clone and build into the staging folder."""
+    stage = Path(plan.commands[0][-1])
 
-    def stream(argv):
-        ran.append(list(argv))
+    def stream(argv, env=None):
+        if ran is not None:
+            ran.append(list(argv))
         if argv[0] == "git":
-            assert not src.exists()  # the earlier checkout was cleared first
+            assert not stage.exists()  # leftovers of a failed build were cleared
+            stage.mkdir(parents=True)
         if argv[:2] == ["cmake", "--build"]:
-            binary = Path(plan.record["binary"])
-            binary.parent.mkdir(parents=True)
-            binary.write_text("#!/bin/sh\n")
+            built = stage / "build" / "bin" / "llama-server"
+            built.parent.mkdir(parents=True)
+            built.write_text("new")
         return 0
 
-    deps = _source_deps(
-        stream=stream,
-        run=lambda argv: subprocess.CompletedProcess(argv, 0, "version: 1 (abc)\n", ""),
-    )
-    record = eng.run_setup(plan, settings=settings, deps=deps)
+    def run(argv):
+        ok = binary_runs or not argv[0].endswith("src.new/build/bin/llama-server")
+        return subprocess.CompletedProcess(argv, 0 if ok else 1, "version: 1\n", "boom")
+
+    return stream, run
+
+
+def test_run_setup_builds_aside_and_moves_the_build_into_place(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    plan = eng.plan_setup("llama_cpp", settings=settings, deps=_source_deps(), from_source=True)
+    stage = Path(plan.commands[0][-1])
+    stage.mkdir(parents=True)
+    (stage / "stale").write_text("from a failed build")
+    src = stage.with_name("src")
+    (src / "build" / "bin").mkdir(parents=True)
+    (src / "build" / "bin" / "llama-server").write_text("old")
+    ran: list[list[str]] = []
+    stream, run = _fake_build(plan, ran)
+    record = eng.run_setup(plan, settings=settings, deps=_source_deps(stream=stream, run=run))
     assert ran == plan.commands
-    assert record["binary"] == plan.record["binary"]
+    assert record["binary"] == str(src / "build" / "bin" / "llama-server")
+    assert Path(record["binary"]).read_text() == "new"
+    assert not stage.exists()
     saved = yaml.safe_load((tmp_path / "cfg" / "engines.yaml").read_text())
     assert saved["llama_cpp"]["flavour"] == "source, CUDA sm 120"
 
 
-def test_a_failed_build_records_nothing(tmp_path) -> None:
+def test_a_new_build_that_does_not_run_leaves_the_installed_one(tmp_path) -> None:
     settings = _settings(tmp_path)
     plan = eng.plan_setup("llama_cpp", settings=settings, deps=_source_deps(), from_source=True)
+    installed = Path(plan.record["binary"])
+    installed.parent.mkdir(parents=True)
+    installed.write_text("old")
+    stream, run = _fake_build(plan, binary_runs=False)
+    with pytest.raises(eng.SetupError, match="left in place"):
+        eng.run_setup(plan, settings=settings, deps=_source_deps(stream=stream, run=run))
+    assert installed.read_text() == "old"
+
+
+def test_a_failed_build_records_nothing_and_keeps_the_install(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    plan = eng.plan_setup("llama_cpp", settings=settings, deps=_source_deps(), from_source=True)
+    installed = Path(plan.record["binary"])
+    installed.parent.mkdir(parents=True)
+    installed.write_text("old")
     deps = _source_deps(stream=lambda argv: 2 if argv[:2] == ["cmake", "--build"] else 0)
     with pytest.raises(eng.SetupError, match="exit 2"):
         eng.run_setup(plan, settings=settings, deps=deps)
     assert not (tmp_path / "cfg" / "engines.yaml").exists()
+    assert installed.read_text() == "old"
 
 
 def test_a_linker_from_another_toolchain_is_kept_out_of_the_build(tmp_path) -> None:
@@ -363,9 +400,9 @@ def test_a_linker_from_another_toolchain_is_kept_out_of_the_build(tmp_path) -> N
     def stream(argv, env=None):
         seen.append(env["PATH"] if env else "")
         if argv[:2] == ["cmake", "--build"]:
-            binary = Path(plan.record["binary"])
-            binary.parent.mkdir(parents=True)
-            binary.write_text("")
+            built = Path(plan.commands[0][-1]) / "build" / "bin" / "llama-server"
+            built.parent.mkdir(parents=True)
+            built.write_text("")
         return 0
 
     deps = _source_deps(
@@ -380,7 +417,31 @@ def test_a_linker_from_another_toolchain_is_kept_out_of_the_build(tmp_path) -> N
 def test_the_system_linker_needs_no_path_change(tmp_path) -> None:
     tools = {**_TOOLS, "c++": "/usr/bin/c++", "ld": "/usr/bin/ld"}
     plan = eng.plan_setup(
-        "llama_cpp", settings=_settings(tmp_path), deps=_source_deps(which=tools.get),
+        "llama_cpp",
+        settings=_settings(tmp_path),
+        deps=_source_deps(which=tools.get),
         from_source=True,
     )
     assert plan.env == {}
+
+
+def test_both_paths_use_the_newest_published_release(tmp_path) -> None:
+    # llama.cpp marks its bNNNNN builds as prereleases, so those count; drafts do not.
+    releases = [
+        {"tag_name": "b3", "draft": True, "assets": _ASSETS},
+        {"tag_name": "b2", "prerelease": True, "assets": _ASSETS},
+        {"tag_name": "b1", "assets": _ASSETS},
+    ]
+    deps = _source_deps(fetch_json=lambda url: releases)
+    settings = _settings(tmp_path)
+    prebuilt = eng.plan_setup("llama_cpp", settings=settings, deps=deps)
+    source = eng.plan_setup("llama_cpp", settings=settings, deps=deps, from_source=True)
+    assert prebuilt.record["version"] == source.record["version"] == "b2"
+
+
+def test_a_release_without_builds_is_reported_not_skipped(tmp_path) -> None:
+    releases = [{"tag_name": "b2", "assets": []}, {"tag_name": "b1", "assets": _ASSETS}]
+    plan = eng.plan_setup(
+        "llama_cpp", settings=_settings(tmp_path), deps=_deps(fetch_json=lambda url: releases)
+    )
+    assert plan.problem and "b2 has no downloadable builds" in plan.problem

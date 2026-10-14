@@ -164,3 +164,10 @@ def test_a_live_session_id_keeps_the_old_path(monkeypatch, stopped) -> None:
     res = _stop(monkeypatch, _state(lanes=[STRATA]), "0123abcd")
     assert res.exit_code == 0, res.output
     assert seen == ["0123abcd"] and stopped == []
+
+
+def test_an_ambiguous_id_prefix_picks_nothing() -> None:
+    other = GpuSession(id="0999eeee", name="gemma", runtime="llama_cpp", port=8010, gpu_ids=(1,))
+    items = serving_now(_state(sessions=[GLM, other]))
+    assert pick(items, "0") == []
+    assert [i.ref for i in pick(items, "01")] == [GLM.id]
