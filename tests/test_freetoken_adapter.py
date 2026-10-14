@@ -120,11 +120,11 @@ async def test_version_none_when_unreachable():
 
 
 @pytest.mark.asyncio
-async def test_never_claims_process_control():
-    """The systemd unit and its VRAM guard own the lifecycle, not llmctl."""
+async def test_claims_process_control_and_discovery():
+    """llmctl launches `ft serve` itself and watches it."""
     caps = _adapter(lambda r: httpx.Response(200, json=MODELS_PAYLOAD)).capabilities()
-    assert caps["launch_process"] is False
-    assert caps["stop_process"] is False
+    assert caps["launch_process"] is True
+    assert caps["stop_process"] is True
     assert caps["discover_models"] is True
     assert caps["health_check"] is True
     assert caps["version"] is True

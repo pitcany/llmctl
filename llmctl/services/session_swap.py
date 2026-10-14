@@ -1,7 +1,8 @@
-"""Swap the GPUs over to a llama.cpp model that llmctl starts itself.
+"""Swap the GPUs over to a model that llmctl starts itself (llama.cpp, SGLang, FreeToken).
 
-A llama.cpp model in the registry has no systemd unit: llmctl runs
-``llama-server`` as a background process and keeps a record of it (a
+Such a model in the registry has no systemd unit: llmctl runs the engine's
+server (``llama-server``, ``python -m sglang.launch_server``, ``ft serve``)
+as a background process and keeps a record of it (a
 "session": pid, port, status; ``llmctl sessions`` lists them, ``llmctl stop``
 ends one). Before this module, ``swap`` started that process *next to*
 whatever held the GPUs, which only worked when the cards happened to be empty.
@@ -194,6 +195,7 @@ def swap_to_session(
     vllm_active: bool,
     vllm_unit: str,
     deps: LaneSwapDeps | None = None,
+    engine: str = "llama-server",
 ) -> SessionSwapResult:
     """Free the GPUs, start ``name`` via ``start(cards)``, roll back on failure.
 
@@ -231,7 +233,7 @@ def swap_to_session(
 
     if error is None:
         where = "one GPU" if placement.cards == 1 else f"{placement.cards} GPUs"
-        deps.log(f"starting llama-server for {name} on {where} (this can take minutes) ...")
+        deps.log(f"starting {engine} for {name} on {where} (this can take minutes) ...")
         for attempt in range(_VRAM_RETRIES + 1):
             try:
                 session = start(placement.cards)
@@ -248,7 +250,7 @@ def swap_to_session(
                 result.ok = True
             else:
                 detail = getattr(session, "error", None) or f"status {status or 'unknown'}"
-                error = f"llama-server did not come up: {detail}"
+                error = f"{engine} did not come up: {detail}"
             break
 
     result.seconds = deps.clock() - began
@@ -262,7 +264,7 @@ def swap_to_session(
     if session is not None and getattr(session, "id", None):
         try:
             stop(session.id)
-            deps.log("  rollback: stopped the half-started llama-server")
+            deps.log(f"  rollback: stopped the half-started {engine}")
         except Exception:  # noqa: BLE001 - best effort; reported by status
             deps.log(f"  rollback: could not stop it; run: llmctl stop {session.id[:8]}")
     lane_result = LaneSwapResult(ok=False)
@@ -301,7 +303,7 @@ def session_target(
     unit: str | None = None,
 ) -> Any:
     """The swap-list row for a llama.cpp registry model, fit decided now."""
-    from llmctl.services.lanes import SwapTarget
+    from llmctl.services.lanes import SwapTarget, engine_label
 
     if gpus is None:
         from llmctl.telemetry.gpu import get_gpu_info
@@ -317,7 +319,7 @@ def session_target(
         key=model.name,
         kind="session",
         model=model.name,
-        engine="llama.cpp" if model.runtime.value == "llama_cpp" else model.runtime.value,
+        engine=engine_label(model.runtime.value),
         upstream="",
         model_id=model.id,
         placement=placement,
@@ -376,7 +378,16 @@ def run_session_swap(
             vllm_active=state.vllm_active,
             vllm_unit=state.vllm_unit,
             deps=deps,
+            engine=_server_name(runtime),
         )
+
+
+def _server_name(runtime: Any) -> str:
+    """What the started process is called in messages (``llama-server``, ``ft serve``)."""
+    value = getattr(runtime, "value", runtime)
+    return {"llama_cpp": "llama-server", "freetoken": "ft serve", "sglang": "sglang"}.get(
+        str(value), str(value)
+    )
 
 
 def pause_for_swap(

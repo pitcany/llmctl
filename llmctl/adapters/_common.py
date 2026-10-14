@@ -194,8 +194,14 @@ class HttpRuntimeAdapter(RuntimeAdapter):
         )
 
 
-class ProcessRuntimeAdapter(RuntimeAdapter):
-    """Base adapter for process-launch runtimes."""
+class ProcessControlMixin:
+    """Start, watch and stop a supervised child process from a launch plan.
+
+    Mixed into :class:`ProcessRuntimeAdapter` (engines that are only ever
+    child processes) and :class:`LaunchableHttpAdapter` (engines llmctl can
+    both start and merely attach to). Expects ``self.runtime``,
+    ``self.display_name``, ``self.config`` and ``self.supervisor``.
+    """
 
     #: Whether a non-dry-run start blocks on endpoint readiness. True for
     #: runtimes that are HTTP servers by construction (vLLM, llama.cpp);
@@ -203,64 +209,10 @@ class ProcessRuntimeAdapter(RuntimeAdapter):
     #: batch jobs that never open the port the scheduler reserved).
     readiness_gated = True
 
-    def __init__(
-        self,
-        runtime: RuntimeName,
-        display_name: str,
-        config: RuntimeConfig,
-        supervisor: ProcessSupervisor | None = None,
-        *,
-        filesystem_discovery: bool = False,
-    ) -> None:
-        self.runtime = runtime
-        self.runtime_name = runtime.value
-        self.display_name = display_name
-        self.config = config
-        self.supervisor = supervisor or ProcessSupervisor()
-        self.filesystem_discovery = filesystem_discovery
-
-    def capabilities(self) -> dict[str, bool]:
-        """Process runtimes: full local process control + supervised logs."""
-        caps = super().capabilities()
-        caps.update(
-            {
-                "discover_models": self.filesystem_discovery,
-                "launch_process": True,
-                "stop_process": True,
-                "logs": True,
-            }
-        )
-        return caps
-
-    async def discover_models(self) -> list[Model]:
-        """Discover on-disk models when this runtime is filesystem-backed."""
-        if not self.filesystem_discovery:
-            return []
-        return discover_filesystem_models(self.runtime)
-
-    async def health_check(self) -> AdapterStatus:
-        """Return OK when the runtime binary is resolvable on PATH."""
-        binary = self.config.binary
-        if not binary:
-            return AdapterStatus(
-                runtime=self.runtime,
-                state=HealthState.OK,
-                message=f"{self.display_name} requires no fixed binary.",
-            )
-        resolved = shutil.which(binary)
-        if resolved:
-            return AdapterStatus(
-                runtime=self.runtime,
-                state=HealthState.OK,
-                message=f"{self.display_name} binary found: {resolved}.",
-                details={"binary": resolved},
-            )
-        return AdapterStatus(
-            runtime=self.runtime,
-            state=HealthState.UNAVAILABLE,
-            message=f"{self.display_name} binary '{binary}' not found on PATH.",
-            details={"binary": binary},
-        )
+    runtime: RuntimeName
+    display_name: str
+    config: RuntimeConfig
+    supervisor: ProcessSupervisor
 
     async def start(self, plan: LaunchPlan, on_spawn: SpawnCallback | None = None) -> Session:
         """Launch the planned command as a supervised child process."""
@@ -424,6 +376,157 @@ class ProcessRuntimeAdapter(RuntimeAdapter):
                 return response.status_code == 200
         except Exception:
             return False
+
+
+class LaunchableHttpAdapter(ProcessControlMixin, HttpRuntimeAdapter):
+    """An HTTP engine llmctl can start itself *and* attach to when it is already up.
+
+    SGLang and FreeToken are servers like Ollama (discovery and health over
+    HTTP) but, unlike Ollama, nothing keeps them running: llmctl launches
+    ``python -m sglang.launch_server`` / ``ft serve`` as a supervised process
+    for a model, exactly as it runs ``llama-server``. Health reads as three
+    states: serving (HTTP answers), installed but idle (the binary resolves),
+    or not installed (``llmctl setup <engine>``).
+    """
+
+    def __init__(
+        self,
+        runtime: RuntimeName,
+        display_name: str,
+        config: RuntimeConfig,
+        supervisor: ProcessSupervisor | None = None,
+        *,
+        endpoint: str | None = None,
+        health_path: str = "/",
+        timeout: float = 5.0,
+        client_factory: ClientFactory | None = None,
+    ) -> None:
+        HttpRuntimeAdapter.__init__(
+            self,
+            runtime,
+            display_name,
+            endpoint or config.endpoint or "http://127.0.0.1",
+            health_path=health_path,
+            timeout=timeout,
+            client_factory=client_factory,
+        )
+        self.config = config
+        self.supervisor = supervisor or ProcessSupervisor()
+
+    def capabilities(self) -> dict[str, bool]:
+        caps = HttpRuntimeAdapter.capabilities(self)
+        caps.update({"launch_process": True, "stop_process": True, "logs": True})
+        return caps
+
+    def installed_binary(self) -> str | None:
+        """The engine's executable on PATH (or as configured), or None."""
+        binary = self.config.binary
+        return shutil.which(binary) if binary else None
+
+    async def _http_health(self) -> AdapterStatus:
+        """The engine's own HTTP health probe (subclasses override)."""
+        return await HttpRuntimeAdapter.health_check(self)
+
+    async def health_check(self) -> AdapterStatus:
+        """Serving, installed-but-idle, or not installed."""
+        status = await self._http_health()
+        if status.state != HealthState.UNAVAILABLE:
+            return status
+        resolved = self.installed_binary()
+        if resolved:
+            return AdapterStatus(
+                runtime=self.runtime,
+                state=HealthState.OK,
+                message=(
+                    f"{self.display_name} is installed ({resolved}) and not running; "
+                    "`llmctl run NAME` starts it."
+                ),
+                details={"binary": resolved, "endpoint": self.endpoint, "serving": False},
+            )
+        return AdapterStatus(
+            runtime=self.runtime,
+            state=HealthState.UNAVAILABLE,
+            message=(
+                f"{self.display_name} is not installed: binary "
+                f"'{self.config.binary}' not found. Run `llmctl setup {self.runtime.value}`."
+            ),
+            details={"binary": self.config.binary, "endpoint": self.endpoint},
+        )
+
+    async def status(self, session: Session | None = None) -> AdapterStatus:
+        """A session llmctl started reports by pid; an adopted one by HTTP."""
+        if session is None or not session.pid:
+            return await self._http_health()
+        return await ProcessControlMixin.status(self, session)
+
+    async def stop(self, session: Session) -> AdapterStatus:
+        """Stop the process llmctl started; an adopted server is only detached."""
+        if not session.pid:
+            return await HttpRuntimeAdapter.stop(self, session)
+        return await ProcessControlMixin.stop(self, session)
+
+
+class ProcessRuntimeAdapter(ProcessControlMixin, RuntimeAdapter):
+    """Base adapter for process-launch runtimes."""
+
+    def __init__(
+        self,
+        runtime: RuntimeName,
+        display_name: str,
+        config: RuntimeConfig,
+        supervisor: ProcessSupervisor | None = None,
+        *,
+        filesystem_discovery: bool = False,
+    ) -> None:
+        self.runtime = runtime
+        self.runtime_name = runtime.value
+        self.display_name = display_name
+        self.config = config
+        self.supervisor = supervisor or ProcessSupervisor()
+        self.filesystem_discovery = filesystem_discovery
+
+    def capabilities(self) -> dict[str, bool]:
+        """Process runtimes: full local process control + supervised logs."""
+        caps = super().capabilities()
+        caps.update(
+            {
+                "discover_models": self.filesystem_discovery,
+                "launch_process": True,
+                "stop_process": True,
+                "logs": True,
+            }
+        )
+        return caps
+
+    async def discover_models(self) -> list[Model]:
+        """Discover on-disk models when this runtime is filesystem-backed."""
+        if not self.filesystem_discovery:
+            return []
+        return discover_filesystem_models(self.runtime)
+
+    async def health_check(self) -> AdapterStatus:
+        """Return OK when the runtime binary is resolvable on PATH."""
+        binary = self.config.binary
+        if not binary:
+            return AdapterStatus(
+                runtime=self.runtime,
+                state=HealthState.OK,
+                message=f"{self.display_name} requires no fixed binary.",
+            )
+        resolved = shutil.which(binary)
+        if resolved:
+            return AdapterStatus(
+                runtime=self.runtime,
+                state=HealthState.OK,
+                message=f"{self.display_name} binary found: {resolved}.",
+                details={"binary": resolved},
+            )
+        return AdapterStatus(
+            runtime=self.runtime,
+            state=HealthState.UNAVAILABLE,
+            message=f"{self.display_name} binary '{binary}' not found on PATH.",
+            details={"binary": binary},
+        )
 
     async def delete_model(self, model: Model) -> AdapterStatus:
         """Filesystem/script runtimes do not delete model files from here."""

@@ -104,7 +104,7 @@ def test_plan_add_picks_the_engine_from_the_source(
     [
         ("", None, "Give a source"),
         ("Qwen/Qwen3-8B:Q4_K_M", "vllm", "llama_cpp's job"),
-        ("x", "freetoken", "plugin lane"),
+        ("x", "openai", "adopted"),
         ("x", "warp-drive", "Unknown engine"),
         ("/definitely/not/here", None, "No such file"),
         ("ollama:qwen3", "vllm", "conflicts"),

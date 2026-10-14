@@ -67,12 +67,17 @@ async def test_health_ok_despite_empty_body():
 
 
 @pytest.mark.asyncio
-async def test_health_unavailable_when_refused():
+async def test_health_unavailable_when_refused_and_not_installed(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)
 
-    status = await _adapter(handler).health_check()
+    adapter = _adapter(handler)
+    monkeypatch.setattr(adapter, "installed_binary", lambda: None)
+    status = await adapter.health_check()
     assert status.state is HealthState.UNAVAILABLE
+    # Installed but idle is not a fault: llmctl can start it.
+    monkeypatch.setattr(adapter, "installed_binary", lambda: "/opt/sglang/bin/python")
+    assert (await adapter.health_check()).state is HealthState.OK
 
 
 @pytest.mark.asyncio
@@ -93,11 +98,11 @@ async def test_version_none_when_unreachable():
 
 
 @pytest.mark.asyncio
-async def test_never_claims_process_control():
-    """The systemd unit and its guard wrapper own the lifecycle, not llmctl."""
+async def test_claims_process_control_and_discovery():
+    """llmctl launches `python -m sglang.launch_server` itself and watches it."""
     caps = _adapter(lambda r: httpx.Response(200, json=MODELS_PAYLOAD)).capabilities()
-    assert caps["launch_process"] is False
-    assert caps["stop_process"] is False
+    assert caps["launch_process"] is True
+    assert caps["stop_process"] is True
     assert caps["discover_models"] is True
     assert caps["health_check"] is True
     assert caps["version"] is True

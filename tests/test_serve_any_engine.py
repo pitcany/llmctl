@@ -186,8 +186,8 @@ def _catalog(*aliases: str) -> list[SwapTarget]:
         (RuntimeName.LMSTUDIO, "on-demand"),
         (RuntimeName.LLAMA_CPP, "session"),
         (RuntimeName.PYTHON_SCRIPT, "start"),
-        (RuntimeName.SGLANG, "cannot"),
-        (RuntimeName.FREETOKEN, "cannot"),
+        (RuntimeName.SGLANG, "session"),
+        (RuntimeName.FREETOKEN, "session"),
     ],
 )
 def test_route_by_engine(db, runtime, kind) -> None:

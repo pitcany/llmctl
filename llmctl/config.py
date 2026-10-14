@@ -351,12 +351,25 @@ def default_runtime_configs() -> dict[str, RuntimeConfig]:
             binary="llama-server", host="127.0.0.1", port_range=[8100, 8199]
         ),
         "python_script": RuntimeConfig(host="127.0.0.1", port_range=[8200, 8299]),
-        # SGLang is adopt-only here: the systemd unit and its guard wrapper own
-        # the lifecycle, so only the endpoint matters.
-        "sglang": RuntimeConfig(endpoint="http://127.0.0.1:30000"),
-        # FreeToken likewise: the systemd unit and its VRAM guard own the
-        # lifecycle, so only the endpoint matters.
-        "freetoken": RuntimeConfig(endpoint="http://127.0.0.1:1919"),
+        # SGLang is launched as `python -m sglang.launch_server`: `binary` is
+        # the interpreter of the env that has sglang installed (`llmctl setup
+        # sglang` sets it). `endpoint` is where an already-running server is
+        # probed for discovery and health.
+        "sglang": RuntimeConfig(
+            endpoint="http://127.0.0.1:30000",
+            binary="python3",
+            host="127.0.0.1",
+            port_range=[30000, 30099],
+            readiness_timeout_s=600.0,
+        ),
+        # FreeToken is launched as `ft serve --model ...` (one GPU).
+        "freetoken": RuntimeConfig(
+            endpoint="http://127.0.0.1:1919",
+            binary="ft",
+            host="127.0.0.1",
+            port_range=[1919, 1929],
+            readiness_timeout_s=600.0,
+        ),
     }
 
 

@@ -34,6 +34,10 @@ from llmctl.config import ManagedUnitConfig, ManagedUnitsConfig
 #: Health wait when a lane source gives none.
 DEFAULT_LANE_TIMEOUT_S = 300.0
 
+#: Runtime ids of the engines llmctl starts itself for a registered model
+#: (as a tracked session), as opposed to a unit or lane something else runs.
+SELF_STARTED_RUNTIMES = frozenset({"llama_cpp", "sglang", "freetoken"})
+
 _ENGINE_LABELS = {
     "vllm": "vLLM",
     "freetoken": "FreeToken",
@@ -42,6 +46,15 @@ _ENGINE_LABELS = {
     "openai": "OpenAI-compat",
     "ollama": "Ollama",
 }
+
+
+#: Engine label -> what its server process is called in messages.
+_SERVER_NAMES = {"llama.cpp": "llama-server", "SGLang": "sglang server", "FreeToken": "ft serve"}
+
+
+def server_name(engine_label_text: str) -> str:
+    """``llama.cpp`` -> ``llama-server``; other engines name their server plainly."""
+    return _SERVER_NAMES.get(engine_label_text, f"{engine_label_text} server")
 
 
 def engine_label(runtime: str | None) -> str:
@@ -453,7 +466,7 @@ def preview_swap(
         cards = getattr(placement, "cards", 1) or 1
         where = "one GPU" if cards == 1 else f"{cards} GPUs (split)"
         port = f"port {target.port}" if target.port else "llmctl picks the port"
-        preview.starts = f"llama-server for {target.key} on {where}; {port}"
+        preview.starts = f"{server_name(target.engine)} for {target.key} on {where}; {port}"
         note = getattr(placement, "note", None)
         if note:
             stops.append(note)
@@ -629,7 +642,10 @@ def session_rows_for(
     is_local: Callable[[Any], bool],
     unit_text: Callable[[str], str] = user_unit_text,
 ) -> list[SwapTarget]:
-    """Swap-list rows for llama.cpp models llmctl starts itself, sorted by name.
+    """Swap-list rows for the models llmctl starts itself, sorted by name.
+
+    That is every llama.cpp, SGLang and FreeToken model (see
+    :data:`SELF_STARTED_RUNTIMES`).
 
     Skipped: other engines, models on another machine, models a listed row
     already serves (same name, or a lane whose unit loads the same file), and
@@ -637,7 +653,9 @@ def session_rows_for(
     """
     rows: list[SwapTarget] = []
     for model in models:
-        if getattr(model.runtime, "value", model.runtime) != "llama_cpp" or not is_local(model):
+        if getattr(model.runtime, "value", model.runtime) not in SELF_STARTED_RUNTIMES:
+            continue
+        if not is_local(model):
             continue
         if resolve(model.name, catalog) is not None:
             continue
@@ -665,7 +683,9 @@ def load_session_rows(settings: Any, catalog: list[SwapTarget]) -> list[SwapTarg
         init_db(url)
         with Session(get_engine(url)) as db:
             models = RegistryService(db).list_models()
-            ports = {m.id: pinned_port(db, m) for m in models if m.runtime.value == "llama_cpp"}
+            ports = {
+                m.id: pinned_port(db, m) for m in models if m.runtime.value in SELF_STARTED_RUNTIMES
+            }
         gpus = get_gpu_info()
         margin = settings.scheduler.safety_margin_gb
         units = llama_cpp_units(settings.managed_units)

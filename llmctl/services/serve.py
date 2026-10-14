@@ -10,12 +10,14 @@ kind       what ``swap`` does
 ========== ==================================================================
 preset     swap the vLLM unit to the preset that serves this checkpoint
 no-preset  vLLM checkpoint with no preset: offer to write a starter preset
-session    llama.cpp row: free the GPUs, start llama-server, roll back on
-           failure (:mod:`llmctl.services.session_swap`)
+session    llama.cpp, SGLang or FreeToken row: free the GPUs, start the
+           engine's server, roll back on failure
+           (:mod:`llmctl.services.session_swap`)
 start      python_script row: run it next to everything else, no swap
 on-demand  Ollama / LM Studio: nothing to start, the first request loads it
-cannot     SGLang, adopted endpoints, other machines, a model too
-           big for every GPU: says why, changes nothing
+cannot     adopted endpoints, other machines, a model too big for
+           every GPU, an engine that is not installed: says why,
+           changes nothing
 ========== ==================================================================
 """
 
@@ -153,17 +155,24 @@ def route(db: Session, model: Model, catalog: list[SwapTarget]) -> ServeRoute:
             "session",
             model,
             f"{model.name} runs as a llama-server that llmctl starts and tracks "
-            "(`llmctl sessions` lists it, `llmctl stop ID` ends it). The swap frees "
+            "(`llmctl ls` shows it, `llmctl stop ID` ends it). The run frees "
             "the GPUs for it first.",
             target,
         )
-    if engine == RuntimeName.SGLANG:
+    if engine in (RuntimeName.SGLANG, RuntimeName.FREETOKEN):
+        from llmctl.services.lanes import engine_label
+        from llmctl.services.session_swap import pinned_port, session_target
+
+        target = session_target(model, port=pinned_port(db, model))
+        if target.placement.problem:
+            return ServeRoute("cannot", model, target.placement.problem)
         return ServeRoute(
-            "cannot",
+            "session",
             model,
-            "llmctl cannot start SGLang models yet: SGLang runs from a start script "
-            "a plugin lane declares. Nothing was changed. Serve the same "
-            f"checkpoint with vLLM instead: llmctl model add {model.source or model.name}",
+            f"{model.name} runs as a {engine_label(engine.value)} server that llmctl starts "
+            "and tracks (`llmctl ls` shows it, `llmctl stop ID` ends it). The run frees "
+            "the GPUs for it first.",
+            target,
         )
     if engine == RuntimeName.PYTHON_SCRIPT:
         return ServeRoute(

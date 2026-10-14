@@ -203,19 +203,20 @@ The GPUs are served in three ways, and `llmctl run NAME` covers all three:
 | --- | --- |
 | a vLLM preset, or a vLLM model | Stops what vLLM serves now and restarts `vllm-tp` on this preset (about 2 min). No preset yet: offers to write a starter one first. |
 | a lane (FreeToken, GLM, the GPU1 coder) | Stops what shares its cards, runs the lane's start script, waits until it answers. |
-| a llama.cpp model | Checks the model fits (one card, or split across both) **before stopping anything**. Then stops vLLM, active lanes and other llama-servers llmctl started, starts `llama-server`, and waits until it answers. |
+| a llama.cpp, SGLang or FreeToken model | Checks the model fits (one card, or split across both) **before stopping anything**. Then stops vLLM, active lanes and other servers llmctl started, starts the engine's server (`llama-server`, `python -m sglang.launch_server`, `ft serve`), and waits until it answers. FreeToken serves from one GPU. |
 | an Ollama or LM Studio model | Nothing. Those servers are always running and load a model the first time a request names it (`ollama run qwen3:8b "hi"`, `lms load KEY`). The GPUs are left alone. |
-| SGLang, a model on another machine, an adopted endpoint | Nothing, with the reason. |
+| a model on another machine, an adopted endpoint, an engine that is not installed | Nothing, with the reason (and the `llmctl setup ENGINE` to run). |
 
 Every run that stops something shows the list first and asks. If the new
 model does not come up, everything it stopped is started again. Swapping to vLLM
 or a lane also stops llama-servers llmctl started, since vLLM will not load next
 to them.
 
-**llama-servers are "sessions".** llmctl runs `llama-server` itself (no systemd
-unit) and keeps a record of it: its process id, port, and status. That record is
-a session. `llmctl sessions` lists them, and `llmctl stop ID` ends one. To go
-back to vLLM, run `llmctl run PRESET`.
+**Servers llmctl starts are "sessions".** llmctl runs `llama-server`,
+`sglang.launch_server` or `ft serve` itself (no systemd unit) and keeps a
+record of it: its process id, port, and status. That record is a session.
+`llmctl ls` shows them, and `llmctl stop ID` ends one. To go back to vLLM, run
+`llmctl run PRESET`.
 
 Removing is `llmctl model rm NAME` (`model delete` is the same command). Alone
 it only hides the row. The model stays in its engine and on disk, and adding it
