@@ -10,13 +10,10 @@ is ``status == "ok"``, so the inherited reachable-means-healthy probe would
 report a server that cannot answer a request yet as OK. The same body carries
 the runtime version; FreeToken 0.1.3 has no separate version endpoint.
 
-**This adapter deliberately cannot launch or stop anything.** On this box the
-FreeToken lane is a systemd user unit (``qwen3.8-flash-next-ft``) whose
-``ExecStartPre`` guards free VRAM on the x16 GPU and whose wrapper
-(``qwen38-ft-start --take-gpus``) evicts the other big-MoE units first. Same
-posture as the SGLang and llama.cpp lanes: llmctl *tracks* the lane, systemd
-*runs* it (``llmctl start-unit`` / ``stop -s`` drive the unit). The unit adopts
-itself on start and detaches on stop.
+llmctl starts FreeToken itself (``ft serve --model ...``, one GPU) for a
+registered model, and also attaches to a server something else started (a
+systemd lane on the author's stack): a session with a pid is llmctl's own,
+one without is adopted.
 
 Before this adapter existed the lane was adopted as ``RuntimeName.OPENAI``, the
 generic catch-all, so it could not be told apart from LiteLLM or a remote box
@@ -25,26 +22,37 @@ and reported no version.
 
 from __future__ import annotations
 
-from llmctl.adapters._common import ClientFactory, HttpRuntimeAdapter
+from typing import Any
+
+from llmctl.adapters._common import ClientFactory, LaunchableHttpAdapter
+from llmctl.config import RuntimeConfig, default_runtime_configs
 from llmctl.db import ModelStatus, RuntimeName
 from llmctl.schemas import AdapterStatus, HealthState, Model
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:1919"
 
 
-class FreeTokenAdapter(HttpRuntimeAdapter):
-    """Adapter for a FreeToken server. Discovery, health and version only."""
+class FreeTokenAdapter(LaunchableHttpAdapter):
+    """Adapter for a FreeToken server: discovery and health over HTTP, and
+    ``ft serve`` as a supervised process when llmctl starts the model itself
+    (see :mod:`llmctl.services.scheduler`)."""
 
     def __init__(
         self,
-        endpoint: str = DEFAULT_ENDPOINT,
+        config: RuntimeConfig | str | None = None,
+        supervisor: Any = None,
         *,
+        endpoint: str | None = None,
         client_factory: ClientFactory | None = None,
     ) -> None:
+        if isinstance(config, str):  # the old (endpoint) signature
+            endpoint, config = config, None
         super().__init__(
             RuntimeName.FREETOKEN,
             "FreeToken",
-            endpoint,
+            config or default_runtime_configs()["freetoken"],
+            supervisor,
+            endpoint=endpoint or DEFAULT_ENDPOINT,
             health_path="/health",
             client_factory=client_factory,
         )
@@ -55,18 +63,12 @@ class FreeTokenAdapter(HttpRuntimeAdapter):
         return "/v1/models"
 
     def capabilities(self) -> dict[str, bool]:
-        """Discovery, health and version — never process control.
-
-        ``launch_process`` and ``stop_process`` stay False on purpose: the
-        systemd unit and its VRAM guard own the lifecycle. See the module
-        docstring.
-        """
         caps = super().capabilities()
         caps["list_loaded_models"] = True
         caps["version"] = True
         return caps
 
-    async def health_check(self) -> AdapterStatus:
+    async def _http_health(self) -> AdapterStatus:
         """OK only when ``/health`` reports ``status == "ok"``.
 
         A 200 with ``"status": "loading"`` is reachable but not ready, and is

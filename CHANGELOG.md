@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- SGLang and FreeToken are engines llmctl starts itself: `llmctl add
+  ORG/REPO --engine sglang|freetoken`, then `llmctl run NAME` launches
+  `python -m sglang.launch_server` / `ft serve` as a tracked session, frees
+  the GPUs first and rolls back on failure. Engine health reads serving /
+  installed-but-idle / not installed (with the `llmctl setup` to run).
 - One verb per intent: `llmctl add`, `run`, `stop`, `ls`, `rm`, `status`,
   `logs`, `doctor`, `tui`, `help`. `swap`/`switch`/`vllm` are hidden aliases
   of `run`; the thirty advanced and legacy verbs still work and are listed

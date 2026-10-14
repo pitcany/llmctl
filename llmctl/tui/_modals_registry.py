@@ -201,6 +201,7 @@ _ENGINE_LABELS = {
     RuntimeName.OLLAMA: "Ollama",
     RuntimeName.VLLM: "vLLM",
     RuntimeName.SGLANG: "SGLang",
+    RuntimeName.FREETOKEN: "FreeToken",
     RuntimeName.LLAMA_CPP: "llama.cpp",
     RuntimeName.LMSTUDIO: "LM Studio",
 }
@@ -210,7 +211,7 @@ _ENGINE_OPTIONS = [("auto (from source)", "auto")] + [
 
 _ADD_EXAMPLES = (
     "[b]qwen3:8b[/b]                        Ollama\n"
-    "[b]Qwen/Qwen3-8B[/b]                   vLLM (or pick SGLang)\n"
+    "[b]Qwen/Qwen3-8B[/b]                   vLLM (or pick SGLang / FreeToken)\n"
     "[b]unsloth/Qwen3-8B-GGUF:Q4_K_M[/b]    llama.cpp, one quant\n"
     "[b]lmstudio:qwen/qwen3-8b[/b]          LM Studio\n"
     "[b]~/models/my-model[/b]               register a local folder or .gguf"

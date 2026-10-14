@@ -34,7 +34,9 @@ from llmctl.schemas import GPUInfo, LaunchPlan, SessionStartRequest
 from llmctl.telemetry.gpu import get_gpu_info
 
 HTTP_SERVER_RUNTIMES = {RuntimeName.OLLAMA, RuntimeName.LMSTUDIO}
-GPU_REQUIRED_RUNTIMES = {RuntimeName.VLLM}
+GPU_REQUIRED_RUNTIMES = {RuntimeName.VLLM, RuntimeName.SGLANG, RuntimeName.FREETOKEN}
+#: Engines that serve from one GPU only.
+SINGLE_GPU_RUNTIMES = {RuntimeName.FREETOKEN}
 LOCAL_FILE_RUNTIMES = {RuntimeName.LLAMA_CPP, RuntimeName.PYTHON_SCRIPT}
 VALID_GPU_MODES = {"auto", "balanced", "most-free", "least-used"}
 _ACTIVE_STATES = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
@@ -54,6 +56,31 @@ def _forced_busy_port_warning(port: int) -> str:
 
 class SchedulerError(ValueError):
     """Raised when a launch is refused and not overridden with ``--force``."""
+
+
+def _python_has_module(python: str, module: str) -> bool:
+    """Whether ``python`` can import ``module`` (checked without importing it).
+
+    ``find_spec`` keeps this to a few milliseconds; importing sglang itself
+    would pull in torch and take seconds at plan time.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, interpreter from settings
+            [
+                python,
+                "-c",
+                f"import importlib.util, sys; "
+                f"sys.exit(0 if importlib.util.find_spec({module!r}) else 1)",
+            ],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
 
 
 def python_script_refusal(script: str) -> str | None:
@@ -159,6 +186,10 @@ class SchedulerService:
             refusals.append(
                 f"Requested tensor_parallel_size={tp} exceeds selected GPU count {len(gpu_ids)}."
             )
+        if runtime in SINGLE_GPU_RUNTIMES and tp > 1:
+            refusals.append(
+                f"{runtime.value} serves from one GPU; tensor_parallel_size={tp} is not possible."
+            )
 
         estimated = self._estimated_vram(model, parameters)
         free_vram_gb = self._free_vram_gb(gpu_ids, gpus_info)
@@ -218,7 +249,7 @@ class SchedulerService:
                     # A refusal, not just the generic "no command" warning, so
                     # the operator is told *why* the preview is empty.
                     refusals.append(reason)
-            self._check_binary(runtime_config, refusals)
+            self._check_engine_installed(runtime, runtime_config, refusals)
             self._check_model_path(runtime, model, parameters, refusals)
             self._check_shard_completeness(runtime, model, refusals)
 
@@ -403,11 +434,26 @@ class SchedulerService:
     # -- safety checks ------------------------------------------------------
 
     @staticmethod
-    def _check_binary(runtime_config: RuntimeConfig, refusals: list[str]) -> None:
-        """Refuse when a configured backend binary is missing from PATH."""
+    def _check_engine_installed(
+        runtime: RuntimeName, runtime_config: RuntimeConfig, refusals: list[str]
+    ) -> None:
+        """Refuse when the engine's binary is missing (or, for SGLang, the module)."""
         binary = runtime_config.binary
-        if binary and shutil.which(binary) is None:
-            refusals.append(f"Backend binary '{binary}' not found on PATH.")
+        if not binary:
+            return
+        resolved = shutil.which(binary)
+        if resolved is None:
+            refusals.append(
+                f"{runtime.value} is not installed: binary '{binary}' not found on PATH. "
+                f"Run `llmctl setup {runtime.value}`, or set runtimes.{runtime.value}.binary "
+                "in settings.yaml."
+            )
+            return
+        if runtime == RuntimeName.SGLANG and not _python_has_module(resolved, "sglang"):
+            refusals.append(
+                f"sglang is not installed in {resolved}. Run `llmctl setup sglang`, or set "
+                "runtimes.sglang.binary to the python of an env that has it."
+            )
 
     @staticmethod
     def _check_model_path(
@@ -505,7 +551,66 @@ class SchedulerService:
             return self._build_llama_cpp_command(runtime_config, model, parameters, host, port)
         if runtime == RuntimeName.PYTHON_SCRIPT:
             return self._build_python_command(model, parameters)
+        if runtime == RuntimeName.SGLANG:
+            return self._build_sglang_command(runtime_config, model, parameters, host, port)
+        if runtime == RuntimeName.FREETOKEN:
+            return self._build_freetoken_command(runtime_config, model, parameters, host, port)
         return []
+
+    def _build_sglang_command(
+        self,
+        runtime_config: RuntimeConfig,
+        model: ModelRecord | None,
+        parameters: dict[str, object],
+        host: str,
+        port: int,
+    ) -> list[str]:
+        """Build ``python -m sglang.launch_server ...`` (``binary`` is the interpreter)."""
+        model_ref = self._model_reference(model)
+        if not model_ref:
+            return []
+        python = runtime_config.binary or "python3"
+        command = [
+            python, "-m", "sglang.launch_server",
+            "--model-path", model_ref, "--host", host, "--port", str(port),
+        ]
+        if "tensor_parallel_size" in parameters:
+            command += ["--tp", str(parameters["tensor_parallel_size"])]
+        if "gpu_memory_utilization" in parameters:
+            command += ["--mem-fraction-static", str(parameters["gpu_memory_utilization"])]
+        if "max_model_len" in parameters:
+            command += ["--context-length", str(parameters["max_model_len"])]
+        if parameters.get("dtype"):
+            command += ["--dtype", str(parameters["dtype"])]
+        if parameters.get("quantization"):
+            command += ["--quantization", str(parameters["quantization"])]
+        if parameters.get("served_model_name"):
+            command += ["--served-model-name", str(parameters["served_model_name"])]
+        command += self._extra_args(parameters, runtime_config)
+        return command
+
+    def _build_freetoken_command(
+        self,
+        runtime_config: RuntimeConfig,
+        model: ModelRecord | None,
+        parameters: dict[str, object],
+        host: str,
+        port: int,
+    ) -> list[str]:
+        """Build ``ft serve --model ...``; the GPU comes from CUDA_VISIBLE_DEVICES."""
+        model_ref = self._model_reference(model)
+        if not model_ref:
+            return []
+        binary = runtime_config.binary or "ft"
+        command = [binary, "serve", "--model", model_ref, "--host", host, "--port", str(port)]
+        if "gpu_memory_utilization" in parameters:
+            command += ["--memory-ratio", str(parameters["gpu_memory_utilization"])]
+        if "max_model_len" in parameters:
+            command += ["--max-seq-len-override", str(parameters["max_model_len"])]
+        if parameters.get("served_model_name"):
+            command += ["--served-model-name", str(parameters["served_model_name"])]
+        command += self._extra_args(parameters, runtime_config)
+        return command
 
     def _build_vllm_command(
         self,

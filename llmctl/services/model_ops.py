@@ -57,12 +57,12 @@ ADDABLE_ENGINES: tuple[RuntimeName, ...] = (
     RuntimeName.OLLAMA,
     RuntimeName.VLLM,
     RuntimeName.SGLANG,
+    RuntimeName.FREETOKEN,
     RuntimeName.LLAMA_CPP,
     RuntimeName.LMSTUDIO,
 )
 
 _NOT_ADDABLE = {
-    RuntimeName.FREETOKEN: "FreeToken runs as a plugin lane (a unit plus a start script).",
     RuntimeName.OPENAI: "OpenAI-compatible endpoints are adopted, not added (`llmctl adopt`).",
     RuntimeName.PYTHON_SCRIPT: "python_script models are registered with `llmctl model add` "
     "without a SOURCE (flags or prompts).",
@@ -302,7 +302,9 @@ def plan_add(
     wants_gguf = bool(quant or filename) or "gguf" in repo.lower()
     if chosen is None:
         chosen = RuntimeName.LLAMA_CPP if wants_gguf else RuntimeName.VLLM
-    if chosen in (RuntimeName.VLLM, RuntimeName.SGLANG) and (quant or filename):
+    if chosen in (RuntimeName.VLLM, RuntimeName.SGLANG, RuntimeName.FREETOKEN) and (
+        quant or filename
+    ):
         raise ModelOpsError(
             f"{chosen.value} downloads the whole safetensors checkpoint; a quant or "
             ".gguf file selects a GGUF build, which is llama_cpp's job."
@@ -335,8 +337,8 @@ def plan_add(
             f"Download the safetensors checkpoint {repo} from Hugging Face, then write "
             "a starter preset so `llmctl run` can serve it."
             if chosen == RuntimeName.VLLM
-            else f"Download the safetensors checkpoint {repo} from Hugging Face. "
-            "Download only: llmctl cannot start SGLang models yet."
+            else f"Download the safetensors checkpoint {repo} from Hugging Face; "
+            f"`llmctl run` then serves it with {chosen.value}."
         ),
         command=f"hf download {repo}",
     )
@@ -836,15 +838,8 @@ class ModelOps:
             )
         if model.runtime == RuntimeName.LLAMA_CPP:
             return AddResult(model, serve=f"llmctl run {model.name}")
-        if model.runtime == RuntimeName.SGLANG:
-            return AddResult(
-                model,
-                notes=(
-                    "SGLang runs as a systemd lane (a plugin lane plus a start script), and "
-                    "llmctl cannot create one yet. Serve it with vLLM instead: "
-                    f"llmctl model add {model.source or model.name}.",
-                ),
-            )
+        if model.runtime in (RuntimeName.SGLANG, RuntimeName.FREETOKEN):
+            return AddResult(model, serve=f"llmctl run {model.name}")
         return AddResult(model)
 
     def register(self, model: Model) -> Model:

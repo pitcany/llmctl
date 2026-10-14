@@ -25,6 +25,8 @@ from llmctl.config import ManagedUnitConfig, Settings, load_settings
 _BACKEND_BINARIES: dict[str, str] = {
     "vllm": "vllm",
     "llama_cpp": "llama-server",
+    "sglang": "python3",
+    "freetoken": "ft",
     "lmstudio": "lms",
     "ollama": "ollama",
     "python": "python",
@@ -154,7 +156,11 @@ def detect_backends(
                 {"backend": backend, "binary": "python", "path": sys.executable, "available": True}
             )
             continue
-        override = cfg.runtime_config(backend).binary if backend in {"vllm", "llama_cpp"} else None
+        override = (
+            cfg.runtime_config(backend).binary
+            if backend in {"vllm", "llama_cpp", "sglang", "freetoken"}
+            else None
+        )
         binary = override or default_binary
         path = shutil.which(binary)
         if backend == "lmstudio" and path is None:

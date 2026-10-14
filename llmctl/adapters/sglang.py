@@ -21,7 +21,10 @@ box in ``llmctl health``.
 
 from __future__ import annotations
 
-from llmctl.adapters._common import ClientFactory, HttpRuntimeAdapter
+from typing import Any
+
+from llmctl.adapters._common import ClientFactory, LaunchableHttpAdapter
+from llmctl.config import RuntimeConfig, default_runtime_configs
 from llmctl.db import ModelStatus, RuntimeName
 from llmctl.schemas import AdapterStatus, HealthState, Model
 
@@ -33,19 +36,27 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:30000"
 SERVER_INFO_PATH = "/get_server_info"
 
 
-class SGLangAdapter(HttpRuntimeAdapter):
-    """Adapter for an SGLang server. Discovery, health and version only."""
+class SGLangAdapter(LaunchableHttpAdapter):
+    """Adapter for an SGLang server: discovery and health over HTTP, and
+    ``python -m sglang.launch_server`` as a supervised process when llmctl
+    starts the model itself (see :mod:`llmctl.services.scheduler`)."""
 
     def __init__(
         self,
-        endpoint: str = DEFAULT_ENDPOINT,
+        config: RuntimeConfig | str | None = None,
+        supervisor: Any = None,
         *,
+        endpoint: str | None = None,
         client_factory: ClientFactory | None = None,
     ) -> None:
+        if isinstance(config, str):  # the old (endpoint) signature
+            endpoint, config = config, None
         super().__init__(
             RuntimeName.SGLANG,
             "SGLang",
-            endpoint,
+            config or default_runtime_configs()["sglang"],
+            supervisor,
+            endpoint=endpoint or DEFAULT_ENDPOINT,
             health_path="/health",
             client_factory=client_factory,
         )
@@ -60,18 +71,12 @@ class SGLangAdapter(HttpRuntimeAdapter):
         return "/v1/models"
 
     def capabilities(self) -> dict[str, bool]:
-        """Discovery, health and version — never process control.
-
-        ``launch_process`` and ``stop_process`` stay False on purpose: the
-        systemd unit and its guard wrapper own the lifecycle. See the module
-        docstring.
-        """
         caps = super().capabilities()
         caps["list_loaded_models"] = True
         caps["version"] = True
         return caps
 
-    async def health_check(self) -> AdapterStatus:
+    async def _http_health(self) -> AdapterStatus:
         """Probe ``/health`` by status code, not by parsing a body.
 
         SGLang answers ``/health`` with a bare 200 and a **zero-byte body**, so

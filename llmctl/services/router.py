@@ -42,8 +42,8 @@ class RuntimeRouter:
             RuntimeName.LLAMA_CPP: LlamaCppAdapter(runtime_config("llama_cpp"), self.supervisor),
             RuntimeName.LMSTUDIO: LMStudioAdapter(runtime_config("lmstudio").endpoint),
             RuntimeName.OLLAMA: OllamaAdapter(runtime_config("ollama").endpoint),
-            RuntimeName.SGLANG: SGLangAdapter(runtime_config("sglang").endpoint),
-            RuntimeName.FREETOKEN: FreeTokenAdapter(runtime_config("freetoken").endpoint),
+            RuntimeName.SGLANG: SGLangAdapter(runtime_config("sglang"), self.supervisor),
+            RuntimeName.FREETOKEN: FreeTokenAdapter(runtime_config("freetoken"), self.supervisor),
             RuntimeName.PYTHON_SCRIPT: PythonScriptAdapter(
                 runtime_config("python_script"), self.supervisor
             ),
