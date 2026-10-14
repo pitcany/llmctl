@@ -3,7 +3,7 @@
 #
 # Generic vLLM OpenAI-API launcher. The systemd unit `llmctl install-vllm-unit`
 # writes points ExecStart at this script and passes configuration via the
-# EnvironmentFile that `llmctl swap` renders.
+# EnvironmentFile that `llmctl run` renders.
 #
 # Required env vars:
 #   VLLM_MODEL          HuggingFace repo or local path
@@ -61,7 +61,7 @@ PYTHON="${VLLM_PYTHON:-$(command -v python3 || true)}"
 if [[ -z "${PYTHON}" || ! -x "${PYTHON}" ]]; then
   echo "vllm-launcher: python interpreter not found: '${PYTHON:-python3 on PATH}'." \
        "Set VLLM_PYTHON in the env file, or activate the env that has vLLM" \
-       "before running llmctl swap." >&2
+       "before running llmctl run." >&2
   exit 1
 fi
 

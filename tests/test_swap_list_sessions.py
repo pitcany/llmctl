@@ -1,6 +1,6 @@
 """llama.cpp registry models appear in the swap list, once.
 
-`llmctl swap NAME` could already serve a llama.cpp registry model, but the
+`llmctl run NAME` could already serve a llama.cpp registry model, but the
 list (`swap --list`, the bare `swap` picker, the TUI Swap screen) showed only
 presets and lanes. These tests pin which models are listed, that a model a
 lane already serves is not listed twice (or started twice), and how the rows

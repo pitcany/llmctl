@@ -4,7 +4,7 @@ Two gaps closed together: a vLLM checkpoint added with `model add` could not
 be swapped to (swap only lists presets), and "serve it" was a different verb
 per engine. These tests pin the starter preset (what it infers, what it
 refuses to guess, that it never overwrites a hand-written preset, that purge
-takes only its own) and the per-engine routing behind `llmctl swap NAME`.
+takes only its own) and the per-engine routing behind `llmctl run NAME`.
 """
 
 from __future__ import annotations
@@ -145,7 +145,7 @@ def test_add_vllm_writes_the_preset_and_says_how_to_serve(db, tmp_path, monkeypa
     )
     result = ModelOps(db).add(plan_add(str(ckpt)))
     assert result.preset == "local-ckpt"
-    assert result.serve == "llmctl swap local-ckpt"
+    assert result.serve == "llmctl run local-ckpt"
     assert "local-ckpt" in load_all_records()
 
 
@@ -226,7 +226,7 @@ def test_find_model_prefers_this_machine_and_flags_real_ambiguity(db) -> None:
 
 
 # --------------------------------------------------------------------------
-# CLI: llmctl swap NAME
+# CLI: llmctl run NAME
 # --------------------------------------------------------------------------
 
 
@@ -255,7 +255,7 @@ def _add(runtime, name, path=None) -> Model:
 
 def test_cli_swap_ollama_model_says_it_loads_on_demand(cli) -> None:
     _add(RuntimeName.OLLAMA, "qwen3:8b")
-    result = CliRunner().invoke(cli.app, ["swap", "qwen3:8b"])
+    result = CliRunner().invoke(cli.app, ["run", "qwen3:8b"])
     assert result.exit_code == 0, result.output
     assert "Nothing to start" in result.output
     assert "ollama run qwen3:8b" in result.output
@@ -274,12 +274,12 @@ def test_cli_swap_llama_cpp_row_frees_the_gpus_for_it(cli, monkeypatch, tmp_path
         "run_session_swap_service",
         lambda state, target, **kw: ran.append(target) or SessionSwapResult(ok=True),
     )
-    result = CliRunner().invoke(cli.app, ["swap", "tiny-gguf", "--dry-run"])
+    result = CliRunner().invoke(cli.app, ["run", "tiny-gguf", "--dry-run"])
     assert result.exit_code == 0, result.output
     assert "llama-server for tiny-gguf on one GPU" in result.output
     assert ran == []  # a dry run stops and starts nothing
 
-    result = CliRunner().invoke(cli.app, ["swap", "tiny-gguf", "--yes"])
+    result = CliRunner().invoke(cli.app, ["run", "tiny-gguf", "--yes"])
     assert result.exit_code == 0, result.output
     assert [t.kind for t in ran] == ["session"] and "Ready" in result.output
 
@@ -287,7 +287,7 @@ def test_cli_swap_llama_cpp_row_frees_the_gpus_for_it(cli, monkeypatch, tmp_path
 def test_cli_swap_vllm_checkpoint_without_preset_offers_one(cli, tmp_path) -> None:
     ckpt = _checkpoint(tmp_path / "ck", {"max_position_embeddings": 8192})
     _add(RuntimeName.VLLM, "ck", str(ckpt))
-    result = CliRunner().invoke(cli.app, ["swap", "ck", "--dry-run"])
+    result = CliRunner().invoke(cli.app, ["run", "ck", "--dry-run"])
     assert result.exit_code == 0, result.output
     assert "vLLM needs a preset" in result.output
     assert "Would write a starter preset" in result.output
@@ -295,5 +295,5 @@ def test_cli_swap_vllm_checkpoint_without_preset_offers_one(cli, tmp_path) -> No
 
 
 def test_cli_swap_unknown_name_still_lists_presets(cli) -> None:
-    result = CliRunner().invoke(cli.app, ["swap", "no-such-thing", "--dry-run"])
+    result = CliRunner().invoke(cli.app, ["run", "no-such-thing", "--dry-run"])
     assert result.exit_code == 2

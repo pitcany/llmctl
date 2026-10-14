@@ -29,7 +29,7 @@ Extension points
 * :class:`PostStartCheck` — runs once the launched model answers; returns
   a status the CLI prints. Must never mutate anything.
 * :data:`LaneSource` — returns extra :class:`~llmctl.services.lanes.Lane`
-  rows for ``llmctl swap`` (servers with their own start script and unit).
+  rows for ``llmctl run`` (servers with their own start script and unit).
 * :data:`CommandHook` — adds Typer commands to the ``llmctl`` app.
 
 ``LLMCTL_PLUGINS=none`` disables plugin discovery (tests, debugging); a

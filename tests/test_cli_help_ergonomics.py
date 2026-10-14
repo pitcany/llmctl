@@ -17,7 +17,7 @@ def test_dash_h_is_help_at_root_and_in_subcommands() -> None:
 
 
 def test_help_command_explains_a_subcommand() -> None:
-    res = runner.invoke(app, ["help", "swap"])
+    res = runner.invoke(app, ["help", "run"])
     assert res.exit_code == 0, res.output
     assert "preset" in res.output.lower()  # Typer >= 0.27 lowercases the metavar
 
@@ -34,10 +34,10 @@ def test_unknown_command_suggests_once() -> None:
 
 
 def test_swap_switch_and_vllm_are_the_same_command() -> None:
-    for name in ("swap", "switch", "vllm"):
+    for name in ("run", "swap", "switch", "vllm"):
         res = runner.invoke(app, [name, "--help"])
         assert res.exit_code == 0, (name, res.output)
-        assert "MUTATES" in res.output, name
+        assert "Run a model" in res.output, name
 
 
 # --- noun-surface cleanup (FIXPLAN Phase 3) ----------------------------------
@@ -51,6 +51,6 @@ def test_canonical_list_commands_exist() -> None:
 
 def test_deprecated_twins_are_hidden_but_still_work() -> None:
     listing = runner.invoke(app, ["--help"]).output
-    for old in ("add-model", "delete-model", "profiles"):
+    for old in ("add-model", "delete-model", "profiles", "swap", "presets"):
         assert f" {old} " not in listing, old
         assert runner.invoke(app, [old, "--help"]).exit_code == 0, old

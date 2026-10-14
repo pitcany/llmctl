@@ -33,12 +33,12 @@ class TestCLICommands:
         runner = CliRunner()
         result = runner.invoke(cli_app, ["--help"])
         assert result.exit_code == 0
-        required_commands = [
-            "scan", "model", "profile", "gpus", "sessions",
-            "start", "stop", "restart", "logs", "bench", "tui", "serve", "generate-systemd"
-        ]
-        for cmd in required_commands:
-            assert cmd in result.output
+        for cmd in ["add", "run", "ls", "stop", "rm", "status", "logs", "doctor", "tui"]:
+            assert f" {cmd} " in result.output, cmd
+        listed = runner.invoke(cli_app, ["help", "--all"]).output
+        for cmd in ["scan", "model", "profile", "gpus", "sessions", "start", "restart",
+                    "bench", "serve", "generate-systemd"]:
+            assert cmd in listed, cmd
 
     def test_cli_scan(self):
         """Test scan command — both dry-run preview and --import path."""

@@ -1,6 +1,6 @@
-"""Keep ``llmctl swap`` tests away from the live machine's lanes and plugins.
+"""Keep ``llmctl run`` tests away from the live machine's lanes and plugins.
 
-``llmctl swap`` lists the lanes the installed plugins describe and STOPS
+``llmctl run`` lists the lanes the installed plugins describe and STOPS
 active lane units (``systemctl --user stop``) before starting vLLM. A test
 that mocks ``start_vllm_tp`` but not that step would stop the real
 FreeToken/llama.cpp servers on a dev box. Disabling plugin discovery gives

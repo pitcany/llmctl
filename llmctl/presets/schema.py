@@ -125,7 +125,7 @@ class Model(BaseModel):
         default=None,
         description=(
             "VESTIGIAL: not read at launch. TurboQuant is chosen per launch with "
-            "`llmctl swap --tq/--no-tq`. Kept so existing YAMLs still validate."
+            "`llmctl run --tq/--no-tq`. Kept so existing YAMLs still validate."
         ),
     )
     #: Extra names for this preset, resolved by llm-models-config's ``load``;

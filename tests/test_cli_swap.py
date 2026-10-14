@@ -1,4 +1,4 @@
-"""`llmctl swap` front end: list, preview, lanes, and never stopping on a typo."""
+"""`llmctl run` front end: list, preview, lanes, and never stopping on a typo."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def _run(monkeypatch, state, *args, vllm_ok=True):
         ),
     )
     monkeypatch.setattr(cli, "start_vllm_tp", lambda *a, **k: result)
-    return CliRunner().invoke(cli.app, ["swap", *args])
+    return CliRunner().invoke(cli.app, ["run", *args])
 
 
 def test_list_shows_presets_and_lanes(monkeypatch, calls):
@@ -140,7 +140,7 @@ def test_vllm_swap_reports_paused_services(monkeypatch, calls):
 
     monkeypatch.setattr(cli, "gather_state", lambda settings: _state(set(), set()))
     monkeypatch.setattr(cli, "start_vllm_tp", with_companions)
-    res = CliRunner().invoke(cli.app, ["swap", "qwen3.8-27b"])
+    res = CliRunner().invoke(cli.app, ["run", "qwen3.8-27b"])
     assert res.exit_code == 0, res.output
     assert "started again: ollama" in res.output
     assert "docker start harbor.ollama" in res.output

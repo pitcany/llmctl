@@ -1,11 +1,11 @@
-"""One list of everything ``llmctl swap`` can serve: vLLM presets plus lanes.
+"""One list of everything ``llmctl run`` can serve: vLLM presets plus lanes.
 
 A *lane* is a self-contained server with its own systemd unit and start script
 (FreeToken, the llama.cpp servers, ...). Lanes come from plugins: every
 :data:`~llmctl.plugins.LaneSource` registered in the plugin registry
 contributes rows (the ``llmctl-stack`` plugin reads llm-router's
 ``router.yaml``). With no plugin installed there are no lanes and
-``llmctl swap`` lists vLLM presets and registered models alone.
+``llmctl run`` lists vLLM presets and registered models alone.
 
 The lane's start script owns the GPU hand-over (``--take-gpus`` stops vllm-tp
 and evicts Ollama models); llmctl runs it, waits for readiness, and rolls back.

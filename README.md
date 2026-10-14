@@ -15,62 +15,28 @@ on demand. Much of `llmctl` exists to manage that split safely.
 
 ## What it does
 
-**Knowing what you have.** `llmctl` keeps a catalog of every model it knows
-about — where the files are, which runtime serves it, how big it is.
-`llmctl scan` asks each runtime what it has and records the answers;
-`llmctl models` lists them; `llmctl model add|edit|clone|delete` maintains them
-by hand. `llmctl validate` checks that everything the catalog claims still
-exists where it says.
+Ten verbs cover a normal day. Everything else is one `llmctl help --all` away
+and keeps working under its old name.
 
-**Getting and removing models.** One verb pair for every engine:
-`llmctl model add SOURCE` fetches the model with that engine's own tool and
-registers it; `llmctl model rm NAME --purge` removes it again. The shape of
-SOURCE picks the engine (see [Adding and removing models](#adding-and-removing-models)).
-In the TUI it is `m`, then `a` to add or `del` to remove. `llmctl pull TAG` is
-the Ollama-only shortcut.
+| Verb | What it does |
+| --- | --- |
+| `llmctl add SOURCE` | Fetch a model with its engine's own tool and remember it. The shape of SOURCE picks the engine: `Qwen/Qwen3-8B` is vLLM, `qwen3:8b` is Ollama, `unsloth/Qwen3-8B-GGUF:Q4_K_M` is llama.cpp; `--engine sglang\|freetoken` overrides. |
+| `llmctl run [NAME]` | Serve a model, whatever its engine. Stops what holds the GPUs, starts NAME, waits until it answers, puts the previous model back if it fails. No NAME: pick from a list. `--dry-run` shows the plan. |
+| `llmctl ls` | Everything you can `run`, and which one is serving now. |
+| `llmctl stop ID` | Stop a server llmctl started. |
+| `llmctl rm NAME` | Forget a model (`--purge` deletes it from the engine and disk too). |
+| `llmctl status` | The managed units and what each serves. |
+| `llmctl logs [ID]` | Tail a server's log. |
+| `llmctl doctor` | Pass/warn/fail report: engines found, GPUs, drift, stale state. |
+| `llmctl tui` | The same, as a full-screen dashboard. |
+| `llmctl help [CMD]` | Help; `--all` lists the advanced verbs. |
 
-**Running models.** Two paths, for two different situations:
-
-| Command | For | What happens |
-| --- | --- | --- |
-| `llmctl swap [NAME]` | Serving anything: a vLLM preset, a lane (FreeToken, llama.cpp, ...), **or any registered model** | A registered model is routed by engine (see [Serving](#serving-a-model-what-swap-does-per-engine)). No NAME = pick from a list. Shows what stops/starts and the last load time, asks, frees the GPUs (other lanes, vllm-tp, Ollama), starts NAME, waits for readiness, rolls back on failure. Lanes come from llm-router's `config/router.yaml` (`$LLMCTL_ROUTER_CONFIG`); `--list` prints the list. `llmctl vllm` is the old name |
-| `llmctl start <model>` | A one-off session for one model | Launches a process, tracks it, and reports `running` only once the endpoint answers |
-
-A **preset** is a recipe at `~/.config/llmctl/presets/<alias>.yaml` — which
-checkpoint, how many GPUs, which quantization, how much context — so
-`llmctl vllm qwen3.8-27b` means "make the shared unit be Qwen3.8-27B". A **profile**
-is the lighter-weight equivalent for the `start` path. Both have a dry run
-(`llmctl plan`, `llmctl preview`, or `--dry-run`) that shows the exact command
-and VRAM estimate without touching anything.
-
-**Watching it.** `llmctl status` for an overview, `llmctl health` per runtime,
-`llmctl gpus` for VRAM and temperature, `llmctl sessions` for what is running,
-`llmctl logs` to tail output, and `llmctl doctor` for a pass/warn/fail
-environment report.
-
-**Cleaning up after crashes.** When records and reality disagree,
-`llmctl reconcile` re-syncs them, `llmctl cleanup` finds dead sessions and
-frees the ports they were holding (`--remove-stale` also deletes the
-`PLANNED` rows a `--dry-run` start leaves behind, which would otherwise
-reserve their endpoint against `adopt` forever), and `llmctl model prune`
-clears catalog rows for models that are genuinely gone.
-
-**Serving it to clients.** `llmctl gateway` runs an OpenAI-compatible endpoint
-that downstream apps point at, with aliases (`llmctl aliases`,
-`llmctl set-alias`) mapping friendly names onto whatever is actually serving —
-so clients need no rewiring when the checkpoint underneath changes.
-
-**Measuring.** `llmctl bench` runs a timed test and records tokens/second,
-time-to-first-token and peak VRAM; `llmctl benchmarks` shows the history and
-compares runs against a baseline.
-
-**Adopting what it did not start.** `llmctl adopt` brings an
-already-running endpoint under management without restarting it, and
-`llmctl detach` lets go again — `llmctl` is a layer over an existing setup, not
-a replacement for it. An adopted session's lifecycle stays with systemd, but
-`llmctl stop <id> --systemd` and `llmctl restart <id> --systemd` drive its
-backing unit for you, in whichever scope the unit actually lives (system or
-`--user`).
+Behind those: a catalog of every model (where the files are, which engine, how
+big), presets for vLLM units, sessions for servers llmctl starts itself,
+adoption of servers it did not start, an OpenAI-compatible gateway with
+aliases, benchmarks, and systemd unit generation. Each is an advanced verb
+(`scan`, `model`, `profile`, `start`, `adopt`, `gateway`, `bench`, ...) and is
+documented in the [user guide](docs/USER-GUIDE.md).
 
 ## How it works
 
@@ -103,19 +69,17 @@ required.
 ## Quick taste
 
 ```bash
-llmctl runtimes                      # what runtimes exist, versions, loaded models
-llmctl runtimes inspect ollama       # one runtime's capabilities in detail
-llmctl presets                       # list available presets
-llmctl swap                          # pick what serves from one list (vLLM, lanes, llama.cpp models)
-llmctl swap flash                    # Flash-Next on FreeToken (a lane a plugin lists)
-llmctl swap qwen3.8-27b              # restart vllm-tp with this preset
-llmctl swap Qwen/Qwen3-8B            # a registered checkpoint: swaps to its preset
+llmctl add Qwen/Qwen3-8B             # download from Hugging Face, serve with vLLM
+llmctl add qwen3:8b                  # ollama pull
+llmctl ls                            # what can run, what is serving
+llmctl run Qwen/Qwen3-8B             # stops what holds the GPUs, starts this, waits
+llmctl run                           # pick from the list
 llmctl status                        # managed units + what they serve right now
 llmctl doctor                        # pass/warn/fail environment report
 llmctl tui                           # interactive TUI
 ```
 
-Add `--dry-run` to render and inspect without changing anything. Most
+Add `--dry-run` to `run` to see the plan without changing anything. Most
 read commands accept `--json` for stable, script-friendly output.
 
 ## Control-plane semantics
@@ -219,7 +183,7 @@ Same two commands whatever the engine. The source's shape picks the engine;
 | LM Studio | `llmctl model add lmstudio:qwen/qwen3-8b` | `lms get qwen/qwen3-8b --yes` |
 | any local | `llmctl model add ~/models/foo.gguf` (or a folder) | registers in place, downloads nothing |
 
-Serving is `llmctl swap NAME` for every engine (see the table above). A vLLM
+Serving is `llmctl run NAME` for every engine (see the table above). A vLLM
 `add` also writes a **starter preset** (`~/.config/llmctl/presets/<name>.yaml`)
 so the model is swappable at once. It holds only what `config.json` proves:
 repo id, native context capped at `vllm.defaults.max_model_len`, TP from
@@ -231,11 +195,11 @@ weights; a hand-written preset still blocks the purge. SGLang adds are
 download-only: SGLang serves through a plugin lane, and llmctl cannot
 write one.
 
-### Serving a model: what `swap` does per engine
+### Serving a model: what `run` does per engine
 
-The GPUs are served in three ways, and `llmctl swap NAME` covers all three:
+The GPUs are served in three ways, and `llmctl run NAME` covers all three:
 
-| NAME is… | What `swap` does |
+| NAME is… | What `run` does |
 | --- | --- |
 | a vLLM preset, or a vLLM model | Stops what vLLM serves now and restarts `vllm-tp` on this preset (about 2 min). No preset yet: offers to write a starter one first. |
 | a lane (FreeToken, GLM, the GPU1 coder) | Stops what shares its cards, runs the lane's start script, waits until it answers. |
@@ -243,7 +207,7 @@ The GPUs are served in three ways, and `llmctl swap NAME` covers all three:
 | an Ollama or LM Studio model | Nothing. Those servers are always running and load a model the first time a request names it (`ollama run qwen3:8b "hi"`, `lms load KEY`). The GPUs are left alone. |
 | SGLang, a model on another machine, an adopted endpoint | Nothing, with the reason. |
 
-Every swap that stops something shows the list first and asks. If the new
+Every run that stops something shows the list first and asks. If the new
 model does not come up, everything it stopped is started again. Swapping to vLLM
 or a lane also stops llama-servers llmctl started, since vLLM will not load next
 to them.
@@ -251,7 +215,7 @@ to them.
 **llama-servers are "sessions".** llmctl runs `llama-server` itself (no systemd
 unit) and keeps a record of it: its process id, port, and status. That record is
 a session. `llmctl sessions` lists them, and `llmctl stop ID` ends one. To go
-back to vLLM, run `llmctl swap PRESET`.
+back to vLLM, run `llmctl run PRESET`.
 
 Removing is `llmctl model rm NAME` (`model delete` is the same command). Alone
 it only hides the row. The model stays in its engine and on disk, and adding it
@@ -376,12 +340,12 @@ with an entry point in the `llmctl.plugins` group whose target is a
 | --- | --- |
 | companion | a GPU-holding service paused around a vLLM launch (a Docker container, a user service); started again once the model answers, or on rollback |
 | post-start check | a read-only verification once the launched model answers (an agent framework's provider URL, a WebUI pin) |
-| lane source | extra `llmctl swap` rows: servers with their own start script and unit |
+| lane source | extra `llmctl run` rows: servers with their own start script and unit |
 | command | extra `llmctl` verbs |
 
 `llmctl-stack` (in `packages/llmctl-stack/`) is the plugin for the `~/AI`
 stack: Harbor, Hermes, llm-router lanes and profiles, the model lab.
-With no plugin installed `llmctl swap` lists presets and registered models
+With no plugin installed `llmctl run` lists presets and registered models
 only. `LLMCTL_PLUGINS=none` turns discovery off for one run; a plugin that
 fails to import is reported on stderr and skipped.
 
@@ -403,7 +367,7 @@ so there is nothing left to forget.
    a backend with `start_cmd`, `upstream`, `served_model`, `gpus:` (the cards
    it occupies — omitted means every card), `health_timeout_s`, and `unit:` +
    `runtime:` (llm-router ignores those two; llmctl reads them). This is the
-   lane list, so the lane appears in `llmctl swap`, `llmctl status` and the
+   lane list, so the lane appears in `llmctl run`, `llmctl status` and the
    TUI as soon as it exists — no `settings.yaml` row needed. Every lane does
    this as of 2026-09-21, so `settings.yaml` holds only units that are not
    lanes (`vllm-tp`, `gpt-oss`, `coder1`). The row's name in `llmctl status`
@@ -419,8 +383,8 @@ so there is nothing left to forget.
    from any other OpenAI-compatible endpoint. Copy `freetoken.py` or
    `sglang.py`: discovery, health and version, never process control.
 
-Then check it: `llmctl status` shows the unit, `llmctl swap --list` shows the
-lane, `llmctl runtimes` names the engine, and `llmctl swap <name> --dry-run`
+Then check it: `llmctl status` shows the unit, `llmctl run --list` shows the
+lane, `llmctl runtimes` names the engine, and `llmctl run <name> --dry-run`
 previews the right stops.
 
 ## Preview a launch
@@ -500,9 +464,9 @@ auto-refreshes every 3s and never blocks the UI on probes.
 
 | Screen | Keys |
 |--------|------|
-| Models (`m`) | `a` add (one source box, any engine, live preview; *Manual entry* for the field form), `del` remove (engine-specific "also remove it" box), `enter` serve (same routing as `llmctl swap NAME`: vLLM → swap confirm for its preset, or write one first; llama.cpp → swap confirm that frees the GPUs; scripts → launch plan; Ollama/LM Studio → says it loads on demand), `ctrl+s` scan, `e` edit, `c` clone, `x` prune missing |
+| Models (`m`) | `a` add (one source box, any engine, live preview; *Manual entry* for the field form), `del` remove (engine-specific "also remove it" box), `enter` serve (same routing as `llmctl run NAME`: vLLM → swap confirm for its preset, or write one first; llama.cpp → swap confirm that frees the GPUs; scripts → launch plan; Ollama/LM Studio → says it loads on demand), `ctrl+s` scan, `e` edit, `c` clone, `x` prune missing |
 | Profiles (`f`) | `a` create, `e` edit, `c` clone, `d` delete |
-| Swap (`w`) | `enter` preview (what stops/starts, last load time) → confirm swaps; same list as `llmctl swap` |
+| Swap (`w`) | `enter` preview (what stops/starts, last load time) → confirm swaps; same list as `llmctl run` |
 | Presets (`p`) | `enter`/`t` launch preset (restarts the managed unit after confirm), `a` add, `e` edit in `$EDITOR`, `c` clone, `d` delete |
 | Sessions (`s`) | `x` stop, `ctrl+r` restart, `c` cleanup; row-highlight tails the log. Failures (e.g. stopping an adopted session) surface as notifications |
 | Benchmarks (`b`) | `n` new, `enter` re-run, `c` set baseline, `x` clear baseline, `d` delete |
@@ -543,7 +507,7 @@ auto-refreshes every 3s and never blocks the UI on probes.
 
 ## Serving vLLM on a new machine
 
-`llmctl swap` drives one systemd unit per managed role (default role
+`llmctl run` drives one systemd unit per managed role (default role
 `vllm-tp`, port 8003). On a fresh host nothing provides that unit yet, so:
 
 ```bash
@@ -564,13 +528,13 @@ max_model_len: 32768
 YAML
 # 4. serve it, from inside the env of step 1 (that is the interpreter the
 #    unit runs; $LLMCTL_PYTHON_ROOT pins it without activating)
-source ~/vllm/bin/activate && llmctl swap qwen3-8b
+source ~/vllm/bin/activate && llmctl run qwen3-8b
 ```
 
 `CUDA_VISIBLE_DEVICES` is the first `tensor_parallel_size` cards unless
 `vllm.defaults.gpus` says otherwise; `HF_HOME` is `~/.cache/huggingface`
 unless set. `sudo systemctl start|stop|restart vllm-tp` is the only
-privileged call, so a NOPASSWD rule for those three keeps `swap`
+privileged call, so a NOPASSWD rule for those three keeps `run`
 prompt-free.
 
 ## Managed units (defaults)

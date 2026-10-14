@@ -256,7 +256,7 @@ def render_preset_env(
     defaults: VLLMDefaultsConfig | None = None,
     config_dir: Path | None = None,
 ) -> tuple[VLLMLaunchSpec, str]:
-    """Return ``(spec, env body)`` that ``llmctl swap PRESET`` would write.
+    """Return ``(spec, env body)`` that ``llmctl run PRESET`` would write.
 
     No TQ override and no side effects: the same render a ``--dry-run`` prints.
     Raises :class:`UnknownPresetError` like :func:`start_vllm_tp`.

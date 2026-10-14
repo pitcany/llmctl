@@ -333,7 +333,7 @@ def plan_add(
         name=name or repo,
         summary=(
             f"Download the safetensors checkpoint {repo} from Hugging Face, then write "
-            "a starter preset so `llmctl swap` can serve it."
+            "a starter preset so `llmctl run` can serve it."
             if chosen == RuntimeName.VLLM
             else f"Download the safetensors checkpoint {repo} from Hugging Face. "
             "Download only: llmctl cannot start SGLang models yet."
@@ -524,7 +524,7 @@ def _preset_users(
 ) -> list[str]:
     """Aliases of vLLM presets that would break if ``model`` were purged.
 
-    A preset is what ``llmctl swap`` and llm-router start, so purging weights
+    A preset is what ``llmctl run`` and llm-router start, so purging weights
     a preset still names takes that lane down on its next start (and the
     deployed tutor generator is one of them). Matches the loader's own link,
     the preset's ``model_id`` against the row, and the HF cache folder the
@@ -780,7 +780,7 @@ class ModelOps:
     def add(self, plan: AddPlan, *, on_progress: Progress | None = None) -> AddResult:
         """Fetch (if needed) and register ``plan``'s model, then make it servable.
 
-        For vLLM that means a starter preset, so ``llmctl swap NAME`` can
+        For vLLM that means a starter preset, so ``llmctl run NAME`` can
         serve it the moment ``add`` returns.
         """
         say = on_progress or (lambda _msg: None)
@@ -825,7 +825,7 @@ class ModelOps:
             return AddResult(
                 refreshed or model,
                 preset=starter.alias,
-                serve=f"llmctl swap {starter.alias}",
+                serve=f"llmctl run {starter.alias}",
                 notes=(f"{verb} {starter.alias}" + (f" ({starter.path})" if starter.path else ""),)
                 + starter.notes,
             )
@@ -835,7 +835,7 @@ class ModelOps:
                 notes=(f"{model.runtime.value} loads it on the first request; nothing to start.",),
             )
         if model.runtime == RuntimeName.LLAMA_CPP:
-            return AddResult(model, serve=f"llmctl swap {model.name}")
+            return AddResult(model, serve=f"llmctl run {model.name}")
         if model.runtime == RuntimeName.SGLANG:
             return AddResult(
                 model,

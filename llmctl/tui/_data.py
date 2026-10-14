@@ -262,7 +262,7 @@ def remove_model(model_id: str, *, purge: bool = False) -> Any:
 
 
 def serve_route(model_id: str) -> Any:
-    """``(route, swap_state)`` for serving ``model_id`` — same as ``llmctl swap``."""
+    """``(route, swap_state)`` for serving ``model_id`` — same as ``llmctl run``."""
     from llmctl.services.lanes import gather_state
     from llmctl.services.serve import route
 

@@ -140,7 +140,7 @@ class ModelsScreen(DataScreen):
         return None
 
     def action_start_model(self) -> None:
-        """Serve the cursor row the way ``llmctl swap NAME`` would.
+        """Serve the cursor row the way ``llmctl run NAME`` would.
 
         A vLLM checkpoint swaps to its preset (offering to write one first), a
         llama.cpp row swaps the GPUs over to a llama-server, and Ollama / LM

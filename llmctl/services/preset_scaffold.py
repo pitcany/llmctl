@@ -1,6 +1,6 @@
 """Starter vLLM preset for a checkpoint, so an added model is swappable.
 
-``llmctl swap`` serves presets, so a vLLM model that has only a registry row
+``llmctl run`` serves presets, so a vLLM model that has only a registry row
 cannot be served until someone writes one. :func:`ensure_starter_preset`
 writes a conservative one from what the checkpoint's ``config.json`` proves
 and ``settings.yaml``'s ``vllm.defaults``:

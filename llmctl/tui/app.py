@@ -29,7 +29,7 @@ REFRESH_INTERVAL = 3.0
 #: the command palette and the help modal so they cannot drift apart.
 SCREENS: tuple[tuple[str, str, str, str], ...] = (
     ("dashboard", "Dashboard", "Overview: runtimes, sessions, GPUs at a glance", "d"),
-    ("swap", "Swap", "Every model that can serve (vLLM, lanes, llama.cpp); switch to one", "w"),
+    ("swap", "Run", "Every model that can run (vLLM, lanes, llama.cpp); switch to one", "w"),
     ("presets", "Presets", "vLLM presets; launch one onto the TP fleet", "p"),
     ("units", "Units", "Managed systemd units and what they serve", "u"),
     ("models", "Models", "Add or remove models for any engine (a, del)", "m"),
@@ -148,7 +148,7 @@ class MissionControlApp(App[None]):
     COMMAND_PALETTE_BINDING = "ctrl+backslash"
     BINDINGS = [
         Binding("d", "show_dashboard", "Dashboard", show=True),
-        Binding("w", "show_swap", "Swap", show=True),
+        Binding("w", "show_swap", "Run", show=True),
         Binding("p", "show_presets", "Presets", show=True),
         Binding("u", "show_units", "Units", show=True),
         Binding("m", "show_models", "Models", show=True),

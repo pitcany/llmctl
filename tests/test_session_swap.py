@@ -1,4 +1,4 @@
-"""`llmctl swap` onto a llama.cpp model is a real swap, with rollback.
+"""`llmctl run` onto a llama.cpp model is a real swap, with rollback.
 
 The costly mistake here is stopping the tutor's vLLM for a model that can
 never load. These tests pin that the fit is decided against card sizes
