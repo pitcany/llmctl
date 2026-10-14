@@ -52,7 +52,7 @@ class FreeTokenAdapter(LaunchableHttpAdapter):
             "FreeToken",
             config or default_runtime_configs()["freetoken"],
             supervisor,
-            endpoint=endpoint or DEFAULT_ENDPOINT,
+            endpoint=endpoint,
             health_path="/health",
             client_factory=client_factory,
         )

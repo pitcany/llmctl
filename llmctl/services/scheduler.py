@@ -65,7 +65,9 @@ class SchedulerError(ValueError):
 
 def _strata_server_for(python: str) -> Path | None:
     """``<repo>/serve/server.py`` for ``<repo>/.venv/bin/python``, if it is there."""
-    candidate = Path(python).resolve().parent.parent.parent / "serve" / "server.py"
+    # absolute(), not resolve(): a venv's bin/python is often a symlink to the
+    # base interpreter, and following it would search beside that instead.
+    candidate = Path(python).absolute().parent.parent.parent / "serve" / "server.py"
     return candidate if candidate.is_file() else None
 
 

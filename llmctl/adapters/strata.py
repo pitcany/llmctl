@@ -36,7 +36,7 @@ class StrataAdapter(LaunchableHttpAdapter):
             "Strata",
             config or default_runtime_configs()["strata"],
             supervisor,
-            endpoint=endpoint or DEFAULT_ENDPOINT,
+            endpoint=endpoint,
             health_path="/v1/models",
             client_factory=client_factory,
         )
