@@ -113,7 +113,7 @@ def save_to_preset(path: Path, fields: dict[str, Any]) -> list[str]:
         if new.get(key) != value:  # the line edit missed (an unusual layout)
             raise OverrideError(
                 f"Could not rewrite {key} in {path} safely; edit it by hand "
-                f"(`llmctl config {old.get('alias', path.stem)} --edit`)."
+                f"(`llmctl settings {old.get('alias', path.stem)} --edit`)."
             )
     try:
         Model.model_validate(new)
@@ -184,7 +184,7 @@ def save_to_profile(db: Any, model: Any, parameters: dict[str, Any]) -> tuple[st
 
 @dataclass(frozen=True)
 class SettingsSource:
-    """Where ``run NAME`` reads its settings from, for ``llmctl config``."""
+    """Where ``run NAME`` reads its settings from, for ``llmctl settings``."""
 
     kind: str  # "preset" | "profile" | "none"
     label: str
