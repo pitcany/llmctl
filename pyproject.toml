@@ -9,6 +9,7 @@ description = "Local-first Linux control plane for managing LLM runtimes (vLLM, 
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Yannik Pitcan", email = "pitcany@gmail.com" }]
 keywords = ["llm", "gpu", "fastapi", "typer", "textual", "ollama", "vllm"]
 classifiers = [
@@ -36,6 +37,12 @@ dependencies = [
   "typer>=0.12.0",
   "uvicorn[standard]>=0.30.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/pitcany/llmctl"
+Source = "https://github.com/pitcany/llmctl"
+Issues = "https://github.com/pitcany/llmctl/issues"
+Changelog = "https://github.com/pitcany/llmctl/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

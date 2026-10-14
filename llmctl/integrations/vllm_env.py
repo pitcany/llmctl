@@ -1,9 +1,10 @@
 """Render the EnvironmentFile body consumed by ``scripts/vllm-launcher.sh``.
 
-The launcher script (lives in ``~/AI/scripts/vllm-launcher.sh``) reads
-its configuration from ``services/vllm-tp.env`` via systemd's
-``EnvironmentFile=`` directive. This module is the canonical renderer
-for that body — line ordering, key spelling, and value formatting are
+The launcher script (shipped as ``llmctl/data/vllm-launcher.sh``; see
+``llmctl.services.systemd.launcher_path``) reads its configuration from
+the unit's env file via systemd's ``EnvironmentFile=`` directive. This
+module is the canonical renderer for that body — line ordering, key
+spelling, and value formatting are
 all locked to match the existing gpu-models output byte-for-byte so the
 cutover from gpu-models to llmctl produces no diff on disk.
 
@@ -39,9 +40,8 @@ class VLLMLaunchSpec(BaseModel):
 
     model: str = Field(description="HuggingFace repo id or absolute local path.")
     served_name: str = Field(description="Name advertised in /v1/models.")
-    # Default TP=2 matches gpu-models's _write_env default. The TP-fleet
-    # unit on yannik-desktop is dual-GPU; per-GPU slot units (TP=1)
-    # construct their own spec with tensor_parallel=1 explicitly.
+    # Default TP=2 matches gpu-models's _write_env default; presets carry
+    # their own tensor_parallel_size and gpus (see preset_loader.gpus_for).
     tensor_parallel: int = Field(default=2, ge=1)
     gpus: str = Field(default="0,1", description="CUDA_VISIBLE_DEVICES value.")
     port: int = Field(default=8003, ge=1, le=65535)

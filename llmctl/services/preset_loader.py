@@ -81,6 +81,11 @@ def resolve_preset_link(
     return (match, "auto" if match else "unlinked")
 
 
+def gpus_for(tensor_parallel: int) -> str:
+    """``CUDA_VISIBLE_DEVICES`` for the first ``tensor_parallel`` cards."""
+    return ",".join(str(i) for i in range(max(1, tensor_parallel)))
+
+
 def model_to_launch_spec(
     model: Model,
     defaults: VLLMDefaultsConfig | None = None,
@@ -97,7 +102,8 @@ def model_to_launch_spec(
       come from the preset; the launch posture demands they be
       explicit.
     * ``tensor_parallel`` — preset's ``tensor_parallel_size`` wins.
-    * ``gpus`` — preset has no ``gpus`` field; ``defaults.gpus`` wins.
+    * ``gpus`` — preset has no ``gpus`` field; ``defaults.gpus`` wins, and
+      when that is unset the first ``tensor_parallel_size`` cards are used.
     * ``port`` — ``port_override`` (e.g. the managed-unit's
       ``default_port``) wins, then ``defaults.port``; the preset's
       own ``port`` is treated as a stale template default and ignored.
@@ -142,7 +148,7 @@ def model_to_launch_spec(
         model=model.model_id,
         served_name=model.served_name,
         tensor_parallel=model.tensor_parallel_size,
-        gpus=defaults.gpus,
+        gpus=defaults.gpus or gpus_for(model.tensor_parallel_size),
         port=port,
         host=model.host or defaults.host,
         max_model_len=model.max_model_len,

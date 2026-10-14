@@ -540,19 +540,48 @@ auto-refreshes every 3s and never blocks the UI on probes.
   `Host` column shows where each lives: the LM Link device name for LM
   Studio fleet models, the local hostname otherwise.
 
+## Serving vLLM on a new machine
+
+`llmctl swap` drives one systemd unit per managed role (default role
+`vllm-tp`, port 8003). On a fresh host nothing provides that unit yet, so:
+
+```bash
+# 1. a Python env that has vLLM (any venv or conda env)
+uv venv ~/vllm && VIRTUAL_ENV=~/vllm uv pip install vllm
+# 2. the unit: ExecStart = llmctl's shipped launcher, EnvironmentFile =
+#    ~/.local/state/llmctl/units/vllm-tp.env (dry-run by default; needs sudo)
+llmctl install-vllm-unit --no-dry-run
+# 3. a preset (quantization: none for unquantized weights)
+cat > ~/.config/llmctl/presets/qwen3-8b.yaml <<'YAML'
+alias: qwen3-8b
+served_name: qwen3-8b
+model_id: Qwen/Qwen3-8B
+quantization: none
+vllm_quantization_flag: ""
+tensor_parallel_size: 1
+max_model_len: 32768
+YAML
+# 4. serve it, from inside the env of step 1 (that is the interpreter the
+#    unit runs; $LLMCTL_PYTHON_ROOT pins it without activating)
+source ~/vllm/bin/activate && llmctl swap qwen3-8b
+```
+
+`CUDA_VISIBLE_DEVICES` is the first `tensor_parallel_size` cards unless
+`vllm.defaults.gpus` says otherwise; `HF_HOME` is `~/.cache/huggingface`
+unless set. `sudo systemctl start|stop|restart vllm-tp` is the only
+privileged call, so a NOPASSWD rule for those three keeps `swap`
+prompt-free.
+
 ## Managed units (defaults)
 
 Out-of-the-box, llmctl knows about:
 
 | Role | systemd unit | Port | GPUs |
 |------|--------------|------|------|
-| TP serving | `vllm-tp` | 8003 | 0,1 (TP=2) |
+| TP serving | `vllm-tp` | 8003 | the preset's first `tensor_parallel_size` cards |
 
-(The per-GPU coder/reasoner slots were decommissioned 2026-06-14; only the
-single `vllm-tp` unit remains, model swapped per preset.)
-
-Every default is overridable in `~/.config/llmctl/settings.yaml` so
-llmctl runs on hosts that don't share yannik-desktop's layout.
+Every default is overridable in `~/.config/llmctl/settings.yaml`
+(`managed_units.vllm_tp.env_file_path`, `vllm.defaults.gpus`, ...).
 
 You can also **register your own roles**, of any runtime — they then
 appear in `llmctl status`, are adoptable via `llmctl adopt-managed`,

@@ -191,11 +191,11 @@ class RuntimeConfig(BaseModel):
 class ManagedUnitConfig(BaseModel):
     """Config for an externally-installed systemd unit that llmctl manages.
 
-    Every field has a default so a fresh install works out of the box,
-    but each can be overridden in ``settings.yaml`` so llmctl can run on
-    a host with a different layout, different unit names, or a different
-    launcher script. This keeps llmctl independent of any specific
-    repo's path conventions (``~/AI/services/...`` is just one option).
+    Every field has a default so a fresh install works out of the box
+    (``llmctl install-vllm-unit`` writes a unit that matches them), but
+    each can be overridden in ``settings.yaml`` so llmctl can run on a host
+    with a different layout, different unit names, or a different launcher
+    script.
     """
 
     enabled: bool = False
@@ -221,9 +221,9 @@ class ManagedUnitConfig(BaseModel):
         1. Explicit ``env_file_path`` from config
         2. ``$LLMCTL_VLLM_ENV_FILE`` environment override
         3. ``$AI_HOME/services/<unit_name>.env`` if AI_HOME is set
-        4. ``~/AI/services/<unit_name>.env`` (matches yannik-desktop, the
-           original cutover target — won't surprise existing installs but
-           a clean install on another host will likely override via config)
+        4. ``$XDG_STATE_HOME/llmctl/units/<unit_name>.env``
+           (``~/.local/state/llmctl/units/<unit_name>.env``), which is where
+           ``llmctl install-vllm-unit`` points the unit's ``EnvironmentFile``.
         """
         if self.env_file_path is not None:
             return Path(self.env_file_path).expanduser()
@@ -233,7 +233,8 @@ class ManagedUnitConfig(BaseModel):
         ai_home = os.environ.get("AI_HOME")
         if ai_home:
             return Path(ai_home).expanduser() / "services" / f"{self.unit_name}.env"
-        return Path.home() / "AI" / "services" / f"{self.unit_name}.env"
+        state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+        return Path(state).expanduser() / "llmctl" / "units" / f"{self.unit_name}.env"
 
 
 class VLLMDefaultsConfig(BaseModel):
@@ -245,13 +246,15 @@ class VLLMDefaultsConfig(BaseModel):
     block carries the values that don't vary per preset (GPU layout,
     port, batching, NCCL flags).
 
-    Default values match the production posture on yannik-desktop so
-    a fresh install behaves the same as the existing setup. Override
-    via ``settings.yaml`` to relocate the production endpoint, pin
-    different GPUs, or tune batching.
+    Override via ``settings.yaml`` to relocate the endpoint, pin different
+    GPUs, or tune batching.
     """
 
-    gpus: str = "0,1"
+    #: ``CUDA_VISIBLE_DEVICES`` for every launch. ``None`` (the default) uses
+    #: the first ``tensor_parallel_size`` cards of the preset being served, so
+    #: a TP=1 preset gets GPU 0 and a TP=2 preset gets ``0,1``; set it to pin
+    #: other cards (``"1"``, ``"2,3"``).
+    gpus: str | None = None
     tensor_parallel: int = 2
     port: int = 8003
     host: str = "0.0.0.0"
@@ -274,9 +277,9 @@ class FleetUnitsConfig(BaseModel):
     """Bare unit names for the fleet preflight orchestrator.
 
     The preflight ("stop competing units before starting the TP unit")
-    needs to know which units claim the same GPUs as the target. These
-    defaults match the ``NOPASSWD`` sudoers entries on yannik-desktop;
-    re-target via ``settings.yaml`` for other hosts.
+    needs to know which units claim the same GPUs as the target. The
+    defaults are the stock ``ollama.service`` and llmctl's own vLLM unit;
+    re-target via ``settings.yaml``.
     """
 
     tp: str = "vllm-tp"

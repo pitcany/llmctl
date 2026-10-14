@@ -22,8 +22,8 @@ Python root (where ``bin/python`` and ``lib/`` live):
 CUDA root: ``$LLMCTL_CUDA_ROOT`` (falls back to ``$GPU_MODELS_CUDA_ROOT``,
 default ``/usr/local/cuda``).
 
-HF_HOME: ``$HF_HOME`` (default ``~/AI/cache/huggingface``, the canonical
-store; ``~/.cache/huggingface`` is only a symlink to it).
+HF_HOME: ``$HF_HOME`` (default ``~/.cache/huggingface``, HuggingFace's own
+default, so the unit shares the cache of every other HF tool on the host).
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ __all__ = [
 
 
 _DEFAULT_CUDA_ROOT = "/usr/local/cuda"
-_DEFAULT_HF_CACHE = "AI/cache/huggingface"
+_DEFAULT_HF_CACHE = ".cache/huggingface"
 
 
 class LauncherEnvError(RuntimeError):
@@ -85,7 +85,7 @@ def resolve_cuda_root() -> str:
 
 
 def resolve_hf_home() -> str:
-    """Return ``HF_HOME``. Default ``~/AI/cache/huggingface``."""
+    """Return ``HF_HOME``. Default ``~/.cache/huggingface``."""
     val = os.environ.get("HF_HOME")
     if val:
         return val

@@ -39,14 +39,17 @@ def test_ai_home_used_when_no_explicit_overrides(monkeypatch: pytest.MonkeyPatch
     assert cfg.resolve_env_file() == Path("/opt/ai/services/vllm-tp.env")
 
 
-def test_home_ai_fallback_when_nothing_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The last-resort default matches the yannik-desktop layout so the
-    initial cutover doesn't require any config changes on the existing host."""
+def test_xdg_state_fallback_when_nothing_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The last-resort default is the XDG state dir, where install-vllm-unit
+    points the unit's EnvironmentFile; no host-specific layout is assumed."""
     monkeypatch.delenv("LLMCTL_VLLM_ENV_FILE", raising=False)
     monkeypatch.delenv("AI_HOME", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.setenv("HOME", "/home/test")
     cfg = ManagedUnitConfig(unit_name="vllm-tp", env_file_path=None)
-    assert cfg.resolve_env_file() == Path("/home/test/AI/services/vllm-tp.env")
+    assert cfg.resolve_env_file() == Path("/home/test/.local/state/llmctl/units/vllm-tp.env")
+    monkeypatch.setenv("XDG_STATE_HOME", "/var/state")
+    assert cfg.resolve_env_file() == Path("/var/state/llmctl/units/vllm-tp.env")
 
 
 def test_unit_name_propagates_to_env_filename(monkeypatch: pytest.MonkeyPatch) -> None:

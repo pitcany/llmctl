@@ -19,7 +19,7 @@ def test_dash_h_is_help_at_root_and_in_subcommands() -> None:
 def test_help_command_explains_a_subcommand() -> None:
     res = runner.invoke(app, ["help", "swap"])
     assert res.exit_code == 0, res.output
-    assert "PRESET" in res.output
+    assert "preset" in res.output.lower()  # Typer >= 0.27 lowercases the metavar
 
 
 def test_help_command_rejects_unknown_command() -> None:

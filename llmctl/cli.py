@@ -27,6 +27,7 @@ from llmctl.db import (
     init_db,
 )
 from llmctl.gpu_arg import GPU_MODES, parse_gpus
+from llmctl.integrations.launcher_env import LauncherEnvError
 from llmctl.schemas import (
     BenchmarkRunRequest,
     ModelCreate,
@@ -45,15 +46,45 @@ from llmctl.services.vllm_orchestrator import (
 )
 from llmctl.telemetry.gpu import get_gpu_info
 
+
+class _SuggestingGroup(typer.core.TyperGroup):
+    """Print exactly one "Did you mean" hint for a mistyped command.
+
+    Click 8.4 appends its own suggestion to NoSuchCommand and Typer 0.24 added
+    a second; Typer 0.27 (vendored click) appends none. Supplying the hint
+    here, only when the error carries none, gives one hint on every version.
+    """
+
+    def resolve_command(self, ctx: Any, args: list[str]) -> Any:
+        try:
+            return super().resolve_command(ctx, args)
+        except Exception as exc:
+            message = getattr(exc, "message", None)
+            # click 8.4 raises NoSuchCommand, which renders its own hint.
+            if (
+                type(exc).__name__ != "UsageError"
+                or not isinstance(message, str)
+                or "Did you mean" in message
+            ):
+                raise
+            import difflib
+
+            wanted = str(args[0]) if args else ""
+            close = difflib.get_close_matches(wanted, self.list_commands(ctx), n=1)
+            if close:
+                exc.message = f"{message.rstrip('.')}. Did you mean '{close[0]}'?"
+            raise
+
+
 app = typer.Typer(
     name="llmctl",
+    cls=_SuggestingGroup,
     help="Local-first mission control scaffold for LLM runtimes.",
     no_args_is_help=True,
     # -h everywhere: Click contexts inherit help_option_names from the parent,
     # so this one setting reaches every subcommand and sub-typer.
     context_settings={"help_option_names": ["-h", "--help"]},
-    # Click's own NoSuchCommand already says "Did you mean ...?"; Typer's
-    # suggestion on top of it printed the hint twice.
+    # One suggestion comes from _SuggestingGroup; Typer's own would double it.
     suggest_commands=False,
 )
 console = Console()
@@ -1450,6 +1481,51 @@ def generate_systemd_session(
     _emit_unit(unit, output)
 
 
+@app.command("install-vllm-unit")
+def install_vllm_unit(
+    role: Annotated[
+        str, typer.Option(help="managed_units role to write the unit for.")
+    ] = "vllm-tp",
+    enable: Annotated[
+        bool, typer.Option(help="Enable the unit after writing (it starts on the first swap).")
+    ] = True,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--no-dry-run",
+            help="Print the unit and the install actions without writing anything.",
+        ),
+    ] = True,
+) -> None:
+    """Write the systemd unit `llmctl swap` restarts (shipped launcher; sudo)."""
+    from llmctl.services.systemd import install_unit, render_vllm_unit
+
+    settings = load_settings()
+    roles = settings.managed_units.roles()
+    if role not in roles:
+        raise typer.BadParameter(f"no managed_units role {role!r}; have: {', '.join(roles)}")
+    unit = render_vllm_unit(roles[role])
+    for warning in unit.warnings:
+        console.print(f"[yellow]warning:[/yellow] {escape(str(warning))}")
+    if dry_run:
+        console.print(unit.content, markup=False, highlight=False)
+    report = install_unit(unit, dry_run=dry_run, enable=enable)
+    header = "DRY RUN - would run" if report.dry_run else "Install report"
+    color = "yellow" if report.dry_run else "green"
+    console.print(
+        f"[{color}]{header}[/{color}] for {escape(unit.name)} -> {escape(report.unit_path)}"
+    )
+    for action in report.actions:
+        console.print(f"  - {escape(str(action))}")
+    for message in report.messages:
+        console.print(f"  [cyan]{escape(str(message))}[/cyan]")
+    if dry_run:
+        console.print("Re-run with --no-dry-run to install it.")
+    else:
+        env_file = roles[role].resolve_env_file()
+        console.print(f"Next: llmctl swap <preset>  # writes {escape(str(env_file))}")
+
+
 @app.command("install-systemd")
 def install_systemd(
     session_id: Annotated[
@@ -1594,7 +1670,9 @@ def help_cmd(
     group = root.command
     target_ctx = root
     for name in command or []:
-        sub = group.get_command(target_ctx, name) if isinstance(group, click.Group) else None
+        # Typer >= 0.27 vendors click, so its groups are not click.Group instances.
+        get = getattr(group, "get_command", None)
+        sub = get(target_ctx, name) if get is not None else None
         if sub is None:
             raise typer.BadParameter(f"no such command: {' '.join(command or [])}")
         target_ctx = click.Context(sub, info_name=name, parent=target_ctx)
@@ -1720,6 +1798,11 @@ def vllm_cmd(
         raise typer.Exit(2) from exc
     except MissingModelPathError as exc:
         console.print(f"[red]Refusing to start {escape(str(preset))}:[/red] {escape(str(exc))}")
+        cli_swap.restore_lanes(stopped_lanes, console)
+        raise typer.Exit(2) from exc
+    except LauncherEnvError as exc:
+        # Nothing was touched: the env file is rendered before any stop.
+        console.print(f"[red]Cannot render the launch env:[/red] {escape(str(exc))}")
         cli_swap.restore_lanes(stopped_lanes, console)
         raise typer.Exit(2) from exc
 
