@@ -445,3 +445,24 @@ def test_a_release_without_builds_is_reported_not_skipped(tmp_path) -> None:
         "llama_cpp", settings=_settings(tmp_path), deps=_deps(fetch_json=lambda url: releases)
     )
     assert plan.problem and "b2 has no downloadable builds" in plan.problem
+
+
+def test_a_failed_swap_puts_the_old_install_back(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    plan = eng.plan_setup("llama_cpp", settings=settings, deps=_source_deps(), from_source=True)
+    installed = Path(plan.record["binary"])
+    installed.parent.mkdir(parents=True)
+    installed.write_text("old")
+    stream, run = _fake_build(plan)
+    real_rename = Path.rename
+
+    def rename(self, target):
+        if self.name == "src.new":
+            raise OSError("disk full")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    with pytest.raises(OSError, match="disk full"):
+        eng.run_setup(plan, settings=settings, deps=_source_deps(stream=stream, run=run))
+    assert installed.read_text() == "old"
+    assert not installed.parents[2].with_name("src.old").exists()

@@ -636,9 +636,20 @@ def _build_llama_cpp(plan: SetupPlan, deps: SetupDeps) -> None:
         raise SetupError(
             f"The new build does not run ({detail}); the installed one was left in place."
         )
+    # Swap by renames: the old tree is set aside, not deleted, until the new
+    # one is in place, so no moment leaves engines.yaml pointing at nothing.
+    backup = plan.install_dir / "src.old"
+    if backup.exists():
+        shutil.rmtree(backup)
     if src.exists():
-        shutil.rmtree(src)
-    stage.rename(src)
+        src.rename(backup)
+    try:
+        stage.rename(src)
+    except OSError:
+        if backup.exists():
+            backup.rename(src)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
 
 
 def _install_strata(plan: SetupPlan, deps: SetupDeps) -> None:
