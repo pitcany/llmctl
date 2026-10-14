@@ -66,6 +66,8 @@ class OrchestratorOptions:
     """
 
     tq_override: bool | None = None
+    #: Preset fields replaced for this start only (``run --tp/--max-len/--gpu-mem``).
+    preset_overrides: dict[str, Any] = field(default_factory=dict)
     dry_run: bool = False
     #: Bypass the local-model-path refusal. The check only fires on a path
     #: that is provably absent, but an unreadable parent directory can make
@@ -224,6 +226,7 @@ def start_vllm_tp(
         defaults=defaults,
         port_override=managed_unit.default_port,
         tq_override=options.tq_override,
+        preset_overrides=options.preset_overrides,
     )
 
     if not options.force:
@@ -278,6 +281,7 @@ def _build_spec(
     defaults: VLLMDefaultsConfig | None,
     port_override: int,
     tq_override: bool | None,
+    preset_overrides: dict[str, Any] | None = None,
 ) -> VLLMLaunchSpec:
     """Resolve preset -> spec, applying TQ override if requested.
 
@@ -294,6 +298,8 @@ def _build_spec(
             f"unknown preset {preset_name!r}. Available: {available}"
         )
 
+    if preset_overrides:
+        model = type(model).model_validate({**model.model_dump(), **preset_overrides})
     base = model_to_launch_spec(
         model, defaults, port_override=port_override
     ).model_dump()

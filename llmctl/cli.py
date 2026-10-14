@@ -56,7 +56,10 @@ class _SuggestingGroup(typer.core.TyperGroup):
     """
 
     #: Front-page order: the everyday verbs in the order a new user meets them.
-    FRONT = ("setup", "add", "run", "ls", "stop", "rm", "status", "logs", "doctor", "tui", "help")
+    FRONT = (
+        "setup", "add", "run", "settings", "ls", "stop", "rm",
+        "status", "logs", "doctor", "tui", "help",
+    )
 
     def list_commands(self, ctx: Any) -> list[str]:
         names = list(super().list_commands(ctx))
@@ -430,6 +433,7 @@ def _build_start_request(
     cpu: bool,
     force: bool,
     dry_run: bool,
+    parameters: dict[str, Any] | None = None,
 ) -> SessionStartRequest:
     """Resolve model/profile and build a :class:`SessionStartRequest`."""
     from llmctl.db import ModelRecord
@@ -465,6 +469,7 @@ def _build_start_request(
         allow_cpu=allow_cpu,
         force=force,
         dry_run=dry_run,
+        parameters=dict(parameters or {}),
     )
 
 
@@ -539,14 +544,19 @@ def start(
     `sessions`, purged by `cleanup --remove-stale`). To look without writing
     anything, use `plan` (verdict + command) or `preview` (adds env/health).
     """
-    from llmctl.services.scheduler import SchedulerError
-
     with _session() as db:
         request = _build_start_request(db, model_id, profile, gpus, cpu, force, dry_run)
-        try:
-            session = SessionService(db).start(request)
-        except SchedulerError as exc:
-            raise typer.BadParameter(str(exc)) from exc
+        _start_request(db, request)
+
+
+def _start_request(db: Session, request: SessionStartRequest) -> None:
+    """Start ``request``, print the outcome, exit 1 when the launch failed."""
+    from llmctl.services.scheduler import SchedulerError
+
+    try:
+        session = SessionService(db).start(request)
+    except SchedulerError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     if session.launch_plan is not None:
         _print_plan_warnings(session.launch_plan)
     # Exit 1 on a failed launch, like `restart`. It used to return 0 (kept for
@@ -576,7 +586,11 @@ def plan(
     with _session() as db:
         request = _build_start_request(db, model_id, profile, gpus, cpu, force=False, dry_run=True)
         launch_plan = SessionService(db).plan(request)
+    _print_launch_plan(launch_plan)
 
+
+def _print_launch_plan(launch_plan: Any) -> None:
+    """The ``plan`` table, warnings and verdict."""
     table = Table(title="Launch Plan", show_header=False)
     table.add_column("Field", style="cyan")
     _id_column(table, "Value")
@@ -1762,8 +1776,31 @@ def vllm_cmd(
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
     ] = False,
+    tp: Annotated[
+        int | None,
+        typer.Option("--tp", min=1, help="GPUs to split the model across (this run)."),
+    ] = None,
+    max_len: Annotated[
+        int | None,
+        typer.Option("--max-len", min=1, help="Context length in tokens (this run)."),
+    ] = None,
+    gpu_mem: Annotated[
+        float | None,
+        typer.Option(
+            "--gpu-mem", min=0.05, max=1.0, help="Fraction of GPU memory to use (this run)."
+        ),
+    ] = None,
+    save: Annotated[
+        bool,
+        typer.Option("--save", help="Keep --tp/--max-len/--gpu-mem for future runs."),
+    ] = False,
 ) -> None:
     """Run NAME on its engine (``run``; ``swap``, ``switch`` and ``vllm`` are old names)."""
+    from llmctl.services.run_overrides import RunOverrides
+
+    overrides = RunOverrides(tp=tp, max_len=max_len, gpu_mem=gpu_mem)
+    if save and not overrides:
+        raise typer.BadParameter("--save keeps --tp/--max-len/--gpu-mem; give at least one")
     if ctx.info_name in _OLD_RUN_NAMES:
         cli_registry.err_console.print(
             f"[dim]note: `llmctl {escape(str(ctx.info_name))}` is now `llmctl run` (same command); "
@@ -1777,9 +1814,14 @@ def vllm_cmd(
     target = cli_swap.pick(state, console) if preset is None else resolve(preset, state.catalog)
     if target is None and preset is not None:
         # Not a preset or lane: maybe a registered model of another engine.
-        routed = _swap_registry_model(preset, state, settings, dry_run=dry_run, yes=yes)
+        routed = _swap_registry_model(
+            preset, state, settings, dry_run=dry_run, yes=yes, overrides=overrides, save=save
+        )
         if routed is not None:
             target, state = routed
+    session_parameters: dict[str, Any] = {}
+    if target is not None and target.kind == "session" and overrides:
+        target, session_parameters = _session_overrides(target, overrides, save=save)
     if target is None:
         # Not in the list: hand it to the vLLM path, which owns preset lookup
         # and fails with the available presets (exit 2) if it is unknown.
@@ -1788,9 +1830,19 @@ def vllm_cmd(
         )
     elif target.kind in ("lane", "session") and (tq or no_tq or force or no_wait):
         raise typer.BadParameter("--tq/--no-tq/--force/--no-wait apply to vLLM presets only")
+    elif target.kind == "lane" and overrides:
+        raise typer.BadParameter(
+            f"{target.key} is a router lane started by its own script, so llmctl cannot "
+            "change its settings. --tp/--max-len/--gpu-mem apply to vLLM presets and "
+            "models llmctl starts."
+        )
     elif not cli_swap.print_preview(state, target, console):
         return
+    if overrides:
+        console.print(f"  for this run: {escape(overrides.describe())}")
     if target.kind in ("lane", "session") and dry_run:
+        if save and target.kind == "session":
+            _save_run_settings(target, overrides, dry_run=True)
         return
     if not dry_run:
         _confirm_state_change(
@@ -1799,7 +1851,9 @@ def vllm_cmd(
             assume_yes=yes,
         )
     if target.kind == "session":
-        cli_swap.run_session_swap(state, target, console)
+        cli_swap.run_session_swap(state, target, console, parameters=session_parameters)
+        if save:
+            _save_run_settings(target, overrides, dry_run=False)
         return
     if target.kind == "lane":
         cli_swap.run_lane_swap(state, target, console)
@@ -1812,6 +1866,7 @@ def vllm_cmd(
     stopped_lanes = cli_swap.stop_lanes_for_vllm(state, console) if listed and not dry_run else []
     started_at = time.monotonic()
     options = _build_options(tq if tq else None, no_tq, dry_run, no_wait, force)
+    options.preset_overrides = overrides.fields()
     try:
         result = start_vllm_tp(
             preset,
@@ -1837,6 +1892,8 @@ def vllm_cmd(
         raise typer.Exit(2) from exc
 
     if result.dry_run:
+        if save:
+            _save_run_settings(target, overrides, dry_run=True)
         return
     if not result.ok:
         console.print("[red]vLLM start did not complete cleanly.[/red]")
@@ -1858,6 +1915,8 @@ def vllm_cmd(
             "Run `llmctl status` once it has loaded."
         )
         _print_companions(result)
+        if save:
+            _save_run_settings(target, overrides, dry_run=False)
         return
     record_load(preset, time.monotonic() - started_at)
     console.print(
@@ -1865,10 +1924,178 @@ def vllm_cmd(
         f"on port {result.spec.port}"
     )
     _print_companions(result)
+    if save:
+        _save_run_settings(target, overrides, dry_run=False)
+
+
+#: Engines whose launch settings llmctl owns (it starts their servers).
+_STARTABLE_ENGINES = ("vllm", "sglang", "freetoken", "strata", "llama_cpp")
+
+
+@app.command(
+    "settings",
+    short_help="Show (or --edit) the settings `llmctl run NAME` starts a model with.",
+)
+def settings_cmd(
+    name: Annotated[str, typer.Argument(help="Preset or model name (see `llmctl ls`).")],
+    edit: Annotated[
+        bool, typer.Option("--edit", help="Open the preset file in $VISUAL/$EDITOR.")
+    ] = False,
+) -> None:
+    """Show the GPUs, context length and memory share NAME runs with, and where
+    they are stored. Change them for one run with `llmctl run NAME --tp N
+    --max-len N --gpu-mem F`; add --save to keep them."""
+    import os
+    import shlex
+    import subprocess
+
+    from llmctl.services.run_overrides import FIELDS, FLAGS, preset_source, profile_source
+    from llmctl.services.serve import AmbiguousModel, find_model
+
+    source = preset_source(name)
+    if source is None:
+        with _session() as db:
+            try:
+                model = find_model(db, name)
+            except AmbiguousModel as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            if model is None:
+                raise typer.BadParameter(f"No preset or model named {name} (see `llmctl ls`).")
+            from llmctl.db import ModelRecord
+
+            record = db.get(ModelRecord, model.id) if model.id else None
+            if record is None or record.runtime.value == "vllm":
+                console.print(
+                    f"{escape(name)} has no preset yet; `llmctl run {escape(name)}` writes one."
+                )
+                return
+            if record.runtime.value not in _STARTABLE_ENGINES:
+                console.print(
+                    f"{escape(name)} is served by {escape(record.runtime.value)}, which keeps "
+                    "its own settings; llmctl does not change them."
+                )
+                return
+            source = profile_source(db, record)
+    labels = {
+        "tensor_parallel_size": "GPUs (tensor parallel)",
+        "max_model_len": "context length",
+        "gpu_memory_utilization": "GPU memory share",
+    }
+    table = Table(title=f"{name} settings", show_header=True)
+    table.add_column("setting")
+    table.add_column("run flag")
+    table.add_column("value")
+    for key in FIELDS:
+        value = source.values.get(key)
+        table.add_row(labels[key], FLAGS[key], "engine default" if value is None else str(value))
+    console.print(table)
+    where = f"{source.label}: {source.path}" if source.path else source.label
+    console.print(f"Stored in {escape(where)}")
+    console.print(
+        f"One run: llmctl run {escape(name)} --max-len 32768   ·   keep it: add --save"
+    )
+    if not edit:
+        return
+    if source.path is None:
+        raise typer.BadParameter(
+            f"{name}'s settings live in llmctl's database, not a file. Change them with "
+            f"`llmctl run {name} --tp/--max-len/--gpu-mem ... --save`."
+        )
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
+    subprocess.call([*shlex.split(editor), str(source.path)])
+    if preset_source(name) is None:
+        console.print(
+            f"[red]{escape(str(source.path))} no longer loads as a preset.[/red] "
+            "Fix it, or `llmctl run` will not find it."
+        )
+        raise typer.Exit(1)
+
+
+def _session_overrides(
+    target: SwapTarget, overrides: Any, *, save: bool
+) -> tuple[SwapTarget, dict[str, Any]]:
+    """Translate run flags for a model llmctl starts as a session (llama.cpp)."""
+    import dataclasses
+
+    from llmctl.db import ModelRecord
+    from llmctl.services.run_overrides import OverrideError, session_parameters
+    from llmctl.services.session_swap import Placement
+
+    with _session() as db:
+        record = db.get(ModelRecord, target.model_id) if target.model_id else None
+        if record is None:
+            raise typer.BadParameter(f"model {target.key} is no longer registered")
+        runtime = record.runtime
+    try:
+        parameters = session_parameters(runtime, overrides)
+    except OverrideError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if overrides.tp is not None:
+        if save:
+            raise typer.BadParameter(
+                "llama.cpp picks its GPUs from the model's size on every run, so --tp "
+                "cannot be saved. Drop --save to use it for this run."
+            )
+        parameters.pop("tensor_parallel_size", None)
+        target = dataclasses.replace(
+            target, placement=Placement(cards=overrides.tp)
+        )
+    return target, parameters
+
+
+def _save_run_settings(target: SwapTarget, overrides: Any, *, dry_run: bool) -> None:
+    """``run --save``: write the flags into the preset or profile NAME runs from."""
+    from llmctl.db import ModelRecord
+    from llmctl.presets import load_all_records
+    from llmctl.services.run_overrides import (
+        OverrideError,
+        save_to_preset,
+        save_to_profile,
+        session_parameters,
+    )
+
+    try:
+        if target.kind == "vllm":
+            record = load_all_records().get(target.key)
+            if record is None:
+                raise OverrideError(f"Not saved: no preset named {target.key}.")
+            where = str(record.source_path)
+            if dry_run:
+                console.print(f"Would save {escape(overrides.describe())} to {escape(where)}")
+                return
+            changes = save_to_preset(record.source_path, overrides.fields())
+        else:
+            with _session() as db:
+                model = db.get(ModelRecord, target.model_id) if target.model_id else None
+                if model is None:
+                    raise OverrideError(f"Not saved: model {target.key} is not registered.")
+                parameters = session_parameters(model.runtime, overrides)
+                if dry_run:
+                    console.print(
+                        f"Would save {escape(overrides.describe())} to {escape(model.name)}'s "
+                        "profile"
+                    )
+                    return
+                name, changes = save_to_profile(db, model, parameters)
+                where = f"profile {name}"
+    except OverrideError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+    if changes:
+        console.print(f"[green]Saved[/green] to {escape(where)}: {escape('; '.join(changes))}")
+    else:
+        console.print(f"Already saved in {escape(where)}; nothing changed.")
 
 
 def _swap_registry_model(
-    name: str, state: Any, settings: Any, *, dry_run: bool, yes: bool
+    name: str,
+    state: Any,
+    settings: Any,
+    *,
+    dry_run: bool,
+    yes: bool,
+    overrides: Any = None,
+    save: bool = False,
 ) -> tuple[SwapTarget, Any] | None:
     """Serve a registered model that is not itself a preset or lane.
 
@@ -1888,6 +2115,11 @@ def _swap_registry_model(
         if model is None:
             return None
         served = route(db, model, state.catalog)
+        if overrides and served.kind in ("on-demand", "cannot"):
+            raise typer.BadParameter(
+                f"{model.name} runs on {model.runtime.value}, which llmctl does not start, "
+                "so --tp/--max-len/--gpu-mem cannot apply."
+            )
         console.print(escape(served.message))
         if served.kind == "preset" and served.target is not None:
             return served.target, state
@@ -1899,23 +2131,53 @@ def _swap_registry_model(
         if served.kind == "cannot":
             raise typer.Exit(1)
         if served.kind == "start":
+            from llmctl.db import ProfileRecord
+            from llmctl.services.run_overrides import OverrideError, session_parameters
+
+            try:
+                parameters = session_parameters(model.runtime, overrides) if overrides else {}
+            except OverrideError as exc:
+                raise typer.BadParameter(str(exc)) from exc
+            # The model's own profile, so settings `run --save` stored apply.
+            own = (
+                db.get(ProfileRecord, model.default_profile_id)
+                if model.default_profile_id
+                else None
+            )
+            request = _build_start_request(
+                db,
+                model.id or name,
+                own.name if own else None,
+                "auto",
+                False,
+                False,
+                dry_run,
+                parameters=parameters,
+            )
+            row = SwapTarget(
+                key=model.name,
+                kind="session",
+                model=model.name,
+                engine=model.runtime.value,
+                upstream="",
+                model_id=model.id,
+            )
+            if overrides:
+                console.print(f"  for this run: {escape(overrides.describe())}")
             if dry_run:
-                # `plan`, not `start --dry-run`: a swap preview writes nothing.
-                plan(model_id=model.id or name, profile=None, gpus="auto", cpu=False)
+                # A plan, not `start --dry-run`: a swap preview writes nothing.
+                _print_launch_plan(SessionService(db).plan(request))
+                if save:
+                    _save_run_settings(row, overrides, dry_run=True)
                 raise typer.Exit(0)
             _confirm_state_change(
                 f"Start {model.name} ({model.runtime.value})",
                 required=settings.scheduler.require_confirmation_for_start,
                 assume_yes=yes,
             )
-            start(
-                model_id=model.id or name,
-                profile=None,
-                gpus="auto",
-                cpu=False,
-                force=False,
-                dry_run=False,
-            )
+            _start_request(db, request)
+            if save:
+                _save_run_settings(row, overrides, dry_run=False)
             raise typer.Exit(0)
         # no-preset: a vLLM checkpoint swap cannot serve until a preset exists.
         if dry_run:
