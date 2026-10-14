@@ -26,7 +26,10 @@ def test_cli_help_lists_required_commands() -> None:
     assert result.exit_code == 0
     output = result.output
     listed_names = re.findall(r"^│ ([a-z-]+)\s", output, re.M)
-    for command in ["add", "run", "ls", "stop", "rm", "status", "logs", "doctor", "tui", "help"]:
+    for command in [
+        "setup", "add", "run", "settings", "ls", "stop", "rm",
+        "status", "logs", "doctor", "tui", "help",
+    ]:
         assert command in listed_names, (command, listed_names)
     # Advanced verbs are hidden from the front page, not removed.
     for command in [

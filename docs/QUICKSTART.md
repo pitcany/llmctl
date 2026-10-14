@@ -90,6 +90,23 @@ sglang.launch_server`, `ft serve`, Strata's `serve/server.py`); waits until
 LM Studio models need nothing started — their servers load a model on the
 first request.
 
+### Change GPUs, context or memory
+
+```bash
+llmctl settings NAME                          # what NAME runs with, and where that is stored
+llmctl run NAME --tp 1 --max-len 32768        # this run only
+llmctl run NAME --max-len 32768 --save        # keep it for every later run
+llmctl settings NAME --edit                   # open a vLLM preset in $EDITOR
+```
+
+`--tp` is the number of GPUs, `--max-len` the context length in tokens and
+`--gpu-mem` the share of GPU memory (0.05 to 1). `--save` writes only after
+the model started, into the vLLM preset file (only the changed lines; comments
+stay) or, for the engines llmctl starts as sessions, into the model's profile.
+llama.cpp has no memory share and picks its GPUs from the model size, so it
+takes `--max-len` and a one-run `--tp`. Ollama, LM Studio and router lanes
+keep their own settings; llmctl refuses the flags for them.
+
 Then:
 
 ```bash

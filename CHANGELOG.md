@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `llmctl run NAME --tp N --max-len N --gpu-mem F` changes GPUs, context
+  and memory share for one run on any engine llmctl starts; `--save` keeps
+  them, in the vLLM preset (line edits, comments kept) or the model's
+  profile (created and linked when it has none; a profile shared by several
+  models is refused). `llmctl settings NAME [--edit]` shows those values and
+  where they live. Direct SGLang/FreeToken/Strata starts from `run` now use
+  the model's default profile.
 - `llmctl setup ENGINE` installs an engine so `run` can use it, recorded in
   `engines.yaml` (no settings.yaml edit): vLLM/SGLang/FreeToken in their own
   venvs (uv, or the stdlib venv), llama.cpp from the GitHub release matched

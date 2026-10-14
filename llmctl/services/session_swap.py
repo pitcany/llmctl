@@ -328,12 +328,15 @@ def session_target(
     )
 
 
-def start_request_fields(record: Any, cards: int) -> dict[str, Any]:
+def start_request_fields(
+    record: Any, cards: int, parameters: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """The session start request a swap makes for ``record`` on ``cards`` GPUs.
 
     The model's default profile rides along, so per-model launch settings
     (a pinned port, extra flags) apply to swaps too. The placement's card
-    count overrides any tensor_parallel_size the profile carries.
+    count overrides any tensor_parallel_size the profile carries; ``parameters``
+    (``run --max-len`` and friends) override the profile for this start.
     """
     return {
         "model_id": record.id,
@@ -341,12 +344,17 @@ def start_request_fields(record: Any, cards: int) -> dict[str, Any]:
         "profile_id": record.default_profile_id or None,
         "gpus_auto": True,
         "dry_run": False,
-        "parameters": {"tensor_parallel_size": cards},
+        "parameters": {**(parameters or {}), "tensor_parallel_size": cards},
     }
 
 
 def run_session_swap(
-    state: Any, target: Any, *, settings: Any, deps: LaneSwapDeps | None = None
+    state: Any,
+    target: Any,
+    *,
+    settings: Any,
+    deps: LaneSwapDeps | None = None,
+    parameters: dict[str, Any] | None = None,
 ) -> SessionSwapResult:
     """:func:`swap_to_session` against the real registry and systemd."""
     from sqlmodel import Session
@@ -365,7 +373,8 @@ def run_session_swap(
         def start(cards: int) -> Any:
             if record is None or runtime is None:
                 raise ValueError(f"model {target.key} is no longer registered")
-            return service.start(SessionStartRequest(**start_request_fields(record, cards)))
+            fields = start_request_fields(record, cards, parameters)
+            return service.start(SessionStartRequest(**fields))
 
         return swap_to_session(
             target.key,

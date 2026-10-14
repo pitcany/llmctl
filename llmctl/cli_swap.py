@@ -212,10 +212,17 @@ def run_lane_swap(state: SwapState, target: SwapTarget, console: Console) -> Non
     raise typer.Exit(1)
 
 
-def run_session_swap(state: SwapState, target: SwapTarget, console: Console) -> None:
+def run_session_swap(
+    state: SwapState,
+    target: SwapTarget,
+    console: Console,
+    parameters: dict | None = None,
+) -> None:
     """Free the GPUs and start a llama.cpp model; exit 1 after rolling back."""
     deps = LaneSwapDeps(log=lambda m: console.print(escape(m)))
-    result = run_session_swap_service(state, target, settings=load_settings(), deps=deps)
+    result = run_session_swap_service(
+        state, target, settings=load_settings(), deps=deps, parameters=parameters
+    )
     if result.ok:
         session = result.session
         sid = (getattr(session, "id", "") or "")[:8]
