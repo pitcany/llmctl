@@ -16,6 +16,7 @@ from pathlib import Path
 
 from sqlmodel import Session
 
+from llmctl.config import RuntimeConfig
 from llmctl.db import RuntimeName, get_engine, init_db
 from llmctl.schemas import ProfileCreate, SessionStartRequest
 from llmctl.services.profiles import ProfileService
@@ -68,9 +69,10 @@ def test_profile_environment_beats_the_runtime_default(tmp_path: Path) -> None:
     db = _db(tmp_path)
     try:
         service = SchedulerService(db)
-        runtime_env = dict(service.settings.runtimes["llama_cpp"].env)
-        runtime_env["LLAMA_GUARD_MIN_FREE_MIB"] = "25000"
-        service.settings.runtimes["llama_cpp"].env = runtime_env
+        # An explicit override, not whatever the developer's settings.yaml has.
+        service.settings.runtimes["llama_cpp"] = RuntimeConfig(
+            env={"LLAMA_GUARD_MIN_FREE_MIB": "25000"}
+        )
 
         pid = _profile(db, {"LLAMA_GUARD_MIN_FREE_MIB": "40000"})
         plan = service.create_launch_plan(

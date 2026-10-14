@@ -11,7 +11,28 @@ reason.
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# Done at import time, before any test module imports llmctl.cli: the module-
+# level Rich consoles read FORCE_COLOR when they are constructed, so a fixture
+# would be too late for them.
+os.environ.pop("FORCE_COLOR", None)
+os.environ["NO_COLOR"] = "1"
+os.environ["TERM"] = "dumb"
+os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
+
+
+@pytest.fixture(autouse=True)
+def _plain_terminal(monkeypatch) -> None:
+    """Rich/Typer must print plain text: tests assert on substrings of CLI
+    output, and `FORCE_COLOR` (set on some shells and CI runners) fills it
+    with escape codes that split the words apart."""
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("TERM", "dumb")
+    monkeypatch.setenv("_TYPER_FORCE_DISABLE_TERMINAL", "1")
 
 
 @pytest.fixture(autouse=True)
