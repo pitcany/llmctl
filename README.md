@@ -24,7 +24,7 @@ and keeps working under its old name.
 | `llmctl add SOURCE` | Fetch a model with its engine's own tool and remember it. The shape of SOURCE picks the engine: `Qwen/Qwen3-8B` is vLLM, `qwen3:8b` is Ollama, `unsloth/Qwen3-8B-GGUF:Q4_K_M` is llama.cpp; `--engine sglang\|freetoken` overrides. |
 | `llmctl run [NAME]` | Serve a model, whatever its engine. Stops what holds the GPUs, starts NAME, waits until it answers, puts the previous model back if it fails. No NAME: pick from a list. `--dry-run` shows the plan. |
 | `llmctl ls` | Everything you can `run`, and which one is serving now. |
-| `llmctl stop ID` | Stop a server llmctl started. |
+| `llmctl stop [NAME]` | Stop what is serving: the vLLM unit, a lane, or a server llmctl started. NAME is a session ID or a name from `ls`; several serving need NAME or `--all`. |
 | `llmctl rm NAME` | Forget a model (`--purge` deletes it from the engine and disk too). |
 | `llmctl status` | The managed units and what each serves. |
 | `llmctl logs [ID]` | Tail a server's log. |
@@ -217,7 +217,7 @@ to them.
 **Servers llmctl starts are "sessions".** llmctl runs `llama-server`,
 `sglang.launch_server` or `ft serve` itself (no systemd unit) and keeps a
 record of it: its process id, port, and status. That record is a session.
-`llmctl ls` shows them, and `llmctl stop ID` ends one. To go back to vLLM, run
+`llmctl ls` shows them, and `llmctl stop NAME` ends one. To go back to vLLM, run
 `llmctl run PRESET`.
 
 Removing is `llmctl model rm NAME` (`model delete` is the same command). Alone

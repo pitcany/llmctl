@@ -45,7 +45,7 @@ under `~/.local/share/llmctl/engines/`:
 | `sglang` | the same models, SGLang's scheduler | a venv with `sglang[all]` |
 | `freetoken` | big MoE models on one consumer GPU plus RAM | a venv with `freetoken[accel]` |
 | `strata` | Qwen3.8-Flash-Next on one GPU plus RAM | `git clone` + Strata's own `setup.sh` (downloads the model it picks for your RAM: 70–120 GB, an hour or more) |
-| `llama_cpp` | GGUF files, CPU or GPU, split across cards | the prebuilt `llama-server` from GitHub, CUDA build matched to your driver (needs Ubuntu 24.04's glibc; older distributions build from source, `setup` says how) |
+| `llama_cpp` | GGUF files, CPU or GPU, split across cards | the prebuilt `llama-server` from GitHub, CUDA build matched to your driver; on a glibc older than 2.38 (Ubuntu 22.04) it builds from source with git + cmake instead |
 | `ollama` | many small models loaded on demand | Ollama's installer (asks for sudo) |
 
 ```bash
@@ -113,7 +113,7 @@ Then:
 llmctl ls             # every model you can run; "serving" marks the live one
 llmctl status         # the managed units and what they serve
 llmctl logs ID        # tail a server llmctl started
-llmctl stop ID        # stop it
+llmctl stop           # stop what is serving (NAME or --all when several are)
 ```
 
 ### vLLM as a persistent unit
@@ -167,9 +167,13 @@ runtimes:
 
 ### `llama_cpp installed, but its prebuilt binary needs a newer glibc`
 
-The GitHub builds target Ubuntu 24.04 (glibc 2.38). On Ubuntu 22.04 and
-similar, build from source and point `runtimes.llama_cpp.binary` at
-`build/bin/llama-server`; the message prints the exact commands.
+The GitHub builds target Ubuntu 24.04 (glibc 2.38). `llmctl setup llama.cpp`
+builds from source on an older glibc by itself; to force it anywhere, run
+`llmctl setup llama.cpp --from-source`. It needs git, cmake and a C++ compiler
+(`sudo apt install git cmake build-essential`), plus the CUDA toolkit (nvcc)
+for a GPU build, and compiles for your cards only (10-30 minutes). If another
+toolchain (Homebrew's binutils, say) comes first on PATH, the build puts the
+compiler's own folder first so it links with the system linker.
 
 ### `sudo: a password is required`
 
