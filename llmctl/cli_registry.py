@@ -378,7 +378,7 @@ def model_edit(
         str | None,
         typer.Option(
             help=(
-                "Profile used by `llmctl start` and `llmctl swap` for this model "
+                "Profile used by `llmctl start` and `llmctl run` for this model "
                 "(name or id); `none` clears it."
             )
         ),
@@ -1018,22 +1018,27 @@ def register(app: typer.Typer) -> None:
     Called from ``llmctl.cli`` so the main module doesn't grow another
     several hundred lines of inline command definitions.
     """
-    app.add_typer(model_app, name="model")
-    app.add_typer(profile_app, name="profile")
+    app.add_typer(model_app, name="model", hidden=True)
+    app.add_typer(profile_app, name="profile", hidden=True)
+    app.command("add", help=_ADD_HELP)(model_add)
+    app.command("rm", help="Remove a model (`--purge` deletes it from its engine too).")(
+        model_delete
+    )
     profile_app.command("list", help="List launch profiles.")(profiles_cmd)
     app.command("profiles", hidden=True, help="Deprecated: use `profile list`.")(
         deprecated_alias(profiles_cmd, "profiles", "profile list")
     )
     app.command(
         "preview",
+        hidden=True,
         help=(
             "Show the launch plan for MODEL_ID incl. env and health URL; writes "
             "nothing (`plan` = terse + verdict, `start --dry-run` = records a row)."
         ),
     )(preview_cmd)
-    app.command("export-registry", help="Write registry bundle to JSON.")(
+    app.command("export-registry", hidden=True, help="Write registry bundle to JSON.")(
         export_registry_cmd
     )
-    app.command("import-registry", help="Read registry bundle from JSON.")(
+    app.command("import-registry", hidden=True, help="Read registry bundle from JSON.")(
         import_registry_cmd
     )

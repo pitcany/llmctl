@@ -1,6 +1,6 @@
 """How to serve a registered model, whatever its engine.
 
-``llmctl swap NAME`` is the one serve verb. Presets and plugin lanes are
+``llmctl run NAME`` is the one serve verb. Presets and plugin lanes are
 its own list; :func:`route` answers for every other registered model so the
 operator never has to know that llama.cpp rows start as sessions, that Ollama
 loads on demand, or that a vLLM checkpoint needs a preset first:

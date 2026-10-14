@@ -1,6 +1,6 @@
 """A stranger can serve vLLM: llmctl ships the launcher and writes the unit.
 
-Before this, `llmctl swap` restarted a `vllm-tp` unit that only existed on
+Before this, `llmctl run` restarted a `vllm-tp` unit that only existed on
 the author's machine, driven by a launcher script in that repo.
 """
 

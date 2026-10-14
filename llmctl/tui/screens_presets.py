@@ -212,7 +212,7 @@ class PresetsScreen(DataScreen):
 
         def _run() -> OrchestratorResult:
             # Lanes (FreeToken, llama.cpp) hold GPUs vLLM needs: stop them
-            # first and restart them if the launch fails, like `llmctl swap`.
+            # first and restart them if the launch fails, like `llmctl run`.
             active = gather_state(settings).active_lanes()
             result, lanes = swap_to_vllm(
                 active,

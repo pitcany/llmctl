@@ -1,4 +1,4 @@
-"""``llmctl swap`` front end: the picker, the preview, and the lane path.
+"""``llmctl run`` front end: the picker, the preview, and the lane path.
 
 The vLLM path still runs through :func:`start_vllm_tp` in ``cli.py``; this
 module adds what is shared by both paths (list, preview, confirmation) and
@@ -46,7 +46,9 @@ from llmctl.services.session_swap import (
 def render_table(state: SwapState, console: Console) -> None:
     """Numbered swap list: model, engine, key, cards, state, last load time."""
     table = Table(
-        title="Swap targets", title_justify="left", caption="llmctl swap NAME  (or: llmctl swap)"
+        title="Models you can run",
+        title_justify="left",
+        caption="llmctl run NAME  (or: llmctl run)",
     )
     table.add_column("#", justify="right")
     table.add_column("Model")
@@ -76,11 +78,11 @@ def pick(state: SwapState, console: Console) -> SwapTarget:
     if not sys.stdin.isatty():
         console.print(
             "[red]No model given[/red] and stdin is not a terminal. "
-            "Run `llmctl swap NAME` with a name from the table."
+            "Run `llmctl run NAME` with a name from the table."
         )
         raise typer.Exit(2)
     answer = typer.prompt(
-        f"Swap to # (1-{len(state.catalog)}, Enter to cancel)",
+        f"Run # (1-{len(state.catalog)}, Enter to cancel)",
         default="",
         show_default=False,
     ).strip()
@@ -100,7 +102,7 @@ def print_preview(state: SwapState, target: SwapTarget, console: Console) -> boo
     """Print what the swap will do. Returns False when there is nothing to do."""
     preview = state.preview(target)
     console.print(
-        f"[bold]Swap to {escape(target.model)}[/bold] ({target.engine}, `{escape(target.key)}`)"
+        f"[bold]Run {escape(target.model)}[/bold] ({target.engine}, `{escape(target.key)}`)"
     )
     for line in preview.lines():
         console.print(f"  {escape(line)}")
@@ -224,7 +226,7 @@ def run_session_swap(state: SwapState, target: SwapTarget, console: Console) -> 
         )
         console.print(
             f"  Stop it: llmctl stop {sid}   ·   go back to what was serving: "
-            f"llmctl swap {escape(_previous_preset(state) or 'PRESET')}"
+            f"llmctl run {escape(_previous_preset(state) or 'PRESET')}"
         )
         return
     console.print(f"[red]Swap failed:[/red] {escape(result.error or 'unknown error')}")

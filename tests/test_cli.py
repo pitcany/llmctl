@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 from typer.testing import CliRunner
@@ -24,26 +25,18 @@ def test_cli_help_lists_required_commands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     output = result.output
+    listed_names = re.findall(r"^│ ([a-z-]+)\s", output, re.M)
+    for command in ["add", "run", "ls", "stop", "rm", "status", "logs", "doctor", "tui", "help"]:
+        assert command in listed_names, (command, listed_names)
+    # Advanced verbs are hidden from the front page, not removed.
     for command in [
-        "scan",
-        "models",
-        "gpus",
-        "sessions",
-        "model",
-        "start",
-        "stop",
-        "restart",
-        "logs",
-        "bench",
-        "tui",
-        "serve",
-        "generate-systemd",
-        "adopt",
-        "adopt-managed",
-        "detach",
-        "reconcile",
+        "scan", "gpus", "sessions", "model", "start", "restart", "bench", "serve",
+        "generate-systemd", "adopt", "adopt-managed", "detach", "reconcile",
     ]:
-        assert command in output
+        assert command not in listed_names, command
+        assert runner.invoke(app, [command, "--help"]).exit_code == 0, command
+    listed = runner.invoke(app, ["help", "--all"]).output
+    assert "adopt-managed" in listed and "generate-systemd" in listed
 
 
 @_SKIP_HELP_RENDER_ON_CI

@@ -2,7 +2,7 @@
 
 `coder1` and `gemma1` are two models on ollama-gpu1 (:11435). Ollama's
 /v1/models lists every installed model, so both lanes read "serving" whenever
-the unit was up, and `llmctl swap gemma1` said "nothing to do" while Qwen was
+the unit was up, and `llmctl run gemma1` said "nothing to do" while Qwen was
 loaded. Ollama lanes are now judged by /api/ps, and a lane whose sibling is
 serving is neither "loading" nor something a swap stops.
 """

@@ -55,6 +55,14 @@ class _SuggestingGroup(typer.core.TyperGroup):
     here, only when the error carries none, gives one hint on every version.
     """
 
+    #: Front-page order: the everyday verbs in the order a new user meets them.
+    FRONT = ("add", "run", "ls", "stop", "rm", "status", "logs", "doctor", "tui", "help")
+
+    def list_commands(self, ctx: Any) -> list[str]:
+        names = list(super().list_commands(ctx))
+        rank = {name: i for i, name in enumerate(self.FRONT)}
+        return sorted(names, key=lambda n: (rank.get(n, len(rank)), names.index(n)))
+
     def resolve_command(self, ctx: Any, args: list[str]) -> Any:
         try:
             return super().resolve_command(ctx, args)
@@ -79,7 +87,8 @@ class _SuggestingGroup(typer.core.TyperGroup):
 app = typer.Typer(
     name="llmctl",
     cls=_SuggestingGroup,
-    help="Local-first mission control scaffold for LLM runtimes.",
+    help="Run models on vLLM, SGLang, FreeToken, llama.cpp, Ollama or LM Studio from one place.",
+    epilog="More commands: llmctl help --all",
     no_args_is_help=True,
     # -h everywhere: Click contexts inherit help_option_names from the parent,
     # so this one setting reaches every subcommand and sub-typer.
@@ -186,7 +195,7 @@ _JSON_OPT = Annotated[
 ]
 
 
-@app.command()
+@app.command(hidden=True)
 def scan(
     do_import: Annotated[
         bool,
@@ -263,7 +272,7 @@ app.command("models", hidden=True, help="Deprecated: use `model list`.")(
 )
 
 
-@app.command()
+@app.command(hidden=True)
 def gpus(json_out: _JSON_OPT = False) -> None:
     """Show NVIDIA GPU telemetry."""
     gpus_info = get_gpu_info()
@@ -307,7 +316,7 @@ def gpus(json_out: _JSON_OPT = False) -> None:
     console.print(table)
 
 
-@app.command("sessions")
+@app.command("sessions", hidden=True)
 def sessions_cmd(
     fresh: Annotated[
         bool,
@@ -506,7 +515,7 @@ def _print_plan_warnings(plan: object) -> None:
         console.print(f"[red]refusal:[/red] {escape(str(reason))}")
 
 
-@app.command()
+@app.command(hidden=True)
 def start(
     model_id: Annotated[str, typer.Argument(help="Model ID to launch.")],
     profile: Annotated[
@@ -547,7 +556,7 @@ def start(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(hidden=True)
 def plan(
     model_id: Annotated[str, typer.Argument(help="Model ID to plan a launch for.")],
     profile: Annotated[str | None, typer.Option(help="Profile name.")] = None,
@@ -636,7 +645,7 @@ def doctor(json_out: _JSON_OPT = False) -> None:
         raise typer.Exit(code=1)
 
 
-@app.command()
+@app.command(hidden=True)
 def cleanup(
     remove_stale: Annotated[
         bool,
@@ -668,7 +677,7 @@ def cleanup(
         )
 
 
-@app.command()
+@app.command(hidden=True)
 def reconcile() -> None:
     """Synchronize tracked sessions with reality.
 
@@ -686,7 +695,7 @@ def reconcile() -> None:
         console.print("[cyan]Reconcile complete.[/cyan] no changes.")
 
 
-@app.command("start-unit")
+@app.command("start-unit", hidden=True)
 def start_unit(
     unit: Annotated[str, typer.Argument(help="systemd unit name, e.g. gpt-oss-120b.")],
     dry_run: Annotated[
@@ -752,7 +761,7 @@ def stop(
         bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
     ] = False,
 ) -> None:
-    """Mark a session stopped safely."""
+    """Stop a running model that llmctl started (by session ID; `llmctl ls`)."""
     settings = load_settings()
     _confirm_state_change(
         f"Stop session {session_id}" + (" and its systemd unit" if systemd else ""),
@@ -779,7 +788,7 @@ def stop(
     console.print(f"[green]Session marked stopped[/green] {session_id}")
 
 
-@app.command()
+@app.command(hidden=True)
 def restart(
     session_id: Annotated[str, typer.Argument(help="Session ID to restart.")],
     systemd: Annotated[
@@ -833,7 +842,7 @@ def restart(
         raise typer.Exit(1)
 
 
-@app.command()
+@app.command(hidden=True)
 def pull(
     model: Annotated[str, typer.Argument(help="Ollama model tag, e.g. qwen3:32b.")],
 ) -> None:
@@ -891,7 +900,7 @@ def logs(
 config_app = typer.Typer(
     name="config", help="Show and validate llmctl configuration.", suggest_commands=False
 )
-app.add_typer(config_app, name="config")
+app.add_typer(config_app, name="config", hidden=True)
 
 
 def _settings_file_path() -> Path:
@@ -976,7 +985,7 @@ runtimes_app = typer.Typer(
     invoke_without_command=True,
     no_args_is_help=False,
 )
-app.add_typer(runtimes_app, name="runtimes")
+app.add_typer(runtimes_app, name="runtimes", hidden=True)
 
 
 @runtimes_app.callback()
@@ -1056,7 +1065,7 @@ def runtimes_inspect(
         console.print(f"    {key}: {mark}")
 
 
-@app.command()
+@app.command(hidden=True)
 def health(json_out: _JSON_OPT = False) -> None:
     """Live runtime probe: is each backend (vllm, ollama, ...) answering right now?
 
@@ -1133,7 +1142,7 @@ def _resolve_bench_target(
     )
 
 
-@app.command()
+@app.command(hidden=True)
 def bench(
     target: Annotated[
         str | None,
@@ -1310,7 +1319,7 @@ def _print_benchmark_result(result: object) -> None:
         )
 
 
-@app.command("benchmarks")
+@app.command("benchmarks", hidden=True)
 def benchmarks_cmd(
     benchmark_id: Annotated[
         str | None,
@@ -1395,7 +1404,7 @@ def tui() -> None:
     MissionControlApp().run()
 
 
-@app.command()
+@app.command(hidden=True)
 def serve(
     host: Annotated[str | None, typer.Option(help="Bind host; defaults to settings.")] = None,
     port: Annotated[int | None, typer.Option(help="Bind port; defaults to settings.")] = None,
@@ -1444,7 +1453,7 @@ def serve(
     )
 
 
-@app.command("generate-systemd")
+@app.command("generate-systemd", hidden=True)
 def generate_systemd(
     user: Annotated[bool, typer.Option(help="Generate a user service unit.")] = True,
     output: Annotated[
@@ -1458,7 +1467,7 @@ def generate_systemd(
     _emit_unit(unit, output)
 
 
-@app.command("generate-systemd-session")
+@app.command("generate-systemd-session", hidden=True)
 def generate_systemd_session(
     session_id: Annotated[str, typer.Argument(help="Session ID to persist.")],
     user: Annotated[bool, typer.Option(help="Generate a user service unit.")] = True,
@@ -1481,7 +1490,7 @@ def generate_systemd_session(
     _emit_unit(unit, output)
 
 
-@app.command("install-vllm-unit")
+@app.command("install-vllm-unit", hidden=True)
 def install_vllm_unit(
     role: Annotated[
         str, typer.Option(help="managed_units role to write the unit for.")
@@ -1497,7 +1506,7 @@ def install_vllm_unit(
         ),
     ] = True,
 ) -> None:
-    """Write the systemd unit `llmctl swap` restarts (shipped launcher; sudo)."""
+    """Write the systemd unit `llmctl run` restarts (shipped launcher; sudo)."""
     from llmctl.services.systemd import install_unit, render_vllm_unit
 
     settings = load_settings()
@@ -1523,10 +1532,10 @@ def install_vllm_unit(
         console.print("Re-run with --no-dry-run to install it.")
     else:
         env_file = roles[role].resolve_env_file()
-        console.print(f"Next: llmctl swap <preset>  # writes {escape(str(env_file))}")
+        console.print(f"Next: llmctl run <preset>  # writes {escape(str(env_file))}")
 
 
-@app.command("install-systemd")
+@app.command("install-systemd", hidden=True)
 def install_systemd(
     session_id: Annotated[
         str | None, typer.Option(help="Install a session unit instead of the API unit.")
@@ -1664,11 +1673,28 @@ def help_cmd(
     command: Annotated[
         list[str] | None, typer.Argument(help="Command (and subcommand) to explain.")
     ] = None,
+    show_all: Annotated[
+        bool, typer.Option("--all", "-a", help="Also list the advanced and legacy commands.")
+    ] = False,
 ) -> None:
     """Show help for llmctl or for COMMAND (same as `llmctl COMMAND --help`)."""
     root = ctx.find_root()
     group = root.command
     target_ctx = root
+    if show_all and not command:
+        console.print(group.get_help(target_ctx), highlight=False, markup=False)
+        console.print("\nAdvanced and legacy commands (all still work):")
+        names = group.list_commands(target_ctx)
+        for name in names:
+            sub = group.get_command(target_ctx, name)
+            if sub is None or not getattr(sub, "hidden", False):
+                continue
+            summary = " ".join((sub.help or "").split())
+            summary = summary.split(". ")[0].rstrip(".")
+            if len(summary) > 70:
+                summary = summary[:67] + "..."
+            console.print(f"  {name:<26} {summary}", highlight=False, markup=False)
+        return
     for name in command or []:
         # Typer >= 0.27 vendors click, so its groups are not click.Group instances.
         get = getattr(group, "get_command", None)
@@ -1680,21 +1706,25 @@ def help_cmd(
     console.print(group.get_help(target_ctx), highlight=False, markup=False)
 
 
-_SWAP_HELP = (
-    "Serve a model: the one verb for every engine. NAME is a vLLM preset, a lane "
-    "a plugin lists (FreeToken, llama.cpp, ...), or any registered "
-    "model (`llmctl models`): a vLLM checkpoint swaps to its preset (offering to "
-    "write one), a llama.cpp row starts as a session, Ollama/LM Studio say they "
-    "load on demand. With no NAME, pick from a list. "
-    "Shows what stops and starts before asking. MUTATES: frees the GPUs "
-    "(vllm-tp, other lanes, ollama, plugin companions) and starts NAME; a failed start "
-    "rolls back to what was serving. --list prints the list; --dry-run previews."
+_RUN_HELP = (
+    "Run a model: the one verb for every engine. NAME is anything `llmctl ls` lists "
+    "(a model you added, a vLLM preset, a lane). Whatever holds the GPUs is stopped "
+    "first, NAME is started, and a failed start puts the previous model back. "
+    "Ollama and LM Studio models need nothing started: they load on first request. "
+    "With no NAME, pick from the list. Shows what stops and starts before asking. "
+    "--dry-run previews without changing anything."
 )
+_OLD_RUN_NAMES = ("swap", "switch", "vllm")
 
 
-@app.command("swap", help=_SWAP_HELP)
-@app.command("switch", help=_SWAP_HELP, hidden=True)
-@app.command("vllm", help="Deprecated alias of `swap`. " + _SWAP_HELP)
+@app.command(
+    "run",
+    help=_RUN_HELP,
+    short_help="Run a model on its engine: stops what holds the GPUs, starts it, waits.",
+)
+@app.command("swap", help=_RUN_HELP, hidden=True)
+@app.command("switch", help=_RUN_HELP, hidden=True)
+@app.command("vllm", help=_RUN_HELP, hidden=True)
 def vllm_cmd(
     ctx: typer.Context,
     preset: Annotated[
@@ -1733,10 +1763,10 @@ def vllm_cmd(
         bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
     ] = False,
 ) -> None:
-    """Swap the TP-fleet vLLM unit onto PRESET (``swap``; ``vllm`` is the old name)."""
-    if ctx.info_name == "vllm":
+    """Run NAME on its engine (``run``; ``swap``, ``switch`` and ``vllm`` are old names)."""
+    if ctx.info_name in _OLD_RUN_NAMES:
         cli_registry.err_console.print(
-            "[dim]note: `llmctl vllm` is now `llmctl swap` (same command); "
+            f"[dim]note: `llmctl {escape(str(ctx.info_name))}` is now `llmctl run` (same command); "
             "the old name keeps working.[/dim]"
         )
     settings = load_settings()
@@ -1974,7 +2004,14 @@ def _print_rollback(result: object, tp_unit: str) -> None:
         console.print(f"    {escape(cmd)}")
 
 
-@app.command("presets")
+@app.command("ls")
+def ls_cmd() -> None:
+    """List every model you can run and which one is serving now."""
+    settings = load_settings()
+    cli_swap.render_table(gather_state(settings), console)
+
+
+@app.command("presets", hidden=True)
 def presets_cmd(json_out: _JSON_OPT = False) -> None:
     """List preset aliases known to llmctl."""
     views = load_preset_views()
@@ -2072,7 +2109,7 @@ def status_cmd(json_out: _JSON_OPT = False) -> None:
     console.print(table)
 
 
-@app.command("validate")
+@app.command("validate", hidden=True)
 def validate_cmd(json_out: _JSON_OPT = False) -> None:
     """Registry integrity: does everything llmctl records still exist where recorded?
 
@@ -2141,7 +2178,7 @@ def _router_url(settings: object) -> str:
     return f"http://{host}:{router.port}"
 
 
-@app.command("gateway")
+@app.command("gateway", hidden=True)
 def gateway_cmd(
     host: Annotated[str | None, typer.Option(help="Bind host; defaults to router.host.")] = None,
     port: Annotated[int | None, typer.Option(help="Bind port; defaults to router.port.")] = None,
@@ -2168,7 +2205,7 @@ def gateway_cmd(
     uvicorn.run(create_gateway_app(settings), host=bind_host, port=bind_port)
 
 
-@app.command("router-status")
+@app.command("router-status", hidden=True)
 def router_status_cmd() -> None:
     """The llmctl gateway (`llmctl gateway`): is it up, and which alias routes where?
 
@@ -2228,7 +2265,7 @@ def router_status_cmd() -> None:
     console.print(table)
 
 
-@app.command("aliases")
+@app.command("aliases", hidden=True)
 def aliases_cmd() -> None:
     """List configured router aliases and their resolved targets."""
     from llmctl.services.gateway import GatewayService
@@ -2262,7 +2299,7 @@ def aliases_cmd() -> None:
     console.print(table)
 
 
-@app.command("set-alias")
+@app.command("set-alias", hidden=True)
 def set_alias_cmd(
     alias: Annotated[str, typer.Argument(help="Alias role (e.g. coding, reasoning).")],
     target: Annotated[
@@ -2327,7 +2364,7 @@ def _print_adopted(session: object, *, prefix: str = "Adopted") -> None:
     )
 
 
-@app.command("adopt")
+@app.command("adopt", hidden=True)
 def adopt_cmd(
     endpoint: Annotated[
         str,
@@ -2391,7 +2428,7 @@ def adopt_cmd(
     _print_adopted(session)
 
 
-@app.command("adopt-managed")
+@app.command("adopt-managed", hidden=True)
 def adopt_managed_cmd(
     role: Annotated[
         str | None,
@@ -2468,7 +2505,7 @@ def adopt_managed_cmd(
         raise typer.Exit(1)
 
 
-@app.command("detach")
+@app.command("detach", hidden=True)
 def detach_cmd(
     session_id: Annotated[str, typer.Argument(help="ADOPTED session id to remove from tracking.")],
 ) -> None:

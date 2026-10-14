@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- One verb per intent: `llmctl add`, `run`, `stop`, `ls`, `rm`, `status`,
+  `logs`, `doctor`, `tui`, `help`. `swap`/`switch`/`vllm` are hidden aliases
+  of `run`; the thirty advanced and legacy verbs still work and are listed
+  by `llmctl help --all`.
 - Plugin seam (`llmctl.plugins`, entry-point group `llmctl.plugins`):
   companions paused around a vLLM launch, post-start checks, lane sources
   and command hooks. The Harbor, Hermes, llm-router and model-lab glue
