@@ -131,6 +131,34 @@ def test_strata_command_runs_the_server_on_its_config(tmp_path: Path, monkeypatc
     assert any("strata is not installed" in r for r in plan.refusal_reasons)
 
 
+def test_strata_request_parameters_cannot_pick_the_script_or_leak_a_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`POST /sessions/start` carries parameters; neither a script path nor an
+    API key may travel from there into the command line."""
+    config = tmp_path / "strata-x.json"
+    config.write_text('{"exe": "/x/strata", "args": []}')
+    monkeypatch.setattr(scheduler_mod, "_strata_server_for", lambda py: Path("/x/serve/server.py"))
+    with _db(tmp_path) as db:
+        model = ModelRecord(name="m", runtime=RuntimeName.STRATA, path=str(config))
+        db.add(model)
+        db.commit()
+        db.refresh(model)
+        scheduler = SchedulerService(db)
+        scheduler.settings.runtimes["strata"] = RuntimeConfig(binary="/definitely/missing")
+        plan = scheduler.create_launch_plan(
+            SessionStartRequest(
+                model_id=model.id,
+                runtime=RuntimeName.STRATA,
+                gpu_ids=[0],
+                parameters={"server": "/tmp/evil.py", "api_key": "s3cret"},
+                dry_run=True,
+            )
+        )
+    assert plan.command[1] == "/x/serve/server.py"
+    assert "/tmp/evil.py" not in plan.command and "s3cret" not in " ".join(plan.command)
+
+
 # --- adapters -----------------------------------------------------------------------
 
 
