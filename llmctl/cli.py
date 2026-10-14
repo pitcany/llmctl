@@ -2305,7 +2305,13 @@ def setup_cmd(
         console.print("Install one: llmctl setup ENGINE")
         return
     try:
-        plan = eng.plan_setup(engine, settings=settings, python=python, extra=list(ctx.args))
+        plan = eng.plan_setup(
+            engine,
+            settings=settings,
+            python=python,
+            extra=list(ctx.args),
+            from_source=from_source,
+        )
     except eng.SetupError as exc:
         console.print(f"[red]{escape(str(exc))}[/red]")
         raise typer.Exit(2) from exc
@@ -2353,6 +2359,14 @@ def _register_strata_config(config: Path) -> None:
             result = ModelOps(db).add(plan)
         console.print(f"  registered {escape(result.model.name)} ({escape(str(config))})")
     except (ModelOpsError, Exception) as exc:  # noqa: BLE001 - setup succeeded; report only
+    from_source: Annotated[
+        bool,
+        typer.Option(
+            "--from-source",
+            help="llama.cpp: build it with git + cmake instead of downloading a build "
+            "(automatic when glibc is older than the prebuilt builds need).",
+        ),
+    ] = False,
         console.print(
             f"  [yellow]could not register {escape(str(config))}: {escape(str(exc))}[/yellow] "
             f"— run: llmctl add {escape(str(config))} --engine strata"

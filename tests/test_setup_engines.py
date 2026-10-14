@@ -28,6 +28,11 @@ def _deps(**over):
         log=lambda m: None,
         run=lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
         stream=lambda argv: 0,
+        # A glibc new enough for the prebuilt builds, whatever the test host has.
+        glibc=lambda: (2, 39),
+        nvcc=lambda: "/usr/local/cuda/bin/nvcc",
+        cuda_archs=lambda: ["120"],
+        cpus=lambda: 8,
     )
     base.update(over)
     return eng.SetupDeps(**base)
@@ -232,7 +237,150 @@ def test_a_binary_that_cannot_run_is_not_recorded(tmp_path) -> None:
         download=download,
         run=lambda argv: subprocess.CompletedProcess(argv, 1, "", glibc),
     )
-    with pytest.raises(eng.SetupError, match="newer glibc"):
+    with pytest.raises(eng.SetupError, match="newer glibc") as err:
         eng.run_setup(plan, settings=settings, deps=deps)
+    assert "llmctl setup llama.cpp --from-source" in str(err.value)
     assert binary.exists()  # unpacked, so the operator can inspect it
     assert not (tmp_path / "cfg" / "engines.yaml").exists()
+
+
+# --- llama.cpp from source ------------------------------------------------------------
+
+_TOOLS = {"git": "/usr/bin/git", "cmake": "/usr/bin/cmake", "g++": "/usr/bin/g++"}
+_RELEASES = [{"tag_name": "b11624", "assets": _ASSETS}]
+
+
+def _source_deps(**over):
+    base = dict(which=_TOOLS.get, fetch_json=lambda url: _RELEASES)
+    base.update(over)
+    return _deps(**base)
+
+
+def test_an_old_glibc_builds_llama_cpp_from_source(tmp_path) -> None:
+    plan = eng.plan_setup(
+        "llama_cpp", settings=_settings(tmp_path), deps=_source_deps(glibc=lambda: (2, 35))
+    )
+    src = tmp_path / "data" / "engines" / "llama_cpp" / "src"
+    assert plan.problem is None and plan.downloads == []
+    assert "glibc 2.35" in plan.steps[0] and "2.38" in plan.steps[0]
+    clone, configure, build = plan.commands
+    assert clone[:5] == ["git", "clone", "--depth", "1", "--branch"] and clone[5] == "b11624"
+    assert clone[-1] == str(src)
+    assert "-DGGML_CUDA=ON" in configure
+    assert "-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc" in configure
+    assert "-DCMAKE_CUDA_ARCHITECTURES=120" in configure
+    assert build[-4:] == ["-j", "8", "--target", "llama-server"]
+    assert plan.record["binary"] == str(src / "build" / "bin" / "llama-server")
+    assert plan.record["flavour"] == "source, CUDA sm 120"
+
+
+def test_from_source_is_a_choice_on_a_new_glibc_too(tmp_path) -> None:
+    plan = eng.plan_setup(
+        "llama_cpp", settings=_settings(tmp_path), deps=_source_deps(), from_source=True
+    )
+    assert plan.commands and not plan.downloads
+    assert "glibc" not in plan.steps[0]
+
+
+def test_a_source_build_without_a_driver_is_a_cpu_build(tmp_path) -> None:
+    plan = eng.plan_setup(
+        "llama_cpp",
+        settings=_settings(tmp_path),
+        deps=_source_deps(driver_cuda=lambda: None),
+        from_source=True,
+    )
+    assert not any(arg.startswith("-DGGML_CUDA") for arg in plan.commands[1])
+    assert plan.record["flavour"] == "source, CPU"
+
+
+@pytest.mark.parametrize(
+    ("over", "fragment"),
+    [
+        ({"which": {"git": "/usr/bin/git"}.get}, "needs cmake, a C++ compiler"),
+        ({"nvcc": lambda: None}, "no CUDA toolkit"),
+    ],
+)
+def test_a_source_build_says_what_is_missing(tmp_path, over, fragment) -> None:
+    plan = eng.plan_setup(
+        "llama_cpp", settings=_settings(tmp_path), deps=_source_deps(**over), from_source=True
+    )
+    assert plan.problem and fragment in plan.problem
+
+
+def test_from_source_is_for_llama_cpp_only(tmp_path) -> None:
+    with pytest.raises(eng.SetupError, match="llama.cpp only"):
+        eng.plan_setup("vllm", settings=_settings(tmp_path), deps=_deps(), from_source=True)
+
+
+def test_run_setup_builds_and_records_the_built_binary(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    plan = eng.plan_setup("llama_cpp", settings=settings, deps=_source_deps(), from_source=True)
+    src = Path(plan.commands[0][-1])
+    src.mkdir(parents=True)
+    (src / "stale").write_text("from an earlier build")
+    ran: list[list[str]] = []
+
+    def stream(argv):
+        ran.append(list(argv))
+        if argv[0] == "git":
+            assert not src.exists()  # the earlier checkout was cleared first
+        if argv[:2] == ["cmake", "--build"]:
+            binary = Path(plan.record["binary"])
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\n")
+        return 0
+
+    deps = _source_deps(
+        stream=stream,
+        run=lambda argv: subprocess.CompletedProcess(argv, 0, "version: 1 (abc)\n", ""),
+    )
+    record = eng.run_setup(plan, settings=settings, deps=deps)
+    assert ran == plan.commands
+    assert record["binary"] == plan.record["binary"]
+    saved = yaml.safe_load((tmp_path / "cfg" / "engines.yaml").read_text())
+    assert saved["llama_cpp"]["flavour"] == "source, CUDA sm 120"
+
+
+def test_a_failed_build_records_nothing(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    plan = eng.plan_setup("llama_cpp", settings=settings, deps=_source_deps(), from_source=True)
+    deps = _source_deps(stream=lambda argv: 2 if argv[:2] == ["cmake", "--build"] else 0)
+    with pytest.raises(eng.SetupError, match="exit 2"):
+        eng.run_setup(plan, settings=settings, deps=deps)
+    assert not (tmp_path / "cfg" / "engines.yaml").exists()
+
+
+def test_a_linker_from_another_toolchain_is_kept_out_of_the_build(tmp_path) -> None:
+    tools = {**_TOOLS, "c++": "/usr/bin/c++", "ld": "/home/linuxbrew/.linuxbrew/bin/ld"}
+    settings = _settings(tmp_path)
+    plan = eng.plan_setup(
+        "llama_cpp", settings=settings, deps=_source_deps(which=tools.get), from_source=True
+    )
+    assert plan.env["PATH"].startswith("/usr/bin:")
+    assert any("links with its own linker" in step for step in plan.steps)
+    seen: list[str] = []
+
+    def stream(argv, env=None):
+        seen.append(env["PATH"] if env else "")
+        if argv[:2] == ["cmake", "--build"]:
+            binary = Path(plan.record["binary"])
+            binary.parent.mkdir(parents=True)
+            binary.write_text("")
+        return 0
+
+    deps = _source_deps(
+        which=tools.get,
+        stream=stream,
+        run=lambda argv: subprocess.CompletedProcess(argv, 0, "version: 1\n", ""),
+    )
+    eng.run_setup(plan, settings=settings, deps=deps)
+    assert seen and all(path.startswith("/usr/bin:") for path in seen)
+
+
+def test_the_system_linker_needs_no_path_change(tmp_path) -> None:
+    tools = {**_TOOLS, "c++": "/usr/bin/c++", "ld": "/usr/bin/ld"}
+    plan = eng.plan_setup(
+        "llama_cpp", settings=_settings(tmp_path), deps=_source_deps(which=tools.get),
+        from_source=True,
+    )
+    assert plan.env == {}
