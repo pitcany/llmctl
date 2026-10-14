@@ -70,11 +70,14 @@ def serving_now(state: Any) -> list[Serving]:
 
 
 def pick(items: list[Serving], name: str) -> list[Serving]:
-    """The items ``name`` selects: an exact name, or a session-id prefix."""
+    """The items ``name`` selects: an exact name, or an unambiguous session-id prefix."""
     exact = [item for item in items if name in item.names]
     if exact:
         return exact
-    return [i for i in items if i.kind == "session" and i.ref.startswith(name)]
+    # An id prefix picks a session only when exactly one fits: `stop 0` must
+    # never stop several sessions that happen to share a first character.
+    prefixed = [i for i in items if i.kind == "session" and i.ref.startswith(name)]
+    return prefixed if len(prefixed) == 1 else []
 
 
 @dataclass
