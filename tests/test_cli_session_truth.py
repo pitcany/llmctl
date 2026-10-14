@@ -35,6 +35,10 @@ class _StubService:
     def __init__(self, db, *a, **k) -> None:
         pass
 
+    def get_session(self, session_id):
+        # `stop ID` first checks the ID names a live session.
+        return _session(SessionStatus.RUNNING)
+
     def stop(self, session_id, *, stop_unit=False):
         return type(self).result
 
