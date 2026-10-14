@@ -92,12 +92,13 @@ required.
 
 ## Docs
 
-- **[Quickstart](../../docs/LLMCTL-QUICKSTART.md)** — install + first
+- **[Quickstart](docs/QUICKSTART.md)** — install + first
   command in 5 minutes
-- **[User guide](../../docs/LLMCTL-USER-GUIDE.md)** — full CLI/TUI
+- **[User guide](docs/USER-GUIDE.md)** — full CLI/TUI
   reference, configuration schema, integrations, troubleshooting
-- **[Workstation runbook](../../docs/RUNBOOK.md)** — broader
-  ~/AI context (Hermes routing, Harbor services, Tailscale, etc.)
+- **Workstation runbook** — the author's stack around llmctl (Hermes
+  routing, Harbor services, Tailscale) lives in `pitcany/AI`,
+  `docs/RUNBOOK.md`
 
 ## Quick taste
 
