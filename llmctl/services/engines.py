@@ -22,7 +22,9 @@ How each engine is installed:
   when uv is missing) with the engine's wheel in it.
 * llama.cpp: the prebuilt ``llama-server`` from the latest GitHub release,
   CUDA build matched to the driver when there is an NVIDIA GPU, CPU build
-  otherwise.
+  otherwise. Those builds need glibc 2.38 (Ubuntu 24.04); on an older
+  system, or with ``--from-source``, the same release is cloned and built
+  with cmake instead (CUDA for this machine's GPUs when nvcc is present).
 * Strata: ``git clone`` of github.com/Niko1221/Strata plus its own
   ``setup.sh --yes --no-start`` (builds the engine, downloads the model it
   picks for the machine's RAM — 70-120 GB, an hour or more). The config
@@ -38,6 +40,7 @@ Everything that touches the network or the filesystem goes through
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import shutil
@@ -77,6 +80,8 @@ _PYTHON_ENGINES: dict[str, tuple[str, str]] = {
 }
 
 LLAMA_CPP_REPO = "ggml-org/llama.cpp"
+#: The glibc the prebuilt llama.cpp Ubuntu builds link against (Ubuntu 24.04).
+PREBUILT_MIN_GLIBC = (2, 38)
 OLLAMA_INSTALL_URL = "https://ollama.com/install.sh"
 
 
@@ -137,8 +142,8 @@ class SetupDeps:
     run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] = lambda argv: (
         subprocess.run(list(argv), capture_output=True, text=True, check=False)  # noqa: S603
     )
-    stream: Callable[[Sequence[str]], int] = lambda argv: subprocess.run(  # noqa: S603
-        list(argv), check=False
+    stream: Callable[..., int] = lambda argv, env=None: subprocess.run(  # noqa: S603
+        list(argv), check=False, env=env
     ).returncode
     which: Callable[[str], str | None] = shutil.which
     fetch_json: Callable[[str], Any] = lambda url: json.load(
@@ -150,6 +155,11 @@ class SetupDeps:
     driver_cuda: Callable[[], str | None] = lambda: _driver_cuda_version()
     machine: Callable[[], str] = platform.machine
     log: Callable[[str], None] = print
+    glibc: Callable[[], tuple[int, int] | None] = lambda: _glibc_version()
+    nvcc: Callable[[], str | None] = lambda: _find_nvcc()
+    #: Compute capabilities of the local GPUs as CMake wants them (``120``).
+    cuda_archs: Callable[[], list[str]] = lambda: _cuda_archs()
+    cpus: Callable[[], int] = lambda: os.cpu_count() or 4
 
 
 def _driver_cuda_version() -> str | None:
@@ -162,6 +172,40 @@ def _driver_cuda_version() -> str | None:
         return None
     match = re.search(r"CUDA Version:\s*([0-9]+\.[0-9]+)", out)
     return match.group(1) if match else None
+
+
+def _glibc_version() -> tuple[int, int] | None:
+    """``(2, 35)`` on glibc systems, None elsewhere (musl, macOS)."""
+    lib, version = platform.libc_ver()
+    match = re.match(r"^(\d+)\.(\d+)", version or "")
+    if lib != "glibc" or not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _find_nvcc() -> str | None:
+    """nvcc on PATH, or the toolkit's default location (often not on PATH)."""
+    found = shutil.which("nvcc")
+    if found:
+        return found
+    default = Path("/usr/local/cuda/bin/nvcc")
+    return str(default) if default.is_file() else None
+
+
+def _cuda_archs() -> list[str]:
+    """``["120"]`` for RTX 50-series cards; empty without nvidia-smi."""
+    try:
+        out = subprocess.run(  # noqa: S603 - fixed argv
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    archs = {line.strip().replace(".", "") for line in out.splitlines() if line.strip()}
+    return sorted(a for a in archs if a.isdigit())
 
 
 # --- plans ---------------------------------------------------------------------------
@@ -180,6 +224,10 @@ class SetupPlan:
     record: dict[str, Any] = field(default_factory=dict)
     #: The downloads, for the llama.cpp plan: (url, filename).
     downloads: list[tuple[str, str]] = field(default_factory=list)
+    #: The commands of a from-source build, run in order.
+    commands: list[list[str]] = field(default_factory=list)
+    #: Environment overrides for those commands (merged over the caller's).
+    env: dict[str, str] = field(default_factory=dict)
     problem: str | None = None
 
 
@@ -195,17 +243,33 @@ def plan_setup(
     deps: SetupDeps | None = None,
     python: str | None = None,
     extra: Sequence[str] = (),
+    from_source: bool = False,
 ) -> SetupPlan:
     """Decide the steps for ``engine`` without touching anything.
 
     ``extra`` is for engines with their own installer flags (Strata).
+    ``from_source`` builds llama.cpp with cmake instead of downloading it.
     """
     deps = deps or SetupDeps()
     engine = canonical_engine(engine)
+    if from_source and engine != "llama_cpp":
+        raise SetupError("--from-source applies to llama.cpp only.")
     target = engine_dir(engine, settings)
     if engine in _PYTHON_ENGINES:
         return _plan_python_engine(engine, target, deps, python)
     if engine == "llama_cpp":
+        glibc = deps.glibc()
+        if from_source:
+            return _plan_llama_cpp_source(target, deps, reason=None)
+        if sys.platform == "linux" and glibc is not None and glibc < PREBUILT_MIN_GLIBC:
+            have = ".".join(map(str, glibc))
+            need = ".".join(map(str, PREBUILT_MIN_GLIBC))
+            return _plan_llama_cpp_source(
+                target,
+                deps,
+                reason=f"this system has glibc {have}; the prebuilt builds need {need}, "
+                "so llama.cpp is built from source",
+            )
         return _plan_llama_cpp(target, deps)
     if engine == "strata":
         return _plan_strata(target, deps, extra)
@@ -338,6 +402,83 @@ def _plan_llama_cpp(target: Path, deps: SetupDeps) -> SetupPlan:
     return plan
 
 
+def _plan_llama_cpp_source(target: Path, deps: SetupDeps, *, reason: str | None) -> SetupPlan:
+    """Clone the latest llama.cpp release and build ``llama-server`` with cmake."""
+    plan = SetupPlan(engine="llama_cpp", install_dir=target)
+    missing = [tool for tool in ("git", "cmake") if not deps.which(tool)]
+    if not (deps.which("c++") or deps.which("g++")):
+        missing.append("a C++ compiler")
+    if missing:
+        plan.problem = (
+            f"Building llama.cpp needs {', '.join(missing)}. On Ubuntu: "
+            "sudo apt install git cmake build-essential, then run setup again."
+        )
+        return plan
+    cuda = deps.driver_cuda()
+    nvcc = deps.nvcc() if cuda else None
+    if cuda and not nvcc:
+        plan.problem = (
+            "This machine has an NVIDIA driver but no CUDA toolkit (nvcc), so a GPU build "
+            "is not possible. Install the toolkit (https://developer.nvidia.com/cuda-downloads) "
+            "and run setup again."
+        )
+        return plan
+    try:
+        releases = deps.fetch_json(f"https://api.github.com/repos/{LLAMA_CPP_REPO}/releases?per_page=10")
+    except Exception as exc:  # noqa: BLE001 - network
+        plan.problem = f"Could not list llama.cpp releases: {exc}"
+        return plan
+    tag = next((r.get("tag_name") for r in releases if r.get("tag_name")), None)
+    if tag is None:
+        plan.problem = "No llama.cpp release was found to build."
+        return plan
+    src = target / "src"
+    build = src / "build"
+    configure = [
+        "cmake", "-S", str(src), "-B", str(build),
+        "-DCMAKE_BUILD_TYPE=Release", "-DLLAMA_CURL=OFF", "-DLLAMA_BUILD_TESTS=OFF",
+    ]
+    if nvcc:
+        configure += ["-DGGML_CUDA=ON", f"-DCMAKE_CUDA_COMPILER={nvcc}"]
+        archs = deps.cuda_archs()
+        if archs:
+            configure.append(f"-DCMAKE_CUDA_ARCHITECTURES={';'.join(archs)}")
+        flavour = "source, CUDA" + (f" sm {', '.join(archs)}" if archs else "")
+    else:
+        flavour = "source, CPU"
+    plan.commands = [
+        ["git", "clone", "--depth", "1", "--branch", tag,
+         f"https://github.com/{LLAMA_CPP_REPO}.git", str(src)],
+        configure,
+        ["cmake", "--build", str(build), "--config", "Release",
+         "-j", str(deps.cpus()), "--target", "llama-server"],
+    ]
+    if reason:
+        plan.steps.append(reason)
+    plan.steps.append(
+        f"build llama.cpp {tag} ({flavour}) in {src}; a CUDA build takes 10-30 minutes"
+    )
+    # gcc finds its linker on PATH. A second toolchain earlier on PATH (Homebrew's
+    # binutils, say) links against that toolchain's libraries, which can need a
+    # newer glibc than this system has: put the compiler's own folder first.
+    cxx = deps.which("c++") or deps.which("g++")
+    ld = deps.which("ld")
+    if cxx and ld and Path(ld).parent != Path(cxx).parent:
+        first = str(Path(cxx).parent)
+        plan.env = {"PATH": f"{first}{os.pathsep}{os.environ.get('PATH', '')}"}
+        plan.steps.append(
+            f"put {first} first on PATH for the build, so {cxx} links with its own "
+            f"linker instead of {ld}"
+        )
+    plan.steps.extend(" ".join(cmd) for cmd in plan.commands)
+    plan.record = {
+        "binary": str(build / "bin" / "llama-server"),
+        "version": tag,
+        "flavour": flavour,
+    }
+    return plan
+
+
 def _plan_ollama(deps: SetupDeps) -> SetupPlan:
     plan = SetupPlan(engine="ollama", needs_sudo=True)
     found = deps.which("ollama")
@@ -415,6 +556,9 @@ def _install_python_engine(plan: SetupPlan, deps: SetupDeps) -> None:
 
 def _install_llama_cpp(plan: SetupPlan, deps: SetupDeps) -> None:
     assert plan.install_dir is not None
+    if plan.commands:
+        _build_llama_cpp(plan, deps)
+        return
     target = plan.install_dir
     target.mkdir(parents=True, exist_ok=True)
     downloads = target / "downloads"
@@ -442,6 +586,21 @@ def _install_llama_cpp(plan: SetupPlan, deps: SetupDeps) -> None:
                 shutil.copy2(item, dest)
     final.chmod(final.stat().st_mode | 0o111)
     shutil.rmtree(downloads, ignore_errors=True)
+
+
+def _build_llama_cpp(plan: SetupPlan, deps: SetupDeps) -> None:
+    assert plan.install_dir is not None
+    plan.install_dir.mkdir(parents=True, exist_ok=True)
+    src = plan.install_dir / "src"
+    if src.exists():
+        # A previous build of ours: `git clone` refuses a non-empty folder.
+        shutil.rmtree(src)
+    env = {**os.environ, **plan.env} if plan.env else None
+    for argv in plan.commands:
+        _must_stream(deps, argv, env=env)
+    binary = Path(plan.record["binary"])
+    if not binary.is_file():
+        raise SetupError(f"The build finished but {binary} is missing.")
 
 
 def _install_strata(plan: SetupPlan, deps: SetupDeps) -> None:
@@ -495,9 +654,9 @@ def _must(deps: SetupDeps, argv: Sequence[str]) -> None:
         raise SetupError(f"`{' '.join(argv)}` failed (exit {proc.returncode}): {detail}")
 
 
-def _must_stream(deps: SetupDeps, argv: Sequence[str]) -> None:
+def _must_stream(deps: SetupDeps, argv: Sequence[str], env: dict[str, str] | None = None) -> None:
     deps.log(f"  $ {' '.join(argv)}")
-    rc = deps.stream(argv)
+    rc = deps.stream(argv, env) if env else deps.stream(argv)
     if rc != 0:
         raise SetupError(f"`{' '.join(argv)}` failed (exit {rc}).")
 
@@ -507,10 +666,8 @@ def _explain_binary_failure(engine: str, failure: str) -> str:
         return (
             f"{engine} installed, but its prebuilt binary needs a newer glibc than this "
             f"system has ({failure.strip().splitlines()[0][:160]}). The GitHub builds "
-            "target Ubuntu 24.04. On an older distribution build it from source: "
-            "git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp && "
-            "cmake -B build -DGGML_CUDA=ON && cmake --build build --config Release -j, "
-            "then set runtimes.llama_cpp.binary to build/bin/llama-server in settings.yaml."
+            "target Ubuntu 24.04. Build it from source instead: "
+            "llmctl setup llama.cpp --from-source"
         )
     return f"{engine} installed, but its binary does not run: {failure.strip()[:400]}"
 
