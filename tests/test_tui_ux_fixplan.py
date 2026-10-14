@@ -385,12 +385,11 @@ def test_launch_effects_follow_settings_and_options() -> None:
     unit = ManagedUnitConfig(unit_name="vllm-alt", env_file_path="/srv/alt.env")
     fleet = FleetUnitsConfig(ollama="ollama-x", tp="vllm-alt")
     steps = describe_launch_effects(
-        unit, fleet, OrchestratorOptions(enable_hermes_verify=False, timeout_s=600)
+        unit, fleet, OrchestratorOptions(enable_post_start_checks=False, timeout_s=600)
     )
     text = " | ".join(steps)
     assert "ollama-x" in text and "/srv/alt.env" in text and "vllm-alt" in text
     assert "10 min" in text
-    assert "Hermes" not in text
 
 
 def test_missing_link_names_the_dangling_model_ref() -> None:

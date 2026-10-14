@@ -3,7 +3,7 @@
 ``llmctl vllm <preset>`` rewrites the env file and restarts the SINGLE TP
 unit, so a preset naming deleted weights evicts whatever is currently
 serving and only then fails to load. The refusal must fire before any side
-effect (fleet preflight stops ollama, Harbor stops the container, the
+effect (fleet preflight stops ollama, companions are stopped, the
 adapter writes the env file).
 
 HuggingFace repo ids must fail OPEN — they resolve from the HF cache or are
@@ -20,8 +20,6 @@ import pytest
 
 from llmctl.config import FleetUnitsConfig, ManagedUnitConfig
 from llmctl.integrations.fleet import FleetRole
-from llmctl.integrations.harbor import StopOutcome
-from llmctl.integrations.hermes import HermesStatus
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.services.vllm_orchestrator import (
     Dependencies,
@@ -61,7 +59,7 @@ class _ExplodingAdapter:
 
 def _deps(config_dir: Path) -> tuple[Dependencies, dict[str, list]]:
     """Dependencies whose side-effecting stubs record every invocation."""
-    log: dict[str, list] = {"preflight": [], "harbor": [], "hermes": []}
+    log: dict[str, list] = {"preflight": [], "companions": [], "checks": []}
 
     def fake_preflight(
         role: FleetRole, fleet: FleetUnitsConfig, sysctl: SystemctlRunner, **kw: Any
@@ -76,20 +74,36 @@ def _deps(config_dir: Path) -> tuple[Dependencies, dict[str, list]]:
 
         return _R()
 
-    def fake_harbor(*args: Any, **kwargs: Any) -> StopOutcome:
-        log["harbor"].append(kwargs)
-        return StopOutcome.NOT_RUNNING
+    class _Companion:
+        name = "container"
+        start_hint = "docker start container"
 
-    def fake_hermes(provider: str, **kwargs: Any) -> HermesStatus:
-        log["hermes"].append(provider)
-        return HermesStatus.OK
+        def stop(self, *, logger: Any) -> bool | None:
+            log["companions"].append("stop")
+            return None
+
+        def start(self, *, logger: Any) -> bool:
+            return True
+
+        def describe(self) -> str:
+            return "stops container"
+
+    class _Check:
+        name = "check"
+
+        def run(self, spec: Any, *, logger: Any) -> object:
+            log["checks"].append(spec.port)
+            return "ok"
+
+        def describe(self) -> str:
+            return "checks"
 
     deps = Dependencies(
         config_dir=config_dir,
         adapter_factory=_ExplodingAdapter,
         systemctl=SystemctlRunner(runner=lambda argv: None),  # type: ignore[arg-type]
-        harbor_stop=fake_harbor,
-        hermes_verify=fake_hermes,
+        companions=[_Companion()],
+        post_start_checks=[_Check()],
         fleet_preflight=fake_preflight,
         logger=lambda _: None,
     )
@@ -121,7 +135,7 @@ def test_missing_local_path_refuses(tmp_path: Path) -> None:
     assert str(gone) in str(excinfo.value)
     assert "--force" in str(excinfo.value)
     # Nothing was touched: no ollama stop, no container stop, no restart.
-    assert log == {"preflight": [], "harbor": [], "hermes": []}
+    assert log == {"preflight": [], "companions": [], "checks": []}
 
 
 def test_present_local_path_passes(tmp_path: Path) -> None:

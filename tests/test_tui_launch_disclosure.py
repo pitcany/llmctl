@@ -1,8 +1,8 @@
 """The preset launch is the widest-blast-radius action in the TUI.
 
-Confirming it stops ollama, stops the Harbor ollama container, rewrites
-vllm-tp.env, restarts the single machine-wide vLLM unit, blocks up to five
-minutes on readiness, and rewrites the Hermes provider. The dialog used to say
+Confirming it stops ollama, stops every plugin companion (e.g. a container),
+rewrites vllm-tp.env, restarts the single machine-wide vLLM unit, blocks up to
+five minutes on readiness, and runs the plugin checks. The dialog used to say
 only "Confirm to launch on the TP fleet unit (both GPUs)" — it disclosed none
 of that, and never showed which model was about to be terminated.
 """
@@ -28,6 +28,37 @@ def _isolated_tui(tmp_path, monkeypatch) -> None:
     database and probes every runtime. See ``llmctl._testing``.
     """
     isolate_tui(monkeypatch, tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _fake_plugins(monkeypatch) -> None:
+    """A registry with one companion and one check, so both lines must show."""
+    from llmctl import plugins
+
+    class _Companion:
+        name = "ollama-container"
+        start_hint = "docker start ollama-container"
+
+        def stop(self, *, logger):
+            return None
+
+        def start(self, *, logger):
+            return True
+
+        def describe(self) -> str:
+            return "stops the container ollama-container, if running"
+
+    class _Check:
+        name = "agent-config"
+
+        def run(self, spec, *, logger):
+            return "ok"
+
+        def describe(self) -> str:
+            return "verifies the agent-config provider"
+
+    reg = plugins.PluginRegistry(companions=[_Companion()], post_start_checks=[_Check()])
+    monkeypatch.setattr(plugins, "_registry", reg)
 
 
 def _view() -> PresetView:
@@ -72,7 +103,7 @@ def test_launch_modal_discloses_the_full_blast_radius() -> None:
 
     async def body(app, pilot) -> None:
         blob = _texts(app.screen).lower()
-        for expected in ("ollama", "harbor", "vllm-tp", "hermes"):
+        for expected in ("ollama", "ollama-container", "vllm-tp", "agent-config"):
             assert expected in blob, (
                 f"launch dialog never mentions {expected!r}: {blob}"
             )
@@ -120,7 +151,7 @@ def test_launch_modal_defaults_to_cancel() -> None:
 def test_failed_launch_reports_what_was_left_stopped(monkeypatch) -> None:
     """A failure mid-sequence leaves the box with no inference backend.
 
-    Fleet preflight stops ollama and the Harbor container before the vLLM
+    Fleet preflight stops ollama and the companions before the vLLM
     restart is attempted. Nothing rolls that back, so if the restart then
     fails the operator must be told what is now down — result.fleet_stopped
     carried the answer and was never used.

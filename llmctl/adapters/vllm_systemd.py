@@ -137,7 +137,7 @@ class VLLMSystemdAdapter:
         self._sleep = sleep
         self._http_get = http_get or _default_http_get
         # Hooks are deliberately list-typed (not single callables) so
-        # multiple integrations (hermes verify, harbor preflight, custom
+        # multiple integrations (post-start checks, companion stops, custom
         # notifiers) can stack without an aggregator pattern. Exceptions
         # from hooks abort the lifecycle; integrations should swallow
         # their own non-fatal warnings internally.

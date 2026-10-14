@@ -1551,7 +1551,7 @@ def _emit_unit(unit: object, output: Path | None) -> None:
 # Phase 5: gpu-models replacement verbs (vllm, slot, presets, status).
 # These wrap the high-level orchestrator in services/vllm_orchestrator.py;
 # the orchestrator owns lifecycle (preset load -> TQ -> preflight ->
-# adapter restart -> hermes verify) so the CLI is purely arg-parsing +
+# adapter restart -> post-start checks) so the CLI is purely arg-parsing +
 # result formatting.
 # ---------------------------------------------------------------------------
 
@@ -1831,10 +1831,9 @@ def _print_companions(result: object) -> None:
     pending = list(getattr(result, "companions_pending", []) or [])
     if restarted:
         console.print(f"  started again: {escape(', '.join(restarted))}")
+    hints = dict(getattr(result, "start_hints", {}) or {})
     for name in failed + pending:
-        how = (
-            f"docker start {name}" if name == "harbor.ollama" else f"sudo systemctl start {name}"
-        )
+        how = hints.get(name, f"sudo systemctl start {name}")
         why = "could not start" if name in failed else "not restarted (--no-wait)"
         console.print(f"  [yellow]{escape(name)} {why}[/yellow] — run: {escape(how)}")
 
@@ -1848,13 +1847,19 @@ def _print_rollback(result: object, tp_unit: str) -> None:
     """
     rollback = getattr(result, "rollback", None)
     stopped: list[str] = list(getattr(result, "fleet_stopped", []) or [])
+    stopped += list(getattr(result, "companions_stopped", []) or [])
+    hints = dict(getattr(result, "start_hints", {}) or {})
+
+    def how(name: str) -> str:
+        return hints.get(name, f"sudo systemctl start {name}")
+
     todo: list[str] = []
     if rollback is None:
         if stopped:
             console.print(
                 f"  [yellow]still stopped:[/yellow] {escape(', '.join(stopped))}"
             )
-            todo += [f"sudo systemctl start {unit}" for unit in stopped]
+            todo += [how(unit) for unit in stopped]
     else:
         if rollback.env_restored:
             console.print(f"  rollback: restored previous {escape(str(rollback.env_path))}")
@@ -1876,9 +1881,7 @@ def _print_rollback(result: object, tp_unit: str) -> None:
                 f"  [red]rollback: could not start:[/red] "
                 f"{escape(', '.join(rollback.restart_failed))}"
             )
-            todo += [f"sudo systemctl start {unit}" for unit in rollback.restart_failed]
-        if rollback.harbor_restarted is False:
-            todo.append("docker start harbor.ollama")
+            todo += [how(unit) for unit in rollback.restart_failed]
     todo.append(f"journalctl -u {tp_unit} -n 80 --no-pager  # why the launch failed")
     console.print("  next:")
     for cmd in todo:

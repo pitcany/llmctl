@@ -20,8 +20,6 @@ from llmctl.config import (
     ManagedUnitConfig,
 )
 from llmctl.integrations.fleet import FleetRole
-from llmctl.integrations.harbor import StopOutcome
-from llmctl.integrations.hermes import HermesStatus
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.integrations.vllm_env import VLLMLaunchSpec
 from llmctl.services.vllm_orchestrator import (
@@ -80,6 +78,44 @@ class _FleetReport:
         return not self.failed
 
 
+class _FakeCompanion:
+    """A plugin companion (e.g. a container) that records stops and starts."""
+
+    name = "ollama-container"
+    start_hint = "docker start ollama-container"
+
+    def __init__(self, log: dict[str, Any], *, running: bool) -> None:
+        self._log = log
+        self._running = running
+
+    def stop(self, *, logger: Any) -> bool | None:
+        self._log["companion_stops"].append(self.name)
+        return True if self._running else None
+
+    def start(self, *, logger: Any) -> bool:
+        self._log["companion_starts"].append(self.name)
+        return True
+
+    def describe(self) -> str:
+        return f"stops the container {self.name}, if running"
+
+
+class _FakeCheck:
+    """A plugin post-start check that records what it was asked to verify."""
+
+    name = "agent-config"
+
+    def __init__(self, log: dict[str, Any]) -> None:
+        self._log = log
+
+    def run(self, spec: Any, *, logger: Any) -> object:
+        self._log["check_calls"].append({"port": spec.port})
+        return "ok"
+
+    def describe(self) -> str:
+        return "checks the agent config"
+
+
 class _AdapterStub:
     """Drop-in for VLLMSystemdAdapter capturing all side effects."""
 
@@ -114,15 +150,15 @@ def _build_deps(
     *,
     config_dir: Path,
     adapter: _AdapterStub | None = None,
-    harbor_outcome: StopOutcome = StopOutcome.NOT_RUNNING,
-    hermes_status: HermesStatus = HermesStatus.OK,
+    companion_running: bool = False,
     fleet_report: _FleetReport | None = None,
 ) -> tuple[Dependencies, dict[str, Any]]:
     """Return Dependencies with all externals stubbed + a call log."""
     log: dict[str, Any] = {
         "preflight_calls": [],
-        "harbor_calls": [],
-        "hermes_calls": [],
+        "companion_stops": [],
+        "companion_starts": [],
+        "check_calls": [],
         "adapters_built": [],
     }
     adapter = adapter or _AdapterStub()
@@ -141,20 +177,12 @@ def _build_deps(
         log["preflight_calls"].append({"role": role, "fleet": fleet})
         return fleet_report
 
-    def fake_harbor(*args: Any, **kwargs: Any) -> StopOutcome:
-        log["harbor_calls"].append(kwargs)
-        return harbor_outcome
-
-    def fake_hermes(provider: str, **kwargs: Any) -> HermesStatus:
-        log["hermes_calls"].append({"provider": provider, **kwargs})
-        return hermes_status
-
     deps = Dependencies(
         config_dir=config_dir,
         adapter_factory=fake_adapter,
         systemctl=SystemctlRunner(runner=lambda argv: None),  # type: ignore[arg-type]
-        harbor_stop=fake_harbor,
-        hermes_verify=fake_hermes,
+        companions=[_FakeCompanion(log, running=companion_running)],
+        post_start_checks=[_FakeCheck(log)],
         fleet_preflight=fake_preflight,
         logger=lambda _: None,
     )
@@ -181,7 +209,7 @@ def test_unknown_preset_raises(tmp_path: Path) -> None:
 
 
 def test_happy_path_lifecycle_order(tmp_path: Path) -> None:
-    """Full lifecycle: preflight -> harbor -> adapter -> hermes."""
+    """Full lifecycle: preflight -> companions -> adapter -> checks."""
     adapter = _AdapterStub()
     _write_preset(tmp_path)
     deps, log = _build_deps(config_dir=tmp_path, adapter=adapter)
@@ -195,9 +223,9 @@ def test_happy_path_lifecycle_order(tmp_path: Path) -> None:
     assert result.ok is True
     assert len(log["preflight_calls"]) == 1
     assert log["preflight_calls"][0]["role"] is FleetRole.TP
-    assert len(log["harbor_calls"]) == 1
-    assert len(log["hermes_calls"]) == 1
-    assert log["hermes_calls"][0]["provider"] == "vllm"
+    assert log["companion_stops"] == ["ollama-container"]
+    assert log["check_calls"] == [{"port": 8003}]
+    assert result.checks == {"agent-config": "ok"}
     assert len(log["adapters_built"]) == 1
     assert adapter.spec_received is not None
     assert adapter.spec_received.served_name == "llama-3.3-70b"
@@ -218,8 +246,8 @@ def test_dry_run_skips_all_side_effects(tmp_path: Path) -> None:
     assert result.dry_run is True
     assert result.ok is True
     assert log["preflight_calls"] == []
-    assert log["harbor_calls"] == []
-    assert log["hermes_calls"] == []
+    assert log["companion_stops"] == []
+    assert log["check_calls"] == []
     assert log["adapters_built"] == []
 
 
@@ -242,9 +270,9 @@ def test_failed_fleet_preflight_aborts_before_adapter(tmp_path: Path) -> None:
 
     assert result.ok is False
     assert result.fleet_failed == ["vllm-tp"]
-    assert log["harbor_calls"] == []
+    assert log["companion_stops"] == []
     assert log["adapters_built"] == []
-    assert log["hermes_calls"] == []
+    assert log["check_calls"] == []
 
 
 def test_tq_override_on_sets_turboquant_kv_dtype(tmp_path: Path) -> None:
@@ -289,15 +317,15 @@ def test_disabling_integrations_skips_them(tmp_path: Path) -> None:
         managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
         options=OrchestratorOptions(
             enable_fleet_preflight=False,
-            enable_harbor_preflight=False,
-            enable_hermes_verify=False,
+            enable_companions=False,
+            enable_post_start_checks=False,
         ),
         deps=deps,
     )
 
     assert log["preflight_calls"] == []
-    assert log["harbor_calls"] == []
-    assert log["hermes_calls"] == []
+    assert log["companion_stops"] == []
+    assert log["check_calls"] == []
     assert len(log["adapters_built"]) == 1
 
 
@@ -357,8 +385,8 @@ def test_ok_is_false_when_the_fleet_preflight_failed() -> None:
     assert result.ok is False
 
 
-def test_hermes_verify_is_skipped_when_readiness_was_not_checked(tmp_path: Path) -> None:
-    """Verifying a provider against an unprobed endpoint reports nothing useful."""
+def test_post_start_checks_are_skipped_when_readiness_was_not_checked(tmp_path: Path) -> None:
+    """Checking anything against an unprobed endpoint reports nothing useful."""
     adapter = _AdapterStub(ready=None)
     _write_preset(tmp_path)
     deps, _ = _build_deps(config_dir=tmp_path, adapter=adapter)
@@ -371,7 +399,7 @@ def test_hermes_verify_is_skipped_when_readiness_was_not_checked(tmp_path: Path)
     )
 
     assert result.restart is not None and result.restart.ready is None
-    assert result.hermes_status is None
+    assert result.checks == {}
 
 
 # --- rollback on a failed swap (FIXPLAN 2026-09-18 §1.1) ------------------
@@ -435,14 +463,12 @@ def _rollback_setup(
     deps, log = _build_deps(
         config_dir=presets,
         adapter=adapter,
-        harbor_outcome=StopOutcome.STOPPED,
+        companion_running=True,
         fleet_report=_FleetReport(stopped=["ollama", "vllm-tp"], skipped=[], failed=[]),
     )
     sysctl = _RecordingSystemctl(fail_start=fail_start)
     deps.systemctl = SystemctlRunner(runner=sysctl)
-    harbor_started: list[str] = []
-    deps.harbor_start = lambda **kw: harbor_started.append(kw["container"]) or True
-    return deps, log, sysctl, env, harbor_started
+    return deps, log, sysctl, env, log["companion_starts"]
 
 
 def test_failed_readiness_rolls_back_env_and_restarts_fleet(tmp_path: Path) -> None:
@@ -460,12 +486,12 @@ def test_failed_readiness_rolls_back_env_and_restarts_fleet(tmp_path: Path) -> N
     assert rb is not None and rb.clean
     assert rb.env_restored is True
     assert rb.tp_stopped is True
-    assert rb.restarted == ["ollama", "vllm-tp"]
-    assert harbor_started == ["harbor.ollama"]
+    assert rb.restarted == ["ollama", "vllm-tp", "ollama-container"]
+    assert harbor_started == ["ollama-container"]
     # The half-started unit is stopped before the env is restored and the
     # previous units are started, in preflight order.
     assert sysctl.verbs()[-3:] == [("stop", "vllm-tp"), ("start", "ollama"), ("start", "vllm-tp")]
-    assert log["hermes_calls"] == []
+    assert log["check_calls"] == []
 
 
 def test_adapter_exception_still_rolls_back(tmp_path: Path) -> None:
@@ -493,7 +519,7 @@ def test_rollback_reports_units_it_could_not_start(tmp_path: Path) -> None:
     rb = result.rollback
     assert rb is not None and not rb.clean
     assert rb.restart_failed == ["ollama"]
-    assert rb.restarted == ["vllm-tp"]
+    assert rb.restarted == ["vllm-tp", "ollama-container"]
 
 
 def test_partial_preflight_failure_restarts_what_it_stopped(tmp_path: Path) -> None:
@@ -538,16 +564,15 @@ def test_successful_launch_does_not_roll_back(tmp_path: Path) -> None:
 
 def _companion_setup(tmp_path: Path, *, ready: bool | None, fail_start: set[str] | None = None):
     _write_preset(tmp_path)
-    deps, _ = _build_deps(
+    deps, log = _build_deps(
         config_dir=tmp_path,
         adapter=_AdapterStub(ready=ready),
-        harbor_outcome=StopOutcome.STOPPED,
+        companion_running=True,
         fleet_report=_FleetReport(stopped=["ollama", "vllm-tp"], skipped=[], failed=[]),
     )
     sysctl = _RecordingSystemctl(fail_start=fail_start)
     deps.systemctl = SystemctlRunner(runner=sysctl)
-    harbor_started: list[str] = []
-    deps.harbor_start = lambda **kw: harbor_started.append(kw["container"]) or True
+    harbor_started = log["companion_starts"]
     result = start_vllm_tp(
         "llama-3.3-70b",
         managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
@@ -561,11 +586,12 @@ def test_ready_launch_starts_paused_services_again_but_not_the_tp_unit(tmp_path:
     result, sysctl, harbor_started = _companion_setup(tmp_path, ready=True)
 
     assert result.ok is True
-    assert result.companions_restarted == ["ollama", "harbor.ollama"]
+    assert result.companions_restarted == ["ollama", "ollama-container"]
     assert ("start", "ollama") in sysctl.verbs()
     # vllm-tp was in fleet_stopped too; the restart already brought it back.
     assert ("start", "vllm-tp") not in sysctl.verbs()
-    assert harbor_started == ["harbor.ollama"]
+    assert harbor_started == ["ollama-container"]
+    assert result.start_hints["ollama-container"] == "docker start ollama-container"
 
 
 def test_unverified_launch_leaves_them_paused_and_says_so(tmp_path: Path) -> None:
@@ -574,7 +600,7 @@ def test_unverified_launch_leaves_them_paused_and_says_so(tmp_path: Path) -> Non
 
     assert result.ok is True
     assert result.companions_restarted == []
-    assert result.companions_pending == ["ollama", "harbor.ollama"]
+    assert result.companions_pending == ["ollama", "ollama-container"]
     assert ("start", "ollama") not in sysctl.verbs()
     assert harbor_started == []
 
@@ -584,7 +610,7 @@ def test_a_companion_that_will_not_start_is_reported_not_fatal(tmp_path: Path) -
 
     assert result.ok is True
     assert result.companions_failed == ["ollama"]
-    assert result.companions_restarted == ["harbor.ollama"]
+    assert result.companions_restarted == ["ollama-container"]
 
 
 def test_failed_launch_restores_via_rollback_not_companions(tmp_path: Path) -> None:

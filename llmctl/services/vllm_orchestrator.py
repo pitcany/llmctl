@@ -1,14 +1,18 @@
 """High-level vLLM start orchestration.
 
-Glues the pieces from Phases 1–4 into the operation the daily
-driver actually wants:
+Glues the pieces into the operation the daily driver actually wants:
 
-* :func:`start_vllm_tp` — start the TP-fleet unit on a preset.
+* :func:`start_vllm_tp` — start the TP unit on a preset.
 
 It composes: preset loading -> TQ override -> spec build ->
-fleet preflight -> Harbor preflight -> adapter restart -> readiness
-poll -> Hermes verify. Everything is injectable so the CLI tests can
-substitute fakes without touching real systemd / docker / hermes.
+fleet preflight -> companion stop -> adapter restart -> readiness
+poll -> post-start checks. Everything is injectable so the CLI tests can
+substitute fakes without touching real systemd or any plugin.
+
+*Companions* (GPU-holding services paused around the launch, e.g. a Docker
+container) and *post-start checks* (read-only verifications once the model
+answers) come from plugins — see :mod:`llmctl.plugins`. With none
+installed the lifecycle is: fleet preflight, restart, wait.
 
 The CLI commands in ``llmctl/cli.py`` are thin wrappers around this
 function plus :func:`preset_choices` for tab-completion.
@@ -16,7 +20,7 @@ function plus :func:`preset_choices` for tab-completion.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,22 +32,13 @@ from llmctl.config import (
     VLLMDefaultsConfig,
 )
 from llmctl.integrations.fleet import FleetRole, FleetUnitsConfig, preflight_stop
-from llmctl.integrations.harbor import (
-    DEFAULT_OLLAMA_CONTAINER,
-    StopOutcome,
-    start_ollama_container,
-    stop_ollama_container,
-)
-from llmctl.integrations.hermes import (
-    DEFAULT_CONFIG_PATH as HERMES_DEFAULT_CONFIG_PATH,
-)
-from llmctl.integrations.hermes import HermesStatus, verify_provider
 from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.integrations.turboquant import apply_to_spec_dict
 from llmctl.integrations.vllm_env import (
     VLLMLaunchSpec,
     render_vllm_env,
 )
+from llmctl.plugins import Companion, PostStartCheck
 from llmctl.presets import load_all, load_one
 from llmctl.services.preset_loader import load_presets, model_to_launch_spec
 
@@ -65,9 +60,9 @@ _LOCAL_PATH_PREFIXES = ("/", "~", "./", "../")
 class OrchestratorOptions:
     """Everything the daily-driver orchestrator can be told to do or skip.
 
-    All defaults match production: enable fleet preflight + Harbor
-    preflight + Hermes verify, no TQ override, do the real systemctl
-    restart and wait for readiness.
+    All defaults match production: enable fleet preflight, stop registered
+    companions, run registered post-start checks, no TQ override, do the
+    real systemctl restart and wait for readiness.
     """
 
     tq_override: bool | None = None
@@ -85,17 +80,18 @@ class OrchestratorOptions:
     #: ~330 s (compile + drafter capture), qwen3.8-27b-uncensored ~260 s.
     timeout_s: float = 900.0
     enable_fleet_preflight: bool = True
-    enable_harbor_preflight: bool = True
-    enable_hermes_verify: bool = True
-    hermes_provider: str = "vllm"
+    #: Stop plugin companions (containers etc.) before the restart.
+    enable_companions: bool = True
+    #: Run plugin post-start checks once the model answers.
+    enable_post_start_checks: bool = True
     #: On a failed launch, put the env file and the stopped fleet back the
     #: way they were (see :func:`_rollback`). Off only for tests/debugging.
     rollback_on_failure: bool = True
     #: After a launch that was *verified* ready, start again what the
-    #: preflight stopped (ollama, the Harbor container). They were only
+    #: preflight stopped (fleet units, companions). They were only
     #: stopped so vLLM could size its KV cache from free VRAM at startup;
-    #: once it has, they coexist (the WebUI embedder runs on CPU). Before
-    #: this, a successful swap left ollama down and WebUI retrieval 400ing.
+    #: once it has, they coexist. Before this, a successful swap left
+    #: ollama down and WebUI retrieval 400ing.
     restore_companions: bool = True
 
 
@@ -111,17 +107,11 @@ class RollbackReport:
     tp_stopped: bool = False
     restarted: list[str] = field(default_factory=list)
     restart_failed: list[str] = field(default_factory=list)
-    #: ``None`` when the Harbor container was not stopped by this launch.
-    harbor_restarted: bool | None = None
 
     @property
     def clean(self) -> bool:
         """``True`` when everything this launch changed was put back."""
-        return (
-            self.env_restored is not False
-            and not self.restart_failed
-            and self.harbor_restarted is not False
-        )
+        return self.env_restored is not False and not self.restart_failed
 
 
 @dataclass
@@ -132,8 +122,12 @@ class OrchestratorResult:
     restart: ManagedRestartResult | None = None
     fleet_stopped: list[str] = field(default_factory=list)
     fleet_failed: list[str] = field(default_factory=list)
-    harbor_outcome: StopOutcome | None = None
-    hermes_status: HermesStatus | None = None
+    #: Plugin companions this launch stopped (and so owes a start).
+    companions_stopped: list[str] = field(default_factory=list)
+    #: Plugin companions that failed to stop; the launch goes on regardless.
+    companions_stop_failed: list[str] = field(default_factory=list)
+    #: Post-start check name -> whatever the check returned.
+    checks: dict[str, object] = field(default_factory=dict)
     dry_run: bool = False
     rollback: RollbackReport | None = None
     #: Preflight-stopped services started again after a verified-ready launch.
@@ -142,6 +136,8 @@ class OrchestratorResult:
     #: Stopped and deliberately NOT restarted because readiness was not
     #: checked (``--no-wait``): vLLM may still be sizing its KV cache.
     companions_pending: list[str] = field(default_factory=list)
+    #: How to start each stopped service by hand, by name.
+    start_hints: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -162,18 +158,34 @@ class OrchestratorResult:
         return self.restart.ready is not False
 
 
+def _registered_companions() -> list[Companion]:
+    from llmctl.plugins import registry
+
+    return list(registry().companions)
+
+
+def _registered_checks() -> list[PostStartCheck]:
+    from llmctl.plugins import registry
+
+    return list(registry().post_start_checks)
+
+
 # Injection seam for tests — production code uses the real defaults.
 @dataclass
 class Dependencies:
     """Injected dependencies. Production callers pass nothing; tests
-    construct one with fakes for each external interface."""
+    construct one with fakes for each external interface.
+
+    ``companions`` / ``post_start_checks`` left as ``None`` means "whatever
+    the installed plugins registered"; pass a list (possibly empty) to pin
+    them.
+    """
 
     config_dir: Path | None = None
     adapter_factory: Callable[..., VLLMSystemdAdapter] = VLLMSystemdAdapter
     systemctl: SystemctlRunner | None = None
-    harbor_stop: Callable[..., StopOutcome] = stop_ollama_container
-    harbor_start: Callable[..., bool] = start_ollama_container
-    hermes_verify: Callable[..., HermesStatus] = verify_provider
+    companions: Sequence[Companion] | None = None
+    post_start_checks: Sequence[PostStartCheck] | None = None
     fleet_preflight: Callable[..., Any] = preflight_stop
     logger: Callable[[str], None] = print
 
@@ -187,7 +199,7 @@ def start_vllm_tp(
     options: OrchestratorOptions | None = None,
     deps: Dependencies | None = None,
 ) -> OrchestratorResult:
-    """Start the TP-fleet unit on ``preset_name``.
+    """Start the TP unit on ``preset_name``.
 
     Lifecycle (when ``options`` defaults are kept):
 
@@ -195,10 +207,10 @@ def start_vllm_tp(
        ``managed_unit.default_port``).
     2. Apply TQ override if requested.
     3. Stop competing systemd units (ollama).
-    4. Stop the Harbor Ollama container if running.
+    4. Stop every registered companion that is running.
     5. Write the env file + restart the unit.
     6. Wait for ``/v1/models`` to respond.
-    7. Verify the Hermes ``vllm`` provider URL.
+    7. Start the stopped services again; run the post-start checks.
 
     Returns an :class:`OrchestratorResult` summarising every step.
     """
@@ -328,11 +340,20 @@ def _run_lifecycle(
     options: OrchestratorOptions,
     deps: Dependencies,
     renderer: Callable[[VLLMLaunchSpec], str],
-    hermes_provider_override: str | None = None,
 ) -> OrchestratorResult:
     """Start lifecycle for the TP unit."""
     result = OrchestratorResult(spec=spec, dry_run=options.dry_run)
     systemctl = deps.systemctl or SystemctlRunner()
+    companions = (
+        list(deps.companions) if deps.companions is not None else _registered_companions()
+    )
+    checks = (
+        list(deps.post_start_checks)
+        if deps.post_start_checks is not None
+        else _registered_checks()
+    )
+    by_name = {c.name: c for c in companions}
+    result.start_hints = {c.name: c.start_hint for c in companions}
 
     if options.dry_run:
         # Build the body without writing — the CLI prints it for the operator.
@@ -352,19 +373,27 @@ def _run_lifecycle(
         )
         result.fleet_stopped = list(report.stopped)
         result.fleet_failed = list(report.failed)
+        for unit in result.fleet_stopped:
+            result.start_hints.setdefault(unit, f"sudo systemctl start {unit}")
         if not report.all_clean:
             # A partial preflight still stopped some units; put them back.
             if options.rollback_on_failure and result.fleet_stopped:
                 result.rollback = _rollback(
-                    result, managed_unit, systemctl, deps, env_written=False
+                    result, managed_unit, systemctl, deps, by_name, env_written=False
                 )
             return result
 
-    if options.enable_harbor_preflight:
-        result.harbor_outcome = deps.harbor_stop(
-            container=DEFAULT_OLLAMA_CONTAINER,
-            logger=deps.logger,
-        )
+    if options.enable_companions:
+        for companion in companions:
+            try:
+                outcome = companion.stop(logger=deps.logger)
+            except Exception as exc:  # noqa: BLE001 - a plugin must not abort the launch
+                deps.logger(f"  {companion.name}: stop raised {exc}")
+                outcome = False
+            if outcome is True:
+                result.companions_stopped.append(companion.name)
+            elif outcome is False:
+                result.companions_stop_failed.append(companion.name)
 
     adapter = deps.adapter_factory(
         managed_unit,
@@ -390,6 +419,7 @@ def _run_lifecycle(
                 managed_unit,
                 systemctl,
                 deps,
+                by_name,
                 env_written=True,
                 env_path=env_path,
                 prior_env=prior_env,
@@ -402,6 +432,7 @@ def _run_lifecycle(
             managed_unit,
             systemctl,
             deps,
+            by_name,
             env_written=True,
             env_path=env_path,
             prior_env=prior_env,
@@ -409,20 +440,34 @@ def _run_lifecycle(
         return result
 
     if options.restore_companions:
-        _restore_companions(result, {managed_unit.unit_name, fleet.tp}, systemctl, deps)
-
-    if options.enable_hermes_verify and (
-        result.restart is not None and result.restart.ready
-    ):
-        provider_name = hermes_provider_override or options.hermes_provider
-        result.hermes_status = deps.hermes_verify(
-            provider_name,
-            expected_port=spec.port,
-            config_path=HERMES_DEFAULT_CONFIG_PATH,
-            logger=deps.logger,
+        _restore_companions(
+            result, {managed_unit.unit_name, fleet.tp}, systemctl, deps, by_name
         )
 
+    if options.enable_post_start_checks and (
+        result.restart is not None and result.restart.ready
+    ):
+        for check in checks:
+            try:
+                result.checks[check.name] = check.run(spec, logger=deps.logger)
+            except Exception as exc:  # noqa: BLE001 - checks are advisory
+                deps.logger(f"  {check.name}: check raised {exc}")
+                result.checks[check.name] = f"error: {exc}"
+
     return result
+
+
+def _start_companion(
+    name: str, by_name: dict[str, Companion], logger: Callable[[str], None]
+) -> bool:
+    companion = by_name.get(name)
+    if companion is None:
+        return False
+    try:
+        return bool(companion.start(logger=logger))
+    except Exception as exc:  # noqa: BLE001 - report, never fail a good launch
+        logger(f"  could not start {name}: {exc}")
+        return False
 
 
 def _restore_companions(
@@ -430,6 +475,7 @@ def _restore_companions(
     tp_units: set[str],
     systemctl: SystemctlRunner,
     deps: Dependencies,
+    by_name: dict[str, Companion],
 ) -> None:
     """Start again what the preflight stopped, once vLLM holds its memory.
 
@@ -439,12 +485,11 @@ def _restore_companions(
     be profiling free VRAM, which is the reason they were stopped.
     """
     names = [u for u in result.fleet_stopped if u not in tp_units]
-    harbor = result.harbor_outcome is StopOutcome.STOPPED
-    if not names and not harbor:
+    if not names and not result.companions_stopped:
         return
     ready = result.restart is not None and result.restart.ready is True
     if not ready:
-        result.companions_pending = names + ([DEFAULT_OLLAMA_CONTAINER] if harbor else [])
+        result.companions_pending = names + list(result.companions_stopped)
         return
     for unit in names:
         try:
@@ -455,14 +500,9 @@ def _restore_companions(
         (result.companions_restarted if ok else result.companions_failed).append(unit)
         if ok:
             deps.logger(f"  started {unit} again (vLLM holds its memory now)")
-    if harbor:
-        try:
-            ok = bool(deps.harbor_start(container=DEFAULT_OLLAMA_CONTAINER, logger=deps.logger))
-        except Exception as exc:  # noqa: BLE001
-            ok = False
-            deps.logger(f"  could not start {DEFAULT_OLLAMA_CONTAINER}: {exc}")
-        target = result.companions_restarted if ok else result.companions_failed
-        target.append(DEFAULT_OLLAMA_CONTAINER)
+    for name in result.companions_stopped:
+        ok = _start_companion(name, by_name, deps.logger)
+        (result.companions_restarted if ok else result.companions_failed).append(name)
 
 
 #: Sentinel for "the env file did not exist before the launch".
@@ -486,6 +526,7 @@ def _rollback(
     managed_unit: ManagedUnitConfig,
     systemctl: SystemctlRunner,
     deps: Dependencies,
+    by_name: dict[str, Companion],
     *,
     env_written: bool,
     env_path: Path | None = None,
@@ -496,8 +537,9 @@ def _rollback(
     Order: stop the half-started TP unit (it holds the VRAM the fleet needs
     and is running the spec we are about to un-write), restore the previous
     env file, then start every unit the preflight stopped in its original
-    order. If ``vllm-tp`` itself was among them, starting it relaunches the
-    *previous* preset from the restored env — the state before the swap.
+    order, then the companions. If ``vllm-tp`` itself was among them,
+    starting it relaunches the *previous* preset from the restored env —
+    the state before the swap.
     """
     log = deps.logger
     report = RollbackReport(env_path=env_path)
@@ -539,13 +581,11 @@ def _rollback(
             report.restart_failed.append(unit)
             log(f"  rollback: FAILED to start {unit}")
 
-    if result.harbor_outcome is StopOutcome.STOPPED:
-        try:
-            report.harbor_restarted = bool(
-                deps.harbor_start(container=DEFAULT_OLLAMA_CONTAINER, logger=log)
-            )
-        except Exception as exc:  # noqa: BLE001 - rollback must keep going
-            report.harbor_restarted = False
-            log(f"  rollback: could not start {DEFAULT_OLLAMA_CONTAINER}: {exc}")
+    for name in result.companions_stopped:
+        if _start_companion(name, by_name, log):
+            report.restarted.append(name)
+        else:
+            report.restart_failed.append(name)
+            log(f"  rollback: FAILED to start {name}")
 
     return report

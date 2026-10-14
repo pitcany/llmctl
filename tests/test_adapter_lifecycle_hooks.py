@@ -1,7 +1,7 @@
 """Verify the pre/post-start hook plumbing on :class:`VLLMSystemdAdapter`.
 
-Phase 3 added a stackable hook mechanism so integrations (hermes verify,
-harbor preflight) can run at the right lifecycle moments without
+Phase 3 added a stackable hook mechanism so integrations (post-start checks,
+companion stops) can run at the right lifecycle moments without
 entangling the adapter with their specifics. These tests pin:
 
 * Hook ordering (pre-start before write_env; post-start after readiness)
@@ -189,7 +189,7 @@ def test_post_start_fires_when_wait_for_ready_false(tmp_path: Path) -> None:
 
 def test_multiple_hooks_run_in_order(tmp_path: Path) -> None:
     """Hooks fire in declaration order — important when one hook's output
-    informs the next (e.g. preflight stop then Harbor pin check)."""
+    informs the next (e.g. preflight stop then a pin check)."""
     timeline: list[str] = []
     pre_hooks = [
         lambda _s: timeline.append("pre-1"),

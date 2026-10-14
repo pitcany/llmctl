@@ -19,7 +19,7 @@ from textual.widgets import Button, Input, Label, Select, Static
 
 from llmctl.config import FleetUnitsConfig, ManagedUnitConfig
 from llmctl.integrations.fleet import FleetRole, units_to_stop
-from llmctl.integrations.harbor import DEFAULT_OLLAMA_CONTAINER
+from llmctl.plugins import registry
 from llmctl.presets import CANONICAL_QUANTIZATIONS, Model, PresetSchemaError
 from llmctl.services.preset_loader import PresetView
 from llmctl.services.vllm_orchestrator import OrchestratorOptions
@@ -34,22 +34,22 @@ def describe_launch_effects(
     """What ``start_vllm_tp`` will do with these settings, in order.
 
     Generated rather than hard-coded, so the dialog names the real units,
-    env file, timeout and Hermes provider, and drops steps an option turns off.
+    env file, timeout and plugin steps, and drops steps an option turns off.
     """
     tp_unit = managed_unit.unit_name
     competing = [u for u in units_to_stop(FleetRole.TP, fleet) if u != tp_unit]
     steps: list[str] = []
     if options.enable_fleet_preflight and competing:
         steps.append(f"stops {', '.join(competing)} (to free VRAM)")
-    if options.enable_harbor_preflight:
-        steps.append(f"stops the Docker container {DEFAULT_OLLAMA_CONTAINER}, if running")
+    if options.enable_companions:
+        steps += [c.describe() for c in registry().companions]
     steps.append(f"rewrites {managed_unit.resolve_env_file()} and restarts {tp_unit}")
     if options.wait_for_ready:
         steps.append(f"waits up to {options.timeout_s / 60:.0f} min for the model to load")
     if options.restore_companions and options.wait_for_ready:
         steps.append("starts the stopped services again once the model is ready")
-    if options.enable_hermes_verify:
-        steps.append(f"repoints the Hermes '{options.hermes_provider}' provider")
+    if options.enable_post_start_checks:
+        steps += [c.describe() for c in registry().post_start_checks]
     return steps
 
 
