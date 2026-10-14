@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `llmctl setup llama.cpp --from-source` clones the latest release and builds
+  `llama-server` with cmake (CUDA for the local cards' compute capability
+  when nvcc is present, CPU otherwise). It is chosen automatically when glibc
+  is older than the 2.38 the prebuilt builds need; a linker from another
+  toolchain earlier on PATH is kept out of the build.
+- `llmctl stop` with no ID stops what is serving: the vLLM unit, a router
+  lane, or a server llmctl started. A name from `llmctl ls` picks one; when
+  several serve it lists them and asks for a name or `--all`. `stop ID` for
+  a live session works as before.
 - `llmctl run NAME --tp N --max-len N --gpu-mem F` changes GPUs, context
   and memory share for one run on any engine llmctl starts; `--save` keeps
   them, in the vLLM preset (line edits, comments kept) or the model's
