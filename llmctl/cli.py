@@ -90,7 +90,10 @@ class _SuggestingGroup(typer.core.TyperGroup):
 app = typer.Typer(
     name="llmctl",
     cls=_SuggestingGroup,
-    help="Run models on vLLM, SGLang, FreeToken, llama.cpp, Ollama or LM Studio from one place.",
+    help=(
+        "Run models on vLLM, SGLang, FreeToken, Strata, llama.cpp, Ollama or LM Studio "
+        "from one place."
+    ),
     epilog="More commands: llmctl help --all",
     no_args_is_help=True,
     # -h everywhere: Click contexts inherit help_option_names from the parent,
