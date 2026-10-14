@@ -40,6 +40,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlmodel import Session
 
+from llmctl import __version__
 from llmctl.api.deps import get_db_session
 from llmctl.config import Settings, load_settings
 from llmctl.db import SQLModel, apply_migrations, get_engine
@@ -130,7 +131,7 @@ def create_gateway_app(
 
     app = FastAPI(
         title="LLMCTL Gateway",
-        version="0.1.0",
+        version=__version__,
         description="Local OpenAI-compatible router for active llmctl sessions.",
         lifespan=lifespan,
     )
