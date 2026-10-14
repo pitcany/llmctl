@@ -596,16 +596,19 @@ class SchedulerService:
 
         A Strata model *is* its config JSON (written by Strata's setup): the
         engine binary, the weight pack and the flags are all in there. The
-        server script lives next to the interpreter's venv, so ``binary``
-        (``<repo>/.venv/bin/python``) locates it; ``parameters.server``
-        overrides. The GPU is passed as ``--gpu`` by nvidia-smi index because
-        Strata numbers cards that way (see ``_strata_gpu``).
+        server script is found next to the interpreter's venv only
+        (``<repo>/.venv/bin/python`` -> ``<repo>/serve/server.py``): a
+        request parameter must not be able to name a script to run, since
+        ``POST /sessions/start`` would turn that into code execution. The GPU
+        is passed as ``--gpu`` by nvidia-smi index because Strata numbers
+        cards that way. An API key is not put on the command line (visible
+        in ``ps`` and in every plan); keep the server on 127.0.0.1 instead.
         """
         config = (model.path or model.source) if model else None
         if not config:
             return []
         python = runtime_config.binary or "python3"
-        server = parameters.get("server") or _strata_server_for(python)
+        server = _strata_server_for(python)
         if not server:
             return []
         command = [
@@ -615,8 +618,6 @@ class SchedulerService:
         gpu = parameters.get("strata_gpu")
         if gpu is not None:
             command += ["--gpu", str(gpu)]
-        if parameters.get("api_key"):
-            command += ["--api-key", str(parameters["api_key"])]
         command += self._extra_args(parameters, runtime_config)
         return command
 
