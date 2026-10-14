@@ -1,4 +1,4 @@
-"""The swap list: router.yaml lanes + vLLM presets, state, preview, load times."""
+"""The swap list: plugin lanes + vLLM presets, state, preview, load times."""
 
 from __future__ import annotations
 
@@ -15,31 +15,12 @@ from llmctl.services.lanes import (
     gpus_overlap,
     last_load_s,
     load_lanes,
+    parse_gpus,
     preview_swap,
     record_load,
     resolve,
     serving_keys,
 )
-
-ROUTER_YAML = """
-switch:
-  health_timeout_s: 300
-backends:
-  - name: qwen38
-    served_model: qwen3.8-27b
-    profile_env: vllm-tp.env.qwen38
-    upstream: http://127.0.0.1:8003
-  - name: flash
-    served_model: qwen3.8-flash-next-freetoken
-    upstream: http://127.0.0.1:1919/
-    start_cmd: ["/bin/qwen38-ft-start", "--take-gpus"]
-    health_timeout_s: 900
-    aliases: ["flash-next"]
-  - name: glm53
-    served_model: glm-5.3-flash
-    upstream: http://127.0.0.1:8006
-    start_cmd: ["/bin/glm53-start"]
-"""
 
 
 def _units() -> ManagedUnitsConfig:
@@ -52,10 +33,34 @@ def _units() -> ManagedUnitsConfig:
     )
 
 
-def _lanes(tmp_path: Path) -> list[Lane]:
-    path = tmp_path / "router.yaml"
-    path.write_text(ROUTER_YAML)
-    return load_lanes(path, _units())
+FLASH = Lane(
+    name="flash",
+    served_model="qwen3.8-flash-next-freetoken",
+    upstream="http://127.0.0.1:1919",
+    start_cmd=("/bin/qwen38-ft-start", "--take-gpus"),
+    health_timeout_s=900,
+    aliases=("flash-next",),
+    unit="qwen3.8-flash-next-ft.service",
+    runtime="freetoken",
+)
+GLM53 = Lane(
+    name="glm53",
+    served_model="glm-5.3-flash",
+    upstream="http://127.0.0.1:8006",
+    start_cmd=("/bin/glm53-start",),
+)
+GLM53_SELF_DESCRIBED = Lane(
+    name="glm53",
+    served_model="glm-5.3-flash",
+    upstream="http://127.0.0.1:8006",
+    start_cmd=("/bin/glm53-start",),
+    unit="glm-5.3-flash.service",
+    runtime="llama_cpp",
+)
+
+
+def _lanes(tmp_path: Path | None = None) -> list[Lane]:
+    return [FLASH, GLM53]
 
 
 def _catalog(tmp_path: Path):
@@ -63,23 +68,20 @@ def _catalog(tmp_path: Path):
     return build_catalog(presets, _lanes(tmp_path), vllm_port=8003)
 
 
-def test_only_command_launched_backends_are_lanes(tmp_path):
-    lanes = _lanes(tmp_path)
-    assert [lane.name for lane in lanes] == ["flash", "glm53"]
-    flash, glm = lanes
-    assert flash.upstream == "http://127.0.0.1:1919"
-    assert flash.start_cmd == ("/bin/qwen38-ft-start", "--take-gpus")
-    assert flash.health_timeout_s == 900
-    # Unit and runtime come from llmctl's managed_units, matched by port.
-    assert flash.unit == "qwen3.8-flash-next-ft.service"
-    assert flash.runtime == "freetoken"
-    # No managed unit on :8006 -> unknown unit, router's default timeout.
-    assert glm.unit is None
-    assert glm.health_timeout_s == 300
+def test_lanes_come_from_the_registered_sources_in_order(tmp_path):
+    """A source that raises is skipped; the others still list."""
+
+    def broken(units):
+        raise OSError("config unreadable")
+
+    assert load_lanes(_units(), sources=[lambda u: [FLASH], broken, lambda u: [GLM53]]) == [
+        FLASH,
+        GLM53,
+    ]
 
 
-def test_missing_router_config_means_no_lanes(tmp_path):
-    assert load_lanes(tmp_path / "absent.yaml") == []
+def test_no_plugins_means_no_lanes():
+    assert load_lanes(_units(), sources=[]) == []
 
 
 def test_catalog_lists_presets_then_lanes_and_resolves_aliases(tmp_path):
@@ -167,34 +169,6 @@ def test_load_times_round_trip(tmp_path):
 
 # -- GPU footprints -------------------------------------------------------------
 
-FOOTPRINT_YAML = """
-backends:
-  - name: flash
-    served_model: ft
-    upstream: http://127.0.0.1:1919
-    start_cmd: ["/bin/ft-start"]
-    gpus: [0]
-  - name: gpu1
-    served_model: coder
-    upstream: http://127.0.0.1:11435
-    start_cmd: ["/bin/gpu1-start"]
-    gpus: [1]
-  - name: pair
-    served_model: big
-    upstream: http://127.0.0.1:8006
-    start_cmd: ["/bin/pair-start"]
-    gpus: [0, 1]
-  - name: undeclared
-    served_model: legacy
-    upstream: http://127.0.0.1:8080
-    start_cmd: ["/bin/legacy-start"]
-  - name: malformed
-    served_model: odd
-    upstream: http://127.0.0.1:8081
-    start_cmd: ["/bin/odd-start"]
-    gpus: ["0"]
-"""
-
 _UNIT_OF = {
     "flash": "ft.service",
     "gpu1": "gpu1.service",
@@ -204,10 +178,25 @@ _UNIT_OF = {
 }
 
 
+def _lane(name: str, port: int, gpus) -> Lane:
+    return Lane(
+        name=name,
+        served_model=name,
+        upstream=f"http://127.0.0.1:{port}",
+        start_cmd=(f"/bin/{name}-start",),
+        unit=_UNIT_OF[name],
+        gpus=parse_gpus(gpus),
+    )
+
+
 def _footprint_state(tmp_path: Path, active: set[str]) -> SwapState:
-    path = tmp_path / "router.yaml"
-    path.write_text(FOOTPRINT_YAML)
-    lanes = [Lane(**{**lane.__dict__, "unit": _UNIT_OF[lane.name]}) for lane in load_lanes(path)]
+    lanes = [
+        _lane("flash", 1919, [0]),
+        _lane("gpu1", 11435, [1]),
+        _lane("pair", 8006, [0, 1]),
+        _lane("undeclared", 8080, None),
+        _lane("malformed", 8081, ["0"]),
+    ]
     presets = {"qwen3.8-27b": SimpleNamespace(served_name="qwen3.8-27b")}
     return SwapState(
         catalog=build_catalog(presets, lanes, vllm_port=8003),
@@ -218,7 +207,7 @@ def _footprint_state(tmp_path: Path, active: set[str]) -> SwapState:
     )
 
 
-def test_gpus_parse_from_router_yaml_and_fail_closed(tmp_path):
+def test_gpus_parse_and_fail_closed(tmp_path):
     state = _footprint_state(tmp_path, set())
     gpus = {row.key: row.gpus for row in state.catalog}
     assert gpus == {
@@ -269,50 +258,16 @@ def test_overlapping_lanes_are_in_the_way(tmp_path):
     assert sum("service" in stop for stop in preview.stops) == 3
 
 
-ROUTER_YAML_SELF_DESCRIBED = """
-backends:
-  - name: glm53
-    served_model: glm-5.3-flash
-    upstream: http://127.0.0.1:8006
-    start_cmd: ["/bin/glm53-start"]
-    unit: glm-5.3-flash
-    runtime: llama_cpp
-"""
-
-
-def test_lane_takes_its_unit_from_router_yaml_when_settings_has_no_row(tmp_path):
-    path = tmp_path / "router.yaml"
-    path.write_text(ROUTER_YAML_SELF_DESCRIBED)
-    lane = load_lanes(path, _units())[0]
-    assert lane.unit == "glm-5.3-flash.service"  # .service suffix added
-    assert lane.runtime == "llama_cpp"
-
-
-def test_a_settings_row_still_wins_over_router_yaml(tmp_path):
-    """The managed_units row is the override; router.yaml is the fallback."""
-    path = tmp_path / "router.yaml"
-    path.write_text(
-        ROUTER_YAML_SELF_DESCRIBED.replace("8006", "1919").replace(
-            "unit: glm-5.3-flash", "unit: wrong-unit"
-        )
-    )
-    lane = load_lanes(path, _units())[0]
-    assert lane.unit == "qwen3.8-flash-next-ft.service"
-    assert lane.runtime == "freetoken"
-
-
 def test_units_from_lanes_skips_covered_ports_and_unitless_lanes(tmp_path):
     """Derive a row only for a lane that names a unit on a free port."""
     from llmctl.services.lanes import units_from_lanes
 
-    self_described = tmp_path / "self.yaml"
-    self_described.write_text(ROUTER_YAML_SELF_DESCRIBED)
-    lanes = _lanes(tmp_path) + load_lanes(self_described, _units())
+    lanes = _lanes() + [GLM53_SELF_DESCRIBED]
 
     derived = units_from_lanes(lanes, _units())
 
-    # flash sits on 1919, which a managed_units row already owns; the glm53
-    # entry from ROUTER_YAML names no unit, so only the self-described one is.
+    # flash sits on 1919, which a managed_units row already owns; the first
+    # glm53 names no unit, so only the self-described one is.
     assert set(derived) == {"glm53"}
     assert derived["glm53"].unit_name == "glm-5.3-flash"
     assert derived["glm53"].default_port == 8006

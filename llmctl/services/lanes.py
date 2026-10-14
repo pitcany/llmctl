@@ -1,26 +1,21 @@
 """One list of everything ``llmctl swap`` can serve: vLLM presets plus lanes.
 
 A *lane* is a self-contained server with its own systemd unit and start script
-(FreeToken, the llama.cpp servers, ...). The authoritative list of lanes is
-llm-router's ``config/router.yaml``: every backend there with a ``start_cmd``.
-llmctl reads that file instead of keeping a second copy, so a lane added for
-the router shows up in ``llmctl swap`` too (the FreeToken lane was invisible to
-llmctl for exactly that reason).
+(FreeToken, the llama.cpp servers, ...). Lanes come from plugins: every
+:data:`~llmctl.plugins.LaneSource` registered in the plugin registry
+contributes rows (the ``llmctl-stack`` plugin reads llm-router's
+``router.yaml``). With no plugin installed there are no lanes and
+``llmctl swap`` lists vLLM presets and registered models alone.
 
 The lane's start script owns the GPU hand-over (``--take-gpus`` stops vllm-tp
 and evicts Ollama models); llmctl runs it, waits for readiness, and rolls back.
-Lane -> systemd unit comes from ``managed_units`` in llmctl's settings when a
-row there shares the port, else from the lane's own ``unit:`` key in
-router.yaml (llm-router ignores it). A lane therefore needs no settings row:
+A lane that names its own unit needs no ``managed_units`` settings row:
 ``units_from_lanes`` derives one so ``llmctl status`` sees it too.
 
-The router's ``profile_env`` backends are NOT read: vLLM rows come from llmctl's
-own presets, the canonical vLLM schema.
-
-Each row has a GPU *footprint*: the cards it occupies. A lane declares it as
-``gpus: [0]`` in router.yaml (the one place llm-router reads too); a lane
-without one, and every vLLM preset (``vllm-tp`` is TP=2), occupies every card.
-A swap stops only what overlaps the new target's footprint.
+Each row has a GPU *footprint*: the cards it occupies. A lane declares it
+(``Lane.gpus``); a lane without one, and every vLLM preset (``vllm-tp`` is
+TP=2), occupies every card. A swap stops only what overlaps the new target's
+footprint.
 """
 
 from __future__ import annotations
@@ -34,15 +29,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-import yaml
-
 from llmctl.config import ManagedUnitConfig, ManagedUnitsConfig
 
-#: Override for the router config location (tests, other machines).
-ROUTER_CONFIG_ENV = "LLMCTL_ROUTER_CONFIG"
-DEFAULT_ROUTER_CONFIG = Path.home() / "AI" / "llm-router" / "config" / "router.yaml"
-
-#: Health wait when router.yaml gives none; the router's own default.
+#: Health wait when a lane source gives none.
 DEFAULT_LANE_TIMEOUT_S = 300.0
 
 _ENGINE_LABELS = {
@@ -60,12 +49,6 @@ def engine_label(runtime: str | None) -> str:
     if not runtime:
         return "?"
     return _ENGINE_LABELS.get(runtime, runtime)
-
-
-def router_config_path() -> Path:
-    """Where router.yaml lives: ``$LLMCTL_ROUTER_CONFIG`` or the ~/AI default."""
-    override = os.environ.get(ROUTER_CONFIG_ENV)
-    return Path(override).expanduser() if override else DEFAULT_ROUTER_CONFIG
 
 
 #: A GPU footprint: the card indices a target occupies. ``None`` = every card.
@@ -94,8 +77,8 @@ def cards_label(row: Any) -> str:
     return format_gpus(row.gpus)
 
 
-def _parse_gpus(raw: Any) -> Gpus:
-    """router.yaml ``gpus:`` -> footprint. Missing or malformed -> every card.
+def parse_gpus(raw: Any) -> Gpus:
+    """A declared ``gpus:`` list -> footprint. Missing or malformed -> every card.
 
     Fails closed: an unreadable footprint overlaps everything, so a swap stops
     it rather than loading a second engine onto its card.
@@ -107,7 +90,8 @@ def _parse_gpus(raw: Any) -> Gpus:
     return frozenset(raw)
 
 
-def _port_of(url: str) -> int | None:
+def port_of(url: str) -> int | None:
+    """The port in ``url``, or None when it has none or is malformed."""
     try:
         return urlparse(url).port
     except ValueError:
@@ -116,7 +100,7 @@ def _port_of(url: str) -> int | None:
 
 @dataclass(frozen=True)
 class Lane:
-    """A command-launched backend from router.yaml."""
+    """A command-launched server a plugin lane source described."""
 
     name: str
     served_model: str
@@ -124,78 +108,37 @@ class Lane:
     start_cmd: tuple[str, ...]
     health_timeout_s: float = DEFAULT_LANE_TIMEOUT_S
     aliases: tuple[str, ...] = ()
-    #: systemd unit (user scope) serving this lane. Taken from llmctl's
-    #: managed_units when a row there shares the port, else from router.yaml's
-    #: own ``unit:`` key — a lane needs no settings row to be complete.
+    #: systemd unit (user scope) serving this lane. A source takes it from
+    #: llmctl's managed_units when a row there shares the port, else from its
+    #: own config — a lane needs no settings row to be complete.
     unit: str | None = None
     #: llmctl runtime id of that unit (``freetoken``, ``llama_cpp``, ...).
     runtime: str | None = None
-    #: Cards the lane occupies, from router.yaml ``gpus:``; None = every card.
+    #: Cards the lane occupies; None = every card.
     gpus: Gpus = None
 
 
 def load_lanes(
-    path: Path | None = None,
     managed_units: ManagedUnitsConfig | None = None,
+    *,
+    sources: Sequence[Callable[..., list[Lane]]] | None = None,
 ) -> list[Lane]:
-    """Return router.yaml's command-launched backends, in file order.
+    """Return every lane the registered lane sources describe, in order.
 
-    A missing or unreadable file yields no lanes: llmctl keeps working with
-    its vLLM presets alone (e.g. on a machine without llm-router).
+    ``sources`` pins the list (tests); the default is the plugin registry. A
+    source that raises is skipped: one broken config file must not take the
+    swap list down with it.
     """
-    path = path or router_config_path()
-    try:
-        raw = yaml.safe_load(path.read_text())
-    except (OSError, yaml.YAMLError):
-        return []
-    backends = raw.get("backends") if isinstance(raw, dict) else None
-    if not isinstance(backends, list):
-        return []
-    default_timeout = DEFAULT_LANE_TIMEOUT_S
-    switch = raw.get("switch")
-    if isinstance(switch, dict) and isinstance(switch.get("health_timeout_s"), int | float):
-        default_timeout = float(switch["health_timeout_s"])
+    if sources is None:
+        from llmctl.plugins import registry
 
-    by_port: dict[int, tuple[str, str]] = {}
-    if managed_units is not None:
-        for unit in managed_units.roles().values():
-            by_port[unit.default_port] = (unit.unit_name, unit.runtime)
-
+        sources = registry().lane_sources
     lanes: list[Lane] = []
-    for entry in backends:
-        if not isinstance(entry, dict):
+    for source in sources:
+        try:
+            lanes += list(source(managed_units))
+        except Exception:  # noqa: BLE001 - a lane source is advisory
             continue
-        cmd = entry.get("start_cmd")
-        name = entry.get("name")
-        served = entry.get("served_model")
-        upstream = entry.get("upstream")
-        if not cmd or not name or not served or not upstream:
-            continue  # profile_env (vLLM) backend, or malformed
-        timeout = entry.get("health_timeout_s")
-        unit, runtime = by_port.get(_port_of(str(upstream)) or -1, (None, None))
-        if unit is None and entry.get("unit"):
-            # No managed_units row: router.yaml carries the unit itself, which
-            # is what keeps a new lane from needing a hand-written settings
-            # entry repeating the same unit name and port.
-            unit = str(entry["unit"])
-            runtime = str(entry["runtime"]) if entry.get("runtime") else None
-        if unit is not None and not unit.endswith(".service"):
-            unit = f"{unit}.service"
-        lanes.append(
-            Lane(
-                name=str(name),
-                served_model=str(served),
-                upstream=str(upstream).rstrip("/"),
-                start_cmd=tuple(str(part) for part in cmd),
-                health_timeout_s=float(timeout)
-                if isinstance(timeout, int | float)
-                else default_timeout,
-                aliases=tuple(str(a) for a in entry.get("aliases") or ()),
-                unit=unit,
-                runtime=runtime,
-                gpus=_parse_gpus(entry.get("gpus")),
-            )
-        )
     return lanes
 
 
@@ -242,7 +185,7 @@ def build_catalog(
     *,
     vllm_port: int,
 ) -> list[SwapTarget]:
-    """vLLM presets first (sorted), then lanes in router.yaml order.
+    """vLLM presets first (sorted), then lanes in source order.
 
     ``presets`` maps alias -> anything with a ``served_name`` attribute
     (:class:`VLLMLaunchSpec` in production).
@@ -515,7 +458,7 @@ def preview_swap(
         if note:
             stops.append(note)
     elif target.kind == "vllm":
-        stops.append("Ollama/Harbor (paused while vLLM loads, started again after)")
+        stops.append("Ollama and plugin companions (paused while vLLM loads, started again after)")
         preview.starts = f"{vllm_unit} on preset {target.key}"
     else:
         lane = target.lane
@@ -763,18 +706,18 @@ def units_from_lanes(
     lanes: Iterable[Lane],
     managed_units: ManagedUnitsConfig,
 ) -> dict[str, ManagedUnitConfig]:
-    """Managed-unit rows for lanes that declare their unit in router.yaml.
+    """Managed-unit rows for lanes that declare their own unit.
 
     A lane already covered by a ``managed_units`` row (matched by port) is
     skipped, so a hand-written row always wins. Everything else becomes a row
-    derived from router.yaml, which is what lets ``llmctl status`` see a lane
+    derived from the lane, which is what lets ``llmctl status`` see a lane
     that was never added to settings.yaml — the gap that left FreeToken and
     GLM-5.3 invisible while they were serving.
     """
     taken_ports = {unit.default_port for unit in managed_units.roles().values()}
     derived: dict[str, ManagedUnitConfig] = {}
     for lane in lanes:
-        port = _port_of(lane.upstream)
+        port = port_of(lane.upstream)
         if lane.unit is None or port is None or port in taken_ports:
             continue
         derived[lane.name] = ManagedUnitConfig(

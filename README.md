@@ -76,8 +76,8 @@ backing unit for you, in whichever scope the unit actually lives (system or
 
 `llmctl` writes the `EnvironmentFile` for an externally-installed
 systemd unit (e.g. `vllm-tp.service`), restarts the unit, polls
-`/v1/models` for readiness, and verifies that downstream consumers
-(Hermes, Open WebUI) still see the right served name. It owns the
+`/v1/models` for readiness, and runs whatever post-start checks the
+installed plugins register (see [Plugins](#plugins)). It owns the
 *how* of running a preset; presets themselves live at
 `~/.config/llmctl/presets/<alias>.yaml`. Legacy presets in
 `~/.config/llm-models/` are symlinked into that directory on first
@@ -106,7 +106,7 @@ llmctl runtimes                      # what runtimes exist, versions, loaded mod
 llmctl runtimes inspect ollama       # one runtime's capabilities in detail
 llmctl presets                       # list available presets
 llmctl swap                          # pick what serves from one list (vLLM, lanes, llama.cpp models)
-llmctl swap flash                    # Flash-Next on FreeToken (a router.yaml lane)
+llmctl swap flash                    # Flash-Next on FreeToken (a lane a plugin lists)
 llmctl swap qwen3.8-27b              # restart vllm-tp with this preset
 llmctl swap Qwen/Qwen3-8B            # a registered checkpoint: swaps to its preset
 llmctl status                        # managed units + what they serve right now
@@ -227,7 +227,7 @@ vLLM reads `quantization_config` itself, and **no tool or reasoning parser**.
 Set those before tool use. A taken alias gets `-2`; an existing preset for the
 same weights is reused. `--purge` deletes a starter preset along with the
 weights; a hand-written preset still blocks the purge. SGLang adds are
-download-only: SGLang serves through a router.yaml lane, and llmctl cannot
+download-only: SGLang serves through a plugin lane, and llmctl cannot
 write one.
 
 ### Serving a model: what `swap` does per engine
@@ -364,6 +364,26 @@ relocated**: silently moving it is the thing a pin exists to prevent,
 and a session whose recorded port is not where the server listens is its
 own kind of lie.
 
+## Plugins
+
+llmctl's core knows the engines, the GPUs, presets, sessions and systemd
+units. Anything tied to one machine's stack lives in a *plugin*: a package
+with an entry point in the `llmctl.plugins` group whose target is a
+`register(registry)` function. Four extension points:
+
+| Point | Used for |
+| --- | --- |
+| companion | a GPU-holding service paused around a vLLM launch (a Docker container, a user service); started again once the model answers, or on rollback |
+| post-start check | a read-only verification once the launched model answers (an agent framework's provider URL, a WebUI pin) |
+| lane source | extra `llmctl swap` rows: servers with their own start script and unit |
+| command | extra `llmctl` verbs |
+
+`llmctl-stack` (in `packages/llmctl-stack/`) is the plugin for the `~/AI`
+stack: Harbor, Hermes, llm-router lanes and profiles, the model lab.
+With no plugin installed `llmctl swap` lists presets and registered models
+only. `LLMCTL_PLUGINS=none` turns discovery off for one run; a plugin that
+fails to import is reported on stderr and skipped.
+
 ## Adding a lane (new engine on the GPUs)
 
 A **lane** is a self-contained server with its own systemd unit and start
@@ -377,15 +397,17 @@ so there is nothing left to forget.
    server answers. The script owns the GPU hand-over — llmctl never
    reimplements it. Have the unit adopt itself with `ds4-llmctl-sync` in
    `ExecStartPost` and detach in `ExecStopPost`.
-2. **Backend in `llm-router/config/router.yaml`** with `start_cmd`, `upstream`,
-   `served_model`, `gpus:` (the cards it occupies — omitted means every card),
-   `health_timeout_s`, and `unit:` + `runtime:` (llm-router ignores those two;
-   llmctl reads them). This is the lane list, so the lane appears in
-   `llmctl swap`, `llmctl status` and the TUI as soon as it exists — no
-   `settings.yaml` row needed. every lane does this as of 2026-09-21, so
-   `settings.yaml` holds only units that are not lanes (`vllm-tp`, `gpt-oss`,
-   `coder1`). The row's name in `llmctl status` is the lane name, and its
-   `source` column reads `router.yaml` rather than `settings`.
+2. **A lane entry in the lane source a plugin provides.** On this stack that
+   is `llm-router/config/router.yaml` (the `llmctl-stack` plugin reads it):
+   a backend with `start_cmd`, `upstream`, `served_model`, `gpus:` (the cards
+   it occupies — omitted means every card), `health_timeout_s`, and `unit:` +
+   `runtime:` (llm-router ignores those two; llmctl reads them). This is the
+   lane list, so the lane appears in `llmctl swap`, `llmctl status` and the
+   TUI as soon as it exists — no `settings.yaml` row needed. Every lane does
+   this as of 2026-09-21, so `settings.yaml` holds only units that are not
+   lanes (`vllm-tp`, `gpt-oss`, `coder1`). The row's name in `llmctl status`
+   is the lane name, and its `source` column reads `lane` rather than
+   `settings`.
 3. **Only if you need to override it:** a `managed_units.units` row in
    `~/.config/llmctl/settings.yaml` (`unit_name`, `default_port`, `runtime`)
    wins over `unit:`. Units that are not lanes live there too.

@@ -10,10 +10,9 @@ both see the same orchestration logic.
 Rules (matching gpu-models behaviour):
 
 * Starting **TP** stops: ollama, then TP itself (idempotent restart).
-  Optionally also stops ``harbor.ollama`` via the Harbor integration.
-* The Harbor integration runs as a separate hook (see
-  :mod:`llmctl.integrations.harbor`); this module covers systemd units
-  only.
+* Plugin companions (containers etc.) are stopped by the orchestrator after
+  this preflight (see :mod:`llmctl.plugins`); this module covers systemd
+  units only.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """Swap screen — one list of everything that can serve, one key to switch.
 
-Same list and preview as ``llmctl swap``: vLLM presets plus the lanes from
-llm-router's router.yaml (FreeToken, llama.cpp, ...). Enter shows what will
+Same list and preview as ``llmctl swap``: vLLM presets plus the lanes the
+plugins list (FreeToken, llama.cpp, ...). Enter shows what will
 stop and start and how long the last load took; confirming runs the swap in
 a worker thread, with rollback on failure.
 
@@ -136,7 +136,7 @@ class SwapScreen(DataScreen):
         yield Header()
         yield Static(
             f"Swap  -  [{C_MUTED}]enter = swap to the selected model (shows what stops "
-            f"first), ctrl+r = refresh. Lanes come from llm-router's router.yaml.[/]",
+            f"first), ctrl+r = refresh. Lanes come from the installed plugins.[/]",
             classes="panel safe",
             id="swap-title",
         )

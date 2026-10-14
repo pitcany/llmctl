@@ -1,7 +1,7 @@
 """`llmctl vllm` must not report readiness it never checked.
 
 `--no-wait` skips the `/v1/models` poll entirely. The command still stopped
-ollama and the Harbor container on the way in, so an operator who reads
+ollama and the plugin companions on the way in, so an operator who reads
 "vLLM ready -- serving X" two seconds later has been told something nobody
 verified: at that point the process has usually not even bound the port.
 """
@@ -80,7 +80,7 @@ def test_no_wait_is_not_treated_as_a_failure(monkeypatch) -> None:
 # --- the failure path and the exit-code contract ------------------------------
 #
 # `llmctl vllm` is the most destructive command in the tool -- it stops ollama
-# and the Harbor container, rewrites the unit env file and restarts the GPU pair
+# and the plugin companions, rewrites the unit env file and restarts the GPU pair
 # -- and had no CLI tests at all. These cover the contract README documents.
 
 

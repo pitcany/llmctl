@@ -1,6 +1,6 @@
 """How to serve a registered model, whatever its engine.
 
-``llmctl swap NAME`` is the one serve verb. Presets and router.yaml lanes are
+``llmctl swap NAME`` is the one serve verb. Presets and plugin lanes are
 its own list; :func:`route` answers for every other registered model so the
 operator never has to know that llama.cpp rows start as sessions, that Ollama
 loads on demand, or that a vLLM checkpoint needs a preset first:
@@ -162,7 +162,7 @@ def route(db: Session, model: Model, catalog: list[SwapTarget]) -> ServeRoute:
             "cannot",
             model,
             "llmctl cannot start SGLang models yet: SGLang runs from a start script "
-            "listed in llm-router's router.yaml. Nothing was changed. Serve the same "
+            "a plugin lane declares. Nothing was changed. Serve the same "
             f"checkpoint with vLLM instead: llmctl model add {model.source or model.name}",
         )
     if engine == RuntimeName.PYTHON_SCRIPT:

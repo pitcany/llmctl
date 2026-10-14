@@ -12,7 +12,9 @@ from llmctl.plugins import PluginRegistry, SystemdCompanion, load_plugins
 
 
 @pytest.fixture(autouse=True)
-def _fresh_registry() -> Any:
+def _fresh_registry(monkeypatch: pytest.MonkeyPatch) -> Any:
+    # conftest turns discovery off for every other test; this file tests it.
+    monkeypatch.delenv("LLMCTL_PLUGINS", raising=False)
     plugins.reset()
     yield
     plugins.reset()

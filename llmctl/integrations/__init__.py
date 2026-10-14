@@ -1,4 +1,4 @@
-"""Integrations with the surrounding ~/AI stack.
+"""Integrations with the host: systemd, journald, the vLLM launcher env.
 
 Modules here translate llmctl's abstract concepts into the concrete
 artifacts consumed by other components on the host:

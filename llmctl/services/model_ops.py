@@ -62,7 +62,7 @@ ADDABLE_ENGINES: tuple[RuntimeName, ...] = (
 )
 
 _NOT_ADDABLE = {
-    RuntimeName.FREETOKEN: "FreeToken lanes are declared in llm-router's router.yaml.",
+    RuntimeName.FREETOKEN: "FreeToken runs as a plugin lane (a unit plus a start script).",
     RuntimeName.OPENAI: "OpenAI-compatible endpoints are adopted, not added (`llmctl adopt`).",
     RuntimeName.PYTHON_SCRIPT: "python_script models are registered with `llmctl model add` "
     "without a SOURCE (flags or prompts).",
@@ -840,7 +840,7 @@ class ModelOps:
             return AddResult(
                 model,
                 notes=(
-                    "SGLang runs as a systemd lane (router.yaml + a start script), and "
+                    "SGLang runs as a systemd lane (a plugin lane plus a start script), and "
                     "llmctl cannot create one yet. Serve it with vLLM instead: "
                     f"llmctl model add {model.source or model.name}.",
                 ),

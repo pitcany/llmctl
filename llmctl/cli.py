@@ -66,9 +66,12 @@ from llmctl import cli_registry  # noqa: E402
 
 cli_registry.register(app)
 
-from llmctl import cli_lab  # noqa: E402
+# Plugins add their own verbs last (see llmctl.plugins); a plugin that fails
+# to import is reported on stderr and skipped so `llmctl` still runs.
+from llmctl.plugins import registry as _plugin_registry  # noqa: E402
 
-cli_lab.register(app)
+for _hook in _plugin_registry().commands:
+    _hook(app)
 
 
 def _session_model_cell(session: object, names: dict[str, str]) -> str:
@@ -1601,12 +1604,12 @@ def help_cmd(
 
 _SWAP_HELP = (
     "Serve a model: the one verb for every engine. NAME is a vLLM preset, a lane "
-    "from llm-router's router.yaml (FreeToken, llama.cpp, ...), or any registered "
+    "a plugin lists (FreeToken, llama.cpp, ...), or any registered "
     "model (`llmctl models`): a vLLM checkpoint swaps to its preset (offering to "
     "write one), a llama.cpp row starts as a session, Ollama/LM Studio say they "
     "load on demand. With no NAME, pick from a list. "
     "Shows what stops and starts before asking. MUTATES: frees the GPUs "
-    "(vllm-tp, other lanes, ollama/Harbor) and starts NAME; a failed start "
+    "(vllm-tp, other lanes, ollama, plugin companions) and starts NAME; a failed start "
     "rolls back to what was serving. --list prints the list; --dry-run previews."
 )
 
@@ -1825,7 +1828,7 @@ def _swap_registry_model(
 
 
 def _print_companions(result: object) -> None:
-    """Say which paused services (ollama, Harbor) came back, or how to."""
+    """Say which paused services (ollama, companions) came back, or how to."""
     restarted = list(getattr(result, "companions_restarted", []) or [])
     failed = list(getattr(result, "companions_failed", []) or [])
     pending = list(getattr(result, "companions_pending", []) or [])
@@ -2140,65 +2143,6 @@ def router_status_cmd() -> None:
             f"[{color}]{'yes' if healthy else 'no'}[/{color}]",
         )
     console.print(table)
-
-
-@app.command("router-profiles")
-def router_profiles_cmd(
-    write: Annotated[
-        bool,
-        typer.Option("--write", help="Rewrite drifted profile files from their presets."),
-    ] = False,
-) -> None:
-    """Check llm-router's vLLM profile envs against the llmctl presets.
-
-    Each router.yaml ``profile_env`` backend is matched to the preset with the
-    same served name and compared with what ``llmctl swap`` would render.
-    Exits 1 on drift (or an unmatched backend) unless --write fixed it. --write
-    rewrites only KEY=VALUE lines; the comments in the profile files are kept.
-    """
-    from llmctl.services.router_profiles import check_profiles, write_profile
-
-    settings = load_settings()
-    report = check_profiles(
-        port=settings.managed_units.vllm_tp.default_port,
-        defaults=settings.vllm.defaults,
-    )
-    if not report:
-        console.print("[yellow]No profile_env backends in router.yaml.[/yellow]")
-        return
-    failed = drifted = False
-    for drift in report:
-        label = f"{escape(drift.backend.name)} ({escape(drift.backend.path.name)})"
-        if drift.error:
-            console.print(f"[red]✗[/red] {label}: {escape(drift.error)}")
-            failed = True
-            continue
-        if drift.in_sync:
-            console.print(f"[green]✓[/green] {label} matches preset {escape(str(drift.preset))}")
-            continue
-        console.print(f"[yellow]≠[/yellow] {label} drifts from preset {escape(str(drift.preset))}:")
-        removed = [key for key, (_, want) in drift.changes.items() if want is None]
-        for key, (have, want) in drift.changes.items():
-            if want is None:
-                new = "[yellow]removed by --write (not in the preset)[/yellow]"
-            else:
-                new = escape(want)
-            old = "(absent)" if have is None else escape(have)
-            console.print(f"    {escape(key)}: {old} → {new}")
-        if write:
-            write_profile(drift)
-            console.print(f"    [green]rewritten[/green] {escape(str(drift.backend.path))}")
-            if removed:
-                console.print(
-                    f"    [yellow]removed {escape(', '.join(removed))}[/yellow]; "
-                    "add them to the preset to keep them (git has the old file)"
-                )
-        else:
-            failed = drifted = True
-    if drifted:
-        console.print("Run `llmctl router-profiles --write` to sync from the presets.")
-    if failed:
-        raise typer.Exit(1)
 
 
 @app.command("aliases")

@@ -38,9 +38,9 @@ class UnitRow:
     env_file_exists: bool
     port: int
     #: Where this row came from: ``settings`` (a ``managed_units`` entry in
-    #: llmctl's settings.yaml) or ``router.yaml`` (derived from a lane that
-    #: names its own ``unit:``). Worth showing: the two files are edited in
-    #: different places, and "why is this row here?" has two answers.
+    #: llmctl's settings.yaml) or ``lane`` (derived from a plugin lane that
+    #: names its own unit). Worth showing: the two are edited in different
+    #: places, and "why is this row here?" has two answers.
     source: str
     #: Tri-state, and the distinction is the point: a list (possibly empty)
     #: means the endpoint answered; ``None`` means it could not be reached.
@@ -62,9 +62,9 @@ def unit_rows(
 ) -> list[UnitRow]:
     """Describe every configured managed unit, probing each one's port.
 
-    Rows come from ``managed_units`` plus every router.yaml lane that names
-    its own ``unit:`` and is not already covered there, so a lane is visible
-    here as soon as the router knows about it.
+    Rows come from ``managed_units`` plus every plugin lane that names its
+    own unit and is not already covered there, so a lane is visible here as
+    soon as its source knows about it.
 
     Args:
         settings: Resolved settings; ``managed_units.roles()`` drives the rows.
@@ -79,7 +79,7 @@ def unit_rows(
     ).items():
         if role not in roles:
             roles[role] = unit
-            sources[role] = "router.yaml"
+            sources[role] = "lane"
     rows: list[UnitRow] = []
     for role, unit in roles.items():
         served = probe_openai_v1_models(

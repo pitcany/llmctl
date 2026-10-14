@@ -99,33 +99,44 @@ def test_row_carries_the_identifying_fields(tmp_path) -> None:
     assert row.port == 8003
 
 
-# --- lanes that declare their own unit in router.yaml -------------------------
+# --- lanes that declare their own unit -----------------------------------------
 
-_LANE_YAML = """
-backends:
-  - name: glm53
-    served_model: glm-5.3-flash
-    upstream: http://127.0.0.1:8006
-    start_cmd: ["/bin/glm53-start"]
-    unit: glm-5.3-flash
-    runtime: llama_cpp
-  - name: onvllmport
-    served_model: shadow
-    upstream: http://127.0.0.1:8003
-    start_cmd: ["/bin/shadow-start"]
-    unit: shadow
-  - name: nounit
-    served_model: anon
-    upstream: http://127.0.0.1:9999
-    start_cmd: ["/bin/anon-start"]
-"""
+
+def _plugin_lanes(monkeypatch) -> None:
+    """A registry whose one lane source lists three lanes of varying shape."""
+    from llmctl import plugins
+    from llmctl.services.lanes import Lane
+
+    lanes = [
+        Lane(
+            name="glm53",
+            served_model="glm-5.3-flash",
+            upstream="http://127.0.0.1:8006",
+            start_cmd=("/bin/glm53-start",),
+            unit="glm-5.3-flash.service",
+            runtime="llama_cpp",
+        ),
+        Lane(
+            name="onvllmport",
+            served_model="shadow",
+            upstream="http://127.0.0.1:8003",
+            start_cmd=("/bin/shadow-start",),
+            unit="shadow.service",
+        ),
+        Lane(
+            name="nounit",
+            served_model="anon",
+            upstream="http://127.0.0.1:9999",
+            start_cmd=("/bin/anon-start",),
+        ),
+    ]
+    reg = plugins.PluginRegistry(lane_sources=[lambda units: lanes])
+    monkeypatch.setattr(plugins, "_registry", reg)
 
 
 def test_a_lane_with_its_own_unit_needs_no_settings_row(tmp_path, monkeypatch) -> None:
     """FreeToken and GLM-5.3 were invisible to `status` for want of that row."""
-    router = tmp_path / "router.yaml"
-    router.write_text(_LANE_YAML)
-    monkeypatch.setenv("LLMCTL_ROUTER_CONFIG", str(router))
+    _plugin_lanes(monkeypatch)
 
     rows = {row.role: row for row in unit_rows(_settings(tmp_path), http_get=_http({"data": []}))}
 
@@ -140,11 +151,9 @@ def test_a_lane_with_its_own_unit_needs_no_settings_row(tmp_path, monkeypatch) -
 
 def test_rows_say_which_file_put_them_there(tmp_path, monkeypatch) -> None:
     """"Why is this row here?" has two answers; the table gives it."""
-    router = tmp_path / "router.yaml"
-    router.write_text(_LANE_YAML)
-    monkeypatch.setenv("LLMCTL_ROUTER_CONFIG", str(router))
+    _plugin_lanes(monkeypatch)
 
     rows = {row.role: row for row in unit_rows(_settings(tmp_path), http_get=_http({"data": []}))}
 
     assert rows["vllm-tp"].source == "settings"
-    assert rows["glm53"].source == "router.yaml"
+    assert rows["glm53"].source == "lane"

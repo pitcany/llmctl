@@ -86,7 +86,7 @@ class ManagedRestartResult:
     #: endpoint was polled and answered, ``False`` means it was polled and did
     #: not, ``None`` means nobody looked (``wait_for_ready=False``). Collapsing
     #: ``None`` into ``True`` is what let the CLI announce "vLLM ready" seconds
-    #: after stopping ollama and Harbor, before the port was bound.
+    #: after stopping ollama and the companions, before the port was bound.
     ready: bool | None
     error: str | None = None
 

@@ -135,6 +135,7 @@ def test_vllm_swap_reports_paused_services(monkeypatch, calls):
         )
         result.companions_restarted = ["ollama"]
         result.companions_failed = ["harbor.ollama"]
+        result.start_hints = {"harbor.ollama": "docker start harbor.ollama"}
         return result
 
     monkeypatch.setattr(cli, "gather_state", lambda settings: _state(set(), set()))

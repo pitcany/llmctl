@@ -384,7 +384,7 @@ class PresetsScreen(DataScreen):
                 reason = f"fleet preflight failed: {', '.join(result.fleet_failed)}"
             elif result.restart is not None and result.restart.error:
                 reason = result.restart.error
-            # Preflight stops ollama and Harbor before the restart is tried.
+            # Preflight stops ollama and the companions before the restart is tried.
             # The orchestrator rolls that back; say what it could not undo so
             # the operator does not believe the box is as they left it.
             aftermath = ""
