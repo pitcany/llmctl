@@ -35,6 +35,7 @@ class RuntimeName(StrEnum):
     PYTHON_SCRIPT = "python_script"
     SGLANG = "sglang"
     FREETOKEN = "freetoken"
+    STRATA = "strata"
     OPENAI = "openai"
 
 

@@ -15,11 +15,12 @@ on demand. Much of `llmctl` exists to manage that split safely.
 
 ## What it does
 
-Ten verbs cover a normal day. Everything else is one `llmctl help --all` away
+Eleven verbs cover a normal day. Everything else is one `llmctl help --all` away
 and keeps working under its old name.
 
 | Verb | What it does |
 | --- | --- |
+| `llmctl setup ENGINE` | Install an engine: vLLM, SGLang and FreeToken each get their own Python env; llama.cpp a prebuilt `llama-server` matched to your CUDA driver; Strata its own checkout and installer; Ollama its official installer. Alone, it lists what is installed. |
 | `llmctl add SOURCE` | Fetch a model with its engine's own tool and remember it. The shape of SOURCE picks the engine: `Qwen/Qwen3-8B` is vLLM, `qwen3:8b` is Ollama, `unsloth/Qwen3-8B-GGUF:Q4_K_M` is llama.cpp; `--engine sglang\|freetoken` overrides. |
 | `llmctl run [NAME]` | Serve a model, whatever its engine. Stops what holds the GPUs, starts NAME, waits until it answers, puts the previous model back if it fails. No NAME: pick from a list. `--dry-run` shows the plan. |
 | `llmctl ls` | Everything you can `run`, and which one is serving now. |
@@ -69,6 +70,7 @@ required.
 ## Quick taste
 
 ```bash
+llmctl setup vllm                    # its own env with vLLM in it (also: sglang, freetoken, strata, llama.cpp, ollama)
 llmctl add Qwen/Qwen3-8B             # download from Hugging Face, serve with vLLM
 llmctl add qwen3:8b                  # ollama pull
 llmctl ls                            # what can run, what is serving
@@ -203,7 +205,7 @@ The GPUs are served in three ways, and `llmctl run NAME` covers all three:
 | --- | --- |
 | a vLLM preset, or a vLLM model | Stops what vLLM serves now and restarts `vllm-tp` on this preset (about 2 min). No preset yet: offers to write a starter one first. |
 | a lane (FreeToken, GLM, the GPU1 coder) | Stops what shares its cards, runs the lane's start script, waits until it answers. |
-| a llama.cpp, SGLang or FreeToken model | Checks the model fits (one card, or split across both) **before stopping anything**. Then stops vLLM, active lanes and other servers llmctl started, starts the engine's server (`llama-server`, `python -m sglang.launch_server`, `ft serve`), and waits until it answers. FreeToken serves from one GPU. |
+| a llama.cpp, SGLang, FreeToken or Strata model | Checks the model fits (one card, or split across both) **before stopping anything**. Then stops vLLM, active lanes and other servers llmctl started, starts the engine's server (`llama-server`, `python -m sglang.launch_server`, `ft serve`, Strata's `serve/server.py`), and waits until it answers. FreeToken and Strata serve from one GPU. |
 | an Ollama or LM Studio model | Nothing. Those servers are always running and load a model the first time a request names it (`ollama run qwen3:8b "hi"`, `lms load KEY`). The GPUs are left alone. |
 | a model on another machine, an adopted endpoint, an engine that is not installed | Nothing, with the reason (and the `llmctl setup ENGINE` to run). |
 

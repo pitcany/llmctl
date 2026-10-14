@@ -68,6 +68,7 @@ def run_doctor(settings: Settings | None = None) -> dict[str, Any]:
     named_checks = (
         ("storage", lambda: _check_storage(cfg)),
         ("backends", lambda: _check_backends(cfg)),
+        ("engines", lambda: _check_engines(cfg)),
         ("gpu", _check_gpu),
         ("sessions", lambda: _check_sessions(cfg)),
         ("drift", lambda: _check_drift(cfg)),
@@ -151,6 +152,30 @@ def _check_backends(cfg: Settings) -> list[DoctorCheck]:
                     f"binary '{entry['binary']}' not found on PATH",
                     "Install the runtime or set its binary path in settings.yaml "
                     "(runtimes.<name>.binary). Unused runtimes can be ignored.",
+                )
+            )
+    return checks
+
+
+def _check_engines(cfg: Settings) -> list[DoctorCheck]:
+    """Which engines `llmctl run` can start today, and how to get the rest."""
+    from llmctl.services.engines import engine_statuses
+
+    checks: list[DoctorCheck] = []
+    for row in engine_statuses(cfg):
+        name = f"engine:{row.engine}"
+        if row.source == "llmctl":
+            version = f" {row.version}" if row.version else ""
+            checks.append(DoctorCheck(name, "pass", f"installed by llmctl{version}: {row.binary}"))
+        elif row.source == "path":
+            checks.append(DoctorCheck(name, "pass", f"found: {row.binary}"))
+        else:
+            checks.append(
+                DoctorCheck(
+                    name,
+                    "warn",
+                    "not installed",
+                    f"`llmctl setup {row.engine}` installs it; ignore engines you do not use.",
                 )
             )
     return checks

@@ -215,6 +215,8 @@ SOURCE picks the engine; --engine overrides the guess.
   llmctl model add qwen3:8b                          Ollama (ollama pull)
   llmctl model add Qwen/Qwen3-8B                     vLLM (Hugging Face download)
   llmctl model add Qwen/Qwen3-8B --engine sglang     SGLang (same download)
+  llmctl model add Qwen/Qwen3.6-35B-A3B --engine freetoken   FreeToken (same download)
+  llmctl model add ~/strata/strata-iq2_xs.json   Strata (the config its setup wrote)
   llmctl model add unsloth/Qwen3-8B-GGUF:Q4_K_M      llama.cpp (one GGUF quant)
   llmctl model add lmstudio:qwen/qwen3-8b            LM Studio (lms get)
   llmctl model add ~/models/foo.gguf                 register a local file/folder

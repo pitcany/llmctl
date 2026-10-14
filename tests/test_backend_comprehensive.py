@@ -248,6 +248,7 @@ class TestRuntimeAdapters:
             "python_script",
             "sglang",
             "freetoken",
+            "strata",
         }
         assert runtimes == required_runtimes
 

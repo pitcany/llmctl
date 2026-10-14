@@ -16,6 +16,7 @@ from sqlmodel import Session
 
 from llmctl.adapters.freetoken import FreeTokenAdapter
 from llmctl.adapters.sglang import SGLangAdapter
+from llmctl.adapters.strata import StrataAdapter
 from llmctl.config import RuntimeConfig
 from llmctl.db import ModelRecord, RuntimeName, get_engine, init_db
 from llmctl.schemas import HealthState, SessionStartRequest
@@ -105,10 +106,35 @@ def test_gpu_is_required_for_both(tmp_path: Path, monkeypatch) -> None:
             assert any("No NVIDIA GPUs" in r for r in plan.refusal_reasons), runtime
 
 
+def test_strata_command_runs_the_server_on_its_config(tmp_path: Path, monkeypatch) -> None:
+    """A Strata model is its config JSON; the GPU goes by nvidia-smi index."""
+    config = tmp_path / "strata-iq2_xs.json"
+    config.write_text('{"exe": "/x/strata", "args": [], "model_name": "qwen-iq2_xs"}')
+    monkeypatch.setattr(scheduler_mod, "_strata_server_for", lambda py: Path("/x/serve/server.py"))
+    with _db(tmp_path) as db:
+        model = ModelRecord(name="qwen-iq2_xs", runtime=RuntimeName.STRATA, path=str(config))
+        db.add(model)
+        db.commit()
+        db.refresh(model)
+        scheduler = SchedulerService(db)
+        scheduler.settings.runtimes["strata"] = RuntimeConfig(binary="/definitely/missing")
+        plan = scheduler.create_launch_plan(
+            SessionStartRequest(
+                model_id=model.id, runtime=RuntimeName.STRATA, gpu_ids=[1], dry_run=True
+            )
+        )
+    assert plan.command[:6] == [
+        "/definitely/missing", "/x/serve/server.py", "--engine", "strata", "--config", str(config)
+    ]
+    assert plan.command[plan.command.index("--gpu") + 1] == "1"
+    assert "CUDA_VISIBLE_DEVICES" not in plan.env
+    assert any("strata is not installed" in r for r in plan.refusal_reasons)
+
+
 # --- adapters -----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("adapter_cls", [SGLangAdapter, FreeTokenAdapter])
+@pytest.mark.parametrize("adapter_cls", [SGLangAdapter, FreeTokenAdapter, StrataAdapter])
 def test_adapters_can_launch_and_stop(adapter_cls) -> None:
     caps = adapter_cls().capabilities()
     assert caps["launch_process"] and caps["stop_process"] and caps["logs"]
@@ -149,6 +175,7 @@ def test_run_list_includes_sglang_and_freetoken_models() -> None:
         SimpleNamespace(name="a", runtime=RuntimeName.SGLANG, path=None),
         SimpleNamespace(name="b", runtime=RuntimeName.FREETOKEN, path=None),
         SimpleNamespace(name="c", runtime=RuntimeName.OLLAMA, path=None),
+        SimpleNamespace(name="d", runtime=RuntimeName.STRATA, path="/x.json"),
     ]
     from llmctl.services.lanes import SwapTarget
 
@@ -156,4 +183,4 @@ def test_run_list_includes_sglang_and_freetoken_models() -> None:
         return SwapTarget(key=m.name, kind="session", model=m.name, engine="x", upstream="")
 
     rows = session_rows_for(models, [], target_for=target_for, is_local=lambda m: True)
-    assert [r.key for r in rows] == ["a", "b"]
+    assert [r.key for r in rows] == ["a", "b", "d"]

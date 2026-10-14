@@ -34,10 +34,15 @@ from llmctl.schemas import GPUInfo, LaunchPlan, SessionStartRequest
 from llmctl.telemetry.gpu import get_gpu_info
 
 HTTP_SERVER_RUNTIMES = {RuntimeName.OLLAMA, RuntimeName.LMSTUDIO}
-GPU_REQUIRED_RUNTIMES = {RuntimeName.VLLM, RuntimeName.SGLANG, RuntimeName.FREETOKEN}
+GPU_REQUIRED_RUNTIMES = {
+    RuntimeName.VLLM,
+    RuntimeName.SGLANG,
+    RuntimeName.FREETOKEN,
+    RuntimeName.STRATA,
+}
 #: Engines that serve from one GPU only.
-SINGLE_GPU_RUNTIMES = {RuntimeName.FREETOKEN}
-LOCAL_FILE_RUNTIMES = {RuntimeName.LLAMA_CPP, RuntimeName.PYTHON_SCRIPT}
+SINGLE_GPU_RUNTIMES = {RuntimeName.FREETOKEN, RuntimeName.STRATA}
+LOCAL_FILE_RUNTIMES = {RuntimeName.LLAMA_CPP, RuntimeName.PYTHON_SCRIPT, RuntimeName.STRATA}
 VALID_GPU_MODES = {"auto", "balanced", "most-free", "least-used"}
 _ACTIVE_STATES = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
 
@@ -56,6 +61,12 @@ def _forced_busy_port_warning(port: int) -> str:
 
 class SchedulerError(ValueError):
     """Raised when a launch is refused and not overridden with ``--force``."""
+
+
+def _strata_server_for(python: str) -> Path | None:
+    """``<repo>/serve/server.py`` for ``<repo>/.venv/bin/python``, if it is there."""
+    candidate = Path(python).resolve().parent.parent.parent / "serve" / "server.py"
+    return candidate if candidate.is_file() else None
 
 
 def _python_has_module(python: str, module: str) -> bool:
@@ -177,7 +188,11 @@ class SchedulerService:
             # see a card the plan says it is not using.
             profile_env.pop("CUDA_VISIBLE_DEVICES", None)
             env.update(profile_env)
-        if gpu_ids:
+        if gpu_ids and runtime == RuntimeName.STRATA:
+            # Strata picks its card by nvidia-smi index (`--gpu`), which
+            # CUDA_VISIBLE_DEVICES would renumber underneath it.
+            parameters.setdefault("strata_gpu", gpu_ids[0])
+        elif gpu_ids:
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in gpu_ids)
         elif request.allow_cpu and runtime in GPU_REQUIRED_RUNTIMES:
             env["CUDA_VISIBLE_DEVICES"] = ""
@@ -454,6 +469,16 @@ class SchedulerService:
                 f"sglang is not installed in {resolved}. Run `llmctl setup sglang`, or set "
                 "runtimes.sglang.binary to the python of an env that has it."
             )
+        if runtime == RuntimeName.STRATA and _strata_server_for(resolved) is None:
+            refusals.append(
+                f"strata is not installed: {resolved} is not the python of a Strata checkout "
+                "(no serve/server.py beside its venv). Run `llmctl setup strata`."
+            )
+        if runtime == RuntimeName.STRATA and _strata_server_for(resolved) is None:
+            refusals.append(
+                f"strata is not installed: {resolved} is not the python of a Strata checkout "
+                "(no serve/server.py beside its venv). Run `llmctl setup strata`."
+            )
 
     @staticmethod
     def _check_model_path(
@@ -555,7 +580,45 @@ class SchedulerService:
             return self._build_sglang_command(runtime_config, model, parameters, host, port)
         if runtime == RuntimeName.FREETOKEN:
             return self._build_freetoken_command(runtime_config, model, parameters, host, port)
+        if runtime == RuntimeName.STRATA:
+            return self._build_strata_command(runtime_config, model, parameters, host, port)
         return []
+
+    def _build_strata_command(
+        self,
+        runtime_config: RuntimeConfig,
+        model: ModelRecord | None,
+        parameters: dict[str, object],
+        host: str,
+        port: int,
+    ) -> list[str]:
+        """Build ``<venv python> serve/server.py --engine strata --config X.json``.
+
+        A Strata model *is* its config JSON (written by Strata's setup): the
+        engine binary, the weight pack and the flags are all in there. The
+        server script lives next to the interpreter's venv, so ``binary``
+        (``<repo>/.venv/bin/python``) locates it; ``parameters.server``
+        overrides. The GPU is passed as ``--gpu`` by nvidia-smi index because
+        Strata numbers cards that way (see ``_strata_gpu``).
+        """
+        config = (model.path or model.source) if model else None
+        if not config:
+            return []
+        python = runtime_config.binary or "python3"
+        server = parameters.get("server") or _strata_server_for(python)
+        if not server:
+            return []
+        command = [
+            python, str(server), "--engine", "strata", "--config", str(config),
+            "--host", host, "--port", str(port),
+        ]
+        gpu = parameters.get("strata_gpu")
+        if gpu is not None:
+            command += ["--gpu", str(gpu)]
+        if parameters.get("api_key"):
+            command += ["--api-key", str(parameters["api_key"])]
+        command += self._extra_args(parameters, runtime_config)
+        return command
 
     def _build_sglang_command(
         self,

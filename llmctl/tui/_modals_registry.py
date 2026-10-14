@@ -202,6 +202,7 @@ _ENGINE_LABELS = {
     RuntimeName.VLLM: "vLLM",
     RuntimeName.SGLANG: "SGLang",
     RuntimeName.FREETOKEN: "FreeToken",
+    RuntimeName.STRATA: "Strata",
     RuntimeName.LLAMA_CPP: "llama.cpp",
     RuntimeName.LMSTUDIO: "LM Studio",
 }

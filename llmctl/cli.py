@@ -56,7 +56,7 @@ class _SuggestingGroup(typer.core.TyperGroup):
     """
 
     #: Front-page order: the everyday verbs in the order a new user meets them.
-    FRONT = ("add", "run", "ls", "stop", "rm", "status", "logs", "doctor", "tui", "help")
+    FRONT = ("setup", "add", "run", "ls", "stop", "rm", "status", "logs", "doctor", "tui", "help")
 
     def list_commands(self, ctx: Any) -> list[str]:
         names = list(super().list_commands(ctx))
@@ -2002,6 +2002,99 @@ def _print_rollback(result: object, tp_unit: str) -> None:
     console.print("  next:")
     for cmd in todo:
         console.print(f"    {escape(cmd)}")
+
+
+@app.command("setup", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def setup_cmd(
+    ctx: typer.Context,
+    engine: Annotated[
+        str | None,
+        typer.Argument(help="vllm, sglang, freetoken, strata, llama_cpp or ollama. Omit to list."),
+    ] = None,
+    python: Annotated[
+        str | None,
+        typer.Option(help="Python to build the engine's env from (default: uv's choice)."),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show the steps and do nothing.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation.")] = False,
+) -> None:
+    """Install an engine so `llmctl run` can use it (`llmctl setup` alone shows them).
+
+    Extra flags after `--` go to the engine's own installer (Strata:
+    `llmctl setup strata -- --family coder --model IQ1_M`).
+    """
+    from llmctl.services import engines as eng
+
+    settings = load_settings()
+    if engine is None:
+        table = Table(title="Engines", title_justify="left")
+        for column in ("engine", "state", "binary", "version"):
+            table.add_column(column)
+        for row in eng.engine_statuses(settings):
+            state = {
+                "llmctl": "[green]installed by llmctl[/green]",
+                "path": "[green]found[/green]",
+                "missing": "[yellow]missing[/yellow]",
+            }[row.source]
+            table.add_row(row.engine, state, escape(row.binary or "—"), escape(row.version or "—"))
+        console.print(table)
+        console.print("Install one: llmctl setup ENGINE")
+        return
+    try:
+        plan = eng.plan_setup(engine, settings=settings, python=python, extra=list(ctx.args))
+    except eng.SetupError as exc:
+        console.print(f"[red]{escape(str(exc))}[/red]")
+        raise typer.Exit(2) from exc
+    if plan.problem:
+        console.print(f"[red]Cannot set up {escape(plan.engine)}:[/red] {escape(plan.problem)}")
+        raise typer.Exit(1)
+    console.print(f"[bold]Set up {escape(plan.engine)}[/bold]")
+    for step in plan.steps:
+        console.print(f"  - {escape(step)}")
+    if plan.needs_sudo:
+        console.print("  [yellow]this installer asks for sudo[/yellow]")
+    if dry_run:
+        console.print("Dry run: nothing was done.")
+        return
+    if not yes and not Confirm.ask("Proceed?", default=True):
+        console.print("[yellow]Nothing changed.[/yellow]")
+        raise typer.Exit(0)
+    deps = eng.SetupDeps(log=lambda m: console.print(escape(m)))
+    try:
+        record = eng.run_setup(plan, settings=settings, deps=deps)
+    except eng.SetupError as exc:
+        console.print(f"[red]Setup failed:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    binary = escape(str(record.get("binary")))
+    version = escape(str(record.get("version") or ""))
+    suffix = f" (version {version})" if version else ""
+    console.print(f"[green]{escape(plan.engine)} ready[/green] — {binary}{suffix}")
+    if plan.engine == "strata" and record.get("config"):
+        _register_strata_config(Path(str(record["config"])))
+    console.print(f"Recorded in {escape(str(eng.engines_file(settings)))}.")
+    console.print(
+        "Next: llmctl add MODEL  (then llmctl run MODEL)"
+        if plan.engine != "strata"
+        else "Next: llmctl run  (the model setup installed is listed)"
+    )
+
+
+def _register_strata_config(config: Path) -> None:
+    """Register the model a Strata setup produced, so `run` can serve it."""
+    from llmctl.services.model_ops import ModelOps, ModelOpsError, plan_add
+
+    try:
+        plan = plan_add(str(config), "strata")
+        with _session() as db:
+            result = ModelOps(db).add(plan)
+        console.print(f"  registered {escape(result.model.name)} ({escape(str(config))})")
+    except (ModelOpsError, Exception) as exc:  # noqa: BLE001 - setup succeeded; report only
+        console.print(
+            f"  [yellow]could not register {escape(str(config))}: {escape(str(exc))}[/yellow] "
+            f"— run: llmctl add {escape(str(config))} --engine strata"
+        )
 
 
 @app.command("ls")

@@ -159,7 +159,7 @@ def route(db: Session, model: Model, catalog: list[SwapTarget]) -> ServeRoute:
             "the GPUs for it first.",
             target,
         )
-    if engine in (RuntimeName.SGLANG, RuntimeName.FREETOKEN):
+    if engine in (RuntimeName.SGLANG, RuntimeName.FREETOKEN, RuntimeName.STRATA):
         from llmctl.services.lanes import engine_label
         from llmctl.services.session_swap import pinned_port, session_target
 

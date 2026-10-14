@@ -27,6 +27,7 @@ _BACKEND_BINARIES: dict[str, str] = {
     "llama_cpp": "llama-server",
     "sglang": "python3",
     "freetoken": "ft",
+    "strata": "python3",
     "lmstudio": "lms",
     "ollama": "ollama",
     "python": "python",
@@ -158,7 +159,7 @@ def detect_backends(
             continue
         override = (
             cfg.runtime_config(backend).binary
-            if backend in {"vllm", "llama_cpp", "sglang", "freetoken"}
+            if backend in {"vllm", "llama_cpp", "sglang", "freetoken", "strata"}
             else None
         )
         binary = override or default_binary

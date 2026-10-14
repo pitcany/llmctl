@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `llmctl setup ENGINE` installs an engine so `run` can use it, recorded in
+  `engines.yaml` (no settings.yaml edit): vLLM/SGLang/FreeToken in their own
+  venvs (uv, or the stdlib venv), llama.cpp from the GitHub release matched
+  to the CUDA driver, Strata via `git clone` + its own `setup.sh`, Ollama via
+  its installer. `llmctl setup` alone lists engines; `doctor` reports them.
+- Strata (github.com/Niko1221/Strata) is a sixth engine: `llmctl add
+  <its config>.json` registers a model its setup produced; `run` serves it.
 - SGLang and FreeToken are engines llmctl starts itself: `llmctl add
   ORG/REPO --engine sglang|freetoken`, then `llmctl run NAME` launches
   `python -m sglang.launch_server` / `ft serve` as a tracked session, frees

@@ -32,6 +32,7 @@ def test_runtime_router_has_expected_adapters() -> None:
         "python_script",
         "sglang",
         "freetoken",
+        "strata",
     }
 
 
