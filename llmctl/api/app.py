@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlmodel import Session
 
+from llmctl import __version__
 from llmctl.api import (
     routes_benchmarks,
     routes_gpu,
@@ -38,7 +39,7 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
     apply_migrations(engine)
     app = FastAPI(
         title="LLM Mission Control",
-        version="0.1.0",
+        version=__version__,
         description="Local-first LLM runtime control plane scaffold.",
     )
 

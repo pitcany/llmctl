@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-10-14
+
+First release from github.com/pitcany/llmctl as its own repository.
+
 - `llmctl setup llama.cpp --from-source` clones the latest release and builds
   `llama-server` with cmake (CUDA for the local cards' compute capability
   when nvcc is present, CPU otherwise). It is chosen automatically when glibc
