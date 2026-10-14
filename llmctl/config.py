@@ -341,6 +341,18 @@ class ManagedUnitsConfig(BaseModel):
         return {"vllm-tp": self.vllm_tp, **self.units}
 
 
+def _recorded_engine_binary(config_dir: Path, runtime: str) -> str | None:
+    """The binary ``llmctl setup`` recorded for ``runtime``, when it still exists."""
+    path = config_dir / "engines.yaml"
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    info = data.get(runtime) if isinstance(data, dict) else None
+    binary = info.get("binary") if isinstance(info, dict) else None
+    return str(binary) if binary and Path(str(binary)).exists() else None
+
+
 def default_runtime_configs() -> dict[str, RuntimeConfig]:
     """Return built-in default configuration for every supported runtime."""
     return {
@@ -370,6 +382,17 @@ def default_runtime_configs() -> dict[str, RuntimeConfig]:
             port_range=[1919, 1929],
             readiness_timeout_s=600.0,
         ),
+        # Strata (github.com/Niko1221/Strata) is launched as
+        # `<its venv>/bin/python serve/server.py --engine strata --config X.json`;
+        # `binary` is that python (`llmctl setup strata` records it) and the
+        # model is the config JSON its setup wrote.
+        "strata": RuntimeConfig(
+            endpoint="http://127.0.0.1:8080",
+            binary="python3",
+            host="127.0.0.1",
+            port_range=[8080, 8089],
+            readiness_timeout_s=1800.0,
+        ),
     }
 
 
@@ -396,9 +419,17 @@ class Settings(BaseModel):
     router: RouterSettings = Field(default_factory=RouterSettings)
 
     def runtime_config(self, runtime: str) -> RuntimeConfig:
-        """Return effective runtime config, merging defaults with YAML overrides."""
+        """Return effective runtime config, merging defaults with YAML overrides.
+
+        Precedence: ``runtimes.<name>`` in settings.yaml, then what
+        ``llmctl setup`` recorded in ``engines.yaml`` (the binary of the env it
+        installed), then the built-in defaults.
+        """
         defaults = default_runtime_configs()
         base = defaults.get(runtime, RuntimeConfig())
+        recorded = _recorded_engine_binary(self.config_dir, runtime)
+        if recorded:
+            base = base.model_copy(update={"binary": recorded})
         override = self.runtimes.get(runtime)
         if override is None:
             return base

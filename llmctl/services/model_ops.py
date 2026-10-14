@@ -58,6 +58,7 @@ ADDABLE_ENGINES: tuple[RuntimeName, ...] = (
     RuntimeName.VLLM,
     RuntimeName.SGLANG,
     RuntimeName.FREETOKEN,
+    RuntimeName.STRATA,
     RuntimeName.LLAMA_CPP,
     RuntimeName.LMSTUDIO,
 )
@@ -194,16 +195,24 @@ def _plan_local(source: str, engine: RuntimeName | None, name: str | None) -> Ad
     is_gguf = path.suffix.lower() == ".gguf" or (
         path.is_dir() and any(path.glob("*.gguf"))
     )
+    is_strata = path.is_file() and path.suffix.lower() == ".json" and _is_strata_config(path)
     if engine is None:
         if is_gguf:
             engine = RuntimeName.LLAMA_CPP
         elif path.is_dir() and (path / "config.json").exists():
             engine = RuntimeName.VLLM
+        elif is_strata:
+            engine = RuntimeName.STRATA
         else:
             raise ModelOpsError(
                 f"Can't tell which engine serves {path}: it is neither a .gguf "
-                "file nor a folder with config.json. Pick an engine."
+                "file, a folder with config.json, nor a Strata config. Pick an engine."
             )
+    if engine == RuntimeName.STRATA and not is_strata:
+        raise ModelOpsError(
+            f"strata serves the config JSON its setup writes (exe + args + tokenizer); "
+            f"{path} is not one."
+        )
     if engine in (RuntimeName.OLLAMA, RuntimeName.LMSTUDIO):
         tool = "ollama create" if engine == RuntimeName.OLLAMA else "lms import"
         raise ModelOpsError(
@@ -220,6 +229,8 @@ def _plan_local(source: str, engine: RuntimeName | None, name: str | None) -> Ad
             "use the llama_cpp engine for this file."
         )
     display = name or (_SHARD_RE.sub("", path.stem) if path.is_file() else path.name)
+    if engine == RuntimeName.STRATA and not name:
+        display = _strata_model_name(path) or display
     return AddPlan(
         engine=engine,
         method="register",
@@ -229,6 +240,27 @@ def _plan_local(source: str, engine: RuntimeName | None, name: str | None) -> Ad
         + (", and write a starter preset for it." if engine == RuntimeName.VLLM else "."),
         command=f"llmctl model add {path} --engine {engine.value}",
     )
+
+
+def _is_strata_config(path: Path) -> bool:
+    """A Strata server config: a JSON object with ``exe`` and ``args``."""
+    import json
+
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and "exe" in data and isinstance(data.get("args"), list)
+
+
+def _strata_model_name(path: Path) -> str | None:
+    import json
+
+    try:
+        name = json.loads(path.read_text()).get("model_name")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return str(name) if name else None
 
 
 def plan_add(
@@ -838,7 +870,7 @@ class ModelOps:
             )
         if model.runtime == RuntimeName.LLAMA_CPP:
             return AddResult(model, serve=f"llmctl run {model.name}")
-        if model.runtime in (RuntimeName.SGLANG, RuntimeName.FREETOKEN):
+        if model.runtime in (RuntimeName.SGLANG, RuntimeName.FREETOKEN, RuntimeName.STRATA):
             return AddResult(model, serve=f"llmctl run {model.name}")
         return AddResult(model)
 

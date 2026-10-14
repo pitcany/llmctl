@@ -36,11 +36,12 @@ DEFAULT_LANE_TIMEOUT_S = 300.0
 
 #: Runtime ids of the engines llmctl starts itself for a registered model
 #: (as a tracked session), as opposed to a unit or lane something else runs.
-SELF_STARTED_RUNTIMES = frozenset({"llama_cpp", "sglang", "freetoken"})
+SELF_STARTED_RUNTIMES = frozenset({"llama_cpp", "sglang", "freetoken", "strata"})
 
 _ENGINE_LABELS = {
     "vllm": "vLLM",
     "freetoken": "FreeToken",
+    "strata": "Strata",
     "llama_cpp": "llama.cpp",
     "sglang": "SGLang",
     "openai": "OpenAI-compat",
@@ -49,7 +50,12 @@ _ENGINE_LABELS = {
 
 
 #: Engine label -> what its server process is called in messages.
-_SERVER_NAMES = {"llama.cpp": "llama-server", "SGLang": "sglang server", "FreeToken": "ft serve"}
+_SERVER_NAMES = {
+    "llama.cpp": "llama-server",
+    "SGLang": "sglang server",
+    "FreeToken": "ft serve",
+    "Strata": "strata server",
+}
 
 
 def server_name(engine_label_text: str) -> str:

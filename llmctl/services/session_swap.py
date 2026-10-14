@@ -385,7 +385,13 @@ def run_session_swap(
 def _server_name(runtime: Any) -> str:
     """What the started process is called in messages (``llama-server``, ``ft serve``)."""
     value = getattr(runtime, "value", runtime)
-    return {"llama_cpp": "llama-server", "freetoken": "ft serve", "sglang": "sglang"}.get(
+    names = {
+        "llama_cpp": "llama-server",
+        "freetoken": "ft serve",
+        "sglang": "sglang",
+        "strata": "strata server",
+    }
+    return names.get(
         str(value), str(value)
     )
 

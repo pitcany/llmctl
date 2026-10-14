@@ -17,7 +17,8 @@ Python root (where ``bin/python`` and ``lib/`` live):
     2. ``$GPU_MODELS_PYTHON_ROOT`` (back-compat with gpu-models)
     3. ``$CONDA_PREFIX`` (active conda env)
     4. ``$VIRTUAL_ENV`` (active venv)
-    5. raise :class:`LauncherEnvError`
+    5. the venv ``llmctl setup vllm`` made (``engines.yaml``)
+    6. raise :class:`LauncherEnvError`
 
 CUDA root: ``$LLMCTL_CUDA_ROOT`` (falls back to ``$GPU_MODELS_CUDA_ROOT``,
 default ``/usr/local/cuda``).
@@ -68,9 +69,14 @@ def resolve_python_root() -> str:
         val = os.environ.get(var)
         if val:
             return val
+    from llmctl.services.engines import recorded_python_root
+
+    recorded = recorded_python_root("vllm")
+    if recorded:
+        return recorded
     raise LauncherEnvError(
-        "No Python environment detected. Activate a conda env "
-        "(sets $CONDA_PREFIX), a venv (sets $VIRTUAL_ENV), or set "
+        "No Python environment detected. Run `llmctl setup vllm`, activate a "
+        "conda env (sets $CONDA_PREFIX) or a venv (sets $VIRTUAL_ENV), or set "
         "$LLMCTL_PYTHON_ROOT explicitly. The vLLM launcher needs this "
         "to construct LD_LIBRARY_PATH and PATH for the systemd unit."
     )

@@ -14,6 +14,7 @@ from llmctl.adapters.lmstudio import LMStudioAdapter
 from llmctl.adapters.ollama import OllamaAdapter
 from llmctl.adapters.python_script import PythonScriptAdapter
 from llmctl.adapters.sglang import SGLangAdapter
+from llmctl.adapters.strata import StrataAdapter
 from llmctl.adapters.vllm import VLLMAdapter
 from llmctl.config import Settings, load_settings
 from llmctl.db import RuntimeName
@@ -44,6 +45,8 @@ class RuntimeRouter:
             RuntimeName.OLLAMA: OllamaAdapter(runtime_config("ollama").endpoint),
             RuntimeName.SGLANG: SGLangAdapter(runtime_config("sglang"), self.supervisor),
             RuntimeName.FREETOKEN: FreeTokenAdapter(runtime_config("freetoken"), self.supervisor),
+            RuntimeName.STRATA: StrataAdapter(runtime_config("strata"), self.supervisor),
+            RuntimeName.STRATA: StrataAdapter(runtime_config("strata"), self.supervisor),
             RuntimeName.PYTHON_SCRIPT: PythonScriptAdapter(
                 runtime_config("python_script"), self.supervisor
             ),
