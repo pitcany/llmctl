@@ -124,11 +124,26 @@ def test_render_command_includes_awq_flag():
     assert "awq" in cmd
 
 
-def test_render_command_trust_remote_code_for_deepseek():
+def test_repo_name_alone_never_asks_for_remote_code():
+    # Anyone can name a repo "x/deepseek-..."; the name is not evidence of custom code.
     meta = _meta("deepseek-ai/DeepSeek-R1-Distill-Llama-70B", architectures=["LlamaForCausalLM"])
     plan = build_plan(meta, _hw(80.0, 80.0))
-    cmd = render_command(plan)
-    assert "--trust-remote-code" in cmd
+    assert plan.trust_remote_code is False
+    assert "--trust-remote-code" not in render_command(plan)
+
+
+def test_custom_code_is_a_warning_not_a_flag_in_the_printed_command():
+    # The printed command is meant to be copied and run; it must not run the
+    # repo's own Python unless the user adds the flag on purpose.
+    meta = _meta(
+        "someone/custom-arch-7b",
+        architectures=["CustomForCausalLM"],
+        auto_map={"AutoModelForCausalLM": "modeling_custom.CustomForCausalLM"},
+    )
+    plan = build_plan(meta, _hw(32.0))
+    assert plan.trust_remote_code is True
+    assert "--trust-remote-code" not in render_command(plan)
+    assert any("--trust-remote-code" in w and "runs" in w for w in plan.warnings)
 
 
 def test_oom_warning_on_undersized_gpu():

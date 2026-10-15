@@ -169,10 +169,9 @@ def build_plan(
     if quant in (None, "fp16", "bf16"):
         dtype = "auto"
 
-    # trust_remote_code: required for many community models with custom modeling code.
-    trust = bool(cfg.get("auto_map")) or any(
-        kw in meta.model_id.lower() for kw in ("deepseek", "yi-", "internlm", "command-r")
-    )
+    # auto_map means the repo ships its own modeling code. Only that, never the
+    # repo name (anyone can call a repo "x/deepseek-..."), marks it.
+    trust = bool(cfg.get("auto_map"))
 
     # vllm quantization flag mapping.
     vq_map = {"awq": "awq", "gptq": "gptq", "fp8": "fp8", "bnb": "bitsandbytes"}
@@ -198,6 +197,12 @@ def build_plan(
         )
     if meta.gated:
         warnings.append("Gated model — ensure HF_TOKEN is set and license accepted.")
+    if trust:
+        warnings.append(
+            "This repo ships its own Python modeling code (auto_map). vLLM needs "
+            "--trust-remote-code for it, which runs that code on this machine. The "
+            "command below leaves it out: read the repo's code first, then add it yourself."
+        )
     if param_count:
         notes.append(f"Estimated weights ~{weight_gib:.1f} GiB at {quant or 'fp16'}.")
 
@@ -242,6 +247,6 @@ def render_command(plan: LaunchPlan) -> list[str]:
         cmd += ["--quantization", plan.vllm_quantization_flag]
     if plan.dtype:
         cmd += ["--dtype", plan.dtype]
-    if plan.trust_remote_code:
-        cmd += ["--trust-remote-code"]
+    # Never --trust-remote-code: this command is meant to be copied and run, so
+    # running a repo's own code stays a choice the user makes (see the warning).
     return cmd
