@@ -111,7 +111,7 @@ def test_status_lists_generic_roles(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(cli_mod, "load_settings", _settings_with_deepseek_role)
     monkeypatch.setattr(
-        "llmctl.services.backends.probe_openai_v1_models", lambda url, timeout: None
+        "llmctl.services.units.probe_openai_v1_models", lambda *_a, **_k: None
     )
     result = CliRunner().invoke(app, ["status", "--json"])
     assert result.exit_code == 0
@@ -216,7 +216,7 @@ def test_status_marks_absent_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path)
     )
     monkeypatch.setattr(cli_mod, "load_settings", lambda: settings)
     monkeypatch.setattr(
-        "llmctl.services.backends.probe_openai_v1_models", lambda url, timeout: None
+        "llmctl.services.units.probe_openai_v1_models", lambda *_a, **_k: None
     )
 
     rows = json.loads(CliRunner().invoke(app, ["status", "--json"]).output)
