@@ -1,0 +1,220 @@
+"""`llmctl hf`: find a Hugging Face model and size it for these GPUs before a download.
+
+Read-only. Nothing here downloads weights or starts a server; `llmctl add`
+downloads and registers, `llmctl run` serves.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+import typer
+from rich.console import Console
+from rich.markup import escape
+from rich.table import Table
+
+from llmctl.hf.hardware import HardwareInfo, detect_hardware
+from llmctl.hf.inspect import inspect_model
+from llmctl.hf.parsing import parse_query
+from llmctl.hf.plan import LaunchPlan, build_plan, render_command
+from llmctl.hf.search import best_match, search_models
+
+console = Console()
+
+hf_app = typer.Typer(
+    name="hf",
+    help=(
+        "Find a Hugging Face model and check that it fits these GPUs, before you "
+        "download it (read-only; `llmctl add` downloads)."
+    ),
+    no_args_is_help=True,
+    suggest_commands=False,
+)
+
+_INSPECT_KEYS = (
+    "architectures",
+    "model_type",
+    "hidden_size",
+    "num_hidden_layers",
+    "num_attention_heads",
+    "max_position_embeddings",
+    "quantization_config",
+    "torch_dtype",
+    "vocab_size",
+)
+
+
+def register(app: typer.Typer) -> None:
+    app.add_typer(hf_app, name="hf")
+
+
+@hf_app.command("search")
+def search_cmd(
+    query: Annotated[str, typer.Argument(help='What you want, e.g. "qwen coder 32b awq".')],
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Max candidates.")] = 10,
+) -> None:
+    """Search Hugging Face and rank the matches.
+
+    The query is parsed for family, size (e.g. 70b, "under 35B") and quantization
+    (awq/gptq/fp8/gguf/bnb); the "Why" column shows what matched.
+    """
+    parsed = parse_query(query)
+    console.print(
+        f"[dim]parsed:[/] family={parsed.family} size={parsed.param_count_b} "
+        f"quant={parsed.quantization} keywords={escape(str(parsed.keywords))}"
+    )
+    try:
+        results = search_models(query, limit=limit)
+    except Exception as exc:  # noqa: BLE001 - network / HF API errors
+        console.print(f"[red]Search failed:[/] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    if not results:
+        console.print("[yellow]No matches.[/]")
+        raise typer.Exit(1)
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Score", justify="right")
+    table.add_column("Model")
+    table.add_column("Downloads", justify="right")
+    table.add_column("Likes", justify="right")
+    table.add_column("Task")
+    table.add_column("Why")
+    for c in results:
+        table.add_row(
+            f"{c.score:.1f}",
+            escape(c.model_id),
+            f"{c.downloads:,}",
+            f"{c.likes:,}",
+            escape(c.pipeline_tag or "-"),
+            escape(", ".join(c.reasons[:3]) or "-"),
+        )
+    console.print(table)
+
+
+@hf_app.command("inspect")
+def inspect_cmd(
+    model_id: Annotated[str, typer.Argument(help="Exact Hugging Face id (org/name).")],
+) -> None:
+    """Show a model's config.json and tokenizer facts; never downloads weights."""
+    meta = inspect_model(model_id)
+    if meta.error:
+        console.print(f"[red]{escape(meta.error)}[/]")
+    console.print(f"[bold]{escape(meta.model_id)}[/]  gated={meta.gated} private={meta.private}")
+    if meta.pipeline_tag:
+        console.print(f"task: {escape(meta.pipeline_tag)}")
+    if meta.tags:
+        console.print(f"tags: {escape(', '.join(meta.tags[:12]))}")
+    for key in _INSPECT_KEYS:
+        if key in meta.config:
+            console.print(f"  {key}: {escape(str(meta.config[key]))}")
+    if meta.tokenizer_config:
+        present = "present" if meta.tokenizer_config.get("chat_template") else "absent"
+        console.print(f"tokenizer.chat_template: {present}")
+
+
+def _resolve_model_id(query_or_id: str) -> str:
+    """Use an org/name verbatim; otherwise search and take the top match."""
+    parsed = parse_query(query_or_id)
+    if parsed.is_model_id():
+        return parsed.raw
+    top = best_match(query_or_id)
+    console.print(
+        f"[dim]selected:[/] {escape(top.model_id)} (score {top.score:.1f}: "
+        f"{escape(', '.join(top.reasons[:2]))})"
+    )
+    return top.model_id
+
+
+def _print_plan(p: LaunchPlan, hw: HardwareInfo) -> None:
+    console.print(f"\n[bold]Plan for {escape(p.model_id)}[/]")
+    console.print(f"  family={p.family} params={p.param_count_b} quant={p.quantization}")
+    console.print(f"  archs={escape(str(p.architectures))} vllm_supported={p.vllm_supported}")
+    console.print(
+        f"  tp={p.tensor_parallel_size} max_model_len={p.max_model_len} "
+        f"util={p.gpu_memory_utilization:.2f} trust_remote_code={p.trust_remote_code}"
+    )
+    if hw.gpus:
+        gpus = ", ".join(f"{g.index}:{g.name} ({g.vram_gib:.1f} GiB)" for g in hw.gpus)
+        console.print(f"  gpus: {escape(gpus)}")
+    else:
+        console.print("  [yellow]gpus: none detected[/]")
+    for note in p.notes:
+        console.print(f"  • {escape(note)}")
+    for warning in p.warnings:
+        console.print(f"  [yellow]! {escape(warning)}[/]")
+    console.print("\n[bold]vLLM command:[/]")
+    console.print("  " + escape(" ".join(render_command(p))))
+    console.print(f"\n[bold]To download and register it:[/] llmctl add {escape(p.model_id)}")
+
+
+@hf_app.command("plan")
+def plan_cmd(
+    query: Annotated[str, typer.Argument(help="Hugging Face id or a description.")],
+    tp: Annotated[int | None, typer.Option("--tp", help="Override tensor_parallel_size.")] = None,
+    max_model_len: Annotated[int | None, typer.Option("--max-model-len")] = None,
+    gpu_memory_utilization: Annotated[
+        float | None, typer.Option("--gpu-memory-utilization")
+    ] = None,
+) -> None:
+    """Size a model for these GPUs and print the `vllm serve` command.
+
+    Reads config.json and the GPU inventory to pick tensor_parallel_size,
+    max_model_len, gpu_memory_utilization, dtype and trust_remote_code, and warns
+    about OOM risk, GGUF and gated repos. Nothing is downloaded or started.
+    """
+    hw = detect_hardware()
+    model_id = _resolve_model_id(query)
+    meta = inspect_model(model_id)
+    if meta.error and not meta.config:
+        console.print(f"[red]{escape(meta.error)}[/]")
+        raise typer.Exit(1)
+    p = build_plan(meta, hw)
+    if tp is not None:
+        p.tensor_parallel_size = tp
+    if max_model_len is not None:
+        p.max_model_len = max_model_len
+    if gpu_memory_utilization is not None:
+        p.gpu_memory_utilization = gpu_memory_utilization
+    _print_plan(p, hw)
+
+
+@hf_app.command("fit")
+def fit_cmd(
+    query: Annotated[str, typer.Argument(help='What you want, e.g. "coder under 35B".')],
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Candidates to check.")] = 5,
+) -> None:
+    """Rank candidates and show whether each one fits these GPUs.
+
+    Like `search`, but reads each candidate's config.json and sizes it, so the
+    "Fits?" column reflects OOM risk (yes / risk). One metadata fetch per row.
+    For measured per-role advice on models you already have, see `llmctl recommend`.
+    """
+    hw = detect_hardware()
+    if hw.gpus:
+        console.print(f"[dim]hardware:[/] {hw.count} GPU(s), {hw.total_vram_gib:.1f} GiB total")
+    try:
+        candidates = search_models(query, limit=limit)
+    except Exception as exc:  # noqa: BLE001 - network / HF API errors
+        console.print(f"[red]Search failed:[/] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+    if not candidates:
+        console.print(
+            "[yellow]No matches.[/] Try a broader query, or `llmctl hf search` for the raw pool."
+        )
+        raise typer.Exit(1)
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Model")
+    table.add_column("Score", justify="right")
+    table.add_column("Fits?", justify="center")
+    table.add_column("tp")
+    table.add_column("Notes")
+    for c in candidates:
+        p = build_plan(inspect_model(c.model_id), hw)
+        oom = any("OOM" in w for w in p.warnings)
+        fits = "yes" if p.vllm_supported and not oom else "risk"
+        note = "; ".join(p.warnings[:1]) or (p.notes[0] if p.notes else "")
+        table.add_row(
+            escape(c.model_id), f"{c.score:.1f}", fits, str(p.tensor_parallel_size), escape(note)
+        )
+    console.print(table)

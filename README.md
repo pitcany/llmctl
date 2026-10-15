@@ -15,12 +15,13 @@ on demand. Much of `llmctl` exists to manage that split safely.
 
 ## What it does
 
-Eleven verbs cover a normal day. Everything else is one `llmctl help --all` away
+Twelve verbs cover a normal day. Everything else is one `llmctl help --all` away
 and keeps working under its old name.
 
 | Verb | What it does |
 | --- | --- |
 | `llmctl setup ENGINE` | Install an engine: vLLM, SGLang and FreeToken each get their own Python env; llama.cpp a prebuilt `llama-server` matched to your CUDA driver; Strata its own checkout and installer; Ollama its official installer. Alone, it lists what is installed. |
+| `llmctl hf search\|inspect\|plan\|fit` | Find a Hugging Face model and check that it fits your GPUs before you download it: ranked search, `config.json` facts, a sizing plan (tensor parallel, context, memory) with its `vllm serve` command, and a "Fits?" table. Read-only. |
 | `llmctl add SOURCE` | Fetch a model with its engine's own tool and remember it. The shape of SOURCE picks the engine: `Qwen/Qwen3-8B` is vLLM, `qwen3:8b` is Ollama, `unsloth/Qwen3-8B-GGUF:Q4_K_M` is llama.cpp; `--engine sglang\|freetoken` overrides. |
 | `llmctl run [NAME]` | Serve a model, whatever its engine. Stops what holds the GPUs, starts NAME, waits until it answers, puts the previous model back if it fails. No NAME: pick from a list. `--dry-run` shows the plan. |
 | `llmctl ls` | Everything you can `run`, and which one is serving now. |
@@ -80,6 +81,7 @@ The package is named `pitcany-llmctl`; the command is `llmctl`.
 
 ```bash
 llmctl setup vllm                    # its own env with vLLM in it (also: sglang, freetoken, strata, llama.cpp, ollama)
+llmctl hf fit "qwen coder 32b awq"   # which candidates fit these GPUs (nothing downloaded)
 llmctl add Qwen/Qwen3-8B             # download from Hugging Face, serve with vLLM
 llmctl add qwen3:8b                  # ollama pull
 llmctl ls                            # what can run, what is serving
