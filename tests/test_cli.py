@@ -249,3 +249,61 @@ def test_cli_validate_reports_findings_and_exits_nonzero(tmp_path, monkeypatch) 
     assert result.exit_code == 1
     assert "preset-model-missing" in result.output
     assert "stale" in result.output
+
+
+class _FakeDist:
+    def __init__(self, direct_url: str | None) -> None:
+        self._direct_url = direct_url
+
+    def read_text(self, name: str) -> str | None:
+        assert name == "direct_url.json"
+        return self._direct_url
+
+
+def test_cli_version_prints_the_version() -> None:
+    from llmctl import __version__
+
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert result.output.startswith(f"llmctl {__version__}")
+
+
+def test_cli_version_adds_the_commit_of_a_git_install(monkeypatch) -> None:
+    from importlib import metadata
+
+    from llmctl import __version__
+
+    direct_url = (
+        '{"url": "https://github.com/pitcany/llmctl", '
+        '"vcs_info": {"vcs": "git", "commit_id": "511e3747deadbeefcafe"}}'
+    )
+    seen: list[str] = []
+
+    def fake_distribution(name: str) -> _FakeDist:
+        seen.append(name)
+        return _FakeDist(direct_url)
+
+    monkeypatch.setattr(metadata, "distribution", fake_distribution)
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert result.output.strip() == f"llmctl {__version__}+511e3747"
+    assert seen == ["pitcany-llmctl"]
+
+
+def test_cli_version_without_metadata_is_the_bare_version(monkeypatch) -> None:
+    from importlib import metadata
+
+    from llmctl import __version__
+
+    def missing(name: str) -> _FakeDist:
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(metadata, "distribution", missing)
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert result.output.strip() == f"llmctl {__version__}"
+    # An editable install records a direct_url.json with no vcs_info.
+    monkeypatch.setattr(
+        metadata, "distribution", lambda name: _FakeDist('{"url": "file:///src", "dir_info": {}}')
+    )
+    assert CliRunner().invoke(app, ["--version"]).output.strip() == f"llmctl {__version__}"

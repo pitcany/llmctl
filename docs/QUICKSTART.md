@@ -24,7 +24,8 @@ llmctl --help
 ```
 
 `pip install git+https://github.com/pitcany/llmctl` into any Python 3.12+
-env works too. Then:
+env works too. The package is named `pitcany-llmctl`; the command is `llmctl`.
+Then:
 
 ```bash
 llmctl doctor      # GPUs, which engines are installed, what to fix
