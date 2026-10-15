@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-10-14
+
+- `llmctl --version` prints the version, plus the commit (`llmctl
+  0.3.0+1a2b3c4d`) when installed from a git URL.
+- The distribution is renamed `pitcany-llmctl`, because `llmctl` on PyPI
+  belongs to another project and `pip install -U llmctl` would replace this
+  tool. The command and the Python import stay `llmctl`. Installs are from
+  GitHub: `uv tool install git+https://github.com/pitcany/llmctl`. An
+  environment that has the old `llmctl` distribution must uninstall it
+  before it installs `pitcany-llmctl`.
+- `llmctl setup` and `doctor` report engines correctly. An engine that a
+  router lane serves is present (`via lane NAME`). A missing engine warns
+  only when a registered model uses it, and the warning names the models;
+  an engine nothing uses passes as `not used`. Engines found on PATH show a
+  version (a 5 s probe; vLLM reads its package metadata).
+- `llmctl --help` lists Strata.
+
 ## 0.2.0 — 2026-10-14
 
 First release from github.com/pitcany/llmctl as its own repository.
