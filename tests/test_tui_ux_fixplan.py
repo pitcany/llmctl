@@ -217,10 +217,13 @@ def test_units_render_unknown_when_systemd_unavailable() -> None:
 def test_install_commands_are_platform_aware() -> None:
     from llmctl.tui import _data
 
-    assert _data.install_command_for("llama_cpp", system="Linux") == ""
+    assert _data.install_command_for("llama_cpp", system="Linux") == "llmctl setup llama_cpp"
     assert _data.install_command_for("lmstudio", system="Linux") == ""
     assert _data.install_command_for("llama_cpp", system="Darwin").startswith("brew")
-    assert _data.install_command_for("ollama", system="Linux").startswith("curl")
+    # `llmctl setup strata` drives Strata's Linux setup only.
+    assert _data.install_command_for("strata", system="Darwin") == ""
+    assert _data.install_command_for("freetoken", system="Darwin") == "llmctl setup freetoken"
+    assert _data.install_command_for("ollama", system="Linux") == "llmctl setup ollama"
 
 
 # --- P1 #8: doctor summary in words --------------------------------------------
@@ -260,6 +263,49 @@ def test_doctor_summary_has_no_raw_booleans() -> None:
     text = rendered["text"]
     assert "True" not in text and "False" not in text, text
     assert "CPU-only" in text and "not detected" in text
+
+
+def test_doctor_unused_engine_is_not_flagged_missing() -> None:
+    from textual.widgets import DataTable
+
+    from llmctl.tui.screens_doctor import DoctorScreen
+
+    rendered: dict = {}
+    screen = DoctorScreen()
+    screen.fetch = lambda: {  # type: ignore[method-assign]
+        "backends": [
+            {"backend": "freetoken", "binary": "ft", "path": None, "available": False,
+             "unused": True},
+        ],
+        "summary": {
+            "gpu_count": 0,
+            "nvml_available": False,
+            "safe_mode": False,
+            "gpu_policy": "balanced",
+            "safety_margin_gb": 2,
+            "allow_public_bind": False,
+            "default_host": "127.0.0.1",
+        },
+    }
+
+    class _Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(screen)
+
+    async def _run() -> None:
+        app = _Host()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            table = app.screen.query_one("#doctor-table", DataTable)
+            rendered["row"] = [str(cell) for cell in table.get_row_at(0)]
+            rendered["summary"] = str(app.screen.query_one("#doctor-summary", Static).render())
+
+    asyncio.run(_run())
+    assert "not used" in rendered["row"][2]
+    assert "llmctl setup freetoken" in rendered["row"][3]
+    assert "manual install" not in rendered["row"][3]
+    assert "Missing backends" not in rendered["summary"]
 
 
 # --- P1 #9: unit journals are reachable; "Logs" is honestly "Events" -----------

@@ -96,17 +96,13 @@ BACKEND_INSTALL_HINTS: dict[str, str] = {
     "python_script": "",
 }
 
-#: Copy-pasteable install commands, keyed by the backend name reported by
-#: ``detect_backends`` (note: ``python`` resolves to the running interpreter and
-#: never needs installing).
-BACKEND_INSTALL_COMMANDS: dict[str, str] = {
-    "vllm": "pip install vllm",
-    "ollama": "curl -fsSL https://ollama.com/install.sh | sh",
-}
+#: Engines whose ``llmctl setup`` plan is Linux-only (prebuilt llama.cpp,
+#: Strata's setup.sh); elsewhere it would hand the operator a dead command.
+_LINUX_ONLY_SETUP = frozenset({"llama_cpp", "strata"})
 
-#: macOS-only additions. Homebrew is not a Linux default, and on this
-#: workstation llama.cpp is built from source and LM Studio is an AppImage,
-#: so copying ``brew install ...`` there handed the operator a dead command.
+#: macOS-only commands for what ``llmctl setup`` does not install there.
+#: Homebrew is not a Linux default, and on this workstation LM Studio is an
+#: AppImage, so copying ``brew install ...`` there handed over a dead command.
 _MACOS_INSTALL_COMMANDS: dict[str, str] = {
     "llama_cpp": "brew install llama.cpp",
     "lmstudio": "brew install --cask lm-studio",
@@ -125,10 +121,14 @@ def install_command_for(backend: str, system: str | None = None) -> str:
     """
     import platform
 
-    commands = dict(BACKEND_INSTALL_COMMANDS)
-    if (system or platform.system()) == "Darwin":
-        commands.update(_MACOS_INSTALL_COMMANDS)
-    return commands.get(backend, "")
+    from llmctl.services.engines import ENGINE_NAMES
+
+    system = system or platform.system()
+    if backend in ENGINE_NAMES and (system == "Linux" or backend not in _LINUX_ONLY_SETUP):
+        return f"llmctl setup {backend}"
+    if system == "Darwin":
+        return _MACOS_INSTALL_COMMANDS.get(backend, "")
+    return ""
 
 
 def get_backend_map() -> dict[str, bool]:
@@ -659,8 +659,32 @@ def get_events(limit: int = 100) -> list[dict[str, Any]]:
 
 
 def get_backends() -> list[dict[str, Any]]:
-    """Return backend binary availability info."""
-    return detect_backends()
+    """Return backend availability info that agrees with ``llmctl doctor``.
+
+    ``detect_backends`` looks on PATH only. For an engine it misses, the
+    engine status decides: installed by ``llmctl setup`` or served by a
+    router lane counts as available. A missing backend that no active model
+    uses gets ``unused``, so the screen does not flag it.
+    """
+    from llmctl.services.doctor import _model_users
+    from llmctl.services.engines import engine_statuses
+
+    settings = load_settings()
+    rows = detect_backends(settings)
+    statuses = {status.engine: status for status in engine_statuses(settings)}
+    users = _model_users(settings)
+    for row in rows:
+        backend = str(row["backend"])
+        if row["available"]:
+            continue
+        status = statuses.get(backend)
+        if status is not None and status.source == "lane":
+            row.update(available=True, path=f"served by lane {status.binary}")
+        elif status is not None and status.source != "missing":
+            row.update(available=True, path=status.binary)
+        elif not users.get(backend):
+            row["unused"] = True
+    return rows
 
 
 def get_doctor_summary() -> dict[str, Any]:
@@ -676,7 +700,6 @@ def get_doctor_summary() -> dict[str, Any]:
         "safety_margin_gb": sched.safety_margin_gb,
         "allow_public_bind": sched.allow_public_bind,
         "default_host": sched.default_host,
-        "missing_backends": missing_backends(settings),
     }
 
 
