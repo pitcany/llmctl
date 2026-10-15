@@ -73,7 +73,7 @@ def test_settings_yaml_shape_parses_units() -> None:
     assert roles["deepseek"].default_port == 8000
     # vllm_tp keeps its compiled-in defaults untouched.
     assert roles["vllm-tp"].default_port == 8003
-    assert settings.managed_units.fleet.tp == "vllm-tp"
+    assert settings.managed_units.fleet.tp == "vllm-engine"
 
 
 def test_runtime_field_defaults_to_vllm() -> None:

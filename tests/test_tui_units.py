@@ -93,7 +93,7 @@ def test_fetch_returns_one_row_per_unit(temp_settings) -> None:
 def test_fetch_marks_active_units_correctly(temp_settings) -> None:
     """is-active=active maps to the row's is_active=True."""
     screen = UnitsScreen(
-        systemctl=_fake_systemctl(active_units={"vllm-tp"}),
+        systemctl=_fake_systemctl(active_units={"vllm-engine"}),
         http_get=_http_responder(by_port={}),
     )
     rows = screen.fetch()
@@ -254,11 +254,11 @@ def test_fetch_sees_a_running_user_scope_unit(temp_settings) -> None:
 def test_fetch_still_reads_system_units_in_system_scope(temp_settings) -> None:
     """The vllm-tp path must be unchanged by scope resolution."""
     screen = UnitsScreen(
-        systemctl=_scoped_systemctl(user_units=set(), active={"vllm-tp"}),
+        systemctl=_scoped_systemctl(user_units=set(), active={"vllm-engine"}),
         http_get=_http_responder(by_port={}),
     )
     rows = {r.unit_name: r for r in screen.fetch()}
-    assert rows["vllm-tp"].is_active is True
+    assert rows["vllm-engine"].is_active is True
 
 
 def test_units_screen_exposes_start_and_stop_bindings() -> None:
