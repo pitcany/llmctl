@@ -147,6 +147,7 @@ def test_run_setup_records_the_engine_and_runtime_config_picks_it_up(tmp_path) -
         calls.append(list(argv))
         Path(plan.record["binary"]).parent.mkdir(parents=True, exist_ok=True)
         Path(plan.record["binary"]).write_text("#!/bin/sh\n")
+        Path(plan.record["binary"]).chmod(0o755)
         return 0
 
     record = eng.run_setup(plan, settings=settings, deps=_deps(run=run, stream=stream))
@@ -287,8 +288,35 @@ def test_doctor_names_the_models_from_the_registry(tmp_path, monkeypatch) -> Non
         db.add(ModelRecord(name="ft-model", runtime=RuntimeName.FREETOKEN))
         db.add(ModelRecord(name="gone", runtime=RuntimeName.SGLANG, active=False))
         db.add(ModelRecord(name="rm-d", runtime=RuntimeName.SGLANG, status=ModelStatus.DELETED))
+        db.add(ModelRecord(name="legacy", runtime=RuntimeName.LMSTUDIO, active=None))
         db.commit()
-    assert doctor._model_users(settings) == {"freetoken": ["ft-model"]}
+    assert doctor._model_users(settings) == {"freetoken": ["ft-model"], "lmstudio": ["legacy"]}
+
+
+def test_a_recorded_binary_that_cannot_execute_is_not_installed(tmp_path) -> None:
+    """Doctor's backend check defers to this row, so it must not say "installed"."""
+    settings = _settings(tmp_path)
+    binary = tmp_path / "engines" / "ft"
+    binary.parent.mkdir()
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o644)
+    engines_path = tmp_path / "engines.yaml"
+    engines_path.write_text(yaml.safe_dump({"freetoken": {"binary": str(binary)}}))
+    rows = {
+        r.engine: r
+        for r in eng.engine_statuses(
+            settings, which=_no_engines_on_path, engines_path=engines_path, lanes=[]
+        )
+    }
+    assert rows["freetoken"].source == "missing"
+    binary.chmod(0o755)
+    rows = {
+        r.engine: r
+        for r in eng.engine_statuses(
+            settings, which=_no_engines_on_path, engines_path=engines_path, lanes=[]
+        )
+    }
+    assert rows["freetoken"].source == "llmctl"
 
 
 def test_backends_skip_missing_engines_and_unused_runtimes(tmp_path, monkeypatch) -> None:
