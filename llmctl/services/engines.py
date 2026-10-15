@@ -822,7 +822,9 @@ def engine_statuses(
     for engine in ENGINE_NAMES:
         info = recorded.get(engine) or {}
         binary = info.get("binary")
-        if binary and Path(str(binary)).exists():
+        # Executable, not just present: doctor's backend check leaves a missing
+        # engine to this row, so a broken install must not read as installed.
+        if binary and os.access(str(binary), os.X_OK):
             rows.append(EngineStatus(engine, "llmctl", str(binary), info.get("version")))
             continue
         default = cfg.runtime_config(engine).binary or _default_binary(engine)

@@ -142,7 +142,8 @@ def _model_users(cfg: Settings) -> dict[str, list[str]]:
         with DBSession(get_engine(cfg.database_url)) as db:
             records = db.exec(
                 select(ModelRecord).where(
-                    ModelRecord.active == True,  # noqa: E712 - SQL, not Python truthiness
+                    # NULL ``active`` is a legacy row and counts as active (db.py).
+                    ModelRecord.active.is_(True) | ModelRecord.active.is_(None),  # type: ignore[union-attr]
                     ModelRecord.status != ModelStatus.DELETED,
                 )
             ).all()
