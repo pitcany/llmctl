@@ -153,7 +153,7 @@ def test_the_action_follows_the_cursor_not_the_first_row(
 ) -> None:
     """Row 0 is vllm-tp; row 1 is gpt-oss. The key must act on the cursor."""
     top = _drive(monkeypatch, units_settings, key="a", active=set(), row=0)
-    assert top["started"] == ["vllm-tp"], top["notes"]
+    assert top["started"] == ["vllm-engine"], top["notes"]
 
     second = _drive(monkeypatch, units_settings, key="a", active=set(), row=1)
     assert second["started"] == ["gpt-oss-120b"], second["notes"]

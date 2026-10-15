@@ -105,12 +105,12 @@ def test_failed_launch_reports_rollback_and_next_commands(monkeypatch) -> None:
     from llmctl.services.vllm_orchestrator import RollbackReport
 
     res = _result(False, error="vLLM did not become ready within 300s")
-    res.fleet_stopped = ["ollama", "vllm-tp"]
+    res.fleet_stopped = ["ollama", "vllm-engine"]
     res.rollback = RollbackReport(
         env_restored=True,
         env_path=Path("/tmp/vllm-tp.env"),
         tp_stopped=True,
-        restarted=["vllm-tp"],
+        restarted=["vllm-engine"],
         restart_failed=["ollama"],
     )
 
@@ -118,9 +118,9 @@ def test_failed_launch_reports_rollback_and_next_commands(monkeypatch) -> None:
 
     assert out.exit_code == 1, out.output
     assert "restored previous" in out.output
-    assert "started again: vllm-tp" in out.output
+    assert "started again: vllm-engine" in out.output
     assert "sudo systemctl start ollama" in out.output
-    assert "journalctl -u vllm-tp" in out.output
+    assert "journalctl -u vllm-engine" in out.output
 
 
 def test_fleet_preflight_failure_is_reported(monkeypatch) -> None:

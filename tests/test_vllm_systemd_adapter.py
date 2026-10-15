@@ -186,7 +186,7 @@ def test_restart_failure_surfaces_error_with_stderr(tmp_path: Path) -> None:
     )
     assert result.ready is False
     assert result.error is not None
-    assert "systemctl restart vllm-tp failed" in result.error
+    assert "systemctl restart vllm-engine failed" in result.error
     assert "boom" in result.error
 
 
