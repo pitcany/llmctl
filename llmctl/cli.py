@@ -157,6 +157,11 @@ from llmctl import cli_registry  # noqa: E402
 
 cli_registry.register(app)
 
+# `llmctl hf`: read-only Hugging Face search and sizing (ported from vserve).
+from llmctl import cli_hf  # noqa: E402
+
+cli_hf.register(app)
+
 # Plugins add their own verbs last (see llmctl.plugins); a plugin that fails
 # to import is reported on stderr and skipped so `llmctl` still runs.
 from llmctl.plugins import registry as _plugin_registry  # noqa: E402

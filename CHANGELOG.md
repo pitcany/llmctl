@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `llmctl hf` finds a Hugging Face model and checks that it fits the GPUs
+  before you download it: `search` (ranked by family, size, quantization and
+  popularity), `inspect` (`config.json` and tokenizer facts), `plan` (tensor
+  parallel size, context length and memory use for the detected GPUs, with the
+  `vllm serve` command and the `llmctl add` step) and `fit` (a "Fits?" table
+  for the top candidates). Read-only. Ported from the `vserve` tool, which this
+  replaces; GPUs come from NVML instead of `nvidia-smi`.
+
 ## 0.3.0 — 2026-10-14
 
 - `llmctl --version` prints the version, plus the commit (`llmctl
