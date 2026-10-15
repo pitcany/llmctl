@@ -12,6 +12,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+import pydantic
 import yaml
 from platformdirs import user_config_dir, user_data_dir, user_log_dir
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -355,7 +356,11 @@ class ManagedUnitsConfig(BaseModel):
             "managed_units.vllm_tp is deprecated; rename the key to "
             "managed_units.vllm_engine (same fields)",
             FutureWarning,
-            stacklevel=2,
+            # Attribute it to whoever loaded the settings, not to pydantic.
+            skip_file_prefixes=(
+                os.path.dirname(pydantic.__file__),
+                __file__,
+            ),
         )
         data = dict(data)
         data["vllm_engine"] = data.pop("vllm_tp")
