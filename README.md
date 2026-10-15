@@ -67,6 +67,15 @@ required.
   routing, Harbor services, Tailscale) lives in `pitcany/AI`,
   `docs/RUNBOOK.md`
 
+## Install
+
+```bash
+uv tool install git+https://github.com/pitcany/llmctl      # or: pipx install git+...
+llmctl --version
+```
+
+The package is named `pitcany-llmctl`; the command is `llmctl`.
+
 ## Quick taste
 
 ```bash

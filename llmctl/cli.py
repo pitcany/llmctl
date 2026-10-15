@@ -104,6 +104,51 @@ app = typer.Typer(
 )
 console = Console()
 
+#: Distribution name; ``llmctl`` on PyPI belongs to someone else.
+DIST_NAME = "pitcany-llmctl"
+
+
+def _version_string() -> str:
+    """``llmctl X.Y.Z``, plus ``+<sha8>`` when installed from a git URL.
+
+    pip and uv record the commit of a VCS install in ``direct_url.json``
+    (``vcs_info.commit_id``); an editable or source install has no
+    ``vcs_info``. Any metadata failure falls back to the bare version.
+    """
+    import json
+    from importlib import metadata
+
+    from llmctl import __version__
+
+    try:
+        raw = metadata.distribution(DIST_NAME).read_text("direct_url.json")
+        commit = str(json.loads(raw or "{}").get("vcs_info", {}).get("commit_id") or "")
+    except Exception:  # noqa: BLE001 - --version must never crash
+        commit = ""
+    return f"llmctl {__version__}+{commit[:8]}" if commit else f"llmctl {__version__}"
+
+
+def _print_version(value: bool) -> None:
+    if value:
+        typer.echo(_version_string())
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            help="Print the version (and the git commit, if known) and exit.",
+            callback=_print_version,
+            is_eager=True,
+        ),
+    ] = False,
+) -> None:
+    pass
+
+
 # Registry/profile management commands (CRUD, preview, export/import) live in
 # their own module to keep cli.py focused on launch/orchestration. ``register``
 # attaches sub-typers (``model``, ``profile``) plus top-level commands
