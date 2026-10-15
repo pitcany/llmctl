@@ -555,7 +555,7 @@ Out-of-the-box, llmctl knows about:
 
 | Role | systemd unit | Port | GPUs |
 |------|--------------|------|------|
-| TP serving | `vllm-tp` | 8003 | the preset's first `tensor_parallel_size` cards |
+| vLLM serving | `vllm-engine` | 8003 | the preset's first `tensor_parallel_size` cards |
 
 Every default is overridable in `~/.config/llmctl/settings.yaml`
 (`managed_units.vllm_engine.env_file_path`, `vllm.defaults.gpus`, ...).
