@@ -1,8 +1,10 @@
-"""Adapter that manages an externally-installed ``vllm-tp.service`` unit.
+"""Adapter that manages an externally-installed vLLM systemd unit
+(``vllm-engine.service`` by default; ``managed_units.vllm_tp.unit_name``
+overrides it).
 
 Unlike :class:`llmctl.adapters.vllm.VLLMAdapter`, this adapter does not
 launch processes directly. The vLLM process is owned by systemd via a
-unit (``vllm-tp.service``) installed in ``/etc/systemd/system``. The
+unit (``vllm-engine.service`` by default) installed in ``/etc/systemd/system``. The
 adapter's responsibilities are:
 
 1. Render a :class:`~llmctl.integrations.vllm_env.VLLMLaunchSpec` to
@@ -92,7 +94,7 @@ class ManagedRestartResult:
 
 
 class VLLMSystemdAdapter:
-    """Manage the ``vllm-tp.service`` systemd unit by writing env + restarting.
+    """Manage the vLLM systemd unit by writing env + restarting.
 
     Construction is intentionally side-effect free. Methods are the only
     surface that touches the filesystem or invokes ``systemctl``.
@@ -100,8 +102,8 @@ class VLLMSystemdAdapter:
     Args:
         config: Managed-unit configuration; provides unit name, env file
             path, legacy-unit marker, and default port. When omitted,
-            a default :class:`ManagedUnitConfig` is used (matches the
-            ``vllm-tp`` posture on yannik-desktop).
+            a default :class:`ManagedUnitConfig` is used (unit
+            ``vllm-engine``, port 8003); settings override both.
         env_file_path: Optional explicit override for the env file path,
             takes precedence over the config-resolved path. Kept for
             test ergonomics and ad-hoc CLI use.
