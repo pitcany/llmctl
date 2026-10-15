@@ -42,7 +42,7 @@ documented in the [user guide](docs/USER-GUIDE.md).
 ## How it works
 
 `llmctl` writes the `EnvironmentFile` for an externally-installed
-systemd unit (e.g. `vllm-tp.service`), restarts the unit, polls
+systemd unit (e.g. `vllm-engine.service`), restarts the unit, polls
 `/v1/models` for readiness, and runs whatever post-start checks the
 installed plugins register (see [Plugins](#plugins)). It owns the
 *how* of running a preset; presets themselves live at
@@ -212,7 +212,7 @@ The GPUs are served in three ways, and `llmctl run NAME` covers all three:
 
 | NAME is… | What `run` does |
 | --- | --- |
-| a vLLM preset, or a vLLM model | Stops what vLLM serves now and restarts `vllm-tp` on this preset (about 2 min). No preset yet: offers to write a starter one first. |
+| a vLLM preset, or a vLLM model | Stops what vLLM serves now and restarts `vllm-engine` on this preset (about 2 min). No preset yet: offers to write a starter one first. |
 | a lane (FreeToken, GLM, the GPU1 coder) | Stops what shares its cards, runs the lane's start script, waits until it answers. |
 | a llama.cpp, SGLang, FreeToken or Strata model | Checks the model fits (one card, or split across both) **before stopping anything**. Then stops vLLM, active lanes and other servers llmctl started, starts the engine's server (`llama-server`, `python -m sglang.launch_server`, `ft serve`, Strata's `serve/server.py`), and waits until it answers. FreeToken and Strata serve from one GPU. |
 | an Ollama or LM Studio model | Nothing. Those servers are always running and load a model the first time a request names it (`ollama run qwen3:8b "hi"`, `lms load KEY`). The GPUs are left alone. |
@@ -382,7 +382,7 @@ so there is nothing left to forget.
    lane list, so the lane appears in `llmctl run`, `llmctl status` and the
    TUI as soon as it exists — no `settings.yaml` row needed. Every lane does
    this as of 2026-09-21, so `settings.yaml` holds only units that are not
-   lanes (`vllm-tp`, `gpt-oss`, `coder1`). The row's name in `llmctl status`
+   lanes (`vllm-engine`, `gpt-oss`, `coder1`). The row's name in `llmctl status`
    is the lane name, and its `source` column reads `lane` rather than
    `settings`.
 3. **Only if you need to override it:** a `managed_units.units` row in
@@ -520,13 +520,13 @@ auto-refreshes every 3s and never blocks the UI on probes.
 ## Serving vLLM on a new machine
 
 `llmctl run` drives one systemd unit per managed role (default role
-`vllm-tp`, port 8003). On a fresh host nothing provides that unit yet, so:
+`vllm-engine`, port 8003). On a fresh host nothing provides that unit yet, so:
 
 ```bash
 # 1. a Python env that has vLLM (any venv or conda env)
 uv venv ~/vllm && VIRTUAL_ENV=~/vllm uv pip install vllm
 # 2. the unit: ExecStart = llmctl's shipped launcher, EnvironmentFile =
-#    ~/.local/state/llmctl/units/vllm-tp.env (dry-run by default; needs sudo)
+#    ~/.local/state/llmctl/units/vllm-engine.env (dry-run by default; needs sudo)
 llmctl install-vllm-unit --no-dry-run
 # 3. a preset (quantization: none for unquantized weights)
 cat > ~/.config/llmctl/presets/qwen3-8b.yaml <<'YAML'
@@ -545,7 +545,7 @@ source ~/vllm/bin/activate && llmctl run qwen3-8b
 
 `CUDA_VISIBLE_DEVICES` is the first `tensor_parallel_size` cards unless
 `vllm.defaults.gpus` says otherwise; `HF_HOME` is `~/.cache/huggingface`
-unless set. `sudo systemctl start|stop|restart vllm-tp` is the only
+unless set. `sudo systemctl start|stop|restart vllm-engine` is the only
 privileged call, so a NOPASSWD rule for those three keeps `run`
 prompt-free.
 

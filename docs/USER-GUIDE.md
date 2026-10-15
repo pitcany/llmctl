@@ -38,7 +38,7 @@ A preset is data — it doesn't say where to run, just what.
 An externally-installed systemd `.service` file that llmctl owns the
 **how** for. The default config (as of 2026-06-14) knows about one:
 
-- `vllm-tp` (port 8003, dual-GPU TP=2, active)
+- `vllm-engine` (port 8003, dual-GPU TP=2, active)
 
 Since 2026-08-05 you can register **additional roles of any runtime**
 under `managed_units.units` (see the schema below). Those roles then
@@ -57,7 +57,7 @@ your box (look in `~/AI/services/`). It just writes their
 ### Slot
 
 > **Deprecated (2026-06-14):** The per-GPU slot system (`vllm-coder`, `vllm-reasoner`)
-> was decommissioned. Only `vllm-tp` (TP=2 across both GPUs) is now active.
+> was decommissioned. Only `vllm-engine` (TP=2 across both GPUs) is now active.
 > This section is retained for reference.
 
 ### Launch spec / orchestrator
@@ -147,7 +147,7 @@ Used by `vllm` only (slots deprecated as of 2026-06-14).
 
 `llmctl logs` reads the log file that llmctl wrote for the session. An
 adopted session has no such file. For an adopted session that records a
-systemd unit (for example `vllm-tp`), the command reads the unit's
+systemd unit (for example `vllm-engine`), the command reads the unit's
 journal with `journalctl -u <unit>` instead. It reads the system journal
 first; if that query succeeds but finds no entries, it then reads the
 user journal (for `systemctl --user` units). If the system-journal query
@@ -285,11 +285,11 @@ for minutes). `llmctl sessions` will show it running once it responds.
 ```
 
 **Scope is detected, not configured.** These are user units, so llmctl
-issues `systemctl --user` with no `sudo`; `vllm-tp` is a system unit and
+issues `systemctl --user` with no `sudo`; `vllm-engine` is a system unit and
 still goes through `sudo`. You do not have to say which.
 
 **They cannot share the GPUs.** Starting one of these evicts whatever else
-holds the cards. Stop `vllm-tp` first, or the guard wrapper refuses the
+holds the cards. Stop `vllm-engine` first, or the guard wrapper refuses the
 start rather than OOM-ing partway through loading the weights.
 
 **If `stop --systemd` or `restart --systemd` is refused** with "llmctl does
@@ -344,7 +344,7 @@ launch picker:
 
 | Key in picker | Target |
 |----------------|--------|
-| `t` | TP fleet (vllm-tp, both GPUs) |
+| `t` | TP fleet (vllm-engine, both GPUs) |
 | `esc` | Cancel |
 
 Picking a target runs the orchestrator in a worker thread.
@@ -355,7 +355,7 @@ failure (with reason).
 
 Live status. One row per managed unit + one row per slot. Columns:
 
-- **Role** — `unit vllm-tp`, etc. (slots deprecated as of 2026-06-14)
+- **Role** — `unit vllm-engine`, etc. (slots deprecated as of 2026-06-14)
 - **Unit** — bare systemd unit name
 - **Active** — `active` (green) or `inactive` (muted)
 - **Port** — what llmctl thinks the unit listens on
@@ -372,7 +372,7 @@ Probes use a 1.5s timeout each; 5 down units add ≤8s to refresh.
 
 Both act on the **cursor row**, not the first row. Scope is detected, so a
 user unit (`gpt-oss-120b`, `deepseek-v4-flash-0731`) is driven with
-`systemctl --user` and no `sudo`, while `vllm-tp` goes through `sudo`.
+`systemctl --user` and no `sudo`, while `vllm-engine` goes through `sudo`.
 
 `a` will not bounce a unit that is already active — start is not a synonym
 for restart. A start that the guard refuses (missing model shards, a
@@ -381,7 +381,7 @@ a notification; the screen does not crash and the unit is left alone.
 
 Starting is not instant: the model loads for minutes before the endpoint
 answers, so **Served (live)** shows `starting?` until it does. These units
-cannot share the GPUs — stop `vllm-tp` first, or the guard refuses.
+cannot share the GPUs — stop `vllm-engine` first, or the guard refuses.
 
 Note `a`, not `s`: `s` is the app-level binding for the Sessions screen,
 and a screen binding shadows it.
@@ -463,7 +463,7 @@ managed_units:
     launcher_marker: vllm-launcher.sh   # set to null to disable legacy-unit guard
     default_port: 8003
 
-  # Slots (vllm-coder, vllm-reasoner) deprecated as of 2026-06-14; only vllm-tp active
+  # Slots (vllm-coder, vllm-reasoner) deprecated as of 2026-06-14; only vllm-engine active
 
   units:                         # optional: additional roles, any runtime
     deepseek:                    # the local DeepSeek llama.cpp server
@@ -472,7 +472,7 @@ managed_units:
       runtime: llama_cpp
 
   fleet:
-    tp: vllm-tp
+    tp: vllm-engine
     ollama: ollama
 
 scheduler:
@@ -507,7 +507,7 @@ the gateway has its own `router.auth_token`.
 | `LLMCTL_API_TOKEN` | Control-plane API bearer token; beats `api.auth_token` from settings.yaml |
 | `LLMCTL_PYTHON_ROOT` | Where the vLLM interpreter lives (for `LD_LIBRARY_PATH` / `PATH` in rendered env files) |
 | `LLMCTL_CUDA_ROOT` | CUDA toolkit root (default `/usr/local/cuda`) |
-| `LLMCTL_VLLM_ENV_FILE` | Direct override for the vllm-tp env file path |
+| `LLMCTL_VLLM_ENV_FILE` | Direct override for the vllm-engine env file path |
 | `LLMCTL_SLOT_CODER_ENV_FILE`, `LLMCTL_SLOT_REASONER_ENV_FILE` | Per-slot env file overrides *(deprecated 2026-06-14 with the slot system)* |
 | `AI_HOME` | Used to resolve `$AI_HOME/services/<unit>.env` when no explicit path is set |
 | `HF_HOME` | HuggingFace cache (default `~/.cache/huggingface`) |
@@ -543,7 +543,7 @@ in `~/.hermes/config.yaml`:
 
 | Unit role | Hermes provider name |
 |-----------|----------------------|
-| `vllm-tp` | `vllm` |
+| `vllm-engine` | `vllm` |
 
 The verify is **read-only**. It prints one of:
 
@@ -571,7 +571,7 @@ gates to avoid systemd `Wants=` restart loops.
 
 | Starting | Stops (in order) |
 |----------|------------------|
-| `vllm-tp` (TP fleet) | `ollama`, `vllm-tp` |
+| `vllm-engine` (TP fleet) | `ollama`, `vllm-engine` |
 
 ---
 
@@ -646,7 +646,7 @@ parity is locked in by 12 fixture files at
 ## Slots
 
 > **Deprecated (2026-06-14):** The per-GPU slot system was decommissioned.
-> Only `vllm-tp` (TP=2 across both GPUs) is now active. This section is
+> Only `vllm-engine` (TP=2 across both GPUs) is now active. This section is
 > retained for reference.
 
 ---
@@ -688,10 +688,10 @@ returns a model list, llmctl should too — file a bug if not.
 ### Legacy unit refusal
 
 ```
-LegacyUnitError: vllm-tp.service ExecStart does not contain 'vllm-launcher.sh'.
+LegacyUnitError: vllm-engine.service ExecStart does not contain 'vllm-launcher.sh'.
 ```
 
-The unit installed in `/etc/systemd/system/vllm-tp.service` predates
+The unit installed in `/etc/systemd/system/vllm-engine.service` predates
 the launcher-script ExecStart and speaks the older `VLLM_TP_*`
 schema. llmctl writes the new `VLLM_*` schema, which the old
 launcher would silently ignore.
