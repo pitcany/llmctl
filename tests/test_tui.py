@@ -225,6 +225,11 @@ def test_get_backends_agrees_with_doctor(temp_db: Settings, monkeypatch) -> None
     assert not rows["sglang"]["available"] and not rows["sglang"].get("unused")
     assert not rows["lmstudio"]["available"] and rows["lmstudio"]["unused"]
 
+    # An unreadable registry is "unknown", not "no model uses it".
+    monkeypatch.setattr("llmctl.services.doctor._model_users", lambda settings: None)
+    rows = {row["backend"]: row for row in _data.get_backends()}
+    assert not rows["lmstudio"].get("unused") and not rows["sglang"].get("unused")
+
 
 def test_doctor_summary_keys(temp_db: Settings) -> None:
     """The doctor summary exposes GPU/NVML status and scheduler config."""

@@ -319,6 +319,37 @@ def test_a_recorded_binary_that_cannot_execute_is_not_installed(tmp_path) -> Non
     assert rows["freetoken"].source == "llmctl"
 
 
+def test_a_recorded_venv_python_without_the_engine_is_not_installed(
+    tmp_path, monkeypatch
+) -> None:
+    """SGLang and Strata record a venv python, which outlives the engine in it."""
+    settings = _settings(tmp_path)
+    python = tmp_path / "strata" / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    engines_path = tmp_path / "engines.yaml"
+    engines_path.write_text(
+        yaml.safe_dump({"sglang": {"binary": str(python)}, "strata": {"binary": str(python)}})
+    )
+    monkeypatch.setattr("llmctl.services.scheduler._python_has_module", lambda py, mod: False)
+
+    def statuses() -> dict[str, eng.EngineStatus]:
+        return {
+            r.engine: r
+            for r in eng.engine_statuses(
+                settings, which=_no_engines_on_path, engines_path=engines_path, lanes=[]
+            )
+        }
+
+    rows = statuses()
+    assert rows["sglang"].source == "missing"
+    assert rows["strata"].source == "missing"  # no serve/server.py beside the venv
+    (tmp_path / "strata" / "serve").mkdir()
+    (tmp_path / "strata" / "serve" / "server.py").write_text("")
+    assert statuses()["strata"].source == "llmctl"
+
+
 def test_backends_skip_missing_engines_and_unused_runtimes(tmp_path, monkeypatch) -> None:
     """`ft` missing is the engine check's business; LM Studio unused is not a warning."""
     import llmctl.services.backends as backends

@@ -824,7 +824,8 @@ def engine_statuses(
         binary = info.get("binary")
         # Executable, not just present: doctor's backend check leaves a missing
         # engine to this row, so a broken install must not read as installed.
-        if binary and os.access(str(binary), os.X_OK):
+        # SGLang and Strata record a venv python, which outlives the engine.
+        if binary and os.access(str(binary), os.X_OK) and _really_installed(engine, str(binary)):
             rows.append(EngineStatus(engine, "llmctl", str(binary), info.get("version")))
             continue
         default = cfg.runtime_config(engine).binary or _default_binary(engine)
