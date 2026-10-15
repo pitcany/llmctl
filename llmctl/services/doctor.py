@@ -135,8 +135,12 @@ def _check_storage(cfg: Settings) -> list[DoctorCheck]:
     return checks
 
 
-def _model_users(cfg: Settings) -> dict[str, list[str]]:
-    """Runtime -> names of the active, not deleted, registry models that use it."""
+def _model_users(cfg: Settings) -> dict[str, list[str]] | None:
+    """Runtime -> names of the active, not deleted, registry models that use it.
+
+    None when the registry cannot be read, so a caller can tell "no model
+    uses it" from "unknown".
+    """
     try:
         init_db(cfg.database_url)
         with DBSession(get_engine(cfg.database_url)) as db:
@@ -148,7 +152,7 @@ def _model_users(cfg: Settings) -> dict[str, list[str]]:
                 )
             ).all()
     except Exception:
-        return {}  # storage check already reported the failure
+        return None
     users: dict[str, list[str]] = {}
     for record in records:
         runtime = getattr(record.runtime, "value", record.runtime)
@@ -172,7 +176,7 @@ def _check_backends(cfg: Settings) -> list[DoctorCheck]:
     from llmctl.services.backends import detect_backends
     from llmctl.services.engines import ENGINE_NAMES
 
-    users = _model_users(cfg)
+    users = _model_users(cfg) or {}  # storage check already reported a failure
     checks: list[DoctorCheck] = []
     for entry in detect_backends(cfg):
         backend = str(entry["backend"])
@@ -206,7 +210,7 @@ def _check_engines(cfg: Settings) -> list[DoctorCheck]:
     """
     from llmctl.services.engines import engine_statuses
 
-    users = _model_users(cfg)
+    users = _model_users(cfg) or {}  # storage check already reported a failure
     checks: list[DoctorCheck] = []
     for row in engine_statuses(cfg):
         name = f"engine:{row.engine}"

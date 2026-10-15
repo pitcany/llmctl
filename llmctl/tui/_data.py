@@ -664,7 +664,8 @@ def get_backends() -> list[dict[str, Any]]:
     ``detect_backends`` looks on PATH only. For an engine it misses, the
     engine status decides: installed by ``llmctl setup`` or served by a
     router lane counts as available. A missing backend that no active model
-    uses gets ``unused``, so the screen does not flag it.
+    uses gets ``unused``, so the screen does not flag it; when the registry
+    cannot be read, every missing backend stays flagged.
     """
     from llmctl.services.doctor import _model_users
     from llmctl.services.engines import engine_statuses
@@ -682,7 +683,7 @@ def get_backends() -> list[dict[str, Any]]:
             row.update(available=True, path=f"served by lane {status.binary}")
         elif status is not None and status.source != "missing":
             row.update(available=True, path=status.binary)
-        elif not users.get(backend):
+        elif users is not None and not users.get(backend):
             row["unused"] = True
     return rows
 
