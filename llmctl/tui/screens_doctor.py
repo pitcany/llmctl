@@ -52,6 +52,7 @@ class DoctorScreen(DataScreen):
         cursor = table.cursor_row
         table.clear()
         self._rows = []
+        missing: list[str] = []
         for entry in data["backends"]:
             backend = str(entry["backend"])
             binary = str(entry["binary"])
@@ -61,7 +62,11 @@ class DoctorScreen(DataScreen):
                 detail = esc(str(entry.get("path") or "-"))
                 command = ""
             else:
-                status_cell = f"[{C_ERR}]missing[/]"
+                if entry.get("unused"):
+                    status_cell = f"[{C_MUTED}]not used[/]"
+                else:
+                    status_cell = f"[{C_ERR}]missing[/]"
+                    missing.append(backend)
                 command = _data.install_command_for(backend)
                 detail = (
                     f"[{C_MUTED}]$ {esc(command)}[/]"
@@ -73,9 +78,9 @@ class DoctorScreen(DataScreen):
             table.add_row(backend, esc(binary), status_cell, detail)
         if 0 <= cursor < len(self._rows):
             table.move_cursor(row=cursor)
-        self._render_summary(data["summary"])
+        self._render_summary(data["summary"], missing)
 
-    def _render_summary(self, summary: dict[str, Any]) -> None:
+    def _render_summary(self, summary: dict[str, Any], missing: list[str]) -> None:
         """Render the GPU/NVML status and scheduler configuration panel."""
         gpu_count = summary["gpu_count"]
         nvml = summary["nvml_available"]
@@ -98,11 +103,10 @@ class DoctorScreen(DataScreen):
             if summary["allow_public_bind"]
             else f"[{C_OK}]refused (loopback only)[/]"
         )
-        missing = summary["missing_backends"]
         missing_line = (
             f"  [{C_ERR}]Missing backends:[/] {esc(', '.join(missing))}"
             if missing
-            else f"  [{C_OK}]All backends available.[/]"
+            else f"  [{C_OK}]Every backend a model uses is available.[/]"
         )
         lines = [
             "[b]System & scheduler[/b]",

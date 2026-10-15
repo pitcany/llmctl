@@ -186,11 +186,44 @@ def test_app_boots_and_navigates(temp_db: Settings) -> None:
 
 
 def test_install_command_for_known_backends() -> None:
-    """Missing backends expose a copy-pasteable install command."""
-    assert _data.install_command_for("vllm") == "pip install vllm"
-    assert _data.install_command_for("ollama").startswith("curl")
+    """Missing engines point at `llmctl setup`, not a manual install."""
+    for engine in ("vllm", "sglang", "freetoken", "ollama"):
+        assert _data.install_command_for(engine) == f"llmctl setup {engine}"
     # python never needs installing.
     assert _data.install_command_for("python") == ""
+
+
+def test_get_backends_agrees_with_doctor(temp_db: Settings, monkeypatch) -> None:
+    """A lane or a setup install makes an engine ready; an unused one is quiet."""
+    from llmctl.services.engines import EngineStatus
+
+    monkeypatch.setattr(
+        _data,
+        "detect_backends",
+        lambda settings=None: [
+            {"backend": name, "binary": name, "path": None, "available": False}
+            for name in ("strata", "freetoken", "sglang", "lmstudio")
+        ],
+    )
+    monkeypatch.setattr(
+        "llmctl.services.engines.engine_statuses",
+        lambda settings=None: [
+            EngineStatus("strata", "lane", "strata"),
+            EngineStatus("freetoken", "llmctl", "/engines/freetoken/bin/ft", "1.0"),
+            EngineStatus("sglang", "missing", None),
+        ],
+    )
+    monkeypatch.setattr(
+        "llmctl.services.doctor._model_users", lambda settings: {"sglang": ["big-moe"]}
+    )
+
+    rows = {row["backend"]: row for row in _data.get_backends()}
+
+    assert rows["strata"]["available"] and rows["strata"]["path"] == "served by lane strata"
+    assert rows["freetoken"]["available"]
+    assert rows["freetoken"]["path"] == "/engines/freetoken/bin/ft"
+    assert not rows["sglang"]["available"] and not rows["sglang"].get("unused")
+    assert not rows["lmstudio"]["available"] and rows["lmstudio"]["unused"]
 
 
 def test_doctor_summary_keys(temp_db: Settings) -> None:
@@ -202,10 +235,8 @@ def test_doctor_summary_keys(temp_db: Settings) -> None:
         "gpu_policy",
         "safety_margin_gb",
         "default_host",
-        "missing_backends",
     ):
         assert key in summary
-    assert isinstance(summary["missing_backends"], list)
 
 
 def test_overview_warnings_name_affected_models(temp_db: Settings) -> None:
@@ -242,7 +273,7 @@ def test_doctor_copy_install_to_clipboard(temp_db: Settings) -> None:
             table.move_cursor(row=target)
             await pilot.press("c")
             await pilot.pause()
-            assert app.clipboard == "pip install vllm"
+            assert app.clipboard == "llmctl setup vllm"
 
     asyncio.run(_run())
 
