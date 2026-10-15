@@ -131,7 +131,7 @@ def _print_plan(p: LaunchPlan, hw: HardwareInfo) -> None:
     console.print(f"  archs={escape(str(p.architectures))} vllm_supported={p.vllm_supported}")
     console.print(
         f"  tp={p.tensor_parallel_size} max_model_len={p.max_model_len} "
-        f"util={p.gpu_memory_utilization:.2f} trust_remote_code={p.trust_remote_code}"
+        f"util={p.gpu_memory_utilization:.2f} ships_own_code={p.trust_remote_code}"
     )
     if hw.gpus:
         gpus = ", ".join(f"{g.index}:{g.name} ({g.vram_gib:.1f} GiB)" for g in hw.gpus)
@@ -159,8 +159,9 @@ def plan_cmd(
     """Size a model for these GPUs and print the `vllm serve` command.
 
     Reads config.json and the GPU inventory to pick tensor_parallel_size,
-    max_model_len, gpu_memory_utilization, dtype and trust_remote_code, and warns
-    about OOM risk, GGUF and gated repos. Nothing is downloaded or started.
+    max_model_len, gpu_memory_utilization and dtype, and warns about OOM risk, GGUF,
+    gated repos and repos that ship their own code (the command never adds
+    --trust-remote-code). Nothing is downloaded or started.
     """
     hw = detect_hardware()
     model_id = _resolve_model_id(query)
