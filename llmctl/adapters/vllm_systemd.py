@@ -125,7 +125,7 @@ class VLLMSystemdAdapter:
         post_start_hooks: list[LifecycleHook] | None = None,
         renderer: EnvRenderer | None = None,
     ) -> None:
-        self.config = config or ManagedUnitConfig(unit_name="vllm-tp", default_port=8003)
+        self.config = config or ManagedUnitConfig(unit_name="vllm-engine", default_port=8003)
         self.env_file_path = (
             Path(env_file_path).expanduser()
             if env_file_path is not None

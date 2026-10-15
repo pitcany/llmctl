@@ -103,7 +103,7 @@ def test_launch_modal_discloses_the_full_blast_radius() -> None:
 
     async def body(app, pilot) -> None:
         blob = _texts(app.screen).lower()
-        for expected in ("ollama", "ollama-container", "vllm-tp", "agent-config"):
+        for expected in ("ollama", "ollama-container", "vllm-engine", "agent-config"):
             assert expected in blob, (
                 f"launch dialog never mentions {expected!r}: {blob}"
             )

@@ -79,7 +79,7 @@ def test_cli_install_vllm_unit_defaults_to_a_dry_run(
     assert res.exit_code == 0, res.output
     assert "DRY RUN" in res.output
     assert str(launcher_path()) in res.output
-    assert str(tmp_path / "state" / "llmctl" / "units" / "vllm-tp.env") in res.output
+    assert str(tmp_path / "state" / "llmctl" / "units" / "vllm-engine.env") in res.output
     assert "--no-dry-run" in res.output
 
 

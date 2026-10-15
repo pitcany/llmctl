@@ -62,7 +62,7 @@ def test_units_to_stop_rejects_unknown_role() -> None:
 
 def test_preflight_stop_skips_inactive_units() -> None:
     """try_stop short-circuit: inactive units land in `skipped`, not `failed`."""
-    active = {"vllm-tp"}  # only one active
+    active = {"vllm-engine"}  # only one active
     runner = _runner(active)
     report = preflight_stop(
         FleetRole.TP,
@@ -70,7 +70,7 @@ def test_preflight_stop_skips_inactive_units() -> None:
         runner,
         logger=lambda _: None,
     )
-    assert report.stopped == ["vllm-tp"]
+    assert report.stopped == ["vllm-engine"]
     assert set(report.skipped) == {"ollama"}
     assert report.failed == []
     assert report.all_clean is True
@@ -78,7 +78,7 @@ def test_preflight_stop_skips_inactive_units() -> None:
 
 def test_preflight_stop_records_failures() -> None:
     """Failed stops surface in `failed` and flip all_clean to False."""
-    active = {"ollama", "vllm-tp"}
+    active = {"ollama", "vllm-engine"}
     runner = _runner(active, fail_on={"ollama"})
     logged: list[str] = []
     report = preflight_stop(
@@ -88,7 +88,7 @@ def test_preflight_stop_records_failures() -> None:
         logger=logged.append,
     )
     assert "ollama" in report.failed
-    assert "vllm-tp" in report.stopped
+    assert "vllm-engine" in report.stopped
     assert report.all_clean is False
     # Failure was surfaced to the logger
     assert any("FAILED to stop ollama" in line for line in logged)
@@ -108,7 +108,7 @@ def test_preflight_stop_uses_custom_unit_names() -> None:
 
 def test_preflight_logs_each_stopped_unit() -> None:
     """Logger gets one line per successful stop for operator audibility."""
-    active = {"vllm-tp", "ollama"}
+    active = {"vllm-engine", "ollama"}
     runner = _runner(active)
     logged: list[str] = []
     preflight_stop(
@@ -117,5 +117,5 @@ def test_preflight_logs_each_stopped_unit() -> None:
         runner,
         logger=logged.append,
     )
-    assert any("stopped vllm-tp" in line for line in logged)
+    assert any("stopped vllm-engine" in line for line in logged)
     assert any("stopped ollama" in line for line in logged)

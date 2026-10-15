@@ -199,7 +199,7 @@ class ManagedUnitConfig(BaseModel):
     """
 
     enabled: bool = False
-    unit_name: str = "vllm-tp"
+    unit_name: str = "vllm-engine"
     # Which runtime the unit serves, as a RuntimeName value ("vllm",
     # "llama_cpp", ...). Only consulted where the role's runtime matters
     # (e.g. `llmctl adopt-managed` tagging the adopted session); the
@@ -282,7 +282,7 @@ class FleetUnitsConfig(BaseModel):
     re-target via ``settings.yaml``.
     """
 
-    tp: str = "vllm-tp"
+    tp: str = "vllm-engine"
     ollama: str = "ollama"
 
 
@@ -316,7 +316,7 @@ class ManagedUnitsConfig(BaseModel):
 
     vllm_tp: ManagedUnitConfig = Field(
         default_factory=lambda: ManagedUnitConfig(
-            enabled=False, unit_name="vllm-tp", default_port=8003
+            enabled=False, unit_name="vllm-engine", default_port=8003
         )
     )
     fleet: FleetUnitsConfig = Field(default_factory=FleetUnitsConfig)
