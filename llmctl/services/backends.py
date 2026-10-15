@@ -149,6 +149,8 @@ def detect_backends(
     ``http_get`` is injectable for tests; defaults to
     :func:`urllib.request.urlopen`.
     """
+    from llmctl.services.engines import _really_installed
+
     cfg = settings or load_settings()
     results: list[dict[str, object]] = []
     for backend, default_binary in _BACKEND_BINARIES.items():
@@ -164,6 +166,8 @@ def detect_backends(
         )
         binary = override or default_binary
         path = shutil.which(binary)
+        if path is not None and not _really_installed(backend, path):
+            path = None  # SGLang and Strata launch through a python; any python3 is not them
         if backend == "lmstudio" and path is None:
             from llmctl.adapters.lmstudio import lms_binary
 

@@ -54,6 +54,27 @@ def test_detect_backends_reports_python_available() -> None:
     assert "vllm" in missing_backends()
 
 
+def test_a_plain_python3_is_not_sglang_or_strata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both launch through ``python3``; finding one on PATH proves neither."""
+    monkeypatch.setattr(
+        "llmctl.services.scheduler._python_has_module", lambda python, module: False
+    )
+    monkeypatch.setattr("llmctl.services.scheduler._strata_server_for", lambda python: None)
+    backends = {b["backend"]: b for b in detect_backends()}
+    for name in ("sglang", "strata"):
+        assert backends[name]["available"] is False
+        assert backends[name]["path"] is None
+
+
+def test_python3_with_sglang_counts_as_sglang(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "llmctl.services.scheduler._python_has_module",
+        lambda python, module: module == "sglang",
+    )
+    backends = {b["backend"]: b for b in detect_backends()}
+    assert backends["sglang"]["available"] is True
+
+
 def _wait_dead(supervisor: ProcessSupervisor, pid: int | None) -> None:
     for _ in range(80):
         if not supervisor.is_running(pid):
