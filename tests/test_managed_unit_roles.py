@@ -236,10 +236,12 @@ def test_status_marks_absent_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path)
 
 def test_the_old_vllm_tp_key_is_still_read_with_a_warning() -> None:
     """Ignoring it would drop a host's pinned env_file_path and unit_name."""
-    with pytest.warns(FutureWarning, match="managed_units.vllm_tp is deprecated"):
+    with pytest.warns(FutureWarning, match="managed_units.vllm_tp is deprecated") as caught:
         settings = Settings.model_validate(
             {"managed_units": {"vllm_tp": {"unit_name": "vllm-tp", "default_port": 9003}}}
         )
+    # Blamed on the caller, not on a pydantic internals frame.
+    assert caught[0].filename == __file__
     assert settings.managed_units.vllm_engine.unit_name == "vllm-tp"
     assert settings.managed_units.vllm_engine.default_port == 9003
 
