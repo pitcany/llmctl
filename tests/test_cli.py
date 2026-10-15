@@ -57,7 +57,7 @@ def test_cli_adopt_managed_help_lists_all_flag() -> None:
     result = runner.invoke(app, ["adopt-managed", "--help"])
     assert result.exit_code == 0
     assert "--all" in result.output
-    assert "vllm-tp" in result.output
+    assert "vllm-engine" in result.output
 
 
 def test_cli_adopt_managed_requires_role_or_all() -> None:

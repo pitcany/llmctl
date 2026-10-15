@@ -87,7 +87,7 @@ def test_fetch_returns_one_row_per_unit(temp_settings) -> None:
     rows: list[_UnitRow] = screen.fetch()
     assert len(rows) == 1
     roles = [r.role for r in rows]
-    assert roles == ["vllm-tp"]
+    assert roles == ["vllm-engine"]
 
 
 def test_fetch_marks_active_units_correctly(temp_settings) -> None:
@@ -97,7 +97,7 @@ def test_fetch_marks_active_units_correctly(temp_settings) -> None:
         http_get=_http_responder(by_port={}),
     )
     rows = screen.fetch()
-    tp_row = next(r for r in rows if r.role == "vllm-tp" and r.role_kind == "managed")
+    tp_row = next(r for r in rows if r.role == "vllm-engine" and r.role_kind == "managed")
     assert tp_row.is_active is True
 
 
@@ -108,7 +108,7 @@ def test_fetch_marks_inactive_units_correctly(temp_settings) -> None:
         http_get=_http_responder(by_port={}),
     )
     rows = screen.fetch()
-    tp_row = next(r for r in rows if r.role == "vllm-tp" and r.role_kind == "managed")
+    tp_row = next(r for r in rows if r.role == "vllm-engine" and r.role_kind == "managed")
     assert tp_row.is_active is False
 
 
@@ -119,7 +119,7 @@ def test_fetch_picks_up_served_names_via_probe(temp_settings) -> None:
         http_get=_http_responder(by_port={8003: ["llama-3.3-70b"]}),
     )
     rows = screen.fetch()
-    tp_row = next(r for r in rows if r.role == "vllm-tp" and r.role_kind == "managed")
+    tp_row = next(r for r in rows if r.role == "vllm-engine" and r.role_kind == "managed")
     assert tp_row.served == ["llama-3.3-70b"]
 
 
@@ -184,7 +184,7 @@ def test_fetch_default_ports_match_config(temp_settings) -> None:
     )
     rows = screen.fetch()
     ports = {(r.role, r.role_kind): r.port for r in rows}
-    assert ports[("vllm-tp", "managed")] == 8003
+    assert ports[("vllm-engine", "managed")] == 8003
 
 
 def test_units_screen_keybinding_present() -> None:

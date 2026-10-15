@@ -66,7 +66,7 @@ def test_settings_managed_units_defaults_carry_through() -> None:
     so callers don't need to special-case missing keys."""
     s = Settings()
     assert isinstance(s.managed_units, ManagedUnitsConfig)
-    assert s.managed_units.vllm_tp.unit_name == "vllm-engine"
+    assert s.managed_units.vllm_engine.unit_name == "vllm-engine"
 
 
 def test_adapter_consumes_config_unit_name() -> None:

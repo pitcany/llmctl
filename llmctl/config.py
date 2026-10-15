@@ -8,12 +8,13 @@ YAML or environment variables.
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 from typing import Any
 
 import yaml
 from platformdirs import user_config_dir, user_data_dir, user_log_dir
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 APP_NAME = "llmctl"
 
@@ -203,7 +204,7 @@ class ManagedUnitConfig(BaseModel):
     # Which runtime the unit serves, as a RuntimeName value ("vllm",
     # "llama_cpp", ...). Only consulted where the role's runtime matters
     # (e.g. `llmctl adopt-managed` tagging the adopted session); the
-    # default keeps every existing vllm_tp consumer unchanged.
+    # default keeps every existing vllm_engine consumer unchanged.
     runtime: str = "vllm"
     env_file_path: Path | None = None
     # The marker string the legacy-unit guard looks for in `systemctl cat`
@@ -286,9 +287,20 @@ class FleetUnitsConfig(BaseModel):
     ollama: str = "ollama"
 
 
+#: The built-in vLLM role, by CLI name. It was ``vllm-tp`` until 2026-10 (the
+#: unit was renamed too: not every preset is TP=2); the old name is still
+#: accepted wherever a role is looked up, via :func:`resolve_role`.
+VLLM_ROLE = "vllm-engine"
+_ROLE_ALIASES = {"vllm-tp": VLLM_ROLE}
+
 #: Role names claimed by ManagedUnitsConfig's typed fields; the generic
 #: ``units`` mapping may not redefine them.
-_RESERVED_ROLE_NAMES = {"vllm-tp", "vllm_tp", "fleet"}
+_RESERVED_ROLE_NAMES = {VLLM_ROLE, "vllm_engine", "vllm-tp", "vllm_tp", "fleet"}
+
+
+def resolve_role(name: str) -> str:
+    """The current name of a managed-unit role (``vllm-tp`` -> ``vllm-engine``)."""
+    return _ROLE_ALIASES.get(name, name)
 
 
 class ManagedUnitsConfig(BaseModel):
@@ -297,9 +309,10 @@ class ManagedUnitsConfig(BaseModel):
     Keyed by logical role rather than unit name so the same role can be
     re-targeted to a different unit on another host without touching code.
 
-    ``vllm_tp`` and ``fleet`` are typed fields for compatibility — existing
-    consumers (``llmctl vllm``, ``adopt-managed vllm-tp``, the preset
-    orchestrator) read them directly and must keep working unchanged.
+    ``vllm_engine`` and ``fleet`` are typed fields — consumers (``llmctl
+    run``, ``adopt-managed vllm-engine``, the preset orchestrator) read them
+    directly. ``vllm_engine`` was ``vllm_tp`` until 2026-10: that key is still
+    read (with a warning), and ``.vllm_tp`` still returns it for plugins.
     Additional roles go in the generic ``units`` mapping::
 
         managed_units:
@@ -311,16 +324,47 @@ class ManagedUnitsConfig(BaseModel):
 
     Role-generic consumers (``llmctl status``, ``adopt-managed``, the
     port-drift validator) iterate :meth:`roles` so opted-in units appear
-    alongside ``vllm-tp``; a config without ``units`` is a no-op migration.
+    alongside ``vllm-engine``; a config without ``units`` is a no-op migration.
     """
 
-    vllm_tp: ManagedUnitConfig = Field(
+    vllm_engine: ManagedUnitConfig = Field(
         default_factory=lambda: ManagedUnitConfig(
             enabled=False, unit_name="vllm-engine", default_port=8003
         )
     )
     fleet: FleetUnitsConfig = Field(default_factory=FleetUnitsConfig)
     units: dict[str, ManagedUnitConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_the_old_vllm_tp_key(cls, data: Any) -> Any:
+        """Read a ``vllm_tp:`` block as ``vllm_engine:``.
+
+        Silently dropping it would be worse than an error: the host's pinned
+        ``env_file_path`` and ``unit_name`` would fall back to the defaults,
+        and the next swap would write the wrong env file.
+        """
+        if not isinstance(data, dict) or "vllm_tp" not in data:
+            return data
+        if "vllm_engine" in data:
+            raise ValueError(
+                "managed_units sets both vllm_engine and its old name vllm_tp; "
+                "keep only vllm_engine"
+            )
+        warnings.warn(
+            "managed_units.vllm_tp is deprecated; rename the key to "
+            "managed_units.vllm_engine (same fields)",
+            FutureWarning,
+            stacklevel=2,
+        )
+        data = dict(data)
+        data["vllm_engine"] = data.pop("vllm_tp")
+        return data
+
+    @property
+    def vllm_tp(self) -> ManagedUnitConfig:
+        """Deprecated name of :attr:`vllm_engine`, kept so plugins keep working."""
+        return self.vllm_engine
 
     @field_validator("units")
     @classmethod
@@ -331,14 +375,17 @@ class ManagedUnitsConfig(BaseModel):
         if clashes:
             raise ValueError(
                 f"managed_units.units may not redefine reserved role(s) "
-                f"{', '.join(clashes)}; configure managed_units.vllm_tp / "
+                f"{', '.join(clashes)}; configure managed_units.vllm_engine / "
                 f"managed_units.fleet directly."
             )
         return value
 
     def roles(self) -> dict[str, ManagedUnitConfig]:
-        """All unit roles by CLI name: the built-in ``vllm-tp`` plus ``units``."""
-        return {"vllm-tp": self.vllm_tp, **self.units}
+        """All unit roles by CLI name: the built-in ``vllm-engine`` plus ``units``.
+
+        Look a name up with :func:`resolve_role` first, so ``vllm-tp`` works.
+        """
+        return {VLLM_ROLE: self.vllm_engine, **self.units}
 
 
 def _recorded_engine_binary(config_dir: Path, runtime: str) -> str | None:

@@ -84,7 +84,7 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
     def _start() -> Any:
         return start_vllm_tp(
             target.key,
-            managed_unit=settings.managed_units.vllm_tp,
+            managed_unit=settings.managed_units.vllm_engine,
             defaults=settings.vllm.defaults,
             fleet=settings.managed_units.fleet,
             options=OrchestratorOptions(dry_run=False),

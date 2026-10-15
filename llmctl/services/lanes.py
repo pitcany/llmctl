@@ -617,7 +617,7 @@ def gather_state(
         def is_active(unit: str, user: bool) -> bool:
             return runner.is_active(unit, user=user)
 
-    vllm = settings.managed_units.vllm_tp
+    vllm = settings.managed_units.vllm_engine
     catalog = build_catalog(presets, lanes, vllm_port=vllm.default_port)
     if session_rows is None:
 

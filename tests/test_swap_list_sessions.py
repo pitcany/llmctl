@@ -219,7 +219,7 @@ def _state_with_unit(active: bool):
     )
     settings = SimpleNamespace(
         managed_units=SimpleNamespace(
-            vllm_tp=SimpleNamespace(unit_name="vllm-tp", default_port=8003)
+            vllm_engine=SimpleNamespace(unit_name="vllm-tp", default_port=8003)
         )
     )
     state = gather_state(
