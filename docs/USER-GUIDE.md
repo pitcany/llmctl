@@ -457,9 +457,9 @@ vllm:
 managed_units:
   vllm_engine:
     enabled: false               # opt-in only; orchestrator commands ignore this
-    unit_name: vllm-tp
+    unit_name: vllm-engine
     runtime: vllm                # runtime `adopt-managed` tags the session with
-    env_file_path: null          # auto: $AI_HOME/services/vllm-tp.env -> ~/AI/services/vllm-tp.env
+    env_file_path: null          # auto: $AI_HOME/services/<unit_name>.env, else ~/.local/state/llmctl/units/<unit_name>.env
     launcher_marker: vllm-launcher.sh   # set to null to disable legacy-unit guard
     default_port: 8003
 
