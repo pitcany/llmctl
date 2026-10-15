@@ -187,7 +187,7 @@ class PresetsScreen(DataScreen):
 
         settings = load_settings()
         effects = describe_launch_effects(
-            settings.managed_units.vllm_tp,
+            settings.managed_units.vllm_engine,
             settings.managed_units.fleet,
             OrchestratorOptions(dry_run=False),
         )
@@ -218,7 +218,7 @@ class PresetsScreen(DataScreen):
                 active,
                 lambda: start_vllm_tp(
                     alias,
-                    managed_unit=settings.managed_units.vllm_tp,
+                    managed_unit=settings.managed_units.vllm_engine,
                     defaults=settings.vllm.defaults,
                     fleet=settings.managed_units.fleet,
                     options=options,

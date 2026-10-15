@@ -558,7 +558,7 @@ Out-of-the-box, llmctl knows about:
 | TP serving | `vllm-tp` | 8003 | the preset's first `tensor_parallel_size` cards |
 
 Every default is overridable in `~/.config/llmctl/settings.yaml`
-(`managed_units.vllm_tp.env_file_path`, `vllm.defaults.gpus`, ...).
+(`managed_units.vllm_engine.env_file_path`, `vllm.defaults.gpus`, ...).
 
 You can also **register your own roles**, of any runtime — they then
 appear in `llmctl status`, are adoptable via `llmctl adopt-managed`,
@@ -573,7 +573,7 @@ managed_units:
       runtime: llama_cpp
 ```
 
-`vllm-tp`, `vllm_tp` and `fleet` are reserved names inside `units`.
+`vllm-engine`, `vllm_engine`, `fleet` and the old names `vllm-tp`/`vllm_tp` are reserved names inside `units`. The built-in role was `vllm-tp` (settings key `vllm_tp`) before 2026-10; both old names are still accepted.
 See the user guide for the full schema.
 
 ## Test

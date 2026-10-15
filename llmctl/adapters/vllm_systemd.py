@@ -1,5 +1,5 @@
 """Adapter that manages an externally-installed vLLM systemd unit
-(``vllm-engine.service`` by default; ``managed_units.vllm_tp.unit_name``
+(``vllm-engine.service`` by default; ``managed_units.vllm_engine.unit_name``
 overrides it).
 
 Unlike :class:`llmctl.adapters.vllm.VLLMAdapter`, this adapter does not

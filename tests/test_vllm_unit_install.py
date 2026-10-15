@@ -87,4 +87,4 @@ def test_cli_install_vllm_unit_rejects_an_unknown_role(monkeypatch, tmp_path) ->
     monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(tmp_path / "cfg"))
     res = CliRunner().invoke(app, ["install-vllm-unit", "--role", "nope"])
     assert res.exit_code == 2
-    assert "nope" in res.output and "vllm-tp" in res.output
+    assert "nope" in res.output and "vllm-engine" in res.output

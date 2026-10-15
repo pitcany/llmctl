@@ -56,7 +56,7 @@ class VLLMAdapter(ProcessRuntimeAdapter):
         config: Runtime config (binary lookup fallback).
         supervisor: Process supervisor (legacy subprocess launch path).
         managed_units: The configured managed systemd units to probe.
-            ``vllm_tp`` is probed via the OpenAI ``/v1/models`` API.
+            ``vllm_engine`` is probed via the OpenAI ``/v1/models`` API.
         http_get: Injected HTTP getter for tests. Default uses
             :func:`urllib.request.urlopen` on ``http://localhost:<port>``.
         probe_timeout_s: Per-port probe timeout. Short by design so an
@@ -101,11 +101,11 @@ class VLLMAdapter(ProcessRuntimeAdapter):
     def _candidate_units(self) -> list[ManagedUnitConfig]:
         """Return all configured managed units to probe.
 
-        Currently fixed to (vllm_tp,) — the only role we model in
+        Currently fixed to (vllm_engine,) — the only role we model in
         config.
         """
         return [
-            self.managed_units.vllm_tp,
+            self.managed_units.vllm_engine,
         ]
 
     def _probe_unit(self, unit: ManagedUnitConfig) -> list[ServedModel] | None:

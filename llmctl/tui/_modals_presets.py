@@ -132,7 +132,7 @@ class PresetLaunchModal(ModalScreen[PresetLaunchTarget | None]):
             yield Static("\n".join(lines))
             with Vertical(id="plan-buttons"):
                 yield Button(
-                    "Launch on vllm-tp — t",
+                    "Launch on vllm-engine — t",
                     variant="error",
                     id="pick-tp",
                 )

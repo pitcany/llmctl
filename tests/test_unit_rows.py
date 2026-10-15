@@ -51,7 +51,7 @@ def _http(payload: object | None = None, *, fail: bool = False):
 
 def _settings(tmp_path: Path, env_name: str = "vllm-tp.env") -> Settings:
     s = Settings()
-    s.managed_units.vllm_tp = ManagedUnitConfig(
+    s.managed_units.vllm_engine = ManagedUnitConfig(
         unit_name="vllm-tp",
         default_port=8003,
         env_file_path=tmp_path / env_name,
@@ -94,7 +94,7 @@ def test_env_file_presence_is_reported(tmp_path) -> None:
 def test_row_carries_the_identifying_fields(tmp_path) -> None:
     rows = unit_rows(_settings(tmp_path), http_get=_http(fail=True))
     row = rows[0]
-    assert row.role == "vllm-tp"
+    assert row.role == "vllm-engine"
     assert row.unit_name == "vllm-tp"
     assert row.port == 8003
 
@@ -146,7 +146,7 @@ def test_a_lane_with_its_own_unit_needs_no_settings_row(tmp_path, monkeypatch) -
     # and a lane that names no unit cannot be derived at all.
     assert "onvllmport" not in rows
     assert "nounit" not in rows
-    assert rows["vllm-tp"].unit_name == "vllm-tp"
+    assert rows["vllm-engine"].unit_name == "vllm-tp"
 
 
 def test_rows_say_which_file_put_them_there(tmp_path, monkeypatch) -> None:
@@ -155,5 +155,5 @@ def test_rows_say_which_file_put_them_there(tmp_path, monkeypatch) -> None:
 
     rows = {row.role: row for row in unit_rows(_settings(tmp_path), http_get=_http({"data": []}))}
 
-    assert rows["vllm-tp"].source == "settings"
+    assert rows["vllm-engine"].source == "settings"
     assert rows["glm53"].source == "lane"

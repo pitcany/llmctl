@@ -49,7 +49,7 @@ def _http_responder(
 def _no_units() -> ManagedUnitsConfig:
     """Build a managed-units config where every probe will succeed if scripted."""
     return ManagedUnitsConfig(
-        vllm_tp=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        vllm_engine=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
     )
 
 

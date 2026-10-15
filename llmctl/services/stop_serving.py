@@ -110,7 +110,7 @@ def real_deps(settings: Any) -> StopDeps:
     from llmctl.services.lane_swap import LaneSwapDeps, stop_user_unit
 
     def stop_vllm(unit: str) -> bool:
-        adapter = VLLMSystemdAdapter(config=settings.managed_units.vllm_tp)
+        adapter = VLLMSystemdAdapter(config=settings.managed_units.vllm_engine)
         adapter.stop()
         return not adapter.is_active()
 

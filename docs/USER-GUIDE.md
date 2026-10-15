@@ -45,7 +45,7 @@ under `managed_units.units` (see the schema below). Those roles then
 appear in `llmctl status`, are adoptable via `llmctl adopt-managed
 <role>`, show on the TUI Units screen, and are covered by the
 port-drift check in `llmctl validate` / `llmctl doctor`. The names
-`vllm-tp`, `vllm_tp` and `fleet` are reserved and rejected inside
+`vllm-engine`, `vllm_engine`, the old names `vllm-tp`/`vllm_tp`, and `fleet` are reserved and rejected inside
 `units`. Set `runtime:` explicitly for anything that is not vLLM, or
 `adopt-managed` mislabels the session.
 
@@ -455,7 +455,7 @@ vllm:
     nccl_p2p_disable: false
 
 managed_units:
-  vllm_tp:
+  vllm_engine:
     enabled: false               # opt-in only; orchestrator commands ignore this
     unit_name: vllm-tp
     runtime: vllm                # runtime `adopt-managed` tags the session with
@@ -680,7 +680,7 @@ free-VRAM floor.
 
 The HTTP probe targets `http://localhost:<default_port>/v1/models`.
 If your unit listens on a different port, override
-`managed_units.vllm_tp.default_port` in `settings.yaml`.
+`managed_units.vllm_engine.default_port` in `settings.yaml`.
 
 Verify with: `curl http://localhost:8003/v1/models`. If that
 returns a model list, llmctl should too — file a bug if not.
@@ -702,7 +702,7 @@ Two options:
 - Disable the guard if you've installed a non-standard launcher:
   ```yaml
   managed_units:
-    vllm_tp:
+    vllm_engine:
       launcher_marker: null
   ```
 

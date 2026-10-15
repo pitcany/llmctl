@@ -17,7 +17,7 @@ from sqlmodel import Session
 
 from llmctl import cli_swap
 from llmctl.api.app import create_app
-from llmctl.config import ManagedUnitConfig, Settings, load_settings
+from llmctl.config import VLLM_ROLE, ManagedUnitConfig, Settings, load_settings, resolve_role
 from llmctl.db import (
     BenchmarkKind,
     ModelRecord,
@@ -1627,8 +1627,8 @@ def generate_systemd_session(
 @app.command("install-vllm-unit", hidden=True)
 def install_vllm_unit(
     role: Annotated[
-        str, typer.Option(help="managed_units role to write the unit for.")
-    ] = "vllm-tp",
+        str, typer.Option(help="managed_units role to write the unit for (vllm-tp = vllm-engine).")
+    ] = VLLM_ROLE,
     enable: Annotated[
         bool, typer.Option(help="Enable the unit after writing (it starts on the first swap).")
     ] = True,
@@ -1645,6 +1645,7 @@ def install_vllm_unit(
 
     settings = load_settings()
     roles = settings.managed_units.roles()
+    role = resolve_role(role)
     if role not in roles:
         raise typer.BadParameter(f"no managed_units role {role!r}; have: {', '.join(roles)}")
     unit = render_vllm_unit(roles[role])
@@ -1990,7 +1991,7 @@ def vllm_cmd(
     try:
         result = start_vllm_tp(
             preset,
-            managed_unit=settings.managed_units.vllm_tp,
+            managed_unit=settings.managed_units.vllm_engine,
             defaults=settings.vllm.defaults,
             fleet=settings.managed_units.fleet,
             options=options,
@@ -2024,7 +2025,7 @@ def vllm_cmd(
             )
         if result.restart is not None and result.restart.error:
             console.print(f"  restart: {escape(result.restart.error)}")
-        _print_rollback(result, settings.managed_units.vllm_tp.unit_name)
+        _print_rollback(result, settings.managed_units.vllm_engine.unit_name)
         raise typer.Exit(1)
     if result.restart is not None and result.restart.ready is None:
         # --no-wait: the restart was issued and nobody probed /v1/models.
@@ -2839,7 +2840,7 @@ def set_alias_cmd(
 def _managed_roles(settings: Settings) -> dict[str, ManagedUnitConfig]:
     """Adoptable managed-unit roles by CLI name.
 
-    The built-in ``vllm-tp`` plus every role in ``managed_units.units`` —
+    The built-in ``vllm-engine`` plus every role in ``managed_units.units`` —
     so ``llmctl adopt-managed <role>`` and ``--all`` cover units of any
     runtime, not only the vLLM TP pair.
     """
@@ -2926,7 +2927,7 @@ def adopt_managed_cmd(
     role: Annotated[
         str | None,
         typer.Argument(
-            help="Managed-unit role to adopt (vllm-tp, or any role from "
+            help="Managed-unit role to adopt (vllm-engine, or any role from "
             "managed_units.units). Omit and pass --all to adopt every "
             "running role.",
         ),
@@ -2942,7 +2943,7 @@ def adopt_managed_cmd(
 ) -> None:
     """Adopt one or all managed systemd units declared in settings.managed_units.*."""
     if role is None and not all_roles:
-        raise typer.BadParameter("Pass a role (e.g. vllm-tp) or --all.")
+        raise typer.BadParameter("Pass a role (e.g. vllm-engine) or --all.")
     if role is not None and all_roles:
         raise typer.BadParameter("Pass a role OR --all, not both.")
 
@@ -2951,12 +2952,13 @@ def adopt_managed_cmd(
     if all_roles:
         targets = list(roles.items())
     else:
-        unit = roles.get(role or "")
+        role = resolve_role(role or "")
+        unit = roles.get(role)
         if unit is None:
             raise typer.BadParameter(
                 f"Unknown role '{role}'. Choose: {', '.join(sorted(roles))}."
             )
-        targets = [(role or "", unit)]
+        targets = [(role, unit)]
 
     adopted = 0
     skipped = 0

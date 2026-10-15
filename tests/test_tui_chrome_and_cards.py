@@ -164,7 +164,7 @@ def _http_responder(by_port: dict[int, list[str]]) -> Callable[[str, float], Any
 def _settings_with_managed_units() -> Settings:
     s = Settings()
     s.managed_units = ManagedUnitsConfig(
-        vllm_tp=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        vllm_engine=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
     )
     return s
 
