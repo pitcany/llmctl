@@ -135,47 +135,96 @@ def _check_storage(cfg: Settings) -> list[DoctorCheck]:
     return checks
 
 
-def _check_backends(cfg: Settings) -> list[DoctorCheck]:
-    """Runtime binaries / endpoints detected."""
-    from llmctl.services.backends import detect_backends
+def _model_users(cfg: Settings) -> dict[str, list[str]]:
+    """Runtime -> names of the active, not deleted, registry models that use it."""
+    try:
+        init_db(cfg.database_url)
+        with DBSession(get_engine(cfg.database_url)) as db:
+            records = db.exec(
+                select(ModelRecord).where(
+                    ModelRecord.active == True,  # noqa: E712 - SQL, not Python truthiness
+                    ModelRecord.status != ModelStatus.DELETED,
+                )
+            ).all()
+    except Exception:
+        return {}  # storage check already reported the failure
+    users: dict[str, list[str]] = {}
+    for record in records:
+        runtime = getattr(record.runtime, "value", record.runtime)
+        users.setdefault(str(runtime), []).append(record.name)
+    return users
 
+
+def _name_models(names: list[str], limit: int = 3) -> str:
+    shown = ", ".join(sorted(names)[:limit])
+    more = len(names) - limit
+    return f"{shown} and {more} more" if more > 0 else shown
+
+
+def _check_backends(cfg: Settings) -> list[DoctorCheck]:
+    """Runtime binaries / endpoints detected.
+
+    A missing engine is reported once, by :func:`_check_engines`; a missing
+    runtime that no model uses (LM Studio on a box without it) passes as
+    ``not used``.
+    """
+    from llmctl.services.backends import detect_backends
+    from llmctl.services.engines import ENGINE_NAMES
+
+    users = _model_users(cfg)
     checks: list[DoctorCheck] = []
     for entry in detect_backends(cfg):
-        name = f"backend:{entry['backend']}"
+        backend = str(entry["backend"])
+        name = f"backend:{backend}"
         if entry["available"]:
             checks.append(DoctorCheck(name, "pass", f"found: {entry['path']}"))
+        elif backend in ENGINE_NAMES:
+            continue
+        elif not users.get(backend):
+            checks.append(DoctorCheck(name, "pass", "not used"))
         else:
             checks.append(
                 DoctorCheck(
                     name,
                     "warn",
-                    f"binary '{entry['binary']}' not found on PATH",
+                    f"binary '{entry['binary']}' not found on PATH; used by "
+                    f"{_name_models(users[backend])}",
                     "Install the runtime or set its binary path in settings.yaml "
-                    "(runtimes.<name>.binary). Unused runtimes can be ignored.",
+                    "(runtimes.<name>.binary).",
                 )
             )
     return checks
 
 
 def _check_engines(cfg: Settings) -> list[DoctorCheck]:
-    """Which engines `llmctl run` can start today, and how to get the rest."""
+    """Which engines `llmctl run` can start today, and how to get the rest.
+
+    A router lane that serves an engine makes it present. A missing engine
+    warns only when a registered model uses it; otherwise it passes as
+    ``not used``, so a healthy box shows no warnings.
+    """
     from llmctl.services.engines import engine_statuses
 
+    users = _model_users(cfg)
     checks: list[DoctorCheck] = []
     for row in engine_statuses(cfg):
         name = f"engine:{row.engine}"
+        version = f" {row.version}" if row.version else ""
         if row.source == "llmctl":
-            version = f" {row.version}" if row.version else ""
             checks.append(DoctorCheck(name, "pass", f"installed by llmctl{version}: {row.binary}"))
         elif row.source == "path":
-            checks.append(DoctorCheck(name, "pass", f"found: {row.binary}"))
+            checks.append(DoctorCheck(name, "pass", f"found{version}: {row.binary}"))
+        elif row.source == "lane":
+            checks.append(DoctorCheck(name, "pass", f"served by lane {row.binary}"))
+        elif not users.get(row.engine):
+            checks.append(DoctorCheck(name, "pass", "not used"))
         else:
             checks.append(
                 DoctorCheck(
                     name,
                     "warn",
-                    "not installed",
-                    f"`llmctl setup {row.engine}` installs it; ignore engines you do not use.",
+                    f"not installed; used by {_name_models(users[row.engine])}",
+                    f"`llmctl setup {row.engine}` installs it.",
                 )
             )
     return checks

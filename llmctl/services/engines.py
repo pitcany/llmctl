@@ -754,10 +754,44 @@ def _version_of(
 @dataclass(frozen=True)
 class EngineStatus:
     engine: str
-    #: ``llmctl`` (installed by setup), ``path`` (found on PATH / settings), or ``missing``.
+    #: ``llmctl`` (installed by setup), ``path`` (found on PATH / settings),
+    #: ``lane`` (a router lane serves it; ``binary`` is the lane name), or ``missing``.
     source: str
     binary: str | None
     version: str | None = None
+
+
+#: Seconds a version probe of an engine found on PATH may take.
+VERSION_TIMEOUT_S = 5.0
+
+
+def _run_with_timeout(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - fixed argv from _version_of
+        list(argv), capture_output=True, text=True, check=False, timeout=VERSION_TIMEOUT_S
+    )
+
+
+def _path_version(
+    engine: str,
+    binary: str,
+    run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]],
+) -> str | None:
+    """Version of an engine found on PATH, cheap enough for every ``setup``/``doctor``.
+
+    ``vllm --version`` imports torch (about 9 s on the workstation); the
+    python next to it reads the installed distribution's metadata in
+    milliseconds.
+    """
+    python = Path(binary).with_name("python")
+    if engine == "vllm" and python.exists():
+        argv = [str(python), "-c", "from importlib.metadata import version; print(version('vllm'))"]
+        try:
+            proc = run(argv)
+        except Exception:  # noqa: BLE001 - a version is optional
+            return None
+        lines = (proc.stdout or "").strip().splitlines()
+        return lines[-1].strip() if proc.returncode == 0 and lines else None
+    return _version_of(engine, binary, SetupDeps(run=run))[0]
 
 
 def engine_statuses(
@@ -765,10 +799,25 @@ def engine_statuses(
     *,
     which: Callable[[str], str | None] = shutil.which,
     engines_path: Path | None = None,
+    lanes: Sequence[Any] | None = None,
+    run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] = _run_with_timeout,
 ) -> list[EngineStatus]:
-    """Where each engine comes from today, for ``llmctl setup`` with no argument."""
+    """Where each engine comes from today, for ``llmctl setup`` and ``doctor``.
+
+    An engine with no install of its own counts as present when a router
+    lane serves it (``lanes``; default: what the plugin lane sources load).
+    An engine found on PATH gets its version from a short probe (``run``);
+    a probe that fails or times out leaves the version empty.
+    """
     cfg = settings or load_settings()
     recorded = load_engines(engines_path or engines_file(cfg))
+    if lanes is None:
+        try:
+            from llmctl.services.lanes import load_lanes
+
+            lanes = load_lanes(cfg.managed_units)
+        except Exception:  # noqa: BLE001 - lanes are advisory here
+            lanes = []
     rows: list[EngineStatus] = []
     for engine in ENGINE_NAMES:
         info = recorded.get(engine) or {}
@@ -780,8 +829,11 @@ def engine_statuses(
         found = which(default) if default else None
         if found and not _really_installed(engine, found):
             found = None  # a python on PATH is not an engine
+        lane = next((ln for ln in lanes if getattr(ln, "runtime", None) == engine), None)
         if found:
-            rows.append(EngineStatus(engine, "path", found))
+            rows.append(EngineStatus(engine, "path", found, _path_version(engine, found, run)))
+        elif lane is not None:
+            rows.append(EngineStatus(engine, "lane", lane.name))
         else:
             rows.append(EngineStatus(engine, "missing", None))
     return rows

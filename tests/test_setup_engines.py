@@ -213,10 +213,165 @@ def test_doctor_reports_engines(tmp_path, monkeypatch) -> None:
             SimpleNamespace(engine="ollama", source="missing", binary=None, version=None),
         ],
     )
+    import llmctl.services.doctor as doctor
+
+    monkeypatch.setattr(doctor, "_model_users", lambda cfg: {"ollama": ["qwen3:8b"]})
     checks = {c.name: c for c in _check_engines(settings)}
     assert checks["engine:vllm"].verdict == "pass" and "0.30.0" in checks["engine:vllm"].detail
     assert checks["engine:ollama"].verdict == "warn"
+    assert "qwen3:8b" in checks["engine:ollama"].detail
     assert "llmctl setup ollama" in (checks["engine:ollama"].remediation or "")
+
+
+def _no_engines_on_path(engine: str) -> None:
+    return None
+
+
+def test_an_engine_a_lane_serves_is_present(tmp_path, monkeypatch) -> None:
+    """The Strata lane serving now means Strata is installed, whatever PATH says."""
+    import llmctl.services.doctor as doctor
+    from llmctl.services.lanes import Lane
+
+    settings = _settings(tmp_path)
+    lane = Lane(
+        "strata", "strata-coder", "http://127.0.0.1:8085", ("strata-start",), runtime="strata"
+    )
+    rows = {
+        r.engine: r for r in eng.engine_statuses(settings, which=_no_engines_on_path, lanes=[lane])
+    }
+    assert rows["strata"].source == "lane" and rows["strata"].binary == "strata"
+    assert rows["vllm"].source == "missing"
+
+    real = eng.engine_statuses
+    monkeypatch.setattr(
+        eng, "engine_statuses", lambda cfg: real(cfg, which=_no_engines_on_path, lanes=[lane])
+    )
+    monkeypatch.setattr(doctor, "_model_users", lambda cfg: {})
+    checks = {c.name: c for c in doctor._check_engines(settings)}
+    assert checks["engine:strata"].verdict == "pass"
+    assert "lane strata" in checks["engine:strata"].detail
+
+
+def test_a_missing_engine_nothing_uses_does_not_warn(tmp_path, monkeypatch) -> None:
+    import llmctl.services.doctor as doctor
+
+    settings = _settings(tmp_path)
+    real = eng.engine_statuses
+    monkeypatch.setattr(
+        eng, "engine_statuses", lambda cfg: real(cfg, which=_no_engines_on_path, lanes=[])
+    )
+    monkeypatch.setattr(doctor, "_model_users", lambda cfg: {"vllm": ["Qwen/Qwen3-8B"]})
+    checks = {c.name: c for c in doctor._check_engines(settings)}
+    for engine in ("sglang", "freetoken", "strata", "llama_cpp", "ollama"):
+        assert checks[f"engine:{engine}"].verdict == "pass", engine
+        assert checks[f"engine:{engine}"].detail == "not used"
+    assert checks["engine:vllm"].verdict == "warn"
+    assert "Qwen/Qwen3-8B" in checks["engine:vllm"].detail
+
+
+def test_doctor_names_the_models_from_the_registry(tmp_path, monkeypatch) -> None:
+    """``_model_users`` reads active registry rows by runtime."""
+    from sqlmodel import Session as DBSession
+
+    import llmctl.services.doctor as doctor
+    from llmctl.db import ModelRecord, ModelStatus, RuntimeName, get_engine, init_db
+
+    monkeypatch.delenv("LLMCTL_DB_URL", raising=False)
+    db_url = f"sqlite:///{tmp_path / 'llmctl.db'}"
+    settings = Settings(
+        paths={"config_dir": tmp_path / "cfg", "data_dir": tmp_path / "data"},
+        database={"url": db_url},
+    )
+    init_db(db_url)
+    with DBSession(get_engine(db_url)) as db:
+        db.add(ModelRecord(name="ft-model", runtime=RuntimeName.FREETOKEN))
+        db.add(ModelRecord(name="gone", runtime=RuntimeName.SGLANG, active=False))
+        db.add(ModelRecord(name="rm-d", runtime=RuntimeName.SGLANG, status=ModelStatus.DELETED))
+        db.commit()
+    assert doctor._model_users(settings) == {"freetoken": ["ft-model"]}
+
+
+def test_backends_skip_missing_engines_and_unused_runtimes(tmp_path, monkeypatch) -> None:
+    """`ft` missing is the engine check's business; LM Studio unused is not a warning."""
+    import llmctl.services.backends as backends
+    import llmctl.services.doctor as doctor
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(
+        backends,
+        "detect_backends",
+        lambda cfg: [
+            {"backend": "freetoken", "binary": "ft", "path": None, "available": False},
+            {"backend": "lmstudio", "binary": "lms", "path": None, "available": False},
+            {"backend": "ollama", "binary": "ollama", "path": "/usr/bin/ollama", "available": True},
+        ],
+    )
+    monkeypatch.setattr(doctor, "_model_users", lambda cfg: {})
+    checks = {c.name: c for c in doctor._check_backends(settings)}
+    assert "backend:freetoken" not in checks
+    assert checks["backend:lmstudio"].verdict == "pass"
+    assert checks["backend:lmstudio"].detail == "not used"
+    assert checks["backend:ollama"].verdict == "pass"
+
+    monkeypatch.setattr(doctor, "_model_users", lambda cfg: {"lmstudio": ["gemma"]})
+    checks = {c.name: c for c in doctor._check_backends(settings)}
+    assert checks["backend:lmstudio"].verdict == "warn"
+    assert "gemma" in checks["backend:lmstudio"].detail
+
+
+def test_an_engine_on_path_gets_its_version(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    seen: list[list[str]] = []
+
+    def run(argv):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "ollama version is 0.12.3\n", "")
+
+    which = {"ollama": "/usr/bin/ollama"}.get
+    rows = {r.engine: r for r in eng.engine_statuses(settings, which=which, lanes=[], run=run)}
+    assert rows["ollama"].source == "path" and rows["ollama"].version == "0.12.3"
+    assert seen == [["/usr/bin/ollama", "--version"]]
+
+
+def test_vllm_on_path_reads_its_version_from_metadata(tmp_path) -> None:
+    """`vllm --version` imports torch; the env's python reads the metadata instead."""
+    settings = _settings(tmp_path)
+    bindir = tmp_path / "env" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "python").write_text("")
+    seen: list[list[str]] = []
+
+    def run(argv):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "0.30.0\n", "")
+
+    which = {"vllm": str(bindir / "vllm")}.get
+    rows = {r.engine: r for r in eng.engine_statuses(settings, which=which, lanes=[], run=run)}
+    assert rows["vllm"].version == "0.30.0"
+    assert seen[0][0] == str(bindir / "python") and "version('vllm')" in seen[0][-1]
+
+
+def test_a_version_probe_that_times_out_leaves_no_version(tmp_path) -> None:
+    settings = _settings(tmp_path)
+
+    def run(argv):
+        raise subprocess.TimeoutExpired(list(argv), eng.VERSION_TIMEOUT_S)
+
+    which = {"llama-server": "/opt/llama/llama-server"}.get
+    rows = {r.engine: r for r in eng.engine_statuses(settings, which=which, lanes=[], run=run)}
+    assert rows["llama_cpp"].source == "path" and rows["llama_cpp"].version is None
+
+
+def test_the_default_version_probe_has_a_timeout(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(eng.subprocess, "run", fake_run)
+    eng._run_with_timeout(["ollama", "--version"])
+    assert seen["timeout"] == eng.VERSION_TIMEOUT_S
 
 
 def test_a_binary_that_cannot_run_is_not_recorded(tmp_path) -> None:

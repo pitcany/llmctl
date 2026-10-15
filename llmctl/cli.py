@@ -2423,6 +2423,10 @@ def setup_cmd(
         for column in ("engine", "state", "binary", "version"):
             table.add_column(column)
         for row in eng.engine_statuses(settings):
+            if row.source == "lane":
+                state = f"[green]via lane {escape(row.binary or '?')}[/green]"
+                table.add_row(row.engine, state, "—", escape(row.version or "—"))
+                continue
             state = {
                 "llmctl": "[green]installed by llmctl[/green]",
                 "path": "[green]found[/green]",
