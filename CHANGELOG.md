@@ -9,6 +9,10 @@
   `vllm serve` command and the `llmctl add` step) and `fit` (a "Fits?" table
   for the top candidates). Read-only. Ported from the `vserve` tool, which this
   replaces; GPUs come from NVML instead of `nvidia-smi`.
+- `llmctl health` now agrees with `doctor`: an engine served by a running
+  router lane reports as serving (lanes), an engine that is missing and that
+  no model uses shows the new `not_used` state, and a missing engine is never
+  reported as "installed".
 
 ## 0.3.0 — 2026-10-14
 
