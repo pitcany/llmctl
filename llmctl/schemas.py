@@ -18,6 +18,7 @@ class HealthState(StrEnum):
     DEGRADED = "degraded"
     UNAVAILABLE = "unavailable"
     UNKNOWN = "unknown"
+    NOT_USED = "not_used"
 
 
 class Model(BaseModel):
