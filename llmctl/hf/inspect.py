@@ -42,17 +42,7 @@ def inspect_model(model_id: str) -> ModelMetadata:
     api = HfApi()
     try:
         info = api.model_info(model_id)
-    except RepositoryNotFoundError:
-        return ModelMetadata(
-            model_id=model_id,
-            config={},
-            tokenizer_config={},
-            tags=[],
-            pipeline_tag=None,
-            gated=False,
-            private=False,
-            error=f"Model not found on Hugging Face: {model_id}",
-        )
+    # GatedRepoError subclasses RepositoryNotFoundError, so it must come first.
     except GatedRepoError:
         return ModelMetadata(
             model_id=model_id,
@@ -66,6 +56,28 @@ def inspect_model(model_id: str) -> ModelMetadata:
                 "Gated repo. Accept the license on Hugging Face and set "
                 "HF_TOKEN (or run `huggingface-cli login`)."
             ),
+        )
+    except RepositoryNotFoundError:
+        return ModelMetadata(
+            model_id=model_id,
+            config={},
+            tokenizer_config={},
+            tags=[],
+            pipeline_tag=None,
+            gated=False,
+            private=False,
+            error=f"Model not found on Hugging Face: {model_id}",
+        )
+    except Exception as e:  # noqa: BLE001 - 5xx, rate limits, network errors
+        return ModelMetadata(
+            model_id=model_id,
+            config={},
+            tokenizer_config={},
+            tags=[],
+            pipeline_tag=None,
+            gated=False,
+            private=False,
+            error=f"Could not fetch model info: {e}",
         )
 
     config: dict[str, Any] = {}

@@ -187,7 +187,8 @@ def fit_cmd(
     """Rank candidates and show whether each one fits these GPUs.
 
     Like `search`, but reads each candidate's config.json and sizes it, so the
-    "Fits?" column reflects OOM risk (yes / risk). One metadata fetch per row.
+    "Fits?" column reflects OOM risk (yes / risk), or says unknown (no GPUs or no
+    model size) or error (the repo could not be read). One metadata fetch per row.
     For measured per-role advice on models you already have, see `llmctl recommend`.
     """
     hw = detect_hardware()
@@ -211,10 +212,18 @@ def fit_cmd(
     table.add_column("tp")
     table.add_column("Notes")
     for c in candidates:
-        p = build_plan(inspect_model(c.model_id), hw)
+        meta = inspect_model(c.model_id)
+        p = build_plan(meta, hw)
         oom = any("OOM" in w for w in p.warnings)
-        fits = "yes" if p.vllm_supported and not oom else "risk"
-        note = "; ".join(p.warnings[:1]) or (p.notes[0] if p.notes else "")
+        if meta.error:
+            fits, note = "error", meta.error
+        elif not hw.gpus or p.param_count_b is None:
+            # No GPUs or no size: the planner has nothing to judge "yes" by.
+            fits = "unknown"
+            note = "; ".join(p.warnings[:1]) or "model size unknown"
+        else:
+            fits = "yes" if p.vllm_supported and not oom else "risk"
+            note = "; ".join(p.warnings[:1]) or (p.notes[0] if p.notes else "")
         table.add_row(
             escape(c.model_id), f"{c.score:.1f}", fits, str(p.tensor_parallel_size), escape(note)
         )
