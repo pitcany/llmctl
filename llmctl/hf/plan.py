@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,6 +48,9 @@ _BYTES_PER_PARAM = {
 }
 
 
+_ACTIVE_SIZE_RE = re.compile(r"\d+(?:\.\d+)?B-\d+E\b", re.IGNORECASE)
+
+
 def _estimate_weight_gib(param_count_b: float | None, quant: str | None) -> float | None:
     if param_count_b is None:
         return None
@@ -88,17 +92,24 @@ def _pick_tp(
     weight_gib: float | None,
     per_gpu_vram_gib: float | None,
     attention_heads: int | None = None,
+    kv_heads: int | None = None,
 ) -> int:
     """Choose tensor_parallel_size that fits weights + slack.
 
     Only sizes vLLM accepts: a power of two up to the GPU count that divides the
-    attention heads (vLLM rejects e.g. tp=3 for 64 heads).
+    attention heads, and that divides the KV heads or is a multiple of them
+    (vLLM replicates KV heads only when tp is a multiple). E.g. 64 heads reject
+    tp=3; 10 KV heads reject tp=4.
     """
-    sizes = [
-        tp
-        for tp in (1, 2, 4, 8)
-        if tp <= max(gpu_count, 1) and (not attention_heads or attention_heads % tp == 0)
-    ]
+
+    def accepted(tp: int) -> bool:
+        if attention_heads and attention_heads % tp:
+            return False
+        if kv_heads:
+            return kv_heads % tp == 0 if kv_heads >= tp else tp % kv_heads == 0
+        return True
+
+    sizes = [tp for tp in (1, 2, 4, 8) if tp <= max(gpu_count, 1) and accepted(tp)]
     if weight_gib is None or per_gpu_vram_gib is None:
         preferred = 1 if (param_count_b is None or param_count_b < 30) else 2
         return preferred if preferred in sizes else sizes[-1]
@@ -160,11 +171,14 @@ def build_plan(
     family = detect_family(meta.model_id) or detect_family(" ".join(archs))
     # An `NxM B` id (Mixtral-8x7B) names the per-expert size; count every expert
     # (an upper bound, so the plan errs toward more GPUs, not an OOM).
+    # A `<M>B-<N>E` id (Llama-4-Scout-17B-16E) names the ACTIVE size, not the
+    # total, so without a total in config.json the size is unknown.
     moe = detect_moe(meta.model_id)
+    active_only = bool(_ACTIVE_SIZE_RE.search(meta.model_id))
     param_count = (
         _params_from_config(cfg)
         or (moe[0] * moe[1] if moe else None)
-        or detect_param_count(meta.model_id)
+        or (None if active_only else detect_param_count(meta.model_id))
     )
     quant = (
         _quant_from_config(cfg)
@@ -175,8 +189,14 @@ def build_plan(
     weight_gib = _estimate_weight_gib(param_count, quant)
     per_gpu = min((g.vram_gib for g in hw.gpus), default=None)
     heads = cfg.get("num_attention_heads")
+    kv_heads = cfg.get("num_key_value_heads")
     tp = _pick_tp(
-        hw.count, param_count, weight_gib, per_gpu, heads if isinstance(heads, int) else None
+        hw.count,
+        param_count,
+        weight_gib,
+        per_gpu,
+        heads if isinstance(heads, int) else None,
+        kv_heads if isinstance(kv_heads, int) else None,
     )
     max_len = _pick_max_len(_max_position_embeddings(cfg), weight_gib, per_gpu, tp)
     util = _pick_gpu_util(quant, weight_gib, per_gpu, tp)
@@ -211,6 +231,11 @@ def build_plan(
             f"OOM risk: estimated {weight_gib:.1f} GiB weights across tp={tp} "
             f"is ≥85% of per-GPU VRAM ({per_gpu:.1f} GiB). Consider higher --tp "
             "or a quantized variant."
+        )
+    if active_only and param_count is None:
+        warnings.append(
+            "The name gives the active parameter count of a mixture-of-experts model, "
+            "not the total; the size, and so the fit, is unknown."
         )
     if meta.gated:
         warnings.append("Gated model — ensure HF_TOKEN is set and license accepted.")
