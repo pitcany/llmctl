@@ -227,7 +227,7 @@ session instead of crashing.
 
 ### Driving an adopted server
 
-The local llama.cpp servers — `gpt-oss-120b` and `deepseek-v4-flash-0731` —
+The local llama.cpp servers — `gpt-oss-120b` and `glm-5.3-flash` —
 run as systemd **user** units that llmctl tracks but did not launch. They
 adopt themselves on start and detach on stop, so llmctl always reflects
 what is actually up.
@@ -371,7 +371,7 @@ Probes use a 1.5s timeout each; 5 down units add ≤8s to refresh.
 | `ctrl+r` | Refresh now |
 
 Both act on the **cursor row**, not the first row. Scope is detected, so a
-user unit (`gpt-oss-120b`, `deepseek-v4-flash-0731`) is driven with
+user unit (`gpt-oss-120b`, `glm-5.3-flash`) is driven with
 `systemctl --user` and no `sudo`, while `vllm-engine` goes through `sudo`.
 
 `a` will not bounce a unit that is already active — start is not a synonym
@@ -466,9 +466,9 @@ managed_units:
   # Slots (vllm-coder, vllm-reasoner) deprecated as of 2026-06-14; only vllm-engine active
 
   units:                         # optional: additional roles, any runtime
-    deepseek:                    # the local DeepSeek llama.cpp server
-      unit_name: deepseek-v4-flash-0731
-      default_port: 8000
+    gpt-oss:                     # the local gpt-oss-120b llama.cpp server
+      unit_name: gpt-oss-120b
+      default_port: 8005
       runtime: llama_cpp
 
   fleet:
@@ -672,7 +672,7 @@ is llama.cpp-only (vLLM is exempt), and any filename it cannot parse
 like any other scheduler refusal.
 
 The same two checks run again at launch time in `scripts/llama-server-guarded` (a symlink to `~/bin/llama-server-guarded`, the canonical copy since 2026-08-08),
-which the `gpt-oss-120b` and `deepseek-v4-flash-0731` units exec through —
+which the `gpt-oss-120b` and `glm-5.3-flash` units exec through —
 so a unit started directly by systemd gets them too, along with a per-GPU
 free-VRAM floor.
 
