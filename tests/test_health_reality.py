@@ -137,3 +137,44 @@ def test_lanes_are_probed_concurrently() -> None:
     start = time.monotonic()
     _health({RuntimeName.STRATA: _Adapter(_NOT_RUNNING)}, lanes, slow)
     assert time.monotonic() - start < 1.2
+
+
+def _engine_health(runtime: RuntimeName, message: str, users: dict[str, list[str]], status: str):
+    from llmctl.services.engines import EngineStatus
+
+    svc = HealthService(
+        None,
+        _Router({runtime: _Adapter(message, runtime=runtime)}),
+        None,
+        lanes=[],
+        engines=[EngineStatus(runtime.value, status, None)],
+        model_users=users,
+        lane_probe=_answer(False),
+    )
+    return svc.get_health()["runtimes"][runtime.value]
+
+
+def test_rule_c_missing_engine_nobody_uses_is_not_used() -> None:
+    rt = _engine_health(RuntimeName.FREETOKEN, "Run `llmctl setup freetoken`", {}, "missing")
+    assert rt["state"] == "not_used" and rt["message"] == "not used"
+
+
+def test_rule_d_missing_engine_with_users_names_models() -> None:
+    rt = _engine_health(
+        RuntimeName.FREETOKEN,
+        "Run `llmctl setup freetoken`",
+        {"freetoken": ["m1", "m2"]},
+        "missing",
+    )
+    assert rt["state"] == "unavailable"
+    assert "m1" in rt["message"] and "m2" in rt["message"]
+
+
+def test_rule_e_missing_engine_never_says_installed() -> None:
+    rt = _engine_health(
+        RuntimeName.SGLANG,
+        "SGLang is installed (/usr/bin/python3) and not running.",
+        {"sglang": ["m"]},
+        "missing",
+    )
+    assert "is installed" not in rt["message"] and "installed (" not in rt["message"]
