@@ -174,3 +174,43 @@ def test_mixtral_counts_all_experts():
     plan = build_plan(meta, _hw(32.0, 32.0))
     assert plan.param_count_b == 56.0
     assert plan.tensor_parallel_size == 2
+
+
+def test_tp_respects_kv_heads_as_vllm_partitions_them():
+    # 40 heads divide by 4, but 10 KV heads do not (and 4 < 10): vLLM rejects tp=4.
+    meta = _meta(
+        "org/phi-4-14B",
+        architectures=["Phi3ForCausalLM"],
+        num_attention_heads=40,
+        num_key_value_heads=10,
+    )
+    plan = build_plan(meta, _hw(12.0, 12.0, 12.0, 12.0))
+    assert plan.tensor_parallel_size == 2
+
+
+def test_tp_may_exceed_kv_heads_when_it_is_a_multiple():
+    # 2 KV heads at tp=4 are replicated; vLLM accepts tp % kv == 0.
+    meta = _meta(
+        "org/model-70B",
+        architectures=["LlamaForCausalLM"],
+        num_attention_heads=64,
+        num_key_value_heads=2,
+    )
+    plan = build_plan(meta, _hw(24.0, 24.0, 24.0, 24.0))
+    assert plan.tensor_parallel_size == 4
+
+
+def test_expert_suffix_names_active_params_so_size_is_unknown():
+    # Llama-4-Scout-17B-16E: 17B active, 109B total; do not size it as 17B.
+    meta = _meta(
+        "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        architectures=["Llama4ForConditionalGeneration"],
+    )
+    plan = build_plan(meta, _hw(48.0))
+    assert plan.param_count_b is None
+    assert any("active" in w for w in plan.warnings)
+
+
+def test_a_suffix_moe_keeps_the_named_total():
+    meta = _meta("Qwen/Qwen3-30B-A3B", architectures=["Qwen3MoeForCausalLM"])
+    assert build_plan(meta, _hw(32.0, 32.0)).param_count_b == 30.0
