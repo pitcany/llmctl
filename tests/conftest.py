@@ -42,3 +42,14 @@ def _no_live_lanes(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("LLMCTL_PLUGINS", "none")
     plugins.reset()
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_registry(monkeypatch, tmp_path) -> None:
+    """The registry database lives in the data dir (``~/.local/share/llmctl``).
+    CLI tests such as ``scan --import`` and ``sessions`` write to it, so
+    without this every test run imported scanned models into the developer's
+    real registry, and failed where that directory is read-only (a sandbox).
+    Tests that need a specific database still set ``LLMCTL_DB_URL``."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.delenv("LLMCTL_DB_URL", raising=False)
