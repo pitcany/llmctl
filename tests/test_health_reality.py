@@ -21,13 +21,15 @@ class _Adapter:
         message: str,
         loaded: list[Model] | None = None,
         runtime: RuntimeName = RuntimeName.STRATA,
+        state: HealthState = HealthState.OK,
     ) -> None:
         self.runtime = runtime
+        self.state = state
         self.message = message
         self.loaded = loaded
 
     async def health_check(self) -> Any:
-        return AdapterStatus(runtime=self.runtime, state=HealthState.OK, message=self.message)
+        return AdapterStatus(runtime=self.runtime, state=self.state, message=self.message)
 
     async def list_loaded_models(self) -> list[Model] | None:
         return self.loaded
@@ -144,7 +146,12 @@ def _engine_health(runtime: RuntimeName, message: str, users: dict[str, list[str
 
     svc = HealthService(
         None,
-        _Router({runtime: _Adapter(message, runtime=runtime)}),
+        # A missing binary with no HTTP answer is what the real adapter reports
+        # as unavailable; an "ok" adapter on a missing engine means reachable.
+        _Router({runtime: _Adapter(
+            message, runtime=runtime,
+            state=HealthState.UNAVAILABLE if status == "missing" else HealthState.OK,
+        )}),
         None,
         lanes=[],
         engines=[EngineStatus(runtime.value, status, None)],

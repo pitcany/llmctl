@@ -38,6 +38,15 @@ async def _default_lane_probe(lane: Lane) -> bool:
         return False
 
 
+#: The adapters' "start it" hint; wrong next to a live session.
+_START_HINT = re.compile(r";?\s*`llmctl run NAME` starts it\.?")
+
+
+def _without_start_hint(message: str) -> str:
+    out = _START_HINT.sub("", message).rstrip().rstrip(";").rstrip()
+    return out if out.endswith(".") else f"{out}."
+
+
 class HealthService:
     """Aggregates health for config, database, runtimes, and GPUs."""
 
@@ -246,7 +255,7 @@ class HealthService:
                     message = message.replace(" and not running", "").replace(
                         "not running", "serving"
                     )
-                    info["message"] = message
+                    info["message"] = _without_start_hint(message)
             elif mine:  # B: lanes exist, none answers, nothing else serves
                 lane = mine[0][0]
                 info["state"] = HealthState.OK.value
@@ -303,9 +312,15 @@ class HealthService:
             if answering:  # A wins
                 continue
             if info.get("sessions"):  # never NOT_USED; E: it is not an installed engine
-                info["message"] = re.sub(
-                    r" is installed \([^)]*\)", " has a live session", str(info["message"])
+                info["message"] = _without_start_hint(
+                    re.sub(r" is installed \([^)]*\)", " has a live session", str(info["message"]))
                 )
+                continue
+            if info.get("state") == HealthState.OK.value and " is installed (" not in str(
+                info.get("message", "")
+            ):
+                # The adapter's HTTP probe answered (e.g. Ollama in Docker, no
+                # binary on PATH): reachable is not "not used".
                 continue
             names = list(users.get(name) or [])
             if not names:  # C

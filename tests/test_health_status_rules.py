@@ -83,3 +83,34 @@ def test_answering_lane_beats_not_used() -> None:
     )
     rt = _run(_FT, _HINT, [EngineStatus("freetoken", "missing", None)], {}, [lane], up=True)
     assert rt["state"] == "ok"
+
+
+def test_reachable_engine_without_binary_is_not_marked_unused() -> None:
+    """Ollama in Docker: no binary on PATH, but its HTTP endpoint answers."""
+    rt = _run(RuntimeName.OLLAMA, "Ollama is reachable at http://127.0.0.1:11434.",
+              [EngineStatus("ollama", "missing", None)], {}, state=HealthState.OK)
+    assert rt["state"] == "ok"
+    assert rt["message"] == "Ollama is reachable at http://127.0.0.1:11434."
+
+
+def test_live_session_on_missing_engine_drops_install_claim_and_start_hint() -> None:
+    """Rule E's rewrite path: a missing engine whose adapter reports a loaded model."""
+    from llmctl.db import ModelStatus
+    from llmctl.schemas import Model
+
+    class _Loaded(_Adapter):
+        async def list_loaded_models(self):  # type: ignore[override]
+            status = ModelStatus.DISCOVERED
+            return [Model(name="m", runtime=self.runtime, source="m", status=status)]
+
+    adapter = _Loaded(RuntimeName.SGLANG,
+                      "SGLang is installed (/usr/bin/python3) and not running; "
+                      "`llmctl run NAME` starts it.",
+                      HealthState.OK)
+    svc = HealthService(None, _Router(adapter), None, lanes=[],
+                        engines=[EngineStatus("sglang", "missing", None)], model_users={})
+    rt = svc.get_health()["runtimes"]["sglang"]
+    assert rt["serving_count"] == 1
+    assert rt["state"] != "not_used"
+    msg = rt["message"]
+    assert "installed" not in msg and "not running" not in msg and "llmctl run" not in msg
