@@ -1245,12 +1245,10 @@ def health(json_out: _JSON_OPT = False) -> None:
             # "binary found" with nothing serving is the case that used to read
             # as healthy; say so plainly instead.
             serving = f"[{'red' if info['state'] == 'ok' else 'dim'}]nothing[/]"
-        table.add_row(
-            escape(str(name)),
-            escape(str(info["state"])),
-            serving,
-            escape(str(info["message"])),
-        )
+        cells = [escape(str(name)), escape(str(info["state"])), escape(str(info["message"]))]
+        if info["state"] == "not_used":
+            cells = [f"[dim]{c}[/]" for c in cells]
+        table.add_row(cells[0], cells[1], serving, cells[2])
     console.print(table)
 
 
