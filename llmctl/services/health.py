@@ -7,13 +7,33 @@ telemetry, and per-runtime adapter availability.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from llmctl._asyncutil import run_sync
 from llmctl.config import Settings, load_settings
 from llmctl.schemas import HealthState
+from llmctl.services.engines import ENGINE_NAMES
+from llmctl.services.lanes import Lane, load_lanes
 from llmctl.services.router import RuntimeRouter
 from llmctl.telemetry.gpu import get_gpu_info, nvml_available
+
+#: Seconds a lane may take to answer its ``/v1/models`` probe.
+LANE_PROBE_TIMEOUT_S = 2.0
+
+LaneProbe = Callable[[Lane], Awaitable[bool]]
+
+
+async def _default_lane_probe(lane: Lane) -> bool:
+    """True when the lane's upstream answers ``GET /v1/models`` with HTTP 200."""
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=LANE_PROBE_TIMEOUT_S) as client:
+            response = await client.get(f"{lane.upstream}/v1/models")
+        return response.status_code == 200
+    except Exception:  # noqa: BLE001 - an unreachable lane is simply not answering
+        return False
 
 
 class HealthService:
@@ -24,8 +44,17 @@ class HealthService:
         settings: Settings | None = None,
         router: RuntimeRouter | None = None,
         db: Any | None = None,
+        *,
+        lanes: Sequence[Lane] | None = None,
+        engines: Any | None = None,
+        model_users: Any | None = None,
+        lane_probe: LaneProbe | None = None,
     ) -> None:
         self.settings = settings or load_settings()
+        self._lanes = list(lanes) if lanes is not None else None
+        self._engines = engines
+        self._model_users = model_users
+        self._lane_probe: LaneProbe = lane_probe or _default_lane_probe
         self._router = router
         # Optional: with a DB session, health also reports what is actually
         # SERVING per runtime. Without one it degrades to binary presence,
@@ -39,21 +68,41 @@ class HealthService:
             self._router = RuntimeRouter(self.settings)
         return self._router
 
-    def _runtime_health(self) -> dict[str, dict[str, Any]]:
-        """Return per-runtime adapter health states (probed concurrently)."""
+    def _load_lanes(self) -> list[Lane]:
+        """Return the injected lanes, or what the lane sources load ([] on failure)."""
+        if self._lanes is not None:
+            return self._lanes
+        try:
+            return list(load_lanes(self.settings.managed_units))
+        except Exception:  # noqa: BLE001 - lanes are advisory
+            return []
+
+    def _runtime_health(
+        self, lanes: Sequence[Lane] = ()
+    ) -> tuple[dict[str, dict[str, Any]], list[bool]]:
+        """Return per-runtime adapter health and per-lane answers (probed concurrently)."""
         order = list(self.router.list_runtimes())
+
+        async def probe_lane(lane: Lane) -> bool:
+            try:
+                return bool(await self._lane_probe(lane))
+            except Exception:  # noqa: BLE001 - a probe that raises is not answering
+                return False
 
         async def probe_all() -> list[Any]:
             return await asyncio.gather(
                 *(self.router.get_adapter(runtime).health_check() for runtime in order),
+                *(probe_lane(lane) for lane in lanes),
                 return_exceptions=True,
             )
 
         runtimes: dict[str, dict[str, Any]] = {}
         try:
-            results = run_sync(probe_all())
+            gathered = run_sync(probe_all())
         except Exception as exc:  # event-loop level failure; report on every runtime
-            results = [exc] * len(order)
+            gathered = [exc] * len(order) + [False] * len(lanes)
+        results = gathered[: len(order)]
+        answers = [r is True for r in gathered[len(order) :]]
         for runtime, result in zip(order, results, strict=True):
             if isinstance(result, BaseException):
                 runtimes[runtime.value] = {
@@ -65,7 +114,7 @@ class HealthService:
                     "state": result.state.value,
                     "message": result.message,
                 }
-        return runtimes
+        return runtimes, answers
 
     def _serving_by_runtime(self) -> dict[str, list[dict[str, Any]]]:
         """Return the live (non-terminal) sessions grouped by runtime value.
@@ -160,18 +209,64 @@ class HealthService:
         extra = [m for m in loaded if m.get("served_name") not in known]
         return [*managed, *extra]
 
+    def _apply_engine_rules(
+        self, runtimes: dict[str, dict[str, Any]], lanes: Sequence[Lane], answers: list[bool]
+    ) -> None:
+        """Overlay lane reality on engine runtimes (rules A, B, F); others are untouched."""
+        for name, info in runtimes.items():
+            if name not in ENGINE_NAMES:
+                continue
+            mine = [(ln, ok) for ln, ok in zip(lanes, answers, strict=True) if ln.runtime == name]
+            up = [ln for ln, ok in mine if ok]
+            sessions: list[dict[str, Any]] = info["sessions"]
+            if up:  # A: a lane answering its probe is serving
+                lane = up[0]
+                info["state"] = HealthState.OK.value
+                info["message"] = f"serving via lane {lane.name} at {lane.upstream}"
+                info["lane"] = lane.name
+                known = {s.get("served_name") for s in sessions}
+                for answering in up:
+                    if answering.served_model and answering.served_model not in known:
+                        known.add(answering.served_model)
+                        sessions.append(
+                            {
+                                "id": None,
+                                "status": "running",
+                                "served_name": answering.served_model,
+                                "endpoint_url": answering.upstream,
+                                "kind": None,
+                                "managed": False,
+                            }
+                        )
+            elif sessions:  # F: a runtime with a session is never "not running"
+                message = str(info.get("message", ""))
+                if "not running" in message:
+                    message = message.replace(" and not running", "").replace(
+                        "not running", "serving"
+                    )
+                    info["message"] = message
+            elif mine:  # B: lanes exist, none answers, nothing else serves
+                lane = mine[0][0]
+                info["state"] = HealthState.OK.value
+                info["message"] = (
+                    f"lane {lane.name} is not running ({lane.upstream}); "
+                    f"`llmctl run {lane.name}` starts it."
+                )
+            info["serving_count"] = len(sessions)
+            info["unmanaged_count"] = sum(1 for s in sessions if not s.get("managed", True))
+
     def get_health(self) -> dict[str, Any]:
         """Return a conservative health snapshot."""
         gpus = get_gpu_info()
-        runtimes = self._runtime_health()
+        lanes = self._load_lanes()
+        runtimes, answers = self._runtime_health(lanes)
         serving = self._serving_by_runtime()
         loaded = self._loaded_by_runtime()
         for name, info in runtimes.items():
             info["sessions"] = self._merge_serving(serving.get(name, []), loaded.get(name, []))
             info["serving_count"] = len(info["sessions"])
-            info["unmanaged_count"] = sum(
-                1 for s in info["sessions"] if not s.get("managed", True)
-            )
+            info["unmanaged_count"] = sum(1 for s in info["sessions"] if not s.get("managed", True))
+        self._apply_engine_rules(runtimes, lanes, answers)
         return {
             "state": HealthState.OK,
             "safe_mode": self.settings.app.safe_mode,
