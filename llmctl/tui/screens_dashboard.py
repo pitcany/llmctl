@@ -117,7 +117,7 @@ class DashboardScreen(DataScreen):
             lines.append(f"[{C_MUTED}]No runtime adapters reported.[/]")
         for name, info in runtimes.items():
             state = info.get("state", "unknown")
-            color = C_OK if state == "ok" else C_WARN
+            color = C_OK if state == "ok" else C_MUTED if state == "not_used" else C_WARN
             message = info.get("message", "")
             lines.append(
                 f"  [{color}]*[/] {esc(name):<14} {state:<12} [{C_MUTED}]{esc(message)}[/]"
