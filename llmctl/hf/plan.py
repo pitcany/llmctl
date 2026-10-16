@@ -7,7 +7,7 @@ from typing import Any
 
 from .hardware import HardwareInfo
 from .inspect import ModelMetadata
-from .parsing import detect_family, detect_param_count, detect_quantization
+from .parsing import detect_family, detect_moe, detect_param_count, detect_quantization
 
 # Architectures vLLM is known NOT to support out of the box. Conservative list.
 VLLM_KNOWN_UNSUPPORTED: set[str] = set()
@@ -87,20 +87,27 @@ def _pick_tp(
     param_count_b: float | None,
     weight_gib: float | None,
     per_gpu_vram_gib: float | None,
+    attention_heads: int | None = None,
 ) -> int:
-    """Choose tensor_parallel_size that fits weights + slack."""
-    if gpu_count <= 1:
-        return 1
+    """Choose tensor_parallel_size that fits weights + slack.
+
+    Only sizes vLLM accepts: a power of two up to the GPU count that divides the
+    attention heads (vLLM rejects e.g. tp=3 for 64 heads).
+    """
+    sizes = [
+        tp
+        for tp in (1, 2, 4, 8)
+        if tp <= max(gpu_count, 1) and (not attention_heads or attention_heads % tp == 0)
+    ]
     if weight_gib is None or per_gpu_vram_gib is None:
-        return 1 if (param_count_b is None or param_count_b < 30) else min(gpu_count, 2)
+        preferred = 1 if (param_count_b is None or param_count_b < 30) else 2
+        return preferred if preferred in sizes else sizes[-1]
     # Leave ~25% headroom for activations + KV cache.
     usable_per_gpu = per_gpu_vram_gib * 0.75
-    for tp in (1, 2, 4, 8):
-        if tp > gpu_count:
-            break
+    for tp in sizes:
         if weight_gib / tp <= usable_per_gpu:
             return tp
-    return min(gpu_count, 8)
+    return sizes[-1]
 
 
 def _pick_max_len(
@@ -151,7 +158,14 @@ def build_plan(
         archs = [archs]
 
     family = detect_family(meta.model_id) or detect_family(" ".join(archs))
-    param_count = _params_from_config(cfg) or detect_param_count(meta.model_id)
+    # An `NxM B` id (Mixtral-8x7B) names the per-expert size; count every expert
+    # (an upper bound, so the plan errs toward more GPUs, not an OOM).
+    moe = detect_moe(meta.model_id)
+    param_count = (
+        _params_from_config(cfg)
+        or (moe[0] * moe[1] if moe else None)
+        or detect_param_count(meta.model_id)
+    )
     quant = (
         _quant_from_config(cfg)
         or detect_quantization(meta.model_id)
@@ -160,7 +174,10 @@ def build_plan(
 
     weight_gib = _estimate_weight_gib(param_count, quant)
     per_gpu = min((g.vram_gib for g in hw.gpus), default=None)
-    tp = _pick_tp(hw.count, param_count, weight_gib, per_gpu)
+    heads = cfg.get("num_attention_heads")
+    tp = _pick_tp(
+        hw.count, param_count, weight_gib, per_gpu, heads if isinstance(heads, int) else None
+    )
     max_len = _pick_max_len(_max_position_embeddings(cfg), weight_gib, per_gpu, tp)
     util = _pick_gpu_util(quant, weight_gib, per_gpu, tp)
 

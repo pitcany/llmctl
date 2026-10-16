@@ -150,3 +150,27 @@ def test_oom_warning_on_undersized_gpu():
     meta = _meta("meta-llama/Llama-3.3-70B-Instruct", architectures=["LlamaForCausalLM"])
     plan = build_plan(meta, _hw(24.0))  # 24 GiB single GPU
     assert any("OOM risk" in w for w in plan.warnings)
+
+
+def test_tp_is_never_a_size_vllm_rejects_on_three_gpus():
+    # 64 heads are not divisible by 3; nothing fits, so fall back to the
+    # largest valid size, not to the GPU count.
+    meta = _meta(
+        "Qwen/Qwen2.5-72B-Instruct", architectures=["Qwen2ForCausalLM"], num_attention_heads=64
+    )
+    plan = build_plan(meta, _hw(40.0, 40.0, 40.0))
+    assert plan.tensor_parallel_size == 2
+
+
+def test_tp_skips_sizes_that_do_not_divide_the_heads():
+    # 40 heads: tp=8 is invalid, tp=4 fits weights that need more than 2 cards.
+    meta = _meta("org/model-70B", architectures=["LlamaForCausalLM"], num_attention_heads=40)
+    plan = build_plan(meta, _hw(*[24.0] * 8))
+    assert 40 % plan.tensor_parallel_size == 0
+
+
+def test_mixtral_counts_all_experts():
+    meta = _meta("mistralai/Mixtral-8x7B-Instruct-v0.1", architectures=["MixtralForCausalLM"])
+    plan = build_plan(meta, _hw(32.0, 32.0))
+    assert plan.param_count_b == 56.0
+    assert plan.tensor_parallel_size == 2

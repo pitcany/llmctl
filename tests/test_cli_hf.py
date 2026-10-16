@@ -131,3 +131,29 @@ def test_hf_group_is_listed_in_root_help(runner: CliRunner) -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert " hf " in result.output
+
+
+def test_fit_says_unknown_or_error_when_it_cannot_judge(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def meta_for(model_id: str) -> ModelMetadata:
+        if "bracket" in model_id:
+            return ModelMetadata(
+                model_id=model_id,
+                config={},
+                tokenizer_config={},
+                tags=[],
+                pipeline_tag=None,
+                gated=True,
+                private=False,
+                error="Gated repo. Accept the license.",
+            )
+        return _meta(model_id)
+
+    monkeypatch.setattr(cli_hf, "inspect_model", meta_for)
+    monkeypatch.setattr(cli_hf, "detect_hardware", lambda: HardwareInfo(gpus=[]))
+    result = runner.invoke(app, ["hf", "fit", "qwen 7b"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert "unknown" in result.output  # no GPUs: no basis for "yes"
+    assert "error" in result.output and "Gated repo" in result.output
+    assert " yes " not in result.output
