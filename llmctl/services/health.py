@@ -7,6 +7,8 @@ telemetry, and per-runtime adapter availability.
 from __future__ import annotations
 
 import asyncio
+import re
+import subprocess
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
@@ -255,6 +257,67 @@ class HealthService:
             info["serving_count"] = len(sessions)
             info["unmanaged_count"] = sum(1 for s in sessions if not s.get("managed", True))
 
+    def _engine_rows(self, lanes: Sequence[Lane]) -> dict[str, Any]:
+        """Return engine name -> EngineStatus (injected, or what ``setup`` would show)."""
+        rows = self._engines
+        if rows is None:
+            try:
+                from llmctl.services.engines import engine_statuses
+
+                # No version probes: health must stay fast.
+                rows = engine_statuses(
+                    self.settings,
+                    lanes=lanes,
+                    run=lambda argv: subprocess.CompletedProcess(list(argv), 1, "", ""),
+                )
+            except Exception:  # noqa: BLE001 - engine rows are advisory
+                rows = []
+        return {row.engine: row for row in rows}
+
+    def _users_by_runtime(self) -> dict[str, list[str]]:
+        if self._model_users is not None:
+            return dict(self._model_users)
+        try:
+            from llmctl.services import doctor
+
+            return doctor._model_users(self.settings) or {}
+        except Exception:  # noqa: BLE001 - model users are advisory
+            return {}
+
+    def _apply_status_rules(
+        self, runtimes: dict[str, dict[str, Any]], lanes: Sequence[Lane], answers: list[bool]
+    ) -> None:
+        """Overlay engine rows and model users (rules C, D, E) on missing engines."""
+        rows = self._engine_rows(lanes)
+        missing = {n for n, r in rows.items() if r.source == "missing" and n in runtimes}
+        if not missing:
+            return
+        from llmctl.services.doctor import _name_models
+
+        users = self._users_by_runtime()
+        for name in missing:
+            info = runtimes[name]
+            answering = any(
+                ln.runtime == name and ok for ln, ok in zip(lanes, answers, strict=True)
+            )
+            if answering:  # A wins
+                continue
+            if info.get("sessions"):  # never NOT_USED; E: it is not an installed engine
+                info["message"] = re.sub(
+                    r" is installed \([^)]*\)", " has a live session", str(info["message"])
+                )
+                continue
+            names = list(users.get(name) or [])
+            if not names:  # C
+                info["state"] = HealthState.NOT_USED.value
+                info["message"] = "not used"
+            else:  # D
+                info["state"] = HealthState.UNAVAILABLE.value
+                info["message"] = (
+                    f"{_name_models(names)} use {name} but it is not installed; "
+                    f"`llmctl setup {name}` installs it."
+                )
+
     def get_health(self) -> dict[str, Any]:
         """Return a conservative health snapshot."""
         gpus = get_gpu_info()
@@ -267,6 +330,7 @@ class HealthService:
             info["serving_count"] = len(info["sessions"])
             info["unmanaged_count"] = sum(1 for s in info["sessions"] if not s.get("managed", True))
         self._apply_engine_rules(runtimes, lanes, answers)
+        self._apply_status_rules(runtimes, lanes, answers)
         return {
             "state": HealthState.OK,
             "safe_mode": self.settings.app.safe_mode,
