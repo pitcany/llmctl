@@ -50,16 +50,37 @@ def render_table(state: SwapState, console: Console) -> None:
         title_justify="left",
         caption="llmctl run NAME  (or: llmctl run)",
     )
-    name_width = max((len(r.key) for r in state.catalog), default=4)
-    table.add_column("#", justify="right", no_wrap=True)
-    table.add_column("Model", overflow="fold")
-    table.add_column("Engine", no_wrap=True)
-    table.add_column("Name", no_wrap=True, min_width=max(name_width, 4))
-    table.add_column("Cards", no_wrap=True)
-    table.add_column("State", no_wrap=True)
-    table.add_column("Last load", no_wrap=True)
-    for index, row in enumerate(state.catalog, start=1):
-        status = state.state_of(row)
+    rows = [
+        (
+            str(index),
+            row.model,
+            row.engine,
+            row.key,
+            cards_label(row),
+            state.state_of(row),
+            format_duration(last_load_s(row.key)) if last_load_s(row.key) else "—",
+        )
+        for index, row in enumerate(state.catalog, start=1)
+    ]
+    headers = ("#", "Model", "Engine", "Name", "Cards", "State", "Last load")
+    # Every column but Model keeps its full width: Name is what `llmctl run`
+    # takes, so it must never be cut. Model gets what is left and is cut on
+    # one line (left to Rich, it either folds into a narrow strip that makes
+    # each row several lines tall, or squeezes `#` and Cards to nothing).
+    # `ls --json` has the whole model.
+    widths = [max([len(h)] + [len(r[i]) for r in rows]) for i, h in enumerate(headers)]
+    chrome = 3 * len(headers) + 1  # a border and two padding cells per column
+    model_width = max(4, console.width - chrome - sum(widths) + widths[1])
+    for i, header in enumerate(headers):
+        if header == "Model":
+            table.add_column(header, no_wrap=True, overflow="ellipsis", max_width=model_width)
+        else:
+            table.add_column(
+                header, no_wrap=True, min_width=widths[i], justify="right" if i == 0 else "left"
+            )
+    for index, row, (*_, status, load) in zip(
+        range(1, len(rows) + 1), state.catalog, rows, strict=True
+    ):
         style = {"serving": "green", "loading": "yellow"}.get(status, "")
         table.add_row(
             str(index),
@@ -68,7 +89,7 @@ def render_table(state: SwapState, console: Console) -> None:
             escape(row.key),
             cards_label(row),
             f"[{style}]{status}[/{style}]" if style else "—",
-            format_duration(last_load_s(row.key)) if last_load_s(row.key) else "—",
+            load,
         )
     console.print(table)
 

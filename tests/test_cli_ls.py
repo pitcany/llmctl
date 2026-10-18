@@ -23,8 +23,11 @@ def _state() -> SwapState:
         )
     ]
     return SwapState(
-        catalog=catalog, serving={"muse-glimmer-30b"}, active_units=set(),
-        vllm_unit="v", vllm_active=False,
+        catalog=catalog,
+        serving={"muse-glimmer-30b"},
+        active_units=set(),
+        vllm_unit="v",
+        vllm_active=False,
     )
 
 
@@ -34,7 +37,9 @@ def test_names_whole_at_80_columns():
     text = c.export_text()
     for k in KEYS:
         assert any(k in line for line in text.splitlines())
-    assert "…" not in text
+    # Model may be cut to fit; Name (the 4th cell) never is.
+    names = [line.split("│")[4] for line in text.splitlines() if line.startswith("│")]
+    assert names and not any("…" in cell for cell in names)
     assert "Models you can run" in text
     assert "llmctl run NAME" in text  # the caption stays
 
@@ -50,3 +55,15 @@ def test_ls_json(monkeypatch):
     assert [r["name"] for r in data] == list(KEYS)
     assert {r["state"] for r in data} <= {"serving", "loading", ""}
     assert all(r["last_load_s"] is None or isinstance(r["last_load_s"], float) for r in data)
+
+
+def test_one_line_per_row_and_no_wider_than_the_console():
+    """Folding Model made each row several lines tall; cropping cut Last load off."""
+    for width in (80, 100):
+        c = Console(width=width, record=True)
+        cli_swap.render_table(_state(), c)
+        lines = c.export_text().splitlines()
+        body = [line for line in lines if line.startswith("│")]
+        assert len(body) == len(KEYS), "\n".join(lines)
+        assert all(len(line) <= width for line in lines)
+        assert all(line.rstrip().endswith("│") for line in body)  # right edge not cropped
