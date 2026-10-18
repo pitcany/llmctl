@@ -7,6 +7,12 @@ a private copy of the ``/v1/models`` probe that collapsed the tri-state, and it
 kept rendering env-file paths that do not exist after the CLI stopped.
 
 Anything that appears on more than one surface belongs here.
+
+Ollama units are probed differently from the rest. Ollama's ``/v1/models``
+lists every installed model, loaded or not, so it cannot say what the unit is
+serving; ``/api/ps`` lists only what is in memory. Units whose runtime is
+``ollama`` therefore use ``probe_ollama_loaded``; all others use
+``/v1/models``.
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from llmctl.config import ManagedUnitConfig, Settings
-from llmctl.services.backends import probe_openai_v1_models
+from llmctl.services.backends import probe_ollama_loaded, probe_openai_v1_models
 from llmctl.services.lanes import load_lanes, units_from_lanes
 
 #: Per-unit probe budget. The TUI refreshes every 3s and probes each unit, so
@@ -45,7 +51,9 @@ class UnitRow:
     #: Tri-state, and the distinction is the point: a list (possibly empty)
     #: means the endpoint answered; ``None`` means it could not be reached.
     #: An idle unit and an unreachable one are different facts, and conflating
-    #: them is what the operator pays for.
+    #: them is what the operator pays for. For Ollama units the list is the
+    #: models loaded now (``/api/ps``), not the installed catalogue that
+    #: ``/v1/models`` returns, and is de-duplicated in order.
     served: list[str] | None
 
     @property
@@ -82,9 +90,12 @@ def unit_rows(
             sources[role] = "lane"
     rows: list[UnitRow] = []
     for role, unit in roles.items():
-        served = probe_openai_v1_models(
-            f"http://127.0.0.1:{unit.default_port}", timeout_s, http_get
-        )
+        base_url = f"http://127.0.0.1:{unit.default_port}"
+        if unit.runtime == "ollama":
+            loaded = probe_ollama_loaded(base_url, timeout_s, http_get)
+            served = None if loaded is None else list(dict.fromkeys(loaded))
+        else:
+            served = probe_openai_v1_models(base_url, timeout_s, http_get)
         env_file = unit.resolve_env_file()
         rows.append(
             UnitRow(
