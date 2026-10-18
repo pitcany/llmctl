@@ -34,7 +34,13 @@ from llmctl.schemas import (
     SessionStartRequest,
 )
 from llmctl.services.benchmarks import BenchmarkService
-from llmctl.services.lanes import SwapTarget, gather_state, record_load, resolve
+from llmctl.services.lanes import (
+    SwapTarget,
+    close_matches,
+    gather_state,
+    record_load,
+    resolve,
+)
 from llmctl.services.preset_loader import load_preset_views
 from llmctl.services.registry import RegistryService
 from llmctl.services.sessions import AdoptError, SessionService
@@ -1936,6 +1942,16 @@ def vllm_cmd(
         cli_swap.render_table(state, console)
         return
     target = cli_swap.pick(state, console) if preset is None else resolve(preset, state.catalog)
+    if target is None and preset is not None and preset.isdecimal():
+        # `llmctl ls` numbers its rows; an exact key/model/alias already won above.
+        number = int(preset)
+        if not 1 <= number <= len(state.catalog):
+            console.print(
+                f"[red]No row {escape(preset)}.[/red] Pick a number in "
+                f"1-{len(state.catalog)}, or run `llmctl ls` to see what you can run."
+            )
+            raise typer.Exit(2)
+        target = state.catalog[number - 1]
     if target is None and preset is not None:
         # Not a preset or lane: maybe a registered model of another engine.
         routed = _swap_registry_model(
@@ -2001,9 +2017,12 @@ def vllm_cmd(
         )
     except UnknownPresetError as exc:
         unknown = exc.args[0] if exc.args else preset
-        console.print(f"[red]Unknown preset:[/red] {escape(str(unknown))}")
+        console.print(f"[red]No model named '{escape(str(unknown))}'.[/red]")
+        close = close_matches(str(unknown), state.catalog)
+        if close:
+            console.print(f"Did you mean: {escape(', '.join(close))}?")
+        console.print("Run `llmctl ls` to see what you can run.")
         cli_swap.restore_lanes(stopped_lanes, console)
-        cli_swap.render_table(state, console)
         raise typer.Exit(2) from exc
     except MissingModelPathError as exc:
         console.print(f"[red]Refusing to start {escape(str(preset))}:[/red] {escape(str(exc))}")
