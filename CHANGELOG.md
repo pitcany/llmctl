@@ -15,9 +15,9 @@
   reported as "installed".
 - Status, health and `ls` tell the truth. For Ollama, `status` and `health`
   report a model as serving only when it is loaded (not merely pulled), and
-  label models owned by a router lane. `llmctl run` accepts the `#` row number
-  from `llmctl ls` as well as a name, and unknown names get a "did you mean"
-  suggestion. `llmctl ls` keeps whole names at 80 columns and has `--json`.
+  label models owned by a router lane. `llmctl run` accepts the row numbers
+  (`#`) from `llmctl ls` as well as a name, and unknown names get "did you mean"
+  suggestions. `llmctl ls` keeps whole names at 80 columns and has `ls --json`.
 
 ## 0.3.0 — 2026-10-14
 

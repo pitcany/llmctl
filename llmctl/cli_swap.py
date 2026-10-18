@@ -50,7 +50,7 @@ def render_table(state: SwapState, console: Console) -> None:
         title_justify="left",
         caption="llmctl run NAME  (or: llmctl run)",
     )
-    name_width = min(max((len(r.key) for r in state.catalog), default=4), 40)
+    name_width = max((len(r.key) for r in state.catalog), default=4)
     table.add_column("#", justify="right", no_wrap=True)
     table.add_column("Model", overflow="fold")
     table.add_column("Engine", no_wrap=True)
