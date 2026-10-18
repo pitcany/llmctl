@@ -13,6 +13,11 @@
   router lane reports as serving (lanes), an engine that is missing and that
   no model uses shows the new `not_used` state, and a missing engine is never
   reported as "installed".
+- Status, health and `ls` tell the truth. For Ollama, `status` and `health`
+  report a model as serving only when it is loaded (not merely pulled), and
+  label models owned by a router lane. `llmctl run` accepts the `#` row number
+  from `llmctl ls` as well as a name, and unknown names get a "did you mean"
+  suggestion. `llmctl ls` keeps whole names at 80 columns and has `--json`.
 
 ## 0.3.0 — 2026-10-14
 
