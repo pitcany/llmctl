@@ -15,6 +15,8 @@ from typing import Any
 from llmctl._asyncutil import run_sync
 from llmctl.config import Settings, load_settings
 from llmctl.schemas import HealthState
+from llmctl.services import backends
+from llmctl.services.backends import probe_ollama_loaded
 from llmctl.services.engines import ENGINE_NAMES
 from llmctl.services.lanes import Lane, load_lanes
 from llmctl.services.router import RuntimeRouter
@@ -26,8 +28,25 @@ LANE_PROBE_TIMEOUT_S = 2.0
 LaneProbe = Callable[[Lane], Awaitable[bool]]
 
 
+_PROBE_OLLAMA_LOADED = probe_ollama_loaded
+
+
 async def _default_lane_probe(lane: Lane) -> bool:
-    """True when the lane's upstream answers ``GET /v1/models`` with HTTP 200."""
+    """True when the lane answers its probe.
+
+    Ollama lanes answer only while their model is loaded (``/api/ps``): its
+    ``/v1/models`` lists every installed model, so it cannot tell lanes apart.
+    Other lanes answer when ``GET /v1/models`` returns HTTP 200.
+    """
+    if lane.runtime == "ollama":
+        probe = probe_ollama_loaded
+        if probe is _PROBE_OLLAMA_LOADED:  # honour a patched backends.probe_ollama_loaded
+            probe = backends.probe_ollama_loaded
+        try:
+            loaded = await asyncio.to_thread(probe, lane.upstream, LANE_PROBE_TIMEOUT_S)
+        except Exception:  # noqa: BLE001 - an unreachable lane is simply not answering
+            return False
+        return bool(lane.served_model) and lane.served_model in (loaded or [])
     try:
         import httpx
 
@@ -263,6 +282,11 @@ class HealthService:
                     f"lane {lane.name} is not running ({lane.upstream}); "
                     f"`llmctl run {lane.name}` starts it."
                 )
+            owners = {ln.served_model: ln.name for ln, _ in mine if ln.served_model}
+            for s in sessions:
+                owner = owners.get(s.get("served_name"))
+                if owner:
+                    s["lane"] = owner
             info["serving_count"] = len(sessions)
             info["unmanaged_count"] = sum(1 for s in sessions if not s.get("managed", True))
 
