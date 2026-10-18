@@ -36,6 +36,7 @@ def test_names_whole_at_80_columns():
         assert any(k in line for line in text.splitlines())
     assert "…" not in text
     assert "Models you can run" in text
+    assert "llmctl run NAME" in text  # the caption stays
 
 
 def test_ls_json(monkeypatch):
@@ -44,6 +45,8 @@ def test_ls_json(monkeypatch):
     assert res.exit_code == 0
     data = json.loads(res.stdout)
     assert [r["number"] for r in data] == [1, 2, 3]
+    documented = {"number", "name", "model", "engine", "kind", "cards", "state", "last_load_s"}
+    assert all(documented <= set(r) for r in data)
     assert [r["name"] for r in data] == list(KEYS)
     assert {r["state"] for r in data} <= {"serving", "loading", ""}
     assert all(r["last_load_s"] is None or isinstance(r["last_load_s"], float) for r in data)

@@ -2020,9 +2020,10 @@ def vllm_cmd(
             options=options,
         )
     except UnknownPresetError as exc:
-        unknown = exc.args[0] if exc.args else preset
-        console.print(f"[red]No model named '{escape(str(unknown))}'.[/red]")
-        close = close_matches(str(unknown), state.catalog)
+        # The exception text is a sentence ("unknown preset 'x'. Available: ..."),
+        # not the name, so suggest from what was typed.
+        console.print(f"[red]No model named '{escape(str(preset))}'.[/red]")
+        close = close_matches(str(preset), state.catalog)
         if close:
             console.print(f"Did you mean: {escape(', '.join(close))}?")
         console.print("Run `llmctl ls` to see what you can run.")
