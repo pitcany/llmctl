@@ -2525,10 +2525,14 @@ def _register_strata_config(config: Path) -> None:
 
 
 @app.command("ls")
-def ls_cmd() -> None:
+def ls_cmd(json_out: _JSON_OPT = False) -> None:
     """List every model you can run and which one is serving now."""
     settings = load_settings()
-    cli_swap.render_table(gather_state(settings), console)
+    state = gather_state(settings)
+    if json_out:
+        _emit_json(cli_swap.rows_json(state))
+        return
+    cli_swap.render_table(state, console)
 
 
 @app.command("presets", hidden=True)
