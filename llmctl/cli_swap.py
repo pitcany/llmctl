@@ -50,13 +50,14 @@ def render_table(state: SwapState, console: Console) -> None:
         title_justify="left",
         caption="llmctl run NAME  (or: llmctl run)",
     )
-    table.add_column("#", justify="right")
-    table.add_column("Model")
-    table.add_column("Engine")
-    table.add_column("Name")
-    table.add_column("Cards")
-    table.add_column("State")
-    table.add_column("Last load")
+    name_width = min(max((len(r.key) for r in state.catalog), default=4), 40)
+    table.add_column("#", justify="right", no_wrap=True)
+    table.add_column("Model", overflow="fold")
+    table.add_column("Engine", no_wrap=True)
+    table.add_column("Name", no_wrap=True, min_width=max(name_width, 4))
+    table.add_column("Cards", no_wrap=True)
+    table.add_column("State", no_wrap=True)
+    table.add_column("Last load", no_wrap=True)
     for index, row in enumerate(state.catalog, start=1):
         status = state.state_of(row)
         style = {"serving": "green", "loading": "yellow"}.get(status, "")
@@ -70,6 +71,23 @@ def render_table(state: SwapState, console: Console) -> None:
             format_duration(last_load_s(row.key)) if last_load_s(row.key) else "—",
         )
     console.print(table)
+
+
+def rows_json(state: SwapState) -> list[dict[str, Any]]:
+    """The swap list as plain data, in catalog order (``llmctl ls --json``)."""
+    return [
+        {
+            "number": index,
+            "name": row.key,
+            "model": row.model,
+            "engine": row.engine,
+            "kind": row.kind,
+            "cards": cards_label(row),
+            "state": state.state_of(row),
+            "last_load_s": last_load_s(row.key),
+        }
+        for index, row in enumerate(state.catalog, start=1)
+    ]
 
 
 def pick(state: SwapState, console: Console) -> SwapTarget:
