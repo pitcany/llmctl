@@ -1235,9 +1235,13 @@ def health(json_out: _JSON_OPT = False) -> None:
         if sessions:
             labels = []
             for s in sessions:
-                label = s["served_name"] or s["endpoint_url"] or (s["id"] or "")[:8]
-                # Started outside llmctl: real, but not ours to stop or track.
-                if not s.get("managed", True):
+                label = escape(
+                    str(s["served_name"] or s["endpoint_url"] or (s["id"] or "")[:8])
+                )
+                if s.get("lane"):
+                    label = f"{label} (lane {escape(str(s['lane']))})"
+                elif not s.get("managed", True):
+                    # Started outside llmctl: real, but not ours to stop or track.
                     label = f"{label} (unmanaged)"
                 labels.append(label)
             serving = f"[green]{', '.join(labels)}[/green]"
