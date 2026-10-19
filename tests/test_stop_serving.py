@@ -281,7 +281,9 @@ def test_preview_lines_are_never_hard_wrapped(monkeypatch, spies) -> None:
 
     The fixture labels are short, so a 40-column console forces the same wrap.
     """
-    monkeypatch.setattr(cli.console, "width", 40)
+    # `_width`, not the `width` property: undoing a patch of the property writes
+    # the measured width back and pins the shared console for every later test.
+    monkeypatch.setattr(cli.console, "_width", 40)
     res = _stop(monkeypatch, _state(lanes=[STRATA, CODER]), "--all", "--dry-run")
     assert res.exit_code == 0, res.output
     lines = [ln for ln in res.output.splitlines() if ln.startswith("  ")]
