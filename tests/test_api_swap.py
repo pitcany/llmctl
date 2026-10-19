@@ -13,7 +13,7 @@ from llmctl.api.app import create_app
 from llmctl.config import Settings
 from llmctl.services import swap_view
 from llmctl.services.gateway import GatewayService
-from llmctl.services.lanes import SwapState, SwapTarget
+from llmctl.services.lanes import Lane, SwapState, SwapTarget
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +23,14 @@ def _no_ambient_token(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _state() -> SwapState:
     catalog = [
-        SwapTarget(key="lane-a", kind="lane", model="a", engine="vllm", upstream="http://h:1"),
+        SwapTarget(
+            key="lane-a",
+            kind="lane",
+            model="a",
+            engine="vllm",
+            upstream="http://h:1",
+            lane=Lane("lane-a", "a", "http://h:1", ("start",)),
+        ),
         SwapTarget(key="sess-b", kind="session", model="b", engine="llama.cpp", upstream=""),
     ]
     return SwapState(
@@ -86,3 +93,74 @@ def test_swap_requires_token(tmp_path: Path) -> None:
     client, _ = _make(tmp_path, token="tok")
     assert _get(client).status_code == 401
     assert _get(client, headers={"Authorization": "Bearer tok"}).status_code == 200
+
+
+# --- POST /swap/run -------------------------------------------------------
+
+import sys  # noqa: E402
+import threading  # noqa: E402
+
+
+def _post(client: TestClient, name: str, dry_run: bool = False):
+    with patch("llmctl.services.lanes.gather_state", return_value=_state()):
+        return client.post("/swap/run", json={"name": name, "dry_run": dry_run})
+
+
+def test_run_unknown_404_with_suggestions(tmp_path: Path) -> None:
+    client, _ = _make(tmp_path)
+    resp = _post(client, "lane-x")
+    assert resp.status_code == 404
+    assert "lane-a" in resp.json()["detail"]
+
+
+def test_run_row_numbers(tmp_path: Path) -> None:
+    client, _ = _make(tmp_path)
+    assert _post(client, "2", dry_run=True).json()["name"] == "sess-b"
+    assert _post(client, "0").status_code == 404
+    assert _post(client, "3").status_code == 404
+
+
+def test_run_dry_run_and_already_serving(tmp_path: Path) -> None:
+    client, _ = _make(tmp_path)
+    with patch("llmctl.services.swap_jobs.run_argv") as run:
+        dry = _post(client, "sess-b", dry_run=True)
+        serving = _post(client, "lane-a")
+        assert run.call_count == 0
+    assert dry.status_code == 200
+    assert dry.json()["already_serving"] is False
+    assert serving.status_code == 200
+    assert serving.json()["already_serving"] is True
+    assert serving.json()["endpoint"] == "http://h:1/v1"
+    assert _get(client).json()["job"] is None
+
+
+def test_run_job_lifecycle_and_busy(tmp_path: Path) -> None:
+    client, _ = _make(tmp_path)
+    gate = threading.Event()
+    seen: list[list[str]] = []
+
+    def fake(argv, on_line):
+        seen.append(argv)
+        on_line("hello")
+        gate.wait(5)
+        return 0
+
+    with patch("llmctl.services.swap_jobs.run_argv", fake):
+        resp = _post(client, "sess-b")
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        assert resp.json()["status"] == "running"
+        busy = _post(client, "sess-b")
+        assert busy.status_code == 409
+        assert job_id in busy.json()["detail"]
+        assert _post(client, "sess-b", dry_run=True).status_code == 200
+        assert _get(client).json()["job"]["job_id"] == job_id
+        gate.set()
+        from llmctl.api.deps import get_swap_jobs
+
+        client.app.dependency_overrides[get_swap_jobs]().wait(job_id, 5)
+        done = client.get(f"/swap/jobs/{job_id}").json()
+    assert done["status"] == "succeeded"
+    assert done["exit_code"] == 0
+    assert done["output"] == ["hello"]
+    assert seen == [[sys.executable, "-m", "llmctl.main", "run", "sess-b", "--yes"]]
