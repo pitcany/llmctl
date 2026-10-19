@@ -3,54 +3,45 @@
 
   // Poll cadence; short enough to feel live, long enough to spare the host.
   var POLL_MS = 5000;
+  var JOB_POLL_MS = 1000;
   var TOKEN_KEY = "llmctl_token";
   var COLUMNS = ["#", "Model", "Engine", "Name", "Cards", "State", "Last load"];
 
   var pollTimer = null;
   var pollInFlight = false;
-  var lastJobId = null;
+  var jobId = null;
+  var lastDoneId = null;
+  var jobBusy = false;
+  var refreshQueued = false;
+  var jobTimer = null;
+  var jobRunning = false;
+  var servingCount = 0;
+  var confirmAction = null;
 
   // Shorthand lookup so the rest of the file stays readable.
   function $(id) {
     return document.getElementById(id);
   }
 
-  // ---- T4 hooks -----------------------------------------------------------
-  // T4 replaces these; the core only calls them, so the wiring stays in one place.
-  var hooks = {
-    // Called when a Run button is pressed for a swap target name.
-    onRun: function (name) { void name; },
-    // Called when a Stop button is pressed; target is a name or "all".
-    onStop: function (target) { void target; },
-    // Called when the list reports a running job, so T4 can follow its output.
-    attachJob: function (id) { void id; }
-  };
-
-  // ---- token storage ------------------------------------------------------
+  // Removes all children of a node.
+  function clear(node) {
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+  }
 
   // Reads the saved token; sessionStorage may throw when storage is blocked.
   function getToken() {
-    try {
-      return window.sessionStorage.getItem(TOKEN_KEY) || "";
-    } catch (e) {
-      return "";
-    }
+    try { return window.sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
   }
 
   // Saves or clears the token for this tab only, never persisting beyond it.
   function setToken(value) {
     try {
-      if (value) {
-        window.sessionStorage.setItem(TOKEN_KEY, value);
-      } else {
-        window.sessionStorage.removeItem(TOKEN_KEY);
-      }
-    } catch (e) {
-      /* storage blocked: the token simply will not be remembered */
-    }
+      if (value) { window.sessionStorage.setItem(TOKEN_KEY, value); }
+      else { window.sessionStorage.removeItem(TOKEN_KEY); }
+    } catch (e) { /* storage blocked: the token will not be remembered */ }
   }
-
-  // ---- API helper ---------------------------------------------------------
 
   // Builds an Error that carries the HTTP status so callers can react to 401.
   function apiError(message, status) {
@@ -61,25 +52,16 @@
 
   // Turns a FastAPI error body into one readable string.
   function detailOf(data, fallback) {
-    if (data && typeof data.detail === "string") {
-      return data.detail;
-    }
-    if (data && data.detail !== undefined) {
-      return JSON.stringify(data.detail);
-    }
-    return fallback;
+    var d = data ? data.detail : undefined;
+    return typeof d === "string" ? d : d !== undefined ? JSON.stringify(d) : fallback;
   }
 
   // Single entry point to the server; relative /swap paths keep it same-origin.
   function api(method, path, body) {
-    if (path.indexOf("/swap") !== 0) {
-      return Promise.reject(apiError("refusing non-/swap path", 0));
-    }
+    if (path.indexOf("/swap") !== 0) { return Promise.reject(apiError("refusing non-/swap path", 0)); }
     var headers = { Accept: "application/json" };
     var token = getToken();
-    if (token) {
-      headers["Authorization"] = "Bearer " + token;
-    }
+    if (token) { headers["Authorization"] = "Bearer " + token; }
     var init = { method: method, headers: headers };
     if (body !== undefined && body !== null) {
       headers["Content-Type"] = "application/json";
@@ -89,13 +71,7 @@
       function (res) {
         return res.text().then(function (text) {
           var data = null;
-          if (text) {
-            try {
-              data = JSON.parse(text);
-            } catch (e) {
-              data = null;
-            }
-          }
+          try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
           if (!res.ok) {
             throw apiError(detailOf(data, "HTTP " + res.status), res.status);
           }
@@ -108,8 +84,6 @@
     );
   }
 
-  // ---- error area ---------------------------------------------------------
-
   // Shows a message in the alert area.
   function showError(message) {
     var area = $("error-area");
@@ -119,30 +93,23 @@
 
   // Hides the alert area once things work again.
   function clearError() {
-    var area = $("error-area");
-    area.textContent = "";
-    area.hidden = true;
+    showError("");
+    $("error-area").hidden = true;
   }
-
-  // ---- 401 handling -------------------------------------------------------
 
   // One shared promise, so concurrent 401s all resume on a single submit.
   var tokenPrompt = null;
 
   // Asks for a token; resolves once the user submits one, so the caller can retry.
   function askForToken() {
-    if (tokenPrompt) {
-      return tokenPrompt;
-    }
+    if (tokenPrompt) { return tokenPrompt; }
     var form = $("token-form");
     form.hidden = false;
     tokenPrompt = new Promise(function (resolve) {
       form.addEventListener("submit", function onSubmit(ev) {
         ev.preventDefault();
         var value = $("token-input").value.trim();
-        if (!value) {
-          return;
-        }
+        if (!value) { return; }
         form.removeEventListener("submit", onSubmit);
         setToken(value);
         $("token-input").value = "";
@@ -157,9 +124,7 @@
   // Calls api(); on 401 shows the token form and retries after submit.
   function apiWithAuth(method, path, body) {
     return api(method, path, body).catch(function (err) {
-      if (err.status !== 401) {
-        throw err;
-      }
+      if (err.status !== 401) { throw err; }
       setToken("");
       showError("Authentication required: enter the API token.");
       return askForToken().then(function () {
@@ -169,66 +134,45 @@
     });
   }
 
-  // Lets the user drop a stored token from the form.
-  function wireTokenClear() {
-    $("token-clear").addEventListener("click", function () {
-      setToken("");
-      $("token-input").value = "";
-    });
-  }
-
-  // ---- formatting ---------------------------------------------------------
-
   // Mirrors lanes.format_duration so the UI and CLI agree: 25s, 2m 05s.
   function formatDuration(seconds) {
-    if (seconds === null || seconds === undefined) {
-      return "—";
-    }
+    if (seconds === null || seconds === undefined) { return "—"; }
     var total = Math.round(seconds);
-    var minutes = Math.floor(total / 60);
     var secs = total % 60;
-    if (minutes) {
-      return minutes + "m " + (secs < 10 ? "0" : "") + secs + "s";
-    }
-    return secs + "s";
+    return total >= 60 ? Math.floor(total / 60) + "m " + (secs < 10 ? "0" : "") + secs + "s" : secs + "s";
   }
 
   // The API sends cards as a string or a list; show either as one string.
   function cardsText(cards) {
-    if (Array.isArray(cards)) {
-      return cards.join(", ");
-    }
-    if (cards === null || cards === undefined) {
-      return "";
-    }
-    return String(cards);
+    if (Array.isArray(cards)) { return cards.join(", "); }
+    return cards === null || cards === undefined ? "" : String(cards);
   }
-
-  // ---- rendering ----------------------------------------------------------
 
   // Small element factory; textContent only, so server data can never become markup.
   function el(tag, text, className) {
     var node = document.createElement(tag);
-    if (text !== undefined && text !== null) {
-      node.textContent = String(text);
-    }
-    if (className) {
-      node.className = className;
-    }
+    if (text !== undefined && text !== null) { node.textContent = String(text); }
+    if (className) { node.className = className; }
     return node;
   }
 
+  // A button that calls onClick; type=button keeps it from submitting forms.
+  function button(label, onClick, disabled) {
+    var b = el("button", label);
+    b.type = "button";
+    b.disabled = !!disabled;
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
   // Copies text to the clipboard and briefly confirms on the button.
-  function copyText(text, button) {
+  function copyText(text, btn) {
     // Shows a status label, then restores "Copy" (fixed, so double-clicks can't stick).
     var done = function (label) {
-      button.textContent = label;
-      window.setTimeout(function () { button.textContent = "Copy"; }, 1500);
+      btn.textContent = label;
+      window.setTimeout(function () { btn.textContent = "Copy"; }, 1500);
     };
-    if (!navigator.clipboard) {
-      done("No clipboard");
-      return;
-    }
+    if (!navigator.clipboard) { done("No clipboard"); return; }
     navigator.clipboard.writeText(text).then(
       function () { done("Copied"); },
       function () { done("Copy failed"); }
@@ -240,19 +184,15 @@
     var line = el("div", null, "copy-line");
     line.appendChild(el("span", label + " ", "copy-label"));
     line.appendChild(el("code", value));
-    var button = el("button", "Copy");
-    button.type = "button";
-    button.addEventListener("click", function () { copyText(value, button); });
-    line.appendChild(button);
+    var btn = button("Copy", function () { copyText(value, btn); });
+    line.appendChild(btn);
     return line;
   }
 
   // Fills the table header once, since the static HTML header may differ.
   function renderHeader() {
     var head = $("rows-table").tHead;
-    while (head.firstChild) {
-      head.removeChild(head.firstChild);
-    }
+    clear(head);
     var tr = el("tr");
     COLUMNS.forEach(function (name) { tr.appendChild(el("th", name)); });
     tr.appendChild(el("th", "Action"));
@@ -262,15 +202,9 @@
   // Builds the action cell: Run for every row, Stop for serving rows.
   function actionCell(row, serving) {
     var td = el("td", null, "actions");
-    var run = el("button", "Run");
-    run.type = "button";
-    run.addEventListener("click", function () { hooks.onRun(row.name); });
-    td.appendChild(run);
+    td.appendChild(button("Run", function () { startRun(row.name); }, jobRunning));
     if (serving) {
-      var stop = el("button", "Stop");
-      stop.type = "button";
-      stop.addEventListener("click", function () { hooks.onStop(row.name); });
-      td.appendChild(stop);
+      td.appendChild(button("Stop", function () { startStop({ name: row.name }); }, jobRunning));
     }
     return td;
   }
@@ -279,18 +213,12 @@
   function nameCell(row, serving, gatewayUrl) {
     var td = el("td");
     td.appendChild(el("div", row.name));
-    if (!serving) {
-      return td;
-    }
+    if (!serving) { return td; }
     var details = el("div", null, "serving-details");
-    if (row.endpoint) {
-      details.appendChild(copyLine("Endpoint", row.endpoint));
-    }
+    if (row.endpoint) { details.appendChild(copyLine("Endpoint", row.endpoint)); }
     (row.aliases || []).forEach(function (alias) {
       var line = copyLine("Alias", alias);
-      if (gatewayUrl) {
-        line.appendChild(el("span", " via " + gatewayUrl, "alias-gateway"));
-      }
+      if (gatewayUrl) { line.appendChild(el("span", " via " + gatewayUrl, "alias-gateway")); }
       details.appendChild(line);
     });
     td.appendChild(details);
@@ -300,9 +228,7 @@
   // Redraws the table body from the /swap payload.
   function renderRows(rows, gatewayUrl) {
     var body = $("rows-body");
-    while (body.firstChild) {
-      body.removeChild(body.firstChild);
-    }
+    clear(body);
     rows.forEach(function (row) {
       var serving = row.state === "serving";
       var tr = el("tr", null, serving ? "serving" : "");
@@ -321,35 +247,160 @@
   // Updates the serving box: who is serving, and whether Stop all is useful.
   function renderServing(rows, gatewayUrl) {
     var box = $("serving-summary");
-    while (box.firstChild) {
-      box.removeChild(box.firstChild);
-    }
+    clear(box);
     var serving = rows.filter(function (r) { return r.state === "serving"; });
-    if (!serving.length) {
-      box.appendChild(el("p", "Nothing is serving."));
-    }
+    if (!serving.length) { box.appendChild(el("p", "Nothing is serving.")); }
     serving.forEach(function (row) {
       var item = el("div", null, "serving-item");
       item.appendChild(el("strong", row.name));
       item.appendChild(el("span", " (" + row.model + ", cards " + cardsText(row.cards) + ")"));
-      if (row.endpoint) {
-        item.appendChild(copyLine("Endpoint", row.endpoint));
-      }
+      if (row.endpoint) { item.appendChild(copyLine("Endpoint", row.endpoint)); }
       box.appendChild(item);
     });
-    if (serving.length && gatewayUrl) {
-      box.appendChild(copyLine("Gateway", gatewayUrl));
-    }
-    $("stop-all-btn").disabled = !serving.length;
+    if (serving.length && gatewayUrl) { box.appendChild(copyLine("Gateway", gatewayUrl)); }
+    servingCount = serving.length;
+    $("stop-all-btn").disabled = !serving.length || jobRunning;
   }
 
-  // ---- polling ------------------------------------------------------------
+  // Shows lines in the confirm panel; with an action, the confirm button runs it.
+  function openConfirm(lines, label, action) {
+    var body = $("confirm-body");
+    var go = $("confirm-run-btn");
+    clear(body);
+    lines.forEach(function (line) { body.appendChild(el("div", line)); });
+    confirmAction = action || null;
+    go.textContent = label;
+    go.hidden = !action;
+    go.disabled = false;
+    $("confirm-panel").hidden = false;
+  }
+
+  // Hides the confirm panel and forgets the pending action.
+  function closeConfirm() {
+    confirmAction = null;
+    $("confirm-panel").hidden = true;
+  }
+
+  // Reports an action failure (409 busy, 404 unknown) in the error area.
+  function failAction(err) {
+    closeConfirm();
+    showError(err.message);
+  }
+
+  // Runs the pending action once; the button locks so a double click sends one request.
+  function onConfirm() {
+    if (!confirmAction || $("confirm-run-btn").disabled) { return; }
+    $("confirm-run-btn").disabled = true;
+    confirmAction();
+  }
+
+  // Dry-runs a swap and asks the user to confirm the preview.
+  function startRun(name) {
+    apiWithAuth("POST", "/swap/run", { name: name, dry_run: true }).then(function (data) {
+      clearError();
+      openConfirm(data.preview || [], "Run " + data.name, function () { confirmRun(name); });
+    }, failAction);
+  }
+
+  // Sends the real run: 202 opens the job panel, 200 means it already serves.
+  function confirmRun(name) {
+    apiWithAuth("POST", "/swap/run", { name: name }).then(function (data) {
+      if (data.job_id) {
+        closeConfirm();
+        attachJob(data.job_id);
+        return;
+      }
+      var lines = [data.already_serving ? "Already serving: " + data.name : data.name];
+      if (data.endpoint) { lines.push("Endpoint: " + data.endpoint); }
+      openConfirm(lines, "", null);
+      refresh();
+    }, failAction);
+  }
+
+  // Dry-runs a stop for {name} or {all:true} and lists what it would free.
+  function startStop(target) {
+    var dry = Object.assign({ dry_run: true }, target);
+    apiWithAuth("POST", "/swap/stop", dry).then(function (data) {
+      clearError();
+      var lines = (data.items || []).map(function (i) {
+        return i.label + " — frees cards " + i.cards;
+      });
+      if (!lines.length) { openConfirm(["Nothing is serving."], "", null); return; }
+      openConfirm(lines, "Stop", function () { confirmStop(target); });
+    }, failAction);
+  }
+
+  // Sends the real stop, lists each result, then refreshes the list.
+  function confirmStop(target) {
+    apiWithAuth("POST", "/swap/stop", target).then(function (data) {
+      var lines = (data.results || []).map(function (r) {
+        return r.label + ": stopped " + r.stopped;
+      });
+      openConfirm(lines, "", null);
+      refresh();
+    }, failAction);
+  }
+
+  // Enables or disables every Run, Stop and Stop all button.
+  function setJobRunning(flag) {
+    jobRunning = flag;
+    document.querySelectorAll("td.actions button").forEach(function (b) { b.disabled = flag; });
+    $("stop-all-btn").disabled = flag || !servingCount;
+  }
+
+  // Draws one job snapshot; returns true once the job has finished.
+  function renderJob(job) {
+    var running = job.status === "running";
+    var text = job.exit_code === 0 ? "Ready" : "Failed (exit " + job.exit_code + ")";
+    $("job-status").textContent = job.name + ": " + (running ? job.status : text);
+    var log = $("job-log");
+    log.textContent = (job.output || []).slice(-200).join("\n");
+    log.scrollTop = log.scrollHeight;
+    return !running;
+  }
+
+  // Fetches the job once; on completion stops polling and refreshes the list.
+  function pollJob() {
+    var id = jobId;
+    if (id === null || jobBusy) { return; }
+    jobBusy = true;
+    apiWithAuth("GET", "/swap/jobs/" + encodeURIComponent(id)).then(function (job) {
+      jobBusy = false;
+      if (id === jobId && renderJob(job)) {
+        window.clearInterval(jobTimer);
+        lastDoneId = id;
+        jobId = null;
+        setJobRunning(false);
+        refresh();
+      }
+    }, function (err) {
+      jobBusy = false;
+      showError(err.message);
+      if (err.status === 404 && id === jobId) {
+        window.clearInterval(jobTimer);
+        lastDoneId = id;
+        jobId = null;
+        setJobRunning(false);
+      }
+    });
+  }
+
+  // Opens the job panel on a job id and follows it until it finishes.
+  function attachJob(id) {
+    window.clearInterval(jobTimer);
+    jobId = id;
+    jobBusy = false;
+    $("job-panel").hidden = false;
+    $("job-status").textContent = "running";
+    $("job-log").textContent = "";
+    setJobRunning(true);
+    pollJob();
+    jobTimer = window.setInterval(pollJob, JOB_POLL_MS);
+  }
 
   // Fetches the list once and renders it; clears the error only on success.
   function refresh() {
-    if (pollInFlight) {
-      return Promise.resolve();
-    }
+    if (pollInFlight) { refreshQueued = true; return Promise.resolve(); }
     pollInFlight = true;
     return apiWithAuth("GET", "/swap").then(
       function (data) {
@@ -357,68 +408,43 @@
         renderRows(data.rows || [], data.gateway_url);
         renderServing(data.rows || [], data.gateway_url);
         clearError();
-        var job = data.job;
-        if (job && job.job_id !== lastJobId) {
-          lastJobId = job.job_id;
-          hooks.attachJob(job.job_id);
+        if (data.job && jobId === null && data.job.job_id !== lastDoneId) {
+          attachJob(data.job.job_id);
         }
+        if (refreshQueued) { refreshQueued = false; refresh(); }
       },
       function (err) {
         pollInFlight = false;
         showError(err.message);
+        if (refreshQueued) { refreshQueued = false; refresh(); }
       }
     );
   }
 
-  // Stops the timer so a hidden tab makes no requests.
-  function stopPolling() {
-    if (pollTimer !== null) {
-      window.clearInterval(pollTimer);
-      pollTimer = null;
-    }
-  }
-
-  // Starts the 5 s loop (and refreshes now) unless the tab is hidden.
+  // Restarts the 5 s loop (and refreshes now); a hidden tab makes no requests.
   function startPolling() {
-    stopPolling();
-    if (document.hidden) {
-      return;
-    }
-    refresh();
-    pollTimer = window.setInterval(refresh, POLL_MS);
-  }
-
-  // Pauses polling while the tab is hidden and resumes when it is shown.
-  function onVisibilityChange() {
-    if (document.hidden) {
-      stopPolling();
-    } else {
-      startPolling();
+    window.clearInterval(pollTimer);
+    if (!document.hidden) {
+      refresh();
+      pollTimer = window.setInterval(refresh, POLL_MS);
     }
   }
-
-  // ---- startup ------------------------------------------------------------
 
   // Wires static controls and begins polling.
   function init() {
     renderHeader();
-    wireTokenClear();
+    $("token-clear").addEventListener("click", function () {
+      setToken("");
+      $("token-input").value = "";
+    });
     $("refresh-btn").addEventListener("click", refresh);
-    $("stop-all-btn").addEventListener("click", function () { hooks.onStop("all"); });
-    document.addEventListener("visibilitychange", onVisibilityChange);
+    $("stop-all-btn").addEventListener("click", function () { startStop({ all: true }); });
+    $("confirm-run-btn").addEventListener("click", onConfirm);
+    $("confirm-cancel-btn").addEventListener("click", closeConfirm);
+    // Pauses polling while the tab is hidden and resumes when it is shown.
+    document.addEventListener("visibilitychange", startPolling);
     startPolling();
   }
-
-  // Shared with T4 code appended below, which lives in this same closure.
-  var core = {
-    api: apiWithAuth,
-    refresh: refresh,
-    showError: showError,
-    clearError: clearError,
-    formatDuration: formatDuration,
-    hooks: hooks
-  };
-  void core;
 
   init();
 })();
