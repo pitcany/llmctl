@@ -63,8 +63,18 @@ class _SuggestingGroup(typer.core.TyperGroup):
 
     #: Front-page order: the everyday verbs in the order a new user meets them.
     FRONT = (
-        "setup", "add", "run", "settings", "ls", "stop", "rm",
-        "status", "logs", "doctor", "tui", "help",
+        "setup",
+        "add",
+        "run",
+        "settings",
+        "ls",
+        "stop",
+        "rm",
+        "status",
+        "logs",
+        "doctor",
+        "tui",
+        "help",
     )
 
     def list_commands(self, ctx: Any) -> list[str]:
@@ -299,9 +309,7 @@ def scan(
             model.format or "",
         )
     console.print(table)
-    console.print(
-        "[dim]Re-run with --import to register these into the registry.[/dim]"
-    )
+    console.print("[dim]Re-run with --import to register these into the registry.[/dim]")
 
 
 def models_cmd(json_out: _JSON_OPT = False) -> None:
@@ -343,8 +351,7 @@ def gpus(json_out: _JSON_OPT = False) -> None:
         return
     if not gpus_info:
         console.print(
-            "[yellow]No NVIDIA GPU telemetry available or "
-            "NVML could not initialize.[/yellow]"
+            "[yellow]No NVIDIA GPU telemetry available or NVML could not initialize.[/yellow]"
         )
         return
     table = Table(title="GPUs")
@@ -360,9 +367,7 @@ def gpus(json_out: _JSON_OPT = False) -> None:
         if gpu.memory_used_mb is not None and gpu.memory_total_mb is not None:
             memory = f"{gpu.memory_used_mb}/{gpu.memory_total_mb} MiB"
         util = (
-            "unknown"
-            if gpu.utilization_gpu_percent is None
-            else f"{gpu.utilization_gpu_percent}%"
+            "unknown" if gpu.utilization_gpu_percent is None else f"{gpu.utilization_gpu_percent}%"
         )
         temp = "n/a" if gpu.temperature_c is None else f"{gpu.temperature_c}C"
         power = "n/a" if gpu.power_draw_watts is None else f"{gpu.power_draw_watts:.0f}W"
@@ -462,9 +467,7 @@ def add_model(
 @app.command("delete-model", hidden=True)
 def delete_model(
     model_id: Annotated[str, typer.Argument(help="Model ID to soft-delete.")],
-    yes: Annotated[
-        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
-    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
 ) -> None:
     """Deprecated: use `llmctl model delete` (also accepts a name)."""
     cli_registry.err_console.print(
@@ -565,9 +568,7 @@ def _print_session_state(session: object, *, verb: str) -> bool:
             "`llmctl sessions` will show it running once it responds."
         )
         return True
-    console.print(
-        f"[red]Session {session.id} {status}[/red]: {escape(str(session.error))}"
-    )
+    console.print(f"[red]Session {session.id} {status}[/red]: {escape(str(session.error))}")
     return False
 
 
@@ -593,9 +594,7 @@ def start(
     ] = "auto",
     cpu: Annotated[bool, typer.Option(help="Force CPU-only mode (hide GPUs).")] = False,
     force: Annotated[bool, typer.Option(help="Launch even when safety checks refuse.")] = False,
-    dry_run: Annotated[
-        bool, typer.Option(help="Plan only; do not launch a process.")
-    ] = False,
+    dry_run: Annotated[bool, typer.Option(help="Plan only; do not launch a process.")] = False,
 ) -> None:
     """Launch a model session (or plan it with --dry-run).
 
@@ -722,9 +721,7 @@ def doctor(json_out: _JSON_OPT = False) -> None:
 def cleanup(
     remove_stale: Annotated[
         bool,
-        typer.Option(
-            help="Delete stopped/failed session records and leftover dry-run plans."
-        ),
+        typer.Option(help="Delete stopped/failed session records and leftover dry-run plans."),
     ] = False,
 ) -> None:
     """Mark dead sessions and report free ports; --remove-stale deletes stale rows.
@@ -775,9 +772,7 @@ def start_unit(
         bool,
         typer.Option("--dry-run", help="Resolve the unit and its scope; start nothing."),
     ] = False,
-    yes: Annotated[
-        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
-    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
 ) -> None:
     """Start a systemd unit llmctl does not own.
 
@@ -836,12 +831,8 @@ def stop(
             help="For an adopted session, stop its backing systemd unit (sudo).",
         ),
     ] = False,
-    all_: Annotated[
-        bool, typer.Option("--all", help="Stop everything that is serving.")
-    ] = False,
-    yes: Annotated[
-        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
-    ] = False,
+    all_: Annotated[bool, typer.Option("--all", help="Stop everything that is serving.")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
 ) -> None:
     """Stop what is serving: the vLLM unit, a lane, or a model llmctl started.
 
@@ -944,9 +935,7 @@ def restart(
             help="For an adopted session, restart its backing systemd unit.",
         ),
     ] = False,
-    yes: Annotated[
-        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
-    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
 ) -> None:
     """Stop a session's process and relaunch it from its stored launch plan.
 
@@ -1000,9 +989,7 @@ def pull(
 
 @app.command()
 def logs(
-    session_id: Annotated[
-        str | None, typer.Argument(help="Session ID to tail logs for.")
-    ] = None,
+    session_id: Annotated[str | None, typer.Argument(help="Session ID to tail logs for.")] = None,
     lines: Annotated[int, typer.Option(help="Number of log lines / events to show.")] = 50,
 ) -> None:
     """Tail a session's log file, or show recent events when no ID is given."""
@@ -1201,9 +1188,7 @@ def runtimes_inspect(
     console.print(f"  version:  {escape(str(match['version'] or 'unknown'))}")
     console.print(f"  endpoint: {escape(str(match['endpoint'] or '-'))}")
     loaded = match["loaded"]
-    console.print(
-        "  loaded:   " + ("n/a" if loaded is None else (", ".join(loaded) or "(none)"))
-    )
+    console.print("  loaded:   " + ("n/a" if loaded is None else (", ".join(loaded) or "(none)")))
     console.print("  capabilities:")
     for key, supported in match["capabilities"].items():
         mark = "[green]yes[/green]" if supported else "[dim]no[/dim]"
@@ -1241,9 +1226,7 @@ def health(json_out: _JSON_OPT = False) -> None:
         if sessions:
             labels = []
             for s in sessions:
-                label = escape(
-                    str(s["served_name"] or s["endpoint_url"] or (s["id"] or "")[:8])
-                )
+                label = escape(str(s["served_name"] or s["endpoint_url"] or (s["id"] or "")[:8]))
                 if s.get("lane"):
                     label = f"{label} (lane {escape(str(s['lane']))})"
                 elif not s.get("managed", True):
@@ -1276,17 +1259,13 @@ def _resolve_bench_target(
     if target is None:
         return model_id, session_id
     if model_id or session_id:
-        raise typer.BadParameter(
-            "Pass a positional target OR --model-id/--session-id, not both."
-        )
+        raise typer.BadParameter("Pass a positional target OR --model-id/--session-id, not both.")
     with _session() as db:
         if db.get(SessionRecord, target) is not None:
             return None, target
         if db.get(ModelRecord, target) is not None:
             return target, None
-    raise typer.BadParameter(
-        f"Target '{target}' does not match any session or model ID."
-    )
+    raise typer.BadParameter(f"Target '{target}' does not match any session or model ID.")
 
 
 @app.command(hidden=True)
@@ -1315,17 +1294,13 @@ def bench(
     session_id: Annotated[
         str | None, typer.Option(help="Session ID (alternative to positional target).")
     ] = None,
-    prompt: Annotated[
-        list[str] | None, typer.Option(help="Prompt to send (repeatable).")
-    ] = None,
+    prompt: Annotated[list[str] | None, typer.Option(help="Prompt to send (repeatable).")] = None,
     max_tokens: Annotated[int, typer.Option(help="Max completion tokens per prompt.")] = 256,
     context_length: Annotated[
         int | None,
         typer.Option(help="Target context length in tokens (long_context kind)."),
     ] = None,
-    concurrency: Annotated[
-        int, typer.Option(help="Parallel in-flight requests (load level).")
-    ] = 1,
+    concurrency: Annotated[int, typer.Option(help="Parallel in-flight requests (load level).")] = 1,
     sweep: Annotated[
         str | None,
         typer.Option(help="Concurrency sweep, e.g. '1,2,4,8' (overrides --concurrency)."),
@@ -1365,13 +1340,9 @@ def bench(
             "synthetic benchmark, it is not a preview. Use --synthetic."
         )
         synthetic = dry_run
-    resolved_model, resolved_session = _resolve_bench_target(
-        target, model_id, session_id
-    )
+    resolved_model, resolved_session = _resolve_bench_target(target, model_id, session_id)
     try:
-        sweep_levels = (
-            [int(part) for part in sweep.split(",") if part.strip()] if sweep else []
-        )
+        sweep_levels = [int(part) for part in sweep.split(",") if part.strip()] if sweep else []
     except ValueError as exc:
         raise typer.BadParameter(
             f"--sweep {sweep!r}: expected comma-separated integers like '1,2,4,8'."
@@ -1472,12 +1443,8 @@ def benchmarks_cmd(
         str | None,
         typer.Argument(help="Show details for a single benchmark id."),
     ] = None,
-    model: Annotated[
-        str | None, typer.Option("--model", help="Filter by model ID.")
-    ] = None,
-    session: Annotated[
-        str | None, typer.Option("--session", help="Filter by session ID.")
-    ] = None,
+    model: Annotated[str | None, typer.Option("--model", help="Filter by model ID.")] = None,
+    session: Annotated[str | None, typer.Option("--session", help="Filter by session ID.")] = None,
     kind: Annotated[
         BenchmarkKind | None,
         typer.Option(help="Filter by kind.", case_sensitive=False),
@@ -1493,9 +1460,7 @@ def benchmarks_cmd(
                 raise typer.Exit(code=1)
             _print_benchmark_result(result)
             return
-        results = service.list_results(
-            model_id=model, session_id=session, kind=kind, limit=limit
-        )
+        results = service.list_results(model_id=model, session_id=session, kind=kind, limit=limit)
     if not results:
         console.print("[yellow]No benchmarks recorded yet.[/yellow]")
         return
@@ -1518,11 +1483,7 @@ def benchmarks_cmd(
             else f"{result.time_to_first_token_ms:.0f} ms"
         )
         peak = "-" if result.peak_vram_mb is None else f"{result.peak_vram_mb}"
-        util = (
-            "-"
-            if result.max_gpu_util_pct is None
-            else f"{result.max_gpu_util_pct:.0f}"
-        )
+        util = "-" if result.max_gpu_util_pct is None else f"{result.max_gpu_util_pct:.0f}"
         when = result.created_at.strftime("%Y-%m-%d %H:%M") if result.created_at else "-"
         ok_color = "green" if result.success else "red"
         table.add_row(
@@ -1766,7 +1727,6 @@ def install_systemd(
     _install(unit)
 
 
-
 def _emit_unit(unit: object, output: Path | None) -> None:
     """Print a rendered systemd unit (and warnings) or write it to a file."""
     name = getattr(unit, "name", "unit.service")
@@ -1877,9 +1837,7 @@ def vllm_cmd(
     ctx: typer.Context,
     preset: Annotated[
         str | None,
-        typer.Argument(
-            help="Preset, lane, or registered model name (see --list). Omit to pick."
-        ),
+        typer.Argument(help="Preset, lane, or registered model name (see --list). Omit to pick."),
     ] = None,
     list_only: Annotated[
         bool, typer.Option("--list", "-l", help="Print the swap list and exit.")
@@ -1907,9 +1865,7 @@ def vllm_cmd(
             help="Restart even if the preset's local model path is missing.",
         ),
     ] = False,
-    yes: Annotated[
-        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")
-    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
     tp: Annotated[
         int | None,
         typer.Option("--tp", min=1, help="GPUs to split the model across (this run)."),
@@ -2047,9 +2003,7 @@ def vllm_cmd(
         console.print("[red]vLLM start did not complete cleanly.[/red]")
         cli_swap.restore_lanes(stopped_lanes, console)
         if result.fleet_failed:
-            console.print(
-                f"  fleet preflight failed on: {escape(', '.join(result.fleet_failed))}"
-            )
+            console.print(f"  fleet preflight failed on: {escape(', '.join(result.fleet_failed))}")
         if result.restart is not None and result.restart.error:
             console.print(f"  restart: {escape(result.restart.error)}")
         _print_rollback(result, settings.managed_units.vllm_engine.unit_name)
@@ -2085,7 +2039,12 @@ _STARTABLE_ENGINES = ("vllm", "sglang", "freetoken", "strata", "llama_cpp")
     short_help="Show (or --edit) the settings `llmctl run NAME` starts a model with.",
 )
 def settings_cmd(
-    name: Annotated[str, typer.Argument(help="Preset or model name (see `llmctl ls`).")],
+    name: Annotated[
+        str | None,
+        typer.Argument(
+            help="Preset or model name, or its # from `llmctl ls`. Omit it to pick from a list."
+        ),
+    ] = None,
     edit: Annotated[
         bool, typer.Option("--edit", help="Open the preset file in $VISUAL/$EDITOR.")
     ] = False,
@@ -2099,6 +2058,30 @@ def settings_cmd(
 
     from llmctl.services.run_overrides import FIELDS, FLAGS, preset_source, profile_source
     from llmctl.services.serve import AmbiguousModel, find_model
+
+    if name is None or (name.isdecimal() and preset_source(name) is None):
+        # Same list and numbering as `llmctl ls` / `llmctl run`, so the # a
+        # user just read there means the same row here.
+        state = gather_state(load_settings())
+        if name is None:
+            target = cli_swap.pick(state, console, command="settings", prompt="Show settings for")
+        else:
+            target = resolve(name, state.catalog)
+            if target is None:
+                if not 1 <= int(name) <= len(state.catalog):
+                    console.print(
+                        f"[red]No row {escape(name)}.[/red] Pick a number in "
+                        f"1-{len(state.catalog)}, or run `llmctl ls` to see what you can run."
+                    )
+                    raise typer.Exit(2)
+                target = state.catalog[int(name) - 1]
+        if target.kind == "lane":
+            console.print(
+                f"{escape(target.key)} is a router lane started by its own script, so its "
+                "settings live there; llmctl does not change them."
+            )
+            return
+        name = target.key
 
     source = preset_source(name)
     if source is None:
@@ -2139,9 +2122,7 @@ def settings_cmd(
     console.print(table)
     where = f"{source.label}: {source.path}" if source.path else source.label
     console.print(f"Stored in {escape(where)}")
-    console.print(
-        f"One run: llmctl run {escape(name)} --max-len 32768   ·   keep it: add --save"
-    )
+    console.print(f"One run: llmctl run {escape(name)} --max-len 32768   ·   keep it: add --save")
     if not edit:
         return
     if source.path is None:
@@ -2185,9 +2166,7 @@ def _session_overrides(
                 "cannot be saved. Drop --save to use it for this run."
             )
         parameters.pop("tensor_parallel_size", None)
-        target = dataclasses.replace(
-            target, placement=Placement(cards=overrides.tp)
-        )
+        target = dataclasses.replace(target, placement=Placement(cards=overrides.tp))
     return target, parameters
 
 
@@ -2382,9 +2361,7 @@ def _print_rollback(result: object, tp_unit: str) -> None:
     todo: list[str] = []
     if rollback is None:
         if stopped:
-            console.print(
-                f"  [yellow]still stopped:[/yellow] {escape(', '.join(stopped))}"
-            )
+            console.print(f"  [yellow]still stopped:[/yellow] {escape(', '.join(stopped))}")
             todo += [how(unit) for unit in stopped]
     else:
         if rollback.env_restored:
@@ -2399,8 +2376,7 @@ def _print_rollback(result: object, tp_unit: str) -> None:
             console.print(f"  rollback: stopped half-started {escape(tp_unit)}")
         if rollback.restarted:
             console.print(
-                f"  [green]rollback: started again:[/green] "
-                f"{escape(', '.join(rollback.restarted))}"
+                f"  [green]rollback: started again:[/green] {escape(', '.join(rollback.restarted))}"
             )
         if rollback.restart_failed:
             console.print(
@@ -2547,8 +2523,7 @@ def presets_cmd(json_out: _JSON_OPT = False) -> None:
         return
     if not views:
         console.print(
-            "[yellow]No presets found.[/yellow] "
-            "Write one to ~/.config/llmctl/presets/<alias>.yaml"
+            "[yellow]No presets found.[/yellow] Write one to ~/.config/llmctl/presets/<alias>.yaml"
         )
         return
     table = Table(title="Presets")
@@ -2655,18 +2630,11 @@ def validate_cmd(json_out: _JSON_OPT = False) -> None:
         *validate_svc.check_preset_model_ids(load_all_presets()),
         *validate_svc.check_registry_paths(models),
         *validate_svc.check_model_root_symlinks(load_model_dirs()),
-        *validate_svc.check_managed_unit_ports(
-            list(settings.managed_units.roles().values())
-        ),
+        *validate_svc.check_managed_unit_ports(list(settings.managed_units.roles().values())),
     ]
 
     if json_out:
-        _emit_json(
-            [
-                {"check": f.check, "target": f.target, "detail": f.detail}
-                for f in findings
-            ]
-        )
+        _emit_json([{"check": f.check, "target": f.target, "detail": f.detail} for f in findings])
         if findings:
             raise typer.Exit(code=1)
         return
@@ -2748,9 +2716,7 @@ def router_status_cmd() -> None:
         response = httpx.get(url, headers=headers, timeout=2.0)
     except httpx.HTTPError as exc:
         console.print(f"[red]Gateway unreachable[/red] at {escape(str(url))}: {escape(str(exc))}")
-        console.print(
-            "[cyan]Start it with[/cyan] `llmctl gateway` (default 127.0.0.1:9000)."
-        )
+        console.print("[cyan]Start it with[/cyan] `llmctl gateway` (default 127.0.0.1:9000).")
         raise typer.Exit(1) from exc
 
     if response.status_code == 401:
@@ -2893,12 +2859,15 @@ def _print_adopted(session: object, *, prefix: str = "Adopted") -> None:
 def adopt_cmd(
     endpoint: Annotated[
         str,
-        typer.Option("--endpoint", "-e", help="Base URL of the running upstream, e.g. http://127.0.0.1:8003."),
+        typer.Option(
+            "--endpoint", "-e", help="Base URL of the running upstream, e.g. http://127.0.0.1:8003."
+        ),
     ],
     runtime: Annotated[
         str,
         typer.Option(
-            "--runtime", "-r",
+            "--runtime",
+            "-r",
             help=(
                 "Runtime adapter id (vllm, llama_cpp, lmstudio, ollama, "
                 "python_script), or 'openai' for a generic OpenAI-compatible "
@@ -2918,8 +2887,7 @@ def adopt_cmd(
         typer.Option(
             "--served-name",
             help=(
-                "OpenAI model id the upstream answers to. "
-                "Defaults to the first id from /v1/models."
+                "OpenAI model id the upstream answers to. Defaults to the first id from /v1/models."
             ),
         ),
     ] = None,
@@ -2986,9 +2954,7 @@ def adopt_managed_cmd(
         role = resolve_role(role or "")
         unit = roles.get(role)
         if unit is None:
-            raise typer.BadParameter(
-                f"Unknown role '{role}'. Choose: {', '.join(sorted(roles))}."
-            )
+            raise typer.BadParameter(f"Unknown role '{role}'. Choose: {', '.join(sorted(roles))}.")
         targets = [(role, unit)]
 
     adopted = 0
@@ -3024,9 +2990,7 @@ def adopt_managed_cmd(
             _print_adopted(session)
 
     summary_color = "green" if adopted else "yellow"
-    console.print(
-        f"[{summary_color}]Done.[/{summary_color}] adopted={adopted}, skipped={skipped}."
-    )
+    console.print(f"[{summary_color}]Done.[/{summary_color}] adopted={adopted}, skipped={skipped}.")
     if adopted == 0 and skipped > 0:
         raise typer.Exit(1)
 

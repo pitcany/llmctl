@@ -18,6 +18,9 @@
   label models owned by a router lane. `llmctl run` accepts the row numbers
   (`#`) from `llmctl ls` as well as a name, and unknown names get "did you mean"
   suggestions. `llmctl ls` keeps whole names at 80 columns and has `ls --json`.
+- `llmctl settings` without NAME shows the `ls` list and asks which row (on a
+  terminal), like `llmctl run`; it also takes the `#` from `llmctl ls`. A
+  router lane says its settings live in its own script.
 
 ## 0.3.0 — 2026-10-14
 

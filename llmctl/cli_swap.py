@@ -111,17 +111,23 @@ def rows_json(state: SwapState) -> list[dict[str, Any]]:
     ]
 
 
-def pick(state: SwapState, console: Console) -> SwapTarget:
-    """Show the list and ask for a number. TTY only; Enter cancels."""
+def pick(
+    state: SwapState, console: Console, *, command: str = "run", prompt: str = "Run"
+) -> SwapTarget:
+    """Show the list and ask for a number. TTY only; Enter cancels.
+
+    ``command`` names the verb in the non-TTY hint, so `llmctl settings` with
+    no NAME does not tell the user to type `llmctl run NAME`.
+    """
     render_table(state, console)
     if not sys.stdin.isatty():
         console.print(
             "[red]No model given[/red] and stdin is not a terminal. "
-            "Run `llmctl run NAME` with a name from the table."
+            f"Run `llmctl {command} NAME` with a name from the table."
         )
         raise typer.Exit(2)
     answer = typer.prompt(
-        f"Run # (1-{len(state.catalog)}, Enter to cancel)",
+        f"{prompt} # (1-{len(state.catalog)}, Enter to cancel)",
         default="",
         show_default=False,
     ).strip()

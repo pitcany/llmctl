@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -304,3 +305,59 @@ def test_settings_edit_opens_the_preset_in_the_editor(monkeypatch, tmp_path) -> 
     res = CliRunner().invoke(cli.app, ["settings", "tiny", "--edit"])
     assert res.exit_code == 0, res.output
     assert opened == [["myeditor", "--wait", str(path)]]
+
+
+# --- `llmctl settings` without NAME, or with a row number -----------------------------
+
+
+def _settings_cli(monkeypatch, tmp_path: Path, *args: str, stdin: str | None = None):
+    """`llmctl settings ...` over the same list `ls` shows: preset tiny (#1), lane flash (#2)."""
+    _preset(tmp_path)
+    real = load_all_records(config_dir=tmp_path)
+    monkeypatch.setattr("llmctl.presets.load_all_records", lambda *a, **k: real)
+    state = SwapState(
+        catalog=build_catalog({"tiny": _Spec()}, [FT], vllm_port=8003),
+        serving=set(),
+        active_units=set(),
+        vllm_unit="vllm-tp",
+        vllm_active=False,
+    )
+    monkeypatch.setattr(cli, "gather_state", lambda settings: state)
+    if stdin is not None:
+        # CliRunner swaps sys.stdin during invoke, so fake the terminal check itself.
+        tty = SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
+        monkeypatch.setattr(cli_swap, "sys", tty)
+    res = CliRunner().invoke(cli.app, ["settings", *args], input=stdin)
+    return res, " ".join(res.output.split())
+
+
+def test_settings_without_name_off_a_terminal_lists_and_says_how(monkeypatch, tmp_path) -> None:
+    res, flat = _settings_cli(monkeypatch, tmp_path)
+    assert res.exit_code == 2, res.output
+    assert "Models you can run" in flat
+    assert "llmctl settings NAME" in flat and "llmctl run NAME`" not in flat
+
+
+def test_settings_without_name_on_a_terminal_picks_a_row(monkeypatch, tmp_path) -> None:
+    res, flat = _settings_cli(monkeypatch, tmp_path, stdin="1\n")
+    assert res.exit_code == 0, res.output
+    assert "Show settings for #" in flat
+    assert "tiny settings" in flat and "32768" in flat
+
+
+def test_settings_takes_the_row_number_from_ls(monkeypatch, tmp_path) -> None:
+    res, flat = _settings_cli(monkeypatch, tmp_path, "1")
+    assert res.exit_code == 0, res.output
+    assert "tiny settings" in flat and "--max-len" in flat
+
+
+def test_settings_for_a_lane_says_llmctl_does_not_own_them(monkeypatch, tmp_path) -> None:
+    res, flat = _settings_cli(monkeypatch, tmp_path, "2")
+    assert res.exit_code == 0, res.output
+    assert "flash is a router lane" in flat
+
+
+def test_settings_out_of_range_row_number(monkeypatch, tmp_path) -> None:
+    res, flat = _settings_cli(monkeypatch, tmp_path, "9")
+    assert res.exit_code == 2, res.output
+    assert "No row 9" in flat and "1-2" in flat
