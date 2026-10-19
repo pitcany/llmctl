@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from llmctl.api.deps import get_settings, get_swap_jobs
 from llmctl.config import Settings
-from llmctl.services import swap_jobs, swap_view
+from llmctl.services import stop_serving, swap_jobs, swap_view
 from llmctl.services.swap_jobs import JobBusy, SwapJobs
 
 router = APIRouter(prefix="/swap", tags=["swap"])
@@ -126,3 +126,58 @@ def run_swap(
         ) from busy
     response.status_code = status.HTTP_202_ACCEPTED
     return {**info, "job_id": job.job_id, "status": "running"}
+
+
+class StopRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str | None = None
+    all_: bool = Field(False, alias="all")
+    dry_run: bool = False
+
+
+@router.post("/stop")
+def stop_swap(
+    body: StopRequest,
+    settings: Settings = Depends(get_settings),
+    jobs: SwapJobs = Depends(get_swap_jobs),
+) -> dict[str, Any]:
+    """Stop what is serving: one named item, or everything with ``all``."""
+    from llmctl.services import lanes
+
+    items = stop_serving.serving_now(lanes.gather_state(settings))
+    if body.name is not None:
+        items = stop_serving.pick(items, body.name)
+        if not items:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Nothing serving matches {body.name!r}",
+            )
+    if not items:
+        return {"items": [], "results": [], "ok": True}
+    if len(items) > 1 and body.name is None and not body.all_:
+        labels = "; ".join(item.label for item in items)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Several things are serving; pass a name or all: {labels}",
+        )
+    shown = [
+        {
+            "kind": item.kind,
+            "label": item.label,
+            "ref": item.ref,
+            "cards": lanes.format_gpus(item.gpus),
+        }
+        for item in items
+    ]
+    if body.dry_run:
+        return {"items": shown, "results": [], "ok": True}
+    running = jobs.running()
+    if running is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Swap job {running.job_id} is running",
+        )
+    outcome = stop_serving.stop_items(items, stop_serving.real_deps(settings))
+    results = [{"label": i.label, "ref": i.ref, "stopped": ok} for i, ok in outcome]
+    return {"items": shown, "results": results, "ok": all(r["stopped"] for r in results)}
