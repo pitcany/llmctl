@@ -200,7 +200,29 @@ def print_preview(state: SwapState, target: SwapTarget, console: Console) -> boo
     )
     for line in preview.lines():
         console.print(f"  {escape(line)}")
+    if preview.already_serving:
+        url = _serving_endpoint(state, target)
+        if url:
+            console.print(f"  answers at {escape(url)}")
     return not (preview.already_serving and target.kind in ("lane", "session"))
+
+
+def _serving_endpoint(state: SwapState, target: SwapTarget) -> str | None:
+    """Where an already-serving lane or session answers, when known."""
+    if target.kind == "lane":
+        return f"{target.upstream}/v1" if target.upstream else None
+    if target.kind == "session":
+        port = target.port
+        for s in state.gpu_sessions:
+            if s.name != target.key:
+                continue
+            if getattr(s, "endpoint_url", None):
+                return str(s.endpoint_url)
+            port = getattr(s, "port", None) or port
+            break
+        if port:
+            return f"http://127.0.0.1:{port}/v1"
+    return None
 
 
 @dataclass
