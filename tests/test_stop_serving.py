@@ -171,3 +171,19 @@ def test_an_ambiguous_id_prefix_picks_nothing() -> None:
     items = serving_now(_state(sessions=[GLM, other]))
     assert pick(items, "0") == []
     assert [i.ref for i in pick(items, "01")] == [GLM.id]
+
+
+def test_preview_line_names_the_cards_each_item_frees() -> None:
+    from dataclasses import replace
+
+    from llmctl.services.stop_serving import preview_line
+
+    lane1 = replace(CODER, gpus=frozenset({1}))
+    bare = GpuSession(id="9999abcd-ffff", name="bare", runtime="llama_cpp", port=8007, gpu_ids=())
+    state = _state(vllm=True, lanes=[lane1], sessions=[GLM, bare])
+    state.catalog = build_catalog({"qwen3.8-27b": _Spec()}, [STRATA, lane1], vllm_port=8003)
+    lines = [preview_line(i) for i in serving_now(state)]
+    assert lines[0].endswith("frees cards all")
+    assert lines[1] == "  lane coder1 (coder1.service, qwen-coder) — frees cards 1"
+    assert lines[2].endswith("frees cards 0+1")
+    assert lines[3].endswith("frees cards all")
