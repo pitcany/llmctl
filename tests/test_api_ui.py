@@ -172,3 +172,25 @@ def test_no_dashboard_line_when_refused(serve_settings) -> None:
     res = _serve("--host", "0.0.0.0")
     assert res.exit_code == 2
     assert "Dashboard:" not in res.output
+
+
+def test_css_theme_custom_properties() -> None:
+    css = _read("app.css")
+    assert ":root" in css and re.search(r"--[a-z-]+\s*:", css)
+    assert "@media (prefers-color-scheme: dark)" in css
+
+
+def test_css_layout_rules() -> None:
+    css = _read("app.css")
+    for needle in ("overflow-x: auto", "white-space: nowrap", "monospace",
+                   "max-height", "overflow-y: auto", "box-sizing: border-box",
+                   "tr.serving", ":disabled", "#serving-box", "#confirm-panel",
+                   "#job-log", "#error-area", "#token-form"):
+        assert needle in css, needle
+    assert "@import" not in css and "url(" not in css
+
+
+def test_index_has_table_wrapper_and_no_style_attr() -> None:
+    html = _read("index.html")
+    assert re.search(r'class="table-wrap"\s*>\s*<table', html)
+    assert "style=" not in html
