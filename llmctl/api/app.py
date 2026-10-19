@@ -17,11 +17,13 @@ from llmctl.api import (
     routes_models,
     routes_profiles,
     routes_sessions,
+    routes_swap,
 )
-from llmctl.api.deps import get_db_session
+from llmctl.api.deps import get_db_session, get_settings, get_swap_jobs
 from llmctl.config import Settings, load_settings, resolve_api_auth_token
 from llmctl.db import SQLModel, apply_migrations, get_engine
 from llmctl.services.health import HealthService
+from llmctl.services.swap_jobs import SwapJobs
 
 #: Paths that stay reachable without a bearer token when
 #: ``scheduler.require_auth_token`` is on: liveness probing plus the
@@ -92,6 +94,10 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
 
     app.dependency_overrides[get_db_session] = session_dependency
 
+    swap_jobs = SwapJobs()
+    app.dependency_overrides[get_settings] = lambda: effective_settings
+    app.dependency_overrides[get_swap_jobs] = lambda: swap_jobs
+
     @app.get("/health", tags=["health"])
     def health() -> dict[str, object]:
         """Return service health."""
@@ -131,6 +137,7 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
     app.include_router(routes_sessions.router)
     app.include_router(routes_gpu.router)
     app.include_router(routes_benchmarks.router)
+    app.include_router(routes_swap.router)
     return app
 
 

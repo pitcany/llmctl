@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- HTTP swap API on `llmctl serve`: `GET /swap` (list, gateway URL, running
+  job), `POST /swap/run` (dry run, or a background job answered with 202; 409
+  while another job runs), `GET /swap/jobs/{id}` (poll status and output) and
+  `POST /swap/stop` (select, dry run, real stop). Jobs are kept in memory. See
+  "HTTP API: swap" in the user guide.
 - `llmctl hf` finds a Hugging Face model and checks that it fits the GPUs
   before you download it: `search` (ranked by family, size, quantization and
   popularity), `inspect` (`config.json` and tokenizer facts), `plan` (tensor

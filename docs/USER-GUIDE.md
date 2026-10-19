@@ -309,6 +309,59 @@ with `llmctl adopt -e URL -r llama_cpp --unit UNIT` (the units' own
 | `llmctl profiles` | List orchestration profiles (different from presets!) |
 | `llmctl generate-systemd`, `install-systemd` | Generate / install systemd units for the API itself |
 
+### HTTP API: swap
+
+`llmctl serve` exposes the swap list and the run/stop actions over HTTP
+(`:8088` by default). When `scheduler.require_auth_token` is on, every request
+needs `Authorization: Bearer $LLMCTL_API_TOKEN`; the examples below show it,
+and you can drop the header when auth is off.
+
+```bash
+AUTH="Authorization: Bearer $LLMCTL_API_TOKEN"
+
+# List swap targets, the gateway URL and the running job (if any)
+curl -H "$AUTH" http://localhost:8088/swap
+
+# Dry run: resolve the name and preview, start nothing (200)
+curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"name": "qwen", "dry_run": true}' http://localhost:8088/swap/run
+
+# Real run: starts a background job (202, body has job_id)
+curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"name": "qwen"}' http://localhost:8088/swap/run
+
+# Poll the job until status is no longer "running"
+curl -H "$AUTH" http://localhost:8088/swap/jobs/JOB_ID
+
+# Stop what is serving (name one item, or pass {"all": true}; "dry_run" previews)
+curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"name": "qwen"}' http://localhost:8088/swap/stop
+```
+
+`POST /swap/run` status codes:
+
+| Code | Meaning |
+|------|---------|
+| 200 | Dry run, or the lane/session is already serving; nothing was started |
+| 202 | Job started; poll `GET /swap/jobs/{id}` |
+| 404 | No swap target matches the name (the message suggests close matches) |
+| 409 | Another swap job is already running |
+
+`POST /swap/stop` status codes:
+
+| Code | Meaning |
+|------|---------|
+| 200 | Stopped (or dry run, or nothing was serving); check `ok` and `results` |
+| 404 | Nothing serving matches the name |
+| 409 | Several things are serving and neither a name nor `all` was given, or a swap job is running |
+
+`GET /swap/jobs/{id}` returns 200 with the captured output, or 404 for an
+unknown id.
+
+Jobs live in memory and are lost when `llmctl serve` restarts. Only one run job
+runs at a time. Output is not streamed: clients poll `GET /swap/jobs/{id}`
+until the job finishes.
+
 ---
 
 ## TUI reference
