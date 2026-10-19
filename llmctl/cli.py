@@ -17,6 +17,7 @@ from sqlmodel import Session
 
 from llmctl import cli_swap
 from llmctl.api.app import create_app
+from llmctl.cli_tables import whole_id_table
 from llmctl.config import VLLM_ROLE, ManagedUnitConfig, Settings, load_settings, resolve_role
 from llmctl.db import (
     BenchmarkKind,
@@ -832,6 +833,10 @@ def stop(
         ),
     ] = False,
     all_: Annotated[bool, typer.Option("--all", help="Stop everything that is serving.")] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show what would be stopped; stop nothing."),
+    ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
 ) -> None:
     """Stop what is serving: the vLLM unit, a lane, or a model llmctl started.
@@ -842,11 +847,17 @@ def stop(
     """
     settings = load_settings()
     if target is not None and not all_ and _is_live_session(target):
-        _stop_session(target, systemd=systemd, yes=yes, settings=settings)
+        _stop_session(target, systemd=systemd, yes=yes, settings=settings, dry_run=dry_run)
         return
     if systemd:
         raise typer.BadParameter("--systemd applies to a session ID (see `llmctl sessions`)")
-    from llmctl.services.stop_serving import pick, real_deps, serving_now, stop_items
+    from llmctl.services.stop_serving import (
+        pick,
+        preview_line,
+        real_deps,
+        serving_now,
+        stop_items,
+    )
 
     items = serving_now(gather_state(settings))
     if target is not None:
@@ -855,7 +866,7 @@ def stop(
             with _session() as db:
                 known = SessionService(db).get_session(target) is not None
             if known:  # a session that is not serving: keep the old behaviour
-                _stop_session(target, systemd=False, yes=yes, settings=settings)
+                _stop_session(target, systemd=False, yes=yes, settings=settings, dry_run=dry_run)
                 return
             raise typer.BadParameter(
                 f"Nothing serving is called {target}. `llmctl ls` shows what serves."
@@ -869,6 +880,13 @@ def stop(
             console.print(f"  - {escape(item.label)}")
         console.print("Stop one: llmctl stop NAME   ·   stop all: llmctl stop --all")
         raise typer.Exit(1)
+    console.print("Would stop:")
+    for item in items:
+        # soft_wrap: one logical line per item. Rich's own wrapping put the
+        # card number alone on the next line at 80 columns.
+        console.print(escape(preview_line(item)), soft_wrap=True)
+    if dry_run:
+        return
     _confirm_state_change(
         "Stop " + "; ".join(item.label for item in items),
         required=settings.scheduler.require_confirmation_for_stop,
@@ -885,6 +903,38 @@ def stop(
         raise typer.Exit(1)
 
 
+def _preview_session_stop(selector: str) -> None:
+    """Print the 'Would stop:' line for one session; change nothing."""
+    from llmctl.services.lanes import format_gpus
+    from llmctl.services.session_swap import GpuSession
+
+    refused: AdoptError | None = None
+    session = None
+    with _session() as db:
+        try:
+            session = SessionService(db).get_session(selector)
+        except AdoptError as exc:
+            refused = exc
+    if refused is not None:
+        console.print(f"[red]Stop refused:[/red] {escape(str(refused))}")
+        raise typer.Exit(1) from refused
+    if session is None:
+        console.print(escape(f"  session {selector}"))
+        return
+    sid = session.id or selector
+    label = GpuSession(
+        id=sid,
+        name=session.served_name or session.model_id or sid[:8],
+        runtime=str(getattr(session.runtime, "value", session.runtime)),
+        port=session.port,
+        gpu_ids=tuple(session.gpu_ids),
+    ).label()
+    line = f"  {escape(label)} (session {escape(sid[:8])})"
+    if session.gpu_ids:
+        line += f" — frees cards {format_gpus(frozenset(session.gpu_ids))}"
+    console.print(line, soft_wrap=True)
+
+
 def _is_live_session(selector: str) -> bool:
     """Whether ``selector`` names a session that is running (or ambiguous)."""
     from llmctl.services.sessions import AmbiguousSessionError
@@ -897,8 +947,14 @@ def _is_live_session(selector: str) -> bool:
     return session is not None and session.status.value != "stopped"
 
 
-def _stop_session(session_id: str, *, systemd: bool, yes: bool, settings: Any) -> None:
+def _stop_session(
+    session_id: str, *, systemd: bool, yes: bool, settings: Any, dry_run: bool = False
+) -> None:
     """Stop one session by ID (the original `llmctl stop ID`)."""
+    console.print("Would stop:")
+    _preview_session_stop(session_id)
+    if dry_run:
+        return
     _confirm_state_change(
         f"Stop session {session_id}" + (" and its systemd unit" if systemd else ""),
         required=settings.scheduler.require_confirmation_for_stop,
@@ -2506,10 +2562,12 @@ def ls_cmd(json_out: _JSON_OPT = False) -> None:
     """List every model you can run and which one is serving now."""
     settings = load_settings()
     state = gather_state(settings)
+    aliases = cli_swap.gateway_aliases(settings)
     if json_out:
-        _emit_json(cli_swap.rows_json(state))
+        _emit_json(cli_swap.rows_json(state, aliases))
         return
     cli_swap.render_table(state, console)
+    cli_swap.render_endpoints(state, console, aliases, settings.router)
 
 
 @app.command("presets", hidden=True)
@@ -2757,7 +2815,7 @@ def router_status_cmd() -> None:
 
 
 @app.command("aliases", hidden=True)
-def aliases_cmd() -> None:
+def aliases_cmd(json_out: _JSON_OPT = False) -> None:
     """List configured router aliases and their resolved targets."""
     from llmctl.services.gateway import GatewayService
 
@@ -2765,28 +2823,51 @@ def aliases_cmd() -> None:
     with _session() as db:
         rows = GatewayService(db, settings).alias_view()
 
-    table = Table(title="Router aliases")
-    _id_column(table, "alias", style="cyan")
-    _id_column(table, "public id")
-    _id_column(table, "target")
-    _id_column(table, "session")
-    _id_column(table, "served name")
-    table.add_column("status")
-    for row in rows:
+    def _status(row: Any) -> str:
         if row.target is None:
-            status_text = "[red]unbound[/red]"
-        elif row.healthy:
-            status_text = "[green]healthy[/green]"
-        else:
-            status_text = "[yellow]bound, no active session[/yellow]"
-        table.add_row(
-            escape(str(row.name)),
-            f"local-{escape(str(row.name))}",
-            row.target or "-",
-            row.resolved_session_id or "-",
-            escape(str(row.resolved_served_name or "-")),
-            status_text,
+            return "unbound"
+        return "healthy" if row.healthy else "bound"
+
+    if json_out:
+        _emit_json(
+            [
+                {
+                    "name": row.name,
+                    "public_id": f"local-{row.name}",
+                    "target": row.target,
+                    "session_id": row.resolved_session_id,
+                    "served_name": row.resolved_served_name,
+                    "status": _status(row),
+                }
+                for row in rows
+            ]
         )
+        return
+
+    labels = {
+        "healthy": "[green]healthy[/green]",
+        "bound": "[yellow]bound, no active session[/yellow]",
+        "unbound": "[red]unbound[/red]",
+    }
+    table = whole_id_table(
+        console,
+        ("alias", "public id", "target", "session", "served name", "status"),
+        [
+            (
+                str(row.name),
+                f"local-{row.name}",
+                row.target or "-",
+                row.resolved_session_id[:8] if row.resolved_session_id else "-",
+                str(row.resolved_served_name or "-"),
+                labels[_status(row)],
+            )
+            for row in rows
+        ],
+        ids={"alias", "public id", "target", "session", "served name"},
+        title="Router aliases",
+        styles={"alias": "cyan"},
+        markup={"status"},
+    )
     console.print(table)
 
 

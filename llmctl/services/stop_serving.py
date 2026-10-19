@@ -13,6 +13,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from llmctl.services.lanes import Gpus, format_gpus
+
 
 @dataclass(frozen=True)
 class Serving:
@@ -24,6 +26,13 @@ class Serving:
     names: frozenset[str]
     #: Unit name (vllm, lane) or session id (session).
     ref: str
+    #: Cards stopping it frees; ``None`` = every card.
+    gpus: Gpus = None
+
+
+def preview_line(item: Serving) -> str:
+    """The stop preview's line for ``item``, the cards it frees last."""
+    return f"  {item.label} — frees cards {format_gpus(item.gpus)}"
 
 
 def serving_now(state: Any) -> list[Serving]:
@@ -55,6 +64,7 @@ def serving_now(state: Any) -> list[Serving]:
                 label=f"lane {lane.name} ({lane.unit}, {lane.served_model})",
                 names=frozenset({lane.name, lane.unit, lane.served_model}),
                 ref=lane.unit,
+                gpus=lane.gpus,
             )
         )
     for session in state.gpu_sessions:
@@ -64,6 +74,7 @@ def serving_now(state: Any) -> list[Serving]:
                 label=f"{session.label()} (session {session.id[:8]})",
                 names=frozenset({session.name, session.id}),
                 ref=session.id,
+                gpus=frozenset(session.gpu_ids) if session.gpu_ids else None,
             )
         )
     return items

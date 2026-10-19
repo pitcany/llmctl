@@ -144,3 +144,76 @@ def test_vllm_swap_reports_paused_services(monkeypatch, calls):
     assert res.exit_code == 0, res.output
     assert "started again: ollama" in res.output
     assert "docker start harbor.ollama" in res.output
+
+
+class _Rec:
+    def __init__(self):
+        self.out: list[str] = []
+
+    def print(self, msg="", *a, **k):
+        self.out.append(str(msg))
+
+
+class _Sess:
+    """Shaped like services.session_swap.GpuSession (no endpoint_url field)."""
+
+    def __init__(self, name, port):
+        self.name = name
+        self.port = port
+        self.gpu_ids = (0,)
+
+    def label(self):
+        return self.name
+
+
+def _session_target(port=None):
+    from llmctl.services.lanes import SwapTarget
+
+    return SwapTarget(
+        key="gemma", kind="session", model="gemma", engine="llama.cpp", upstream="", port=port
+    )
+
+
+def _session_state(sessions):
+    st = _state(set(), set())
+    st.gpu_sessions = sessions
+    return st
+
+
+def test_serving_lane_says_where_it_answers():
+    st = _state({"flash"}, {"ft.service"})
+    target = next(r for r in st.catalog if r.key == "flash")
+    con = _Rec()
+    assert cli_swap.print_preview(st, target, con) is False
+    assert any(f"{target.upstream}/v1" in line for line in con.out)
+
+
+def test_serving_session_port_beats_the_profile_port():
+    st = _session_state([_Sess("gemma", 9000)])
+    con = _Rec()
+    assert cli_swap.print_preview(st, _session_target(port=8080), con) is False
+    assert any("http://127.0.0.1:9000/v1" in line for line in con.out)
+
+
+def test_serving_session_falls_back_to_port():
+    st = _session_state([_Sess("gemma", None)])
+    con = _Rec()
+    assert cli_swap.print_preview(st, _session_target(port=8080), con) is False
+    assert any("http://127.0.0.1:8080/v1" in line for line in con.out)
+
+
+def test_serving_session_unknown_endpoint_prints_nothing_extra():
+    st = _session_state([_Sess("gemma", None)])
+    con = _Rec()
+    assert cli_swap.print_preview(st, _session_target(), con) is False
+    assert not any("answers at" in line for line in con.out)
+
+
+def test_serving_real_gpu_session_uses_its_own_port():
+    from llmctl.services.session_swap import GpuSession
+
+    sess = GpuSession(id="abcdef123", name="gemma", runtime="llama_cpp", port=9001, gpu_ids=(0,))
+    st = _session_state([sess])
+    con = _Rec()
+    assert cli_swap.print_preview(st, _session_target(), con) is False
+    assert any("http://127.0.0.1:9001/v1" in line for line in con.out)

@@ -171,3 +171,118 @@ def test_an_ambiguous_id_prefix_picks_nothing() -> None:
     items = serving_now(_state(sessions=[GLM, other]))
     assert pick(items, "0") == []
     assert [i.ref for i in pick(items, "01")] == [GLM.id]
+
+
+def test_preview_line_names_the_cards_each_item_frees() -> None:
+    from dataclasses import replace
+
+    from llmctl.services.stop_serving import preview_line
+
+    lane1 = replace(CODER, gpus=frozenset({1}))
+    bare = GpuSession(id="9999abcd-ffff", name="bare", runtime="llama_cpp", port=8007, gpu_ids=())
+    state = _state(vllm=True, lanes=[lane1], sessions=[GLM, bare])
+    state.catalog = build_catalog({"qwen3.8-27b": _Spec()}, [STRATA, lane1], vllm_port=8003)
+    lines = [preview_line(i) for i in serving_now(state)]
+    assert lines[0].endswith("frees cards all")
+    assert lines[1] == "  lane coder1 (coder1.service, qwen-coder) — frees cards 1"
+    assert lines[2].endswith("frees cards 0+1")
+    assert lines[3].endswith("frees cards all")
+
+
+# --- --dry-run and the preview before a real stop ---------------------------------------
+
+
+@pytest.fixture
+def spies(monkeypatch, stopped):
+    hits: list[str] = []
+    monkeypatch.setattr(cli, "_confirm_state_change", lambda *a, **k: hits.append("confirm"))
+    monkeypatch.setattr(stop_serving, "stop_items", lambda *a, **k: hits.append("stop") or [])
+    monkeypatch.setattr(cli.SessionService, "stop", lambda *a, **k: hits.append("svc"))
+    return hits
+
+
+def test_dry_run_previews_and_changes_nothing(monkeypatch, spies) -> None:
+    res = _stop(monkeypatch, _state(lanes=[STRATA, CODER]), "--all", "--dry-run")
+    assert res.exit_code == 0, res.output
+    assert "Would stop:" in res.output
+    assert "lane strata" in res.output and "lane coder1" in res.output
+    assert spies == []
+
+
+def test_dry_run_still_needs_a_choice_and_a_known_name(monkeypatch, spies) -> None:
+    state = _state(lanes=[STRATA, CODER])
+    res = _stop(monkeypatch, state, "--dry-run")
+    assert res.exit_code == 1 and "llmctl stop --all" in res.output
+    monkeypatch.setattr(cli.SessionService, "get_session", lambda self, s: None)
+    assert _stop(monkeypatch, state, "nope", "--dry-run").exit_code == 2
+    assert spies == []
+
+
+def test_dry_run_with_nothing_serving(monkeypatch, spies) -> None:
+    res = _stop(monkeypatch, _state(), "--dry-run")
+    assert res.exit_code == 0
+    assert "Nothing llmctl can stop is serving." in res.output
+
+
+def test_dry_run_of_a_live_session(monkeypatch, spies) -> None:
+    from llmctl.schemas import Session
+
+    monkeypatch.setattr(cli, "_is_live_session", lambda selector: True)
+    sess = Session(
+        id="0123abcd-ffff", runtime="llama_cpp", port=8006, gpu_ids=[0, 1], served_name="glm"
+    )
+    monkeypatch.setattr(cli.SessionService, "get_session", lambda self, s: sess)
+    res = _stop(monkeypatch, _state(), "0123abcd", "--dry-run")
+    out = " ".join(res.output.split())
+    assert res.exit_code == 0, res.output
+    assert "Would stop:" in out and "glm" in out and "0123abcd" in out
+    assert "frees cards 0+1" in out  # the `ls` Cards notation, like lanes
+    assert spies == []
+
+
+def test_a_real_stop_previews_before_confirming(monkeypatch, stopped) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(cli, "_confirm_state_change", lambda *a, **k: order.append("confirm"))
+    monkeypatch.setattr(cli.console, "print", lambda *a, **k: order.append(str(a[0])))
+    res = _stop(monkeypatch, _state(lanes=[STRATA]))
+    assert res.exit_code == 0, res.output
+    assert order[0] == "Would stop:" and "lane strata" in order[1] and order[2] == "confirm"
+
+
+@pytest.mark.parametrize("extra", [(), ("--dry-run",)])
+def test_an_ambiguous_session_prefix_is_refused_cleanly(monkeypatch, spies, extra) -> None:
+    from llmctl.services.sessions import AmbiguousSessionError
+
+    def boom(self, selector):
+        raise AmbiguousSessionError("prefix 01 matches 2 sessions")
+
+    monkeypatch.setattr(cli, "_is_live_session", lambda selector: True)
+    monkeypatch.setattr(cli.SessionService, "get_session", boom)
+    res = _stop(monkeypatch, _state(), "01", *extra)
+    assert res.exit_code == 1, res.output
+    assert "Stop refused" in res.output
+    assert spies == []
+
+
+def test_dry_run_of_a_known_but_not_serving_session(monkeypatch, spies) -> None:
+    from llmctl.schemas import Session
+
+    sess = Session(id="0123abcd-ffff", runtime="llama_cpp", port=8006, gpu_ids=[2], served_name="g")
+    monkeypatch.setattr(cli, "_is_live_session", lambda selector: False)
+    monkeypatch.setattr(cli.SessionService, "get_session", lambda self, s: sess)
+    res = _stop(monkeypatch, _state(), "0123abcd", "--dry-run")
+    assert res.exit_code == 0, res.output
+    assert "Would stop:" in res.output and "0123abcd" in res.output
+    assert spies == []
+
+
+def test_preview_lines_are_never_hard_wrapped(monkeypatch, spies) -> None:
+    """Rich used to break the line before the card number at 80 columns.
+
+    The fixture labels are short, so a 40-column console forces the same wrap.
+    """
+    monkeypatch.setattr(cli.console, "width", 40)
+    res = _stop(monkeypatch, _state(lanes=[STRATA, CODER]), "--all", "--dry-run")
+    assert res.exit_code == 0, res.output
+    lines = [ln for ln in res.output.splitlines() if ln.startswith("  ")]
+    assert lines and all("frees cards" in ln for ln in lines), res.output

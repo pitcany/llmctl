@@ -67,3 +67,81 @@ def test_one_line_per_row_and_no_wider_than_the_console():
         assert len(body) == len(KEYS), "\n".join(lines)
         assert all(len(line) <= width for line in lines)
         assert all(line.rstrip().endswith("│") for line in body)  # right edge not cropped
+
+
+# -- endpoints and gateway aliases ------------------------------------------
+
+
+def _lane_state(serving: bool = True) -> SwapState:
+    catalog = [
+        SwapTarget(
+            key="lane[x]",
+            kind="lane",
+            model="org/m[1]",
+            engine="llama.cpp",
+            upstream="http://127.0.0.1:8001",
+        ),
+        SwapTarget(key="sess", kind="session", model="s", engine="llama.cpp", upstream=""),
+    ]
+    return SwapState(
+        catalog=catalog,
+        serving={"lane[x]", "sess"} if serving else set(),
+        active_units=set(),
+        vllm_unit="v",
+        vllm_active=False,
+    )
+
+
+def _aliases():
+    from llmctl.services.gateway import AliasView
+
+    return [
+        AliasView("b", "t", "id", "org/m[1]", True),
+        AliasView("a", "t", "id", "org/m[1]", True),
+        AliasView("sick", "t", None, "org/m[1]", False),
+        AliasView("other", "t", "id", "zzz", True),
+    ]
+
+
+def test_rows_json_endpoint_and_aliases():
+    data = cli_swap.rows_json(_lane_state(), _aliases())
+    assert data[0]["endpoint"] == "http://127.0.0.1:8001/v1"
+    assert data[0]["aliases"] == ["local-a", "local-b"]
+    assert data[1]["endpoint"] is None and data[1]["aliases"] == []
+    idle = cli_swap.rows_json(_lane_state(False), _aliases())
+    assert idle[0]["aliases"] == []
+
+
+def test_render_endpoints_lines():
+    from llmctl.config import RouterSettings
+
+    c = Console(width=200, record=True)
+    cli_swap.render_endpoints(_lane_state(), c, _aliases(), RouterSettings())
+    lines = c.export_text().splitlines()
+    assert lines[0] == "lane[x] → http://127.0.0.1:8001/v1  (model org/m[1])"
+    r = RouterSettings()
+    assert lines[1] == f"  gateway: http://{r.host}:{r.port}/v1 as local-a, local-b"
+    assert len(lines) == 2
+
+
+def test_render_endpoints_silent_when_nothing_serving():
+    from llmctl.config import RouterSettings
+
+    c = Console(record=True)
+    cli_swap.render_endpoints(_lane_state(False), c, _aliases(), RouterSettings())
+    assert c.export_text() == ""
+
+
+def test_ls_survives_gateway_failure(monkeypatch):
+    def boom(self):
+        raise RuntimeError("db down")
+
+    from llmctl.services.gateway import GatewayService
+
+    monkeypatch.setattr(GatewayService, "alias_view", boom)
+    monkeypatch.setattr(cli, "gather_state", lambda settings: _lane_state())
+    assert cli_swap.gateway_aliases(cli.load_settings()) == []
+    res = CliRunner().invoke(cli.app, ["ls", "--json"])
+    assert res.exit_code == 0
+    assert all(r["aliases"] == [] for r in json.loads(res.stdout))
+    assert CliRunner().invoke(cli.app, ["ls"]).exit_code == 0

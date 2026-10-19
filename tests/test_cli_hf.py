@@ -157,3 +157,63 @@ def test_fit_says_unknown_or_error_when_it_cannot_judge(
     assert "unknown" in result.output  # no GPUs: no basis for "yes"
     assert "error" in result.output and "Gated repo" in result.output
     assert " yes " not in result.output
+
+
+LONG_ID = "Qwen/Qwen3.5-Coder-32B-Instruct-AWQ"
+
+
+def _long_candidates(query: str, limit: int = 10) -> list[Candidate]:
+    return [
+        Candidate(
+            model_id=LONG_ID,
+            downloads=1234,
+            likes=5,
+            tags=[],
+            pipeline_tag="text-generation",
+            score=9.5,
+            reasons=["family qwen", "quant awq matches the request exactly", "size fits"],
+        )
+    ]
+
+
+def test_search_table_keeps_ids_whole_and_rows_one_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rich.console import Console
+
+    monkeypatch.setattr(cli_hf, "search_models", _long_candidates)
+    monkeypatch.setattr(cli_hf, "console", Console(width=80, record=True))
+    cli_hf.search_cmd("q", limit=10, as_json=False)
+    lines = cli_hf.console.export_text().splitlines()
+    rows = [ln for ln in lines if LONG_ID in ln]
+    assert len(rows) == 1
+    assert "…" in rows[0]
+    assert "size fits" not in "\n".join(lines)
+
+
+def test_fit_table_keeps_ids_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rich.console import Console
+
+    monkeypatch.setattr(cli_hf, "search_models", _long_candidates)
+    monkeypatch.setattr(cli_hf, "console", Console(width=80, record=True))
+    cli_hf.fit_cmd("q", limit=5)
+    rows = [ln for ln in cli_hf.console.export_text().splitlines() if LONG_ID in ln]
+    assert len(rows) == 1
+
+
+def test_search_json(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    monkeypatch.setattr(cli_hf, "search_models", _long_candidates)
+    result = runner.invoke(app, ["hf", "search", "q", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert set(data[0]) == {"model_id", "score", "downloads", "likes", "task", "reasons"}
+    assert isinstance(data[0]["reasons"], list)
+
+
+def test_search_json_failure_exits_1(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(query: str, limit: int = 10) -> list[Candidate]:
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(cli_hf, "search_models", boom)
+    result = runner.invoke(app, ["hf", "search", "q", "--json"])
+    assert result.exit_code == 1
