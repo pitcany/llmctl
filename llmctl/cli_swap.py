@@ -43,12 +43,16 @@ from llmctl.services.session_swap import (
 )
 
 
-def render_table(state: SwapState, console: Console) -> None:
-    """Numbered swap list: model, engine, key, cards, state, last load time."""
+def render_table(state: SwapState, console: Console, *, command: str = "run") -> None:
+    """Numbered swap list: model, engine, key, cards, state, last load time.
+
+    ``command`` is the verb the caption suggests: the list is also the
+    `llmctl settings` picker, where "llmctl run NAME" would be the wrong hint.
+    """
     table = Table(
         title="Models you can run",
         title_justify="left",
-        caption="llmctl run NAME  (or: llmctl run)",
+        caption=f"llmctl {command} NAME  (or: llmctl {command})",
     )
     rows = [
         (
@@ -116,10 +120,11 @@ def pick(
 ) -> SwapTarget:
     """Show the list and ask for a number. TTY only; Enter cancels.
 
-    ``command`` names the verb in the non-TTY hint, so `llmctl settings` with
-    no NAME does not tell the user to type `llmctl run NAME`.
+    ``command`` names the verb in the caption and the non-TTY hint, so
+    `llmctl settings` with no NAME does not tell the user to type
+    `llmctl run NAME`.
     """
-    render_table(state, console)
+    render_table(state, console, command=command)
     if not sys.stdin.isatty():
         console.print(
             "[red]No model given[/red] and stdin is not a terminal. "

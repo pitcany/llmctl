@@ -336,6 +336,8 @@ def test_settings_without_name_off_a_terminal_lists_and_says_how(monkeypatch, tm
     assert res.exit_code == 2, res.output
     assert "Models you can run" in flat
     assert "llmctl settings NAME" in flat and "llmctl run NAME`" not in flat
+    assert "llmctl settings NAME (or: llmctl settings)" in flat  # the table caption
+    assert "llmctl run" not in flat
 
 
 def test_settings_without_name_on_a_terminal_picks_a_row(monkeypatch, tmp_path) -> None:
