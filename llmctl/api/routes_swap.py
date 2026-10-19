@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from llmctl.api.deps import get_settings, get_swap_jobs
 from llmctl.config import Settings
 from llmctl.services import stop_serving, swap_jobs, swap_view
-from llmctl.services.swap_jobs import JobBusy, SwapJobs
+from llmctl.services.swap_jobs import JobBusy, StopInProgress, SwapJobs
 
 router = APIRouter(prefix="/swap", tags=["swap"])
 
@@ -96,7 +96,13 @@ def run_swap(
     state = lanes.gather_state(settings)
     catalog = state.catalog
     target = lanes.resolve(body.name, catalog)
-    if target is None and body.name.isdecimal() and 1 <= int(body.name) <= len(catalog):
+    # The length cap keeps int() away from Python's 4300-digit limit (a 500).
+    if (
+        target is None
+        and body.name.isdecimal()
+        and len(body.name) <= 6
+        and 1 <= int(body.name) <= len(catalog)
+    ):
         target = catalog[int(body.name) - 1]
     if target is None:
         close = lanes.close_matches(body.name, catalog)[:3]
@@ -124,6 +130,8 @@ def run_swap(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Swap job {busy.job.job_id} is already running",
         ) from busy
+    except StopInProgress as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     response.status_code = status.HTTP_202_ACCEPTED
     return {**info, "job_id": job.job_id, "status": "running"}
 
@@ -172,12 +180,13 @@ def stop_swap(
     ]
     if body.dry_run:
         return {"items": shown, "results": [], "ok": True}
-    running = jobs.running()
-    if running is not None:
+    try:
+        with jobs.stopping():
+            outcome = stop_serving.stop_items(items, stop_serving.real_deps(settings))
+    except JobBusy as busy:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Swap job {running.job_id} is running",
-        )
-    outcome = stop_serving.stop_items(items, stop_serving.real_deps(settings))
+            detail=f"Swap job {busy.job.job_id} is running",
+        ) from busy
     results = [{"label": i.label, "ref": i.ref, "stopped": ok} for i, ok in outcome]
     return {"items": shown, "results": results, "ok": all(r["stopped"] for r in results)}

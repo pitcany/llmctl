@@ -164,3 +164,9 @@ def test_run_job_lifecycle_and_busy(tmp_path: Path) -> None:
     assert done["exit_code"] == 0
     assert done["output"] == ["hello"]
     assert seen == [[sys.executable, "-m", "llmctl.main", "run", "sess-b", "--yes"]]
+
+
+def test_a_huge_row_number_is_404_not_500(tmp_path: Path) -> None:
+    """int() refuses strings over 4300 digits; that must not become a 500."""
+    client, _ = _make(tmp_path)
+    assert _post(client, "9" * 5000).status_code == 404

@@ -14,7 +14,9 @@ import subprocess
 import sys
 import threading
 import uuid
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -64,7 +66,8 @@ class SwapJob:
     job_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     status: str = "running"
     exit_code: int | None = None
-    output: list[str] = field(default_factory=list)
+    # The tail, not the head: a swap's error and rollback lines come last.
+    output: deque[str] = field(default_factory=lambda: deque(maxlen=MAX_OUTPUT_LINES))
     started_at: datetime = field(default_factory=_now)
     finished_at: datetime | None = None
 
@@ -97,40 +100,76 @@ class JobBusy(Exception):
         self.job = job
 
 
+class StopInProgress(Exception):
+    """Raised when a swap is asked for while a stop is changing what serves."""
+
+
 class SwapJobs:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._jobs: dict[str, SwapJob] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._stopping = 0
 
     def start(self, name: str, model: str, argv: list[str]) -> SwapJob:
         with self._lock:
             for existing in self._jobs.values():
                 if existing.status == "running":
                     raise JobBusy(existing)
+            if self._stopping:
+                raise StopInProgress("a stop is in progress")
             job = SwapJob(name=name, model=model)
             self._jobs[job.job_id] = job
             thread = threading.Thread(target=self._run, args=(job, argv), daemon=True)
             self._threads[job.job_id] = thread
-        thread.start()
+        try:
+            thread.start()
+        except BaseException as exc:
+            # Left "running", the job would refuse every later swap until restart.
+            self._finish(job, None, f"error: could not start the swap thread: {exc}")
+            raise
         return job
+
+    @contextmanager
+    def stopping(self) -> Iterator[None]:
+        """Hold off new swaps while a stop runs; raise JobBusy if one is running.
+
+        The check and the hold happen under one lock, so a swap cannot start
+        between "nothing is running" and the stop itself.
+        """
+        with self._lock:
+            for existing in self._jobs.values():
+                if existing.status == "running":
+                    raise JobBusy(existing)
+            self._stopping += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._stopping -= 1
 
     def _run(self, job: SwapJob, argv: list[str]) -> None:
         def on_line(line: str) -> None:
             with self._lock:
-                if len(job.output) < MAX_OUTPUT_LINES:
-                    job.output.append(line)
+                job.output.append(line)
 
-        code: int | None
+        code: int | None = None
+        error: str | None = None
         try:
             code = swap_jobs.run_argv(argv, on_line)
-        except Exception as exc:  # noqa: BLE001 - surfaced in job output
-            code = None
-            on_line(f"error: {exc}")
+        except BaseException as exc:  # noqa: BLE001 - surfaced in job output
+            error = f"error: {exc}"
+        finally:
+            self._finish(job, code, error)
+
+    def _finish(self, job: SwapJob, code: int | None, error: str | None) -> None:
         with self._lock:
+            if error:
+                job.output.append(error)
             job.exit_code = code
-            job.status = "succeeded" if code == 0 else "failed"
             job.finished_at = _now()
+            # Last, so a reader that sees a final status also sees finished_at.
+            job.status = "succeeded" if code == 0 else "failed"
 
     def get(self, job_id: str) -> SwapJob | None:
         with self._lock:

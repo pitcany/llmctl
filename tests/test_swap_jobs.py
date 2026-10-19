@@ -37,7 +37,7 @@ def test_success(monkeypatch):
     job = jobs.start("n", "m", ["z"])
     jobs.wait(job.job_id, 5)
     assert job.status == "succeeded" and job.exit_code == 0
-    assert job.output == ["x", "y"] and job.finished_at is not None
+    assert list(job.output) == ["x", "y"] and job.finished_at is not None
     assert jobs.get(job.job_id) is job and jobs.running() is None
 
 
@@ -114,3 +114,49 @@ def test_run_argv_survives_invalid_utf8():
     )
     assert code == 0
     assert len(lines) == 1 and lines[0].startswith("a") and lines[0].endswith("b")
+
+
+def test_output_keeps_the_tail(monkeypatch):
+    """The error and rollback lines come last; the cap must not drop them."""
+    monkeypatch.setattr(swap_jobs, "MAX_OUTPUT_LINES", 3)
+
+    def fake(argv, on_line):
+        for n in range(10):
+            on_line(f"line {n}")
+        return 1
+
+    monkeypatch.setattr(swap_jobs, "run_argv", fake)
+    jobs = SwapJobs()
+    job = jobs.start("n", "m", ["z"])
+    jobs.wait(job.job_id, 5)
+    assert job.to_dict()["output"] == ["line 7", "line 8", "line 9"]
+
+
+def test_a_thread_that_will_not_start_does_not_block_later_swaps(monkeypatch):
+    def refuse(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", refuse)
+    jobs = SwapJobs()
+    with pytest.raises(RuntimeError):
+        jobs.start("n", "m", ["z"])
+    assert jobs.running() is None
+    (job,) = jobs._jobs.values()
+    assert job.status == "failed" and "can't start" in job.output[-1]
+
+
+def test_a_stop_holds_off_new_swaps_and_refuses_while_one_runs(monkeypatch):
+    gate = threading.Event()
+    monkeypatch.setattr(swap_jobs, "run_argv", lambda argv, on_line: gate.wait(5) and 0)
+    jobs = SwapJobs()
+    with jobs.stopping():
+        with pytest.raises(swap_jobs.StopInProgress):
+            jobs.start("n", "m", ["z"])
+    job = jobs.start("n", "m", ["z"])  # free again once the stop is done
+    try:
+        with pytest.raises(JobBusy), jobs.stopping():
+            pass
+    finally:
+        gate.set()
+    jobs.wait(job.job_id, 5)
+    assert job.status == "succeeded"
