@@ -212,14 +212,9 @@ def _serving_endpoint(state: SwapState, target: SwapTarget) -> str | None:
     if target.kind == "lane":
         return f"{target.upstream}/v1" if target.upstream else None
     if target.kind == "session":
-        port = target.port
-        for s in state.gpu_sessions:
-            if s.name != target.key:
-                continue
-            if getattr(s, "endpoint_url", None):
-                return str(s.endpoint_url)
-            port = getattr(s, "port", None) or port
-            break
+        # The running process's own port wins over the one its profile pins.
+        port = next((s.port for s in state.gpu_sessions if s.name == target.key), None)
+        port = port or target.port
         if port:
             return f"http://127.0.0.1:{port}/v1"
     return None

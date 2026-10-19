@@ -882,7 +882,9 @@ def stop(
         raise typer.Exit(1)
     console.print("Would stop:")
     for item in items:
-        console.print(escape(preview_line(item)))
+        # soft_wrap: one logical line per item. Rich's own wrapping put the
+        # card number alone on the next line at 80 columns.
+        console.print(escape(preview_line(item)), soft_wrap=True)
     if dry_run:
         return
     _confirm_state_change(
@@ -903,6 +905,7 @@ def stop(
 
 def _preview_session_stop(selector: str) -> None:
     """Print the 'Would stop:' line for one session; change nothing."""
+    from llmctl.services.lanes import format_gpus
     from llmctl.services.session_swap import GpuSession
 
     refused: AdoptError | None = None
@@ -928,8 +931,8 @@ def _preview_session_stop(selector: str) -> None:
     ).label()
     line = f"  {escape(label)} (session {escape(sid[:8])})"
     if session.gpu_ids:
-        line += f" — frees cards {', '.join(str(g) for g in session.gpu_ids)}"
-    console.print(line)
+        line += f" — frees cards {format_gpus(frozenset(session.gpu_ids))}"
+    console.print(line, soft_wrap=True)
 
 
 def _is_live_session(selector: str) -> bool:

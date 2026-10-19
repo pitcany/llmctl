@@ -155,10 +155,12 @@ class _Rec:
 
 
 class _Sess:
-    def __init__(self, name, endpoint_url):
+    """Shaped like services.session_swap.GpuSession (no endpoint_url field)."""
+
+    def __init__(self, name, port):
         self.name = name
-        self.endpoint_url = endpoint_url
-        self.gpu_ids = [0]
+        self.port = port
+        self.gpu_ids = (0,)
 
     def label(self):
         return self.name
@@ -186,8 +188,8 @@ def test_serving_lane_says_where_it_answers():
     assert any(f"{target.upstream}/v1" in line for line in con.out)
 
 
-def test_serving_session_uses_endpoint_url():
-    st = _session_state([_Sess("gemma", "http://127.0.0.1:9000/v1")])
+def test_serving_session_port_beats_the_profile_port():
+    st = _session_state([_Sess("gemma", 9000)])
     con = _Rec()
     assert cli_swap.print_preview(st, _session_target(port=8080), con) is False
     assert any("http://127.0.0.1:9000/v1" in line for line in con.out)

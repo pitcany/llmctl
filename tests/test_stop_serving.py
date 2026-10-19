@@ -235,7 +235,8 @@ def test_dry_run_of_a_live_session(monkeypatch, spies) -> None:
     res = _stop(monkeypatch, _state(), "0123abcd", "--dry-run")
     out = " ".join(res.output.split())
     assert res.exit_code == 0, res.output
-    assert "Would stop:" in out and "glm" in out and "0123abcd" in out and "0, 1" in out
+    assert "Would stop:" in out and "glm" in out and "0123abcd" in out
+    assert "frees cards 0+1" in out  # the `ls` Cards notation, like lanes
     assert spies == []
 
 
@@ -273,3 +274,15 @@ def test_dry_run_of_a_known_but_not_serving_session(monkeypatch, spies) -> None:
     assert res.exit_code == 0, res.output
     assert "Would stop:" in res.output and "0123abcd" in res.output
     assert spies == []
+
+
+def test_preview_lines_are_never_hard_wrapped(monkeypatch, spies) -> None:
+    """Rich used to break the line before the card number at 80 columns.
+
+    The fixture labels are short, so a 40-column console forces the same wrap.
+    """
+    monkeypatch.setattr(cli.console, "width", 40)
+    res = _stop(monkeypatch, _state(lanes=[STRATA, CODER]), "--all", "--dry-run")
+    assert res.exit_code == 0, res.output
+    lines = [ln for ln in res.output.splitlines() if ln.startswith("  ")]
+    assert lines and all("frees cards" in ln for ln in lines), res.output

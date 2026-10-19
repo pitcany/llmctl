@@ -46,12 +46,24 @@ def whole_id_table(
     widths = []
     for i, header in enumerate(headers):
         is_markup = header in markup
-        widths.append(
-            max([cell_len(header)] + [_plain_len(row[i], is_markup) for row in rows])
-        )
-    chrome = 3 * len(headers) + 1  # a border and two padding cells per column
+        widths.append(max([cell_len(header)] + [_plain_len(row[i], is_markup) for row in rows]))
     desc = [i for i, h in enumerate(headers) if h not in ids]
-    leftover = console.width - chrome - sum(w for i, w in enumerate(widths) if i not in desc)
+    # Rich squeezes *every* column, identifiers included, once a table is wider
+    # than the console. When the descriptive columns cannot each keep a few
+    # cells, drop them from the right instead: `--json` still has them all.
+    cols = list(range(len(headers)))
+
+    def leftover_for(kept: list[int]) -> int:
+        chrome = 3 * len(kept) + 1  # a border and two padding cells per column
+        return console.width - chrome - sum(widths[i] for i in kept if i not in desc)
+
+    while True:
+        kept_desc = [i for i in cols if i in desc]
+        if not kept_desc or leftover_for(cols) >= 4 * len(kept_desc):
+            break
+        cols.remove(kept_desc[-1])
+    desc = [i for i in desc if i in cols]
+    leftover = leftover_for(cols)
     # Share the leftover out: narrow descriptive columns keep their natural
     # width, and the rest split what remains.
     limits: dict[int, int] = {}
@@ -60,7 +72,8 @@ def whole_id_table(
         fair = max(4, leftover // (len(pending) - n))
         limits[i] = min(widths[i], fair)
         leftover -= limits[i]
-    for i, header in enumerate(headers):
+    for i in cols:
+        header = headers[i]
         kwargs: dict[str, object] = {"justify": justify.get(header, "left")}
         if header in styles:
             kwargs["style"] = styles[header]
@@ -71,7 +84,5 @@ def whole_id_table(
         else:
             table.add_column(header, no_wrap=True, min_width=widths[i], **kwargs)
     for row in rows:
-        table.add_row(
-            *(cell if h in markup else escape(cell) for h, cell in zip(headers, row, strict=True))
-        )
+        table.add_row(*(row[i] if headers[i] in markup else escape(row[i]) for i in cols))
     return table

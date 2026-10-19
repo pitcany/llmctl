@@ -16,9 +16,7 @@ def _render(table, width: int = 80) -> list[str]:
 def test_identifier_whole_and_description_ellipsised() -> None:
     ident = "k" * 40
     console = Console(width=80)
-    table = whole_id_table(
-        console, ("Name", "Desc"), [(ident, "d" * 200)], ids={"Name"}
-    )
+    table = whole_id_table(console, ("Name", "Desc"), [(ident, "d" * 200)], ids={"Name"})
     lines = _render(table)
     data = [ln for ln in lines if ident in ln]
     assert len(data) == 1
@@ -40,3 +38,16 @@ def test_markup_opt_in() -> None:
     )
     out = "\n".join(_render(table))
     assert "up" in out and "[green]" not in out
+
+
+def test_narrow_console_drops_descriptions_not_identifier_characters() -> None:
+    """Rich squeezes every column once a table is too wide; identifiers must not pay."""
+    a, b = "alias-" + "a" * 24, "target-" + "t" * 23  # 30 cells each
+    headers = ("A", "B", "Why", "Status")
+    rows = [(a, b, "w" * 40, "s" * 20)]
+    console = Console(width=72)  # ids + chrome fit; ids + 2 descriptions x 4 do not
+    lines = _render(whole_id_table(console, headers, rows, ids={"A", "B"}), width=72)
+    data = [ln for ln in lines if a in ln]
+    assert len(data) == 1 and b in data[0], "\n".join(lines)
+    assert "Status" not in "\n".join(lines)  # the rightmost description went first
+    assert all(len(ln) <= 72 for ln in lines)
