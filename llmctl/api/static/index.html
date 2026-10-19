@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llmctl swap</title>
+<link rel="stylesheet" href="/ui/app.css">
+<script src="/ui/app.js" defer></script>
+</head>
+<body>
+<header>
+  <h1>llmctl swap</h1>
+</header>
+<main>
+  <div id="error-area" role="alert" hidden></div>
+
+  <form id="token-form" hidden>
+    <label for="token-input">API token</label>
+    <input id="token-input" type="password" autocomplete="off">
+    <button id="token-save" type="submit">Save token</button>
+    <button id="token-clear" type="button">Clear</button>
+  </form>
+
+  <section id="serving-box" aria-label="Currently serving">
+    <h2>Serving</h2>
+    <div id="serving-summary"></div>
+    <button id="stop-all-btn" type="button">Stop all</button>
+  </section>
+
+  <section aria-label="Models">
+    <h2>Models</h2>
+    <button id="refresh-btn" type="button">Refresh</button>
+    <table id="rows-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Name</th>
+          <th>Status</th>
+          <th>GPUs</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="rows-body"></tbody>
+    </table>
+  </section>
+
+  <section id="confirm-panel" aria-label="Confirm" hidden>
+    <h2>Confirm</h2>
+    <div id="confirm-body"></div>
+    <button id="confirm-run-btn" type="button">Run</button>
+    <button id="confirm-cancel-btn" type="button">Cancel</button>
+  </section>
+
+  <section id="job-panel" aria-label="Job" hidden>
+    <h2>Job</h2>
+    <div id="job-status"></div>
+    <pre id="job-log"></pre>
+  </section>
+</main>
+</body>
+</html>

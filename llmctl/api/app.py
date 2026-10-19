@@ -18,6 +18,7 @@ from llmctl.api import (
     routes_profiles,
     routes_sessions,
     routes_swap,
+    routes_ui,
 )
 from llmctl.api.deps import get_db_session, get_settings, get_swap_jobs
 from llmctl.config import Settings, load_settings, resolve_api_auth_token
@@ -27,9 +28,13 @@ from llmctl.services.swap_jobs import SwapJobs
 
 #: Paths that stay reachable without a bearer token when
 #: ``scheduler.require_auth_token`` is on: liveness probing plus the
-#: interactive API docs. Everything else (including /doctor, which leaks
-#: host configuration) demands the token.
-AUTH_EXEMPT_PATHS = frozenset({"/health", "/docs", "/redoc", "/openapi.json"})
+#: interactive API docs, plus the static dashboard shell (/, /ui and its JS/CSS;
+#: no data, the page asks the user for a token and sends it on its /swap calls).
+#: Everything else (including /doctor, which leaks host configuration)
+#: demands the token.
+AUTH_EXEMPT_PATHS = frozenset(
+    {"/health", "/docs", "/redoc", "/openapi.json", "/", "/ui", "/ui/app.js", "/ui/app.css"}
+)
 
 
 def create_app(settings: Settings | None = None, database_url: str | None = None) -> FastAPI:
@@ -138,6 +143,7 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
     app.include_router(routes_gpu.router)
     app.include_router(routes_benchmarks.router)
     app.include_router(routes_swap.router)
+    app.include_router(routes_ui.router)
     return app
 
 
