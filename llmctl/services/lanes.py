@@ -20,6 +20,7 @@ footprint.
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import time
@@ -244,6 +245,12 @@ def resolve(wanted: str, catalog: list[SwapTarget]) -> SwapTarget | None:
         if row.matches(wanted):
             return row
     return None
+
+
+def close_matches(wanted: str, catalog: list[SwapTarget], n: int = 3) -> list[str]:
+    """Up to ``n`` catalog keys or served models that look like ``wanted``, best first."""
+    names = list(dict.fromkeys(name for row in catalog for name in (row.key, row.model) if name))
+    return difflib.get_close_matches(wanted, names, n=n)
 
 
 def user_unit_text(unit: str) -> str:

@@ -34,7 +34,13 @@ from llmctl.schemas import (
     SessionStartRequest,
 )
 from llmctl.services.benchmarks import BenchmarkService
-from llmctl.services.lanes import SwapTarget, gather_state, record_load, resolve
+from llmctl.services.lanes import (
+    SwapTarget,
+    close_matches,
+    gather_state,
+    record_load,
+    resolve,
+)
 from llmctl.services.preset_loader import load_preset_views
 from llmctl.services.registry import RegistryService
 from llmctl.services.sessions import AdoptError, SessionService
@@ -1235,9 +1241,13 @@ def health(json_out: _JSON_OPT = False) -> None:
         if sessions:
             labels = []
             for s in sessions:
-                label = s["served_name"] or s["endpoint_url"] or (s["id"] or "")[:8]
-                # Started outside llmctl: real, but not ours to stop or track.
-                if not s.get("managed", True):
+                label = escape(
+                    str(s["served_name"] or s["endpoint_url"] or (s["id"] or "")[:8])
+                )
+                if s.get("lane"):
+                    label = f"{label} (lane {escape(str(s['lane']))})"
+                elif not s.get("managed", True):
+                    # Started outside llmctl: real, but not ours to stop or track.
                     label = f"{label} (unmanaged)"
                 labels.append(label)
             serving = f"[green]{', '.join(labels)}[/green]"
@@ -1936,6 +1946,16 @@ def vllm_cmd(
         cli_swap.render_table(state, console)
         return
     target = cli_swap.pick(state, console) if preset is None else resolve(preset, state.catalog)
+    if target is None and preset is not None and preset.isdecimal():
+        # `llmctl ls` numbers its rows; an exact key/model/alias already won above.
+        number = int(preset)
+        if not 1 <= number <= len(state.catalog):
+            console.print(
+                f"[red]No row {escape(preset)}.[/red] Pick a number in "
+                f"1-{len(state.catalog)}, or run `llmctl ls` to see what you can run."
+            )
+            raise typer.Exit(2)
+        target = state.catalog[number - 1]
     if target is None and preset is not None:
         # Not a preset or lane: maybe a registered model of another engine.
         routed = _swap_registry_model(
@@ -2000,10 +2020,14 @@ def vllm_cmd(
             options=options,
         )
     except UnknownPresetError as exc:
-        unknown = exc.args[0] if exc.args else preset
-        console.print(f"[red]Unknown preset:[/red] {escape(str(unknown))}")
+        # The exception text is a sentence ("unknown preset 'x'. Available: ..."),
+        # not the name, so suggest from what was typed.
+        console.print(f"[red]No model named '{escape(str(preset))}'.[/red]")
+        close = close_matches(str(preset), state.catalog)
+        if close:
+            console.print(f"Did you mean: {escape(', '.join(close))}?")
+        console.print("Run `llmctl ls` to see what you can run.")
         cli_swap.restore_lanes(stopped_lanes, console)
-        cli_swap.render_table(state, console)
         raise typer.Exit(2) from exc
     except MissingModelPathError as exc:
         console.print(f"[red]Refusing to start {escape(str(preset))}:[/red] {escape(str(exc))}")
@@ -2502,10 +2526,14 @@ def _register_strata_config(config: Path) -> None:
 
 
 @app.command("ls")
-def ls_cmd() -> None:
+def ls_cmd(json_out: _JSON_OPT = False) -> None:
     """List every model you can run and which one is serving now."""
     settings = load_settings()
-    cli_swap.render_table(gather_state(settings), console)
+    state = gather_state(settings)
+    if json_out:
+        _emit_json(cli_swap.rows_json(state))
+        return
+    cli_swap.render_table(state, console)
 
 
 @app.command("presets", hidden=True)
