@@ -194,3 +194,51 @@ def test_index_has_table_wrapper_and_no_style_attr() -> None:
     html = _read("index.html")
     assert re.search(r'class="table-wrap"\s*>\s*<table', html)
     assert "style=" not in html
+
+
+# -- app.js core scans ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"],
+)
+def test_app_js_has_no_html_injection_sinks(bad) -> None:
+    assert bad not in _read("app.js")
+
+
+def test_app_js_uses_session_storage_only() -> None:
+    js = _read("app.js")
+    assert "sessionStorage" in js
+    assert "localStorage" not in js
+
+
+def test_app_js_fetches_relative_swap_paths_with_bearer() -> None:
+    js = _read("app.js")
+    assert "fetch(" in js
+    assert not re.search(r"https?://", js)
+    assert "'/swap" in js or '"/swap' in js
+    assert "Authorization" in js and "Bearer" in js
+    assert not re.search(r"fetch\(\s*[\"'](?!/swap)", js)
+
+
+def test_app_js_polling_clipboard_and_error_literals() -> None:
+    js = _read("app.js")
+    for needle in (
+        "visibilitychange",
+        "document.hidden",
+        "navigator.clipboard.writeText",
+        "llmctl API unreachable",
+    ):
+        assert needle in js
+
+
+def test_app_js_is_one_iife_with_commented_functions() -> None:
+    js = _read("app.js")
+    assert js.startswith("(function () {") and js.rstrip().endswith("})();")
+    assert '"use strict"' in js
+    lines = js.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"\s*(?:var \w+ = )?function\s*(\w*)\s*\(", line)
+        if m and m.group(1):
+            assert lines[i - 1].strip().startswith("//"), f"no comment: {line.strip()}"
