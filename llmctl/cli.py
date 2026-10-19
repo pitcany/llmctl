@@ -17,6 +17,7 @@ from sqlmodel import Session
 
 from llmctl import cli_swap
 from llmctl.api.app import create_app
+from llmctl.cli_tables import whole_id_table
 from llmctl.config import VLLM_ROLE, ManagedUnitConfig, Settings, load_settings, resolve_role
 from llmctl.db import (
     BenchmarkKind,
@@ -2757,7 +2758,7 @@ def router_status_cmd() -> None:
 
 
 @app.command("aliases", hidden=True)
-def aliases_cmd() -> None:
+def aliases_cmd(json_out: _JSON_OPT = False) -> None:
     """List configured router aliases and their resolved targets."""
     from llmctl.services.gateway import GatewayService
 
@@ -2765,28 +2766,51 @@ def aliases_cmd() -> None:
     with _session() as db:
         rows = GatewayService(db, settings).alias_view()
 
-    table = Table(title="Router aliases")
-    _id_column(table, "alias", style="cyan")
-    _id_column(table, "public id")
-    _id_column(table, "target")
-    _id_column(table, "session")
-    _id_column(table, "served name")
-    table.add_column("status")
-    for row in rows:
+    def _status(row: Any) -> str:
         if row.target is None:
-            status_text = "[red]unbound[/red]"
-        elif row.healthy:
-            status_text = "[green]healthy[/green]"
-        else:
-            status_text = "[yellow]bound, no active session[/yellow]"
-        table.add_row(
-            escape(str(row.name)),
-            f"local-{escape(str(row.name))}",
-            row.target or "-",
-            row.resolved_session_id or "-",
-            escape(str(row.resolved_served_name or "-")),
-            status_text,
+            return "unbound"
+        return "healthy" if row.healthy else "bound"
+
+    if json_out:
+        _emit_json(
+            [
+                {
+                    "name": row.name,
+                    "public_id": f"local-{row.name}",
+                    "target": row.target,
+                    "session_id": row.resolved_session_id,
+                    "served_name": row.resolved_served_name,
+                    "status": _status(row),
+                }
+                for row in rows
+            ]
         )
+        return
+
+    labels = {
+        "healthy": "[green]healthy[/green]",
+        "bound": "[yellow]bound, no active session[/yellow]",
+        "unbound": "[red]unbound[/red]",
+    }
+    table = whole_id_table(
+        console,
+        ("alias", "public id", "target", "session", "served name", "status"),
+        [
+            (
+                str(row.name),
+                f"local-{row.name}",
+                row.target or "-",
+                row.resolved_session_id[:8] if row.resolved_session_id else "-",
+                str(row.resolved_served_name or "-"),
+                labels[_status(row)],
+            )
+            for row in rows
+        ],
+        ids={"alias", "public id", "target", "session", "served name"},
+        title="Router aliases",
+        styles={"alias": "cyan"},
+        markup={"status"},
+    )
     console.print(table)
 
 
