@@ -97,7 +97,7 @@ holding the previous preset.
 | `llmctl runtimes inspect <rt>` | One runtime in detail, with capability flags |
 | `llmctl health` | Per-runtime health rollup (vLLM, llama.cpp, LM Studio, Ollama) |
 | `llmctl run NAME` | Serve anything: a preset, a lane, or any registered model (routed by engine). `NAME` can also be the row number (`#`) from `llmctl ls` |
-| `llmctl ls [--json]` | List models with row numbers, whole names at 80 columns; `--json` for machine-readable output |
+| `llmctl ls [--json]` | List models with row numbers, whole names at 80 columns; endpoint and gateway aliases are listed below the table and in `--json`. `--json` for machine-readable output |
 | `llmctl model add SOURCE` | Add a model for any engine: `qwen3:8b` (Ollama), `Qwen/Qwen3-8B` (vLLM), `org/X-GGUF:Q4_K_M` (llama.cpp), `lmstudio:KEY`, or a local path |
 | `llmctl model rm NAME [--purge]` | Remove it from llmctl; `--purge` also removes it from its engine (`ollama rm`, HF cache, files) |
 | `llmctl pull <tag>` | Ollama-only shortcut for `model add` (streaming progress; registers the model; exits 1 on failure) |
@@ -194,7 +194,7 @@ answer; the gateway does not route to a `degraded` session.
 | `llmctl sessions` | List sessions. Probes liveness first; `--no-fresh` skips the probe |
 | `llmctl scan` | Refresh discovery cache (vLLM HTTP probe + filesystem + Ollama API) |
 | `llmctl start MODEL_ID --profile NAME` | Scheduler-based launch (subprocess, not systemd) |
-| `llmctl stop SESSION` | Mark a session stopped (`--yes` skips the prompt). `--systemd/-s` stops its backing unit instead |
+| `llmctl stop [NAME] [--all] [--dry-run]` | Mark a session stopped (`--yes` skips the prompt). `--systemd/-s` stops its backing unit instead. `--dry-run` shows what would be stopped and stops nothing; a real stop shows the same preview first |
 | `llmctl restart SESSION` | Stop the process and relaunch it from the stored plan (`--yes` skips the prompt); exits 1 if the relaunch failed. `--systemd/-s` restarts its backing unit instead |
 | `llmctl plan MODEL_ID` | Print a launch plan without executing |
 | `llmctl cleanup [--remove-stale]` | Free ports + purge dead sessions and leftover dry-run plans |

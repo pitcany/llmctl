@@ -21,6 +21,15 @@
 - `llmctl settings` without NAME shows the `ls` list and asks which row (on a
   terminal), like `llmctl run`; it also takes the `#` from `llmctl ls`. A
   router lane says its settings live in its own script.
+- `llmctl ls` shows where each model answers: endpoint and gateway aliases
+  appear below the table and in `ls --json`. `llmctl run NAME` on a lane or
+  session that is already serving says where it answers instead of starting
+  it again.
+- `llmctl aliases` and `llmctl hf search` / `hf fit` print whole identifiers
+  (model ids, 8-character session prefixes), one line per row, and both take
+  `--json` (`aliases --json`, `hf search --json`).
+- `llmctl stop --dry-run` shows what would be stopped and stops nothing; a
+  real stop prints the same preview first.
 
 ## 0.3.0 — 2026-10-14
 
