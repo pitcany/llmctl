@@ -84,17 +84,25 @@
     );
   }
 
+  // Who put the current message up: "list" (the 5 s poll) or "action".
+  var errorSource = null;
+
   // Shows a message in the alert area.
-  function showError(message) {
+  function showError(message, source) {
     var area = $("error-area");
     area.textContent = message;
     area.hidden = false;
+    errorSource = source || "action";
   }
 
-  // Hides the alert area once things work again.
-  function clearError() {
-    showError("");
-    $("error-area").hidden = true;
+  // Hides the alert area. With a source, only that source's message goes, so a
+  // successful poll does not wipe a 409 from Run before anyone reads it.
+  function clearError(source) {
+    if (source && errorSource !== source) { return; }
+    var area = $("error-area");
+    area.textContent = "";
+    area.hidden = true;
+    errorSource = null;
   }
 
   // One shared promise, so concurrent 401s all resume on a single submit.
@@ -199,34 +207,20 @@
     head.appendChild(tr);
   }
 
-  // Builds the action cell: Run for every row, Stop for serving rows.
+  // Builds the action cell: Stop for a serving row, Run for the rest.
   function actionCell(row, serving) {
     var td = el("td", null, "actions");
-    td.appendChild(button("Run", function () { startRun(row.name); }, jobRunning));
     if (serving) {
       td.appendChild(button("Stop", function () { startStop({ name: row.name }); }, jobRunning));
+    } else {
+      td.appendChild(button("Run", function () { startRun(row.name); }, jobRunning));
     }
     return td;
   }
 
-  // Builds the "Name" cell; serving rows add endpoint and alias details below it.
-  function nameCell(row, serving, gatewayUrl) {
-    var td = el("td");
-    td.appendChild(el("div", row.name));
-    if (!serving) { return td; }
-    var details = el("div", null, "serving-details");
-    if (row.endpoint) { details.appendChild(copyLine("Endpoint", row.endpoint)); }
-    (row.aliases || []).forEach(function (alias) {
-      var line = copyLine("Alias", alias);
-      if (gatewayUrl) { line.appendChild(el("span", " via " + gatewayUrl, "alias-gateway")); }
-      details.appendChild(line);
-    });
-    td.appendChild(details);
-    return td;
-  }
-
-  // Redraws the table body from the /swap payload.
-  function renderRows(rows, gatewayUrl) {
+  // Redraws the table body from the /swap payload. Endpoints and aliases live
+  // in the Serving box only: repeating them here made serving rows four lines tall.
+  function renderRows(rows) {
     var body = $("rows-body");
     clear(body);
     rows.forEach(function (row) {
@@ -235,7 +229,7 @@
       tr.appendChild(el("td", row.number));
       tr.appendChild(el("td", row.model));
       tr.appendChild(el("td", row.engine));
-      tr.appendChild(nameCell(row, serving, gatewayUrl));
+      tr.appendChild(el("td", row.name, "ident"));
       tr.appendChild(el("td", cardsText(row.cards)));
       tr.appendChild(el("td", row.state));
       tr.appendChild(el("td", formatDuration(row.last_load_s)));
@@ -255,6 +249,10 @@
       item.appendChild(el("strong", row.name));
       item.appendChild(el("span", " (" + row.model + ", cards " + cardsText(row.cards) + ")"));
       if (row.endpoint) { item.appendChild(copyLine("Endpoint", row.endpoint)); }
+      // Like `llmctl ls`: the stable gateway names that reach this model.
+      (row.aliases || []).forEach(function (alias) {
+        item.appendChild(copyLine("Gateway name", alias));
+      });
       box.appendChild(item);
     });
     if (serving.length && gatewayUrl) { box.appendChild(copyLine("Gateway", gatewayUrl)); }
@@ -334,7 +332,7 @@
   function confirmStop(target) {
     apiWithAuth("POST", "/swap/stop", target).then(function (data) {
       var lines = (data.results || []).map(function (r) {
-        return r.label + ": stopped " + r.stopped;
+        return (r.stopped ? "Stopped " : "Could not stop ") + r.label;
       });
       openConfirm(lines, "", null);
       refresh();
@@ -405,9 +403,9 @@
     return apiWithAuth("GET", "/swap").then(
       function (data) {
         pollInFlight = false;
-        renderRows(data.rows || [], data.gateway_url);
+        renderRows(data.rows || []);
         renderServing(data.rows || [], data.gateway_url);
-        clearError();
+        clearError("list");
         if (data.job && jobId === null && data.job.job_id !== lastDoneId) {
           attachJob(data.job.job_id);
         }
@@ -415,7 +413,7 @@
       },
       function (err) {
         pollInFlight = false;
-        showError(err.message);
+        showError(err.message, "list");
         if (refreshQueued) { refreshQueued = false; refresh(); }
       }
     );

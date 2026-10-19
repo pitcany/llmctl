@@ -53,7 +53,7 @@ body {
 
 main,
 header {
-  max-width: 60rem;
+  max-width: 80rem; /* the seven ls columns plus Action fit a laptop screen */
   margin: 0 auto;
 }
 
@@ -171,10 +171,47 @@ td {
   border-bottom: 1px solid var(--border);
 }
 
+/* No cell wraps: words split mid-word ("servin g") otherwise. The table
+   grows instead and .table-wrap scrolls it sideways on a phone. */
+th,
+td {
+  white-space: nowrap;
+}
+
 th {
   color: var(--muted);
   font-weight: 600;
+}
+
+td.actions button {
+  padding: 0.2rem 0.7rem;
+}
+
+.serving-item {
+  margin: 0 0 0.6rem;
+}
+
+.copy-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+}
+
+.copy-line code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   white-space: nowrap;
+}
+
+.copy-line button {
+  padding: 0 0.5rem;
+  font-size: 0.8rem;
+  background: transparent;
+  color: var(--accent);
+}
+
+#stop-all-btn {
+  margin-top: 0.25rem;
 }
 
 td.ident,
