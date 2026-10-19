@@ -833,6 +833,10 @@ def stop(
         ),
     ] = False,
     all_: Annotated[bool, typer.Option("--all", help="Stop everything that is serving.")] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show what would be stopped; stop nothing."),
+    ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
 ) -> None:
     """Stop what is serving: the vLLM unit, a lane, or a model llmctl started.
@@ -843,11 +847,17 @@ def stop(
     """
     settings = load_settings()
     if target is not None and not all_ and _is_live_session(target):
-        _stop_session(target, systemd=systemd, yes=yes, settings=settings)
+        _stop_session(target, systemd=systemd, yes=yes, settings=settings, dry_run=dry_run)
         return
     if systemd:
         raise typer.BadParameter("--systemd applies to a session ID (see `llmctl sessions`)")
-    from llmctl.services.stop_serving import pick, real_deps, serving_now, stop_items
+    from llmctl.services.stop_serving import (
+        pick,
+        preview_line,
+        real_deps,
+        serving_now,
+        stop_items,
+    )
 
     items = serving_now(gather_state(settings))
     if target is not None:
@@ -856,7 +866,7 @@ def stop(
             with _session() as db:
                 known = SessionService(db).get_session(target) is not None
             if known:  # a session that is not serving: keep the old behaviour
-                _stop_session(target, systemd=False, yes=yes, settings=settings)
+                _stop_session(target, systemd=False, yes=yes, settings=settings, dry_run=dry_run)
                 return
             raise typer.BadParameter(
                 f"Nothing serving is called {target}. `llmctl ls` shows what serves."
@@ -870,6 +880,11 @@ def stop(
             console.print(f"  - {escape(item.label)}")
         console.print("Stop one: llmctl stop NAME   ·   stop all: llmctl stop --all")
         raise typer.Exit(1)
+    console.print("Would stop:")
+    for item in items:
+        console.print(escape(preview_line(item)))
+    if dry_run:
+        return
     _confirm_state_change(
         "Stop " + "; ".join(item.label for item in items),
         required=settings.scheduler.require_confirmation_for_stop,
@@ -886,6 +901,37 @@ def stop(
         raise typer.Exit(1)
 
 
+def _preview_session_stop(selector: str) -> None:
+    """Print the 'Would stop:' line for one session; change nothing."""
+    from llmctl.services.session_swap import GpuSession
+
+    refused: AdoptError | None = None
+    session = None
+    with _session() as db:
+        try:
+            session = SessionService(db).get_session(selector)
+        except AdoptError as exc:
+            refused = exc
+    if refused is not None:
+        console.print(f"[red]Stop refused:[/red] {escape(str(refused))}")
+        raise typer.Exit(1) from refused
+    if session is None:
+        console.print(escape(f"  session {selector}"))
+        return
+    sid = session.id or selector
+    label = GpuSession(
+        id=sid,
+        name=session.served_name or session.model_id or sid[:8],
+        runtime=str(getattr(session.runtime, "value", session.runtime)),
+        port=session.port,
+        gpu_ids=tuple(session.gpu_ids),
+    ).label()
+    line = f"  {escape(label)} (session {escape(sid[:8])})"
+    if session.gpu_ids:
+        line += f" — frees cards {', '.join(str(g) for g in session.gpu_ids)}"
+    console.print(line)
+
+
 def _is_live_session(selector: str) -> bool:
     """Whether ``selector`` names a session that is running (or ambiguous)."""
     from llmctl.services.sessions import AmbiguousSessionError
@@ -898,8 +944,14 @@ def _is_live_session(selector: str) -> bool:
     return session is not None and session.status.value != "stopped"
 
 
-def _stop_session(session_id: str, *, systemd: bool, yes: bool, settings: Any) -> None:
+def _stop_session(
+    session_id: str, *, systemd: bool, yes: bool, settings: Any, dry_run: bool = False
+) -> None:
     """Stop one session by ID (the original `llmctl stop ID`)."""
+    console.print("Would stop:")
+    _preview_session_stop(session_id)
+    if dry_run:
+        return
     _confirm_state_change(
         f"Stop session {session_id}" + (" and its systemd unit" if systemd else ""),
         required=settings.scheduler.require_confirmation_for_stop,
