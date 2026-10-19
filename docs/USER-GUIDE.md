@@ -362,6 +362,32 @@ Jobs live in memory and are lost when `llmctl serve` restarts. Only one run job
 runs at a time. Output is not streamed: clients poll `GET /swap/jobs/{id}`
 until the job finishes.
 
+### Web dashboard
+
+```bash
+llmctl serve
+# Dashboard: http://127.0.0.1:8088/ui
+```
+
+Open the printed URL. The page is a browser front end for the swap API above:
+
+- **Models**: the `llmctl ls` table, refreshed every 5 s (paused while the tab
+  is hidden). On a phone the table scrolls sideways inside its box.
+- **Serving**: each serving model's endpoint and gateway names, with Copy
+  buttons, plus the gateway URL. Same facts as the lines under `llmctl ls`.
+- **Run / Stop / Stop all**: every action shows its dry run first ("stops: …",
+  "frees cards 1") and only acts on **Confirm**.
+- **Job**: a swap's output, polled every second, ending in "Ready" or
+  "Failed (exit N)". Reload the page during a swap and it picks the job up
+  again; Run and Stop stay disabled until it finishes.
+
+**Token.** When `scheduler.require_auth_token` is on, the first request gets a
+401 and the page asks for the token. It is kept in this tab's
+`sessionStorage` only, so a new tab or window asks again. The page itself
+(`/ui`, `/ui/app.js`, `/ui/app.css`) loads without a token; it holds no data.
+
+Swap jobs are lost when `llmctl serve` restarts, as with the API.
+
 ---
 
 ## TUI reference
