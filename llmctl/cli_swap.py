@@ -98,7 +98,32 @@ def render_table(state: SwapState, console: Console, *, command: str = "run") ->
     console.print(table)
 
 
-def rows_json(state: SwapState) -> list[dict[str, Any]]:
+def gateway_aliases(settings: Any) -> list[Any]:
+    """The gateway's alias views; best effort, ``[]`` when anything fails."""
+    try:
+        from sqlmodel import Session
+
+        from llmctl.db import get_engine, init_db
+        from llmctl.services.gateway import GatewayService
+
+        init_db(settings.database_url)
+        with Session(get_engine(settings.database_url)) as db:
+            return list(GatewayService(db, settings).alias_view())
+    except Exception:  # noqa: BLE001 - aliases are decoration on `ls`
+        return []
+
+
+def _aliases_for(row: SwapTarget, serving: bool, aliases: list[Any] | None) -> list[str]:
+    if not serving:
+        return []
+    return sorted(
+        f"local-{a.name}"
+        for a in aliases or []
+        if a.healthy and a.resolved_served_name == row.model
+    )
+
+
+def rows_json(state: SwapState, aliases: list[Any] | None = None) -> list[dict[str, Any]]:
     """The swap list as plain data, in catalog order (``llmctl ls --json``)."""
     return [
         {
@@ -110,9 +135,28 @@ def rows_json(state: SwapState) -> list[dict[str, Any]]:
             "cards": cards_label(row),
             "state": state.state_of(row),
             "last_load_s": last_load_s(row.key),
+            "endpoint": f"{row.upstream}/v1" if row.upstream else None,
+            "aliases": _aliases_for(row, state.state_of(row) == "serving", aliases),
         }
         for index, row in enumerate(state.catalog, start=1)
     ]
+
+
+def render_endpoints(
+    state: SwapState, console: Console, aliases: list[Any] | None, router: Any
+) -> None:
+    """Under the table: where each serving row answers, and its gateway ids."""
+    for row in state.catalog:
+        serving = state.state_of(row) == "serving"
+        if not serving or not row.upstream:
+            continue
+        console.print(
+            f"{escape(row.key)} → {escape(row.upstream + '/v1')}  (model {escape(row.model)})"
+        )
+        names = _aliases_for(row, True, aliases)
+        if names:
+            url = f"http://{router.host}:{router.port}/v1"
+            console.print(f"  gateway: {escape(url)} as {escape(', '.join(names))}")
 
 
 def pick(

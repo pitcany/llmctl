@@ -2507,10 +2507,12 @@ def ls_cmd(json_out: _JSON_OPT = False) -> None:
     """List every model you can run and which one is serving now."""
     settings = load_settings()
     state = gather_state(settings)
+    aliases = cli_swap.gateway_aliases(settings)
     if json_out:
-        _emit_json(cli_swap.rows_json(state))
+        _emit_json(cli_swap.rows_json(state, aliases))
         return
     cli_swap.render_table(state, console)
+    cli_swap.render_endpoints(state, console, aliases, settings.router)
 
 
 @app.command("presets", hidden=True)
