@@ -6,13 +6,14 @@ downloads and registers, `llmctl run` serves.
 
 from __future__ import annotations
 
+import json
 from typing import Annotated
 
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.table import Table
 
+from llmctl.cli_tables import whole_id_table
 from llmctl.hf.hardware import HardwareInfo, detect_hardware
 from llmctl.hf.inspect import inspect_model
 from llmctl.hf.parsing import parse_query
@@ -52,6 +53,9 @@ def register(app: typer.Typer) -> None:
 def search_cmd(
     query: Annotated[str, typer.Argument(help='What you want, e.g. "qwen coder 32b awq".')],
     limit: Annotated[int, typer.Option("--limit", "-n", help="Max candidates.")] = 10,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print only a JSON list of candidates.")
+    ] = False,
 ) -> None:
     """Search Hugging Face and rank the matches.
 
@@ -59,36 +63,63 @@ def search_cmd(
     (awq/gptq/fp8/gguf/bnb); the "Why" column shows what matched.
     """
     parsed = parse_query(query)
-    console.print(
-        f"[dim]parsed:[/] family={parsed.family} size={parsed.param_count_b} "
-        f"quant={parsed.quantization} keywords={escape(str(parsed.keywords))}"
-    )
+    if not as_json:
+        console.print(
+            f"[dim]parsed:[/] family={parsed.family} size={parsed.param_count_b} "
+            f"quant={parsed.quantization} keywords={escape(str(parsed.keywords))}"
+        )
     try:
         results = search_models(query, limit=limit)
     except Exception as exc:  # noqa: BLE001 - network / HF API errors
-        console.print(f"[red]Search failed:[/] {escape(str(exc))}")
+        if as_json:
+            typer.echo(f"Search failed: {exc}", err=True)
+        else:
+            console.print(f"[red]Search failed:[/] {escape(str(exc))}")
         raise typer.Exit(1) from exc
+    if as_json:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "model_id": c.model_id,
+                        "score": c.score,
+                        "downloads": c.downloads,
+                        "likes": c.likes,
+                        "task": c.pipeline_tag,
+                        "reasons": list(c.reasons),
+                    }
+                    for c in results
+                ]
+            )
+        )
+        if not results:
+            raise typer.Exit(1)
+        return
     if not results:
         console.print("[yellow]No matches.[/]")
         raise typer.Exit(1)
 
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Score", justify="right")
-    table.add_column("Model")
-    table.add_column("Downloads", justify="right")
-    table.add_column("Likes", justify="right")
-    table.add_column("Task")
-    table.add_column("Why")
-    for c in results:
-        table.add_row(
+    rows = [
+        (
             f"{c.score:.1f}",
-            escape(c.model_id),
+            c.model_id,
             f"{c.downloads:,}",
             f"{c.likes:,}",
-            escape(c.pipeline_tag or "-"),
-            escape(", ".join(c.reasons[:3]) or "-"),
+            c.pipeline_tag or "-",
+            ", ".join(c.reasons[:3]) or "-",
         )
-    console.print(table)
+        for c in results
+    ]
+    console.print(
+        whole_id_table(
+            console,
+            ("Score", "Model", "Downloads", "Likes", "Task", "Why"),
+            rows,
+            ids={"Model", "Score", "Downloads", "Likes"},
+            justify={"Score": "right", "Downloads": "right", "Likes": "right"},
+            styles={},
+        )
+    )
 
 
 @hf_app.command("inspect")
@@ -205,12 +236,7 @@ def fit_cmd(
         )
         raise typer.Exit(1)
 
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Model")
-    table.add_column("Score", justify="right")
-    table.add_column("Fits?", justify="center")
-    table.add_column("tp")
-    table.add_column("Notes")
+    rows = []
     for c in candidates:
         meta = inspect_model(c.model_id)
         p = build_plan(meta, hw)
@@ -224,7 +250,13 @@ def fit_cmd(
         else:
             fits = "yes" if p.vllm_supported and not oom else "risk"
             note = "; ".join(p.warnings[:1]) or (p.notes[0] if p.notes else "")
-        table.add_row(
-            escape(c.model_id), f"{c.score:.1f}", fits, str(p.tensor_parallel_size), escape(note)
+        rows.append((c.model_id, f"{c.score:.1f}", fits, str(p.tensor_parallel_size), note))
+    console.print(
+        whole_id_table(
+            console,
+            ("Model", "Score", "Fits?", "tp", "Notes"),
+            rows,
+            ids={"Model", "Score", "Fits?", "tp"},
+            justify={"Score": "right", "Fits?": "center"},
         )
-    console.print(table)
+    )
