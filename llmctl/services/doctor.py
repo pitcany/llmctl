@@ -25,6 +25,7 @@ from llmctl.db import (
     init_db,
     utcnow,
 )
+from llmctl.services.preset_loader import load_preset_views
 from llmctl.telemetry.process import is_pid_running
 
 _ACTIVE = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
@@ -311,6 +312,10 @@ def _check_orphan_discoveries(cfg: Settings) -> list[DoctorCheck]:
     the threshold has not been served by anything in that long.
     This warns and names the command; it never deletes, because "unseen" can
     also mean a machine that has been switched off.
+
+    A row whose name a preset on disk still serves (its ``served_name`` or
+    alias) is skipped: that is an opt-in lane nobody has loaded lately, not a
+    retired one, and ``model delete`` would be the wrong advice.
     """
     try:
         init_db(cfg.database_url)
@@ -325,7 +330,8 @@ def _check_orphan_discoveries(cfg: Settings) -> list[DoctorCheck]:
         return []  # storage check already reported the failure
     days = _orphan_discovery_days()
     cutoff = utcnow() - timedelta(days=days)
-    orphans = [r for r in records if _last_seen(r) < cutoff]
+    served = _preset_names()
+    orphans = [r for r in records if _last_seen(r) < cutoff and r.name not in served]
     if not orphans:
         return [
             DoctorCheck(
@@ -352,6 +358,15 @@ def _check_orphan_discoveries(cfg: Settings) -> list[DoctorCheck]:
             "off, bring it up and re-run `llmctl scan --import`.",
         )
     ]
+
+
+def _preset_names() -> set[str]:
+    """Served names and aliases of every preset on disk; empty if none load."""
+    try:
+        views = load_preset_views()
+    except Exception:
+        return set()  # a broken preset dir must not hide real orphans
+    return {v.served_name for v in views} | {v.alias for v in views}
 
 
 def _last_seen(record: ModelRecord) -> datetime:

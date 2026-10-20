@@ -242,6 +242,60 @@ def test_doctor_flags_orphan_discoveries(isolated_env) -> None:
     assert "llmctl model delete" in warnings["orphan-discoveries"]["remediation"]
 
 
+def test_doctor_skips_discoveries_a_preset_still_serves(isolated_env, monkeypatch) -> None:
+    """2026-10-20: an opt-in preset left unloaded for weeks is dormant, not orphaned."""
+    from datetime import timedelta
+
+    from sqlmodel import Session as DBSession
+
+    from llmctl.config import load_settings
+    from llmctl.db import (
+        ModelRecord,
+        ModelStatus,
+        RuntimeName,
+        get_engine,
+        init_db,
+        utcnow,
+    )
+    from llmctl.services import doctor
+    from llmctl.services.preset_loader import PresetView
+
+    view = PresetView(
+        alias="qwen27b-uncensored",
+        served_name="qwen3.8-27b-uncensored",
+        model_id="org/Qwen3.8-27B-Uncensored-FP8",
+        family=None,
+        param_count_b=None,
+        tensor_parallel=2,
+        quantization="fp8",
+        source_path=None,
+    )
+    monkeypatch.setattr(doctor, "load_preset_views", lambda: [view])
+
+    settings = load_settings()
+    init_db(settings.database_url)
+    with DBSession(get_engine(settings.database_url)) as db:
+        for name in ("qwen3.8-27b-uncensored", "ghost-model"):
+            db.add(
+                ModelRecord(
+                    name=name,
+                    runtime=RuntimeName.VLLM,
+                    source=name,
+                    host="yannik-desktop",
+                    status=ModelStatus.DISCOVERED,
+                    updated_at=utcnow() - timedelta(days=90),
+                )
+            )
+        db.commit()
+
+    report = doctor.run_doctor(settings)
+    warnings = {c["name"]: c for c in report["warnings"]}
+    detail = warnings["orphan-discoveries"]["detail"]
+    assert "ghost-model" in detail
+    assert "qwen3.8-27b-uncensored" not in detail
+    assert detail.startswith("1 discovered model(s)")
+
+
 def test_orphan_threshold_env_override(isolated_env, monkeypatch) -> None:
     """LLMCTL_ORPHAN_DISCOVERY_DAYS tightens the window; junk values fall back."""
     from llmctl.services.doctor import (
