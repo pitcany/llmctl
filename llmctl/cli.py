@@ -1610,10 +1610,15 @@ def serve(
             "Set api.auth_token in settings.yaml or export LLMCTL_API_TOKEN."
         )
 
+    bind_port = port or settings.api.port
+    shown = "127.0.0.1" if bind_host in ("0.0.0.0", "::") else bind_host
+    if ":" in shown:
+        shown = f"[{shown}]"
+    typer.echo(f"Dashboard: http://{shown}:{bind_port}/ui")
     uvicorn.run(
         create_app(settings),
         host=bind_host,
-        port=port or settings.api.port,
+        port=bind_port,
     )
 
 
