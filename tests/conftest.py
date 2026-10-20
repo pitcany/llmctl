@@ -53,3 +53,15 @@ def _no_live_registry(monkeypatch, tmp_path) -> None:
     Tests that need a specific database still set ``LLMCTL_DB_URL``."""
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.delenv("LLMCTL_DB_URL", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_settings(monkeypatch, tmp_path) -> None:
+    """Every test starts from default settings, not the developer's
+    ``~/.config/llmctl/settings.yaml``. With ``scheduler.require_auth_token``
+    on there, each ``create_app()`` test got 503 "no token configured" on the
+    workstation while CI (no settings file) stayed green. Only the default
+    location moves (``XDG_CONFIG_HOME``), so tests that pass a path or set
+    ``LLMCTL_CONFIG_DIR`` themselves still get theirs."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("LLMCTL_API_TOKEN", raising=False)
