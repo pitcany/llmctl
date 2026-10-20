@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `llmctl generate-systemd` / `install-systemd` and the session units' `llmctl
+  start` fallback write an absolute `ExecStart` (the venv's `bin/llmctl`, or
+  `<python> -m llmctl.main`). A bare `llmctl` failed under systemd, which does
+  not search `~/.local/bin` or a venv.
 - Web dashboard: `llmctl serve` prints `Dashboard: http://127.0.0.1:8088/ui`.
   The page shows the `llmctl ls` table, what is serving (endpoints, gateway
   names, Copy buttons), and Run/Stop buttons that preview first (the dry run)

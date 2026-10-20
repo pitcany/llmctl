@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shlex
 from pathlib import Path
 
 import httpx
@@ -286,12 +288,36 @@ def test_benchmark_delete_missing_returns_false(db: Session) -> None:
 # -- systemd unit generation ------------------------------------------------
 
 
+def _exec_start(content: str) -> list[str]:
+    line = next(ln for ln in content.splitlines() if ln.startswith("ExecStart="))
+    return shlex.split(line.removeprefix("ExecStart="))
+
+
 def test_render_api_unit_contains_execstart() -> None:
     unit = render_api_unit(load_settings(), user=True)
     assert unit.name == "llm-mission-control.service"
-    assert "ExecStart=llmctl serve" in unit.content
+    argv = _exec_start(unit.content)
+    assert argv[argv.index("serve") :][:3] == ["serve", "--host", "127.0.0.1"]
     assert "WantedBy=default.target" in unit.content
     assert any("systemctl --user" in cmd for cmd in unit.install_commands())
+
+
+def test_execstart_is_an_absolute_runnable_path() -> None:
+    """systemd does not search ~/.local/bin or a venv: a bare `llmctl` fails
+    with "Executable path is not absolute"."""
+    argv = _exec_start(render_api_unit(load_settings(), user=True).content)
+    exe = Path(argv[0])
+    assert exe.is_absolute() and os.access(exe, os.X_OK), argv
+
+
+def test_without_a_console_script_it_runs_the_module(tmp_path, monkeypatch) -> None:
+    from llmctl.services import systemd
+
+    python = tmp_path / "bin" / "python"  # a bin/ with no llmctl script in it
+    python.parent.mkdir()
+    python.touch()
+    monkeypatch.setattr(systemd.sys, "executable", str(python))
+    assert systemd.llmctl_command() == [str(python), "-m", "llmctl.main"]
 
 
 def test_render_session_unit_process_runtime_embeds_command(
@@ -326,7 +352,8 @@ def test_render_session_unit_server_runtime_warns(db: Session) -> None:
     session = SessionService(db).start(request)
     unit = render_session_unit(session, user=True)
     assert any("daemon" in warning for warning in unit.warnings)
-    assert "llmctl start" in unit.content
+    argv = _exec_start(unit.content)
+    assert Path(argv[0]).is_absolute() and "start" in argv, argv
 
 
 def test_render_session_unit_refuses_adopted(db: Session) -> None:
@@ -451,7 +478,7 @@ def test_install_unit_writes_file(tmp_path: Path, monkeypatch) -> None:
     report = systemd.install_unit(unit, dry_run=False, enable=False)
     assert report.written is True
     assert target.exists()
-    assert "ExecStart=llmctl serve" in target.read_text()
+    assert "serve" in _exec_start(target.read_text())
 
 
 def test_benchmark_rerun_endpoint(tmp_path: Path) -> None:
