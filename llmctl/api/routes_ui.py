@@ -22,8 +22,8 @@ _MEDIA_TYPES = {
 }
 
 UI_CSP = (
-    "default-src 'none'; script-src 'self'; style-src 'self'; "
-    "connect-src 'self'; img-src 'self'; base-uri 'none'; "
+    "default-src 'self'; script-src 'self'; style-src 'self'; "
+    "connect-src 'self'; img-src 'self' data:; base-uri 'none'; "
     "form-action 'none'; frame-ancestors 'none'"
 )
 
