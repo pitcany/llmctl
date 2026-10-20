@@ -42,6 +42,9 @@ def _state(serving: set[str], active: set[str]) -> SwapState:
 def calls(monkeypatch):
     seen: dict[str, list] = {"lane": [], "vllm": [], "stop": [], "restore": []}
     monkeypatch.setattr(cli, "_confirm_state_change", lambda *a, **k: None)
+    # Never reach the live llm-router from the suite (2026-10-20: a run without this
+    # posted 20 real /admin/switch calls). Router-path tests re-enable it explicitly.
+    monkeypatch.setattr(cli_swap, "router_up", lambda url: False)
     monkeypatch.setattr(
         cli_swap,
         "swap_to_lane",
