@@ -169,6 +169,22 @@ class RouterSettings(BaseModel):
     reconcile_interval_s: int = 10
 
 
+class LaneSwitcherSettings(BaseModel):
+    """llm-router, the one engine that starts and stops desktop GPU lanes.
+
+    ``llmctl run`` asks it to switch (``POST /admin/switch``) when it is up, so
+    llmctl and request-driven swaps share one implementation and one set of
+    guards. ``llmctl run --direct`` keeps the in-process path.
+    """
+
+    enabled: bool = True
+    url: str = "http://127.0.0.1:4100"
+    #: systemd EnvironmentFile holding ROUTER_API_KEY (never logged).
+    env_file: Path | None = Path("~/.config/llm-router/env")
+    #: longest a switch may take: the big lanes declare health_timeout_s up to 1800.
+    timeout_s: float = 1900.0
+
+
 class RuntimeConfig(BaseModel):
     """Per-runtime connection and launch configuration.
 
@@ -469,6 +485,7 @@ class Settings(BaseModel):
     managed_units: ManagedUnitsConfig = Field(default_factory=ManagedUnitsConfig)
     vllm: VLLMConfig = Field(default_factory=VLLMConfig)
     router: RouterSettings = Field(default_factory=RouterSettings)
+    lane_switcher: LaneSwitcherSettings = Field(default_factory=LaneSwitcherSettings)
 
     def runtime_config(self, runtime: str) -> RuntimeConfig:
         """Return effective runtime config, merging defaults with YAML overrides.

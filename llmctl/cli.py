@@ -1930,6 +1930,13 @@ def vllm_cmd(
         ),
     ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+    direct: Annotated[
+        bool,
+        typer.Option(
+            "--direct",
+            help="Swap in-process instead of asking llm-router (the lane switcher) to do it.",
+        ),
+    ] = False,
     tp: Annotated[
         int | None,
         typer.Option("--tp", min=1, help="GPUs to split the model across (this run)."),
@@ -2014,6 +2021,13 @@ def vllm_cmd(
             required=settings.scheduler.require_confirmation_for_start,
             assume_yes=yes,
         )
+    # One switch engine (2026-10-20): llm-router starts and stops the GPU lanes.
+    # Per-run vLLM tuning (--tp/--max-len/--gpu-mem/--tq/--force/--no-wait) needs
+    # llmctl's own env render, so those keep the direct path.
+    tuned = bool(overrides) or tq or no_tq or force or no_wait
+    if not direct and not dry_run and target.kind in ("lane", "vllm") and not tuned:
+        if cli_swap.run_router_swap(state, target, console, settings):
+            return
     if target.kind == "session":
         cli_swap.run_session_swap(state, target, console, parameters=session_parameters)
         if save:

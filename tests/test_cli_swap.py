@@ -217,3 +217,78 @@ def test_serving_real_gpu_session_uses_its_own_port():
     con = _Rec()
     assert cli_swap.print_preview(st, _session_target(), con) is False
     assert any("http://127.0.0.1:9001/v1" in line for line in con.out)
+
+
+# --- one switch engine: llm-router does the swap when it is up (2026-10-20) ---------
+from llmctl.services.lane_switcher import RouterRefused, RouterSwitch  # noqa: E402
+
+
+def _router(monkeypatch, answer):
+    """llm-router is up with a key; `answer` is a RouterSwitch, None (404) or an exception."""
+    seen: list[tuple[str, bool]] = []
+    monkeypatch.setattr(cli_swap, "router_up", lambda url: True)
+    monkeypatch.setattr(cli_swap, "router_key", lambda env_file: "k")
+
+    def fake_switch(model, *, url, key, force, timeout_s):
+        seen.append((model, force))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(cli_swap, "switch_via_router", fake_switch)
+    return seen
+
+
+def test_lane_swap_goes_through_the_router(monkeypatch, calls):
+    seen = _router(
+        monkeypatch,
+        RouterSwitch("flash", "ft-model", "http://127.0.0.1:1919", True, False, "qwen3.8-27b"),
+    )
+    res = _run(monkeypatch, _state({"qwen3.8-27b"}, set()), "flash")
+    assert res.exit_code == 0, res.output
+    assert seen == [("ft-model", True)]
+    assert calls["lane"] == []  # llmctl did not swap on its own
+    assert "Ready" in res.output and "via llm-router" in res.output
+
+
+def test_vllm_preset_goes_through_the_router(monkeypatch, calls):
+    seen = _router(
+        monkeypatch,
+        RouterSwitch("qwen38", "qwen3.8-27b", "http://127.0.0.1:8003", True, False, "ft-model"),
+    )
+    res = _run(monkeypatch, _state({"flash"}, {"ft.service"}), "qwen3.8-27b")
+    assert res.exit_code == 0, res.output
+    assert seen == [("qwen3.8-27b", True)]
+    assert calls["stop"] == []  # no in-process stop of lanes either
+
+
+def test_router_refusal_ends_the_command_without_a_direct_swap(monkeypatch, calls):
+    _router(monkeypatch, RouterRefused("leased by mathlab", retry_after=120))
+    res = _run(monkeypatch, _state({"qwen3.8-27b"}, set()), "flash")
+    assert res.exit_code == 1
+    assert "refused" in res.output and "--direct" in res.output
+    assert calls["lane"] == []
+
+
+def test_unknown_to_router_falls_back_to_the_direct_path(monkeypatch, calls):
+    _router(monkeypatch, None)
+    res = _run(monkeypatch, _state({"qwen3.8-27b"}, set()), "flash")
+    assert res.exit_code == 0, res.output
+    assert calls["lane"] == ["flash"]
+
+
+def test_router_down_falls_back_to_the_direct_path(monkeypatch, calls):
+    monkeypatch.setattr(cli_swap, "router_up", lambda url: False)
+    monkeypatch.setattr(cli_swap, "router_key", lambda env_file: "k")
+    res = _run(monkeypatch, _state({"qwen3.8-27b"}, set()), "flash")
+    assert res.exit_code == 0, res.output
+    assert calls["lane"] == ["flash"]
+
+
+def test_direct_flag_skips_the_router(monkeypatch, calls):
+    seen = _router(
+        monkeypatch, RouterSwitch("flash", "ft-model", "http://127.0.0.1:1919", True, False, None)
+    )
+    res = _run(monkeypatch, _state({"qwen3.8-27b"}, set()), "flash", "--direct")
+    assert res.exit_code == 0, res.output
+    assert seen == [] and calls["lane"] == ["flash"]

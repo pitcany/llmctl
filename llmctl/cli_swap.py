@@ -9,9 +9,12 @@ is.
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import httpx
 import typer
 from rich.console import Console
 from rich.markup import escape
@@ -24,6 +27,12 @@ from llmctl.services.lane_swap import (
     restore_previous,
     stop_user_unit,
     swap_to_lane,
+)
+from llmctl.services.lane_switcher import (
+    RouterRefused,
+    router_key,
+    router_up,
+    switch_via_router,
 )
 from llmctl.services.lanes import (
     Lane,
@@ -283,6 +292,75 @@ def run_lane_swap(state: SwapState, target: SwapTarget, console: Console) -> Non
             "(commands printed above)"
         )
     raise typer.Exit(1)
+
+
+def run_router_swap(state: SwapState, target: SwapTarget, console: Console, settings: Any) -> bool:
+    """Swap through llm-router, the one lane switch engine.
+
+    Returns True when the swap was handled there (success, or a refusal that
+    ended the command). Returns False when llmctl must use its own path: the
+    switcher is disabled, down, has no key, or does not know the model.
+    """
+    cfg = settings.lane_switcher
+    if not cfg.enabled:
+        return False
+    key = router_key(Path(cfg.env_file).expanduser() if cfg.env_file else None)
+    if key is None:
+        console.print("[dim]llm-router key not found; swapping directly.[/dim]")
+        return False
+    if not router_up(cfg.url):
+        console.print(
+            f"[dim]llm-router not answering at {escape(cfg.url)}; swapping directly.[/dim]"
+        )
+        return False
+    sessions: list[Any] = []
+    if state.sessions_in_the_way(target):
+        sessions, error = pause_for_swap(
+            state, target, settings=settings, log=lambda m: console.print(escape(m))
+        )
+        if error:
+            console.print(f"[red]Swap failed:[/red] {escape(error)}")
+            restore_lanes(Paused(sessions=sessions), console)
+            raise typer.Exit(1)
+    console.print(
+        f"  via llm-router {escape(cfg.url)} (operator swap: cooldown and min-hold skipped)"
+    )
+    started = time.monotonic()
+    try:
+        result = switch_via_router(
+            target.model, url=cfg.url, key=key, force=True, timeout_s=cfg.timeout_s
+        )
+    except RouterRefused as exc:
+        console.print(f"[red]llm-router refused:[/red] {escape(str(exc))}")
+        if exc.retry_after:
+            console.print(f"  retry in {escape(format_duration(exc.retry_after))}")
+        console.print(f"  bypass the switcher: llmctl run {escape(target.key)} --direct")
+        if sessions:
+            restore_lanes(Paused(sessions=sessions), console)
+        raise typer.Exit(1) from exc
+    except httpx.HTTPError as exc:
+        console.print(f"[red]llm-router call failed:[/red] {escape(str(exc))}")
+        console.print("  the switch may still be running; check `llmctl status` before retrying")
+        raise typer.Exit(1) from exc
+    if result is None:
+        console.print(
+            f"[dim]llm-router does not know {escape(target.model)}; swapping directly.[/dim]"
+        )
+        if sessions:
+            restore_lanes(Paused(sessions=sessions), console)
+        return False
+    seconds = time.monotonic() - started
+    if result.already_active:
+        console.print(
+            f"[green]Already serving[/green] — {escape(result.served_model)} "
+            f"on {escape(result.upstream)}"
+        )
+    else:
+        console.print(
+            f"[green]Ready[/green] — {escape(result.served_model)} on {escape(result.upstream)} "
+            f"({format_duration(seconds)}; was {escape(result.previous or 'nothing')})"
+        )
+    return True
 
 
 def run_session_swap(
