@@ -396,6 +396,14 @@ def _check_drift(cfg: Settings) -> list[DoctorCheck]:
 
 def _check_gateway(cfg: Settings) -> list[DoctorCheck]:
     """Gateway reachability (informational — the gateway is optional)."""
+    if not cfg.router.enabled:
+        return [
+            DoctorCheck(
+                "gateway",
+                "pass",
+                "disabled (router.enabled: false); the LiteLLM front door on :4000 routes requests",
+            )
+        ]
     import httpx
 
     host = cfg.router.host if cfg.router.host not in ("0.0.0.0", "") else "127.0.0.1"

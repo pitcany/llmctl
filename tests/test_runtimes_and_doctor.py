@@ -254,3 +254,13 @@ def test_orphan_threshold_env_override(isolated_env, monkeypatch) -> None:
     for junk in ("", "abc", "0", "-3"):
         monkeypatch.setenv("LLMCTL_ORPHAN_DISCOVERY_DAYS", junk)
         assert _orphan_discovery_days() == _ORPHAN_DISCOVERY_DAYS_DEFAULT
+
+
+def test_doctor_gateway_check_passes_when_the_router_is_disabled(monkeypatch):
+    """2026-10-20: the :9000 gateway was switched off; doctor must not warn about it every run."""
+    from llmctl.config import Settings
+    from llmctl.services import doctor as doc
+
+    cfg = Settings.model_validate({"router": {"enabled": False, "port": 9}})
+    [check] = doc._check_gateway(cfg)
+    assert check.verdict == "pass" and "disabled" in check.detail
