@@ -382,8 +382,9 @@ Open the printed URL. The page is a browser front end for the swap API above:
   again; Run and Stop stay disabled until it finishes.
 
 **Token.** When `scheduler.require_auth_token` is on, the first request gets a
-401 and the page asks for the token. It is kept in this tab's
-`sessionStorage` only, so a new tab or window asks again. The page itself
+401 and the page asks for the token. It is kept in the browser's
+`localStorage`, so new tabs and restarts don't ask again; **Forget token**
+(top of the page) removes it from that browser. The page itself
 (`/ui`, `/ui/app.js`, `/ui/app.css`) loads without a token; it holds no data.
 
 Swap jobs are lost when `llmctl serve` restarts, as with the API.

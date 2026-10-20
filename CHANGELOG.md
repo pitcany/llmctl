@@ -7,8 +7,9 @@
   names, Copy buttons), and Run/Stop buttons that preview first (the dry run)
   and ask before acting; a running swap shows its output live and survives a
   reload. Plain HTML/CSS/JS shipped in the package, nothing loaded from the
-  internet, strict CSP. When the API needs a token, the page asks once per
-  tab. See "Web dashboard" in the user guide.
+  internet, strict CSP. When the API needs a token, the page asks once and
+  remembers it in that browser until **Forget token**. See "Web dashboard" in
+  the user guide.
 - HTTP swap API on `llmctl serve`: `GET /swap` (list, gateway URL, running
   job), `POST /swap/run` (dry run, or a background job answered with 202; 409
   while another job runs), `GET /swap/jobs/{id}` (poll status and output) and

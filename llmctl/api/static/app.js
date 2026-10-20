@@ -30,17 +30,18 @@
     }
   }
 
-  // Reads the saved token; sessionStorage may throw when storage is blocked.
+  // Reads the saved token; localStorage may throw when storage is blocked.
   function getToken() {
-    try { return window.sessionStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
+    try { return window.localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; }
   }
 
-  // Saves or clears the token for this tab only, never persisting beyond it.
+  // Saves or clears the token per browser (new tabs don't ask); Forget token removes it.
   function setToken(value) {
     try {
-      if (value) { window.sessionStorage.setItem(TOKEN_KEY, value); }
-      else { window.sessionStorage.removeItem(TOKEN_KEY); }
+      if (value) { window.localStorage.setItem(TOKEN_KEY, value); }
+      else { window.localStorage.removeItem(TOKEN_KEY); }
     } catch (e) { /* storage blocked: the token will not be remembered */ }
+    $("token-forget").hidden = !getToken();
   }
 
   // Builds an Error that carries the HTTP status so callers can react to 401.
@@ -431,10 +432,10 @@
   // Wires static controls and begins polling.
   function init() {
     renderHeader();
-    $("token-clear").addEventListener("click", function () {
-      setToken("");
-      $("token-input").value = "";
-    });
+    $("token-clear").addEventListener("click", function () { setToken(""); $("token-input").value = ""; });
+    // Forget: drop the saved token; the next poll's 401 brings the form back.
+    $("token-forget").hidden = !getToken();
+    $("token-forget").addEventListener("click", function () { setToken(""); refresh(); });
     $("refresh-btn").addEventListener("click", refresh);
     $("stop-all-btn").addEventListener("click", function () { startStop({ all: true }); });
     $("confirm-run-btn").addEventListener("click", onConfirm);

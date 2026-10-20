@@ -207,10 +207,13 @@ def test_app_js_has_no_html_injection_sinks(bad) -> None:
     assert bad not in _read("app.js")
 
 
-def test_app_js_uses_session_storage_only() -> None:
+def test_app_js_remembers_the_token_per_browser() -> None:
+    """localStorage, so a new tab does not ask again; Forget token removes it."""
     js = _read("app.js")
-    assert "sessionStorage" in js
-    assert "localStorage" not in js
+    assert "localStorage" in js
+    assert "sessionStorage" not in js
+    assert 'id="token-forget"' in _read("index.html")
+    assert '$("token-forget")' in js
 
 
 def test_app_js_fetches_relative_swap_paths_with_bearer() -> None:
