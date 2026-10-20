@@ -1294,6 +1294,9 @@ def health(json_out: _JSON_OPT = False) -> None:
             # "binary found" with nothing serving is the case that used to read
             # as healthy; say so plainly instead.
             serving = f"[{'red' if info['state'] == 'ok' else 'dim'}]nothing[/]"
+        stopped = [escape(str(lane["name"])) for lane in info.get("stopped_lanes", [])]
+        if stopped:
+            serving += f"\n[dim]stopped: {', '.join(stopped)}[/dim]"
         cells = [escape(str(name)), escape(str(info["state"])), escape(str(info["message"]))]
         if info["state"] == "not_used":
             cells = [f"[dim]{c}[/]" for c in cells]

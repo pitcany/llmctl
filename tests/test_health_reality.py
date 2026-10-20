@@ -103,6 +103,21 @@ def test_rule_b_lane_not_running() -> None:
     )
 
 
+def test_stopped_lane_listed_beside_a_serving_one() -> None:
+    async def probe(lane: Lane) -> bool:
+        return lane.name == "strata"
+
+    lanes = [_lane(), _lane("glm53", port=8006)]
+    rt = _health({RuntimeName.STRATA: _Adapter(_NOT_RUNNING)}, lanes, probe)["strata"]
+    assert "serving via lane strata at http://127.0.0.1:8007" in rt["message"]
+    assert rt["stopped_lanes"] == [{"name": "glm53", "upstream": "http://127.0.0.1:8006"}]
+
+
+def test_stopped_lanes_empty_when_all_answer() -> None:
+    rt = _health({RuntimeName.STRATA: _Adapter(_NOT_RUNNING)}, [_lane()], _answer(True))["strata"]
+    assert rt["stopped_lanes"] == []
+
+
 def test_rule_f_session_never_says_not_running() -> None:
     loaded = [
         Model(name="m", runtime=RuntimeName.STRATA, source="m", status=ModelStatus.DISCOVERED)

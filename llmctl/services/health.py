@@ -243,6 +243,11 @@ class HealthService:
                 continue
             mine = [(ln, ok) for ln, ok in zip(lanes, answers, strict=True) if ln.runtime == name]
             up = [ln for ln, ok in mine if ok]
+            # Lanes of this runtime that did not answer: listed so a stopped lane
+            # (e.g. glm53 beside a running strata lane) stays visible in `health`.
+            info["stopped_lanes"] = [
+                {"name": ln.name, "upstream": ln.upstream} for ln, ok in mine if not ok
+            ]
             sessions: list[dict[str, Any]] = info["sessions"]
             if up:  # A: a lane answering its probe is serving
                 lane = up[0]
