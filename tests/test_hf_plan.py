@@ -263,3 +263,30 @@ def test_safetensors_bytes_sums_only_weights():
     ]
     assert _safetensors_bytes(sibs) == 15
     assert _safetensors_bytes([]) is None
+
+
+def test_safetensors_bytes_counts_one_checkpoint():
+    from types import SimpleNamespace as F
+
+    from llmctl.hf.inspect import _safetensors_bytes
+
+    single_and_shards = [
+        F(rfilename="model.safetensors", size=100),
+        F(rfilename="model-00001-of-00002.safetensors", size=60),
+        F(rfilename="model-00002-of-00002.safetensors", size=40),
+        F(rfilename="model-mtp-bf16.safetensors", size=7),  # extra weights, kept
+    ]
+    assert _safetensors_bytes(single_and_shards) == 107
+    mistral = [
+        F(rfilename="consolidated.safetensors", size=100),
+        F(rfilename="model-00001-of-00001.safetensors", size=100),
+    ]
+    assert _safetensors_bytes(mistral) == 100
+    assert _safetensors_bytes([F(rfilename="consolidated.safetensors", size=9)]) == 9
+
+
+def test_measured_size_suppresses_the_unknown_moe_warning():
+    meta = _meta("someone/Llama-4-Scout-17B-16E", architectures=["Llama4ForCausalLM"])
+    assert any("is unknown" in w for w in build_plan(meta, _hw(32.0, 32.0)).warnings)
+    meta.weight_bytes = 60 * 1024**3
+    assert not any("is unknown" in w for w in build_plan(meta, _hw(32.0, 32.0)).warnings)

@@ -60,7 +60,12 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
 
     # A one-card vLLM preset gets a card and an engine (see vllm_slots).
     target = place(state, target, target.tp)
-    # A lane that fits beside what runs (measured VRAM) stops nothing.
+    # A lane that fits beside what runs (measured VRAM) stops nothing. Free
+    # VRAM is read now: the state was gathered before the confirm dialog.
+    if target.kind == "lane":
+        from llmctl.services.vram_fit import free_mib_now
+
+        state.free_mib = free_mib_now()
     fit = state.fits_alongside(target) if target.kind == "lane" else None
     # llama.cpp processes llmctl started are in the way of vLLM and lanes too.
     paused: list[Any] = []

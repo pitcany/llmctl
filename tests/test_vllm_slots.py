@@ -202,7 +202,9 @@ def test_engine2_must_be_a_user_unit():
 
     with pytest.raises(ValidationError, match="user_scope: true"):
         ManagedUnitsConfig(vllm_engine2={"unit_name": "vllm-engine2", "default_port": 8010})
-    ok = ManagedUnitsConfig(vllm_engine2={"unit_name": "vllm-engine2", "user_scope": True})
+    ok = ManagedUnitsConfig(
+        vllm_engine2={"unit_name": "vllm-engine2", "default_port": 8010, "user_scope": True}
+    )
     assert ok.vllm_engine2.user_scope
 
 
@@ -234,3 +236,15 @@ def test_tui_run_swap_places_a_one_card_preset(monkeypatch):
     ok, _msg = screens_swap.run_swap(state, resolve("small", state.catalog))
     assert ok
     assert seen == {"stopped": [], "unit": "main", "gpus": "1"}
+
+
+def test_engine2_must_not_reuse_the_main_unit_or_port():
+    import pytest
+    from pydantic import ValidationError
+
+    from llmctl.config import ManagedUnitsConfig
+
+    with pytest.raises(ValidationError, match="unit_name must differ"):
+        ManagedUnitsConfig(vllm_engine2={"user_scope": True, "default_port": 8010})
+    with pytest.raises(ValidationError, match="default_port must differ"):
+        ManagedUnitsConfig(vllm_engine2={"unit_name": "vllm-engine2", "user_scope": True})

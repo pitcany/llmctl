@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -108,11 +109,33 @@ def inspect_model(model_id: str) -> ModelMetadata:
 
 
 def _safetensors_bytes(siblings: Any) -> int | None:
-    """Sum of ``*.safetensors`` file sizes, or None when the Hub gave none."""
-    total = 0
+    """Size of the ``*.safetensors`` checkpoint vLLM loads, or None when unknown.
+
+    A repo can ship one checkpoint twice: a single ``model.safetensors`` beside
+    its shards (``model-00001-of-00004.safetensors``), or Mistral's
+    ``consolidated.safetensors`` beside the HF-format files. Counting both
+    doubles the size, so the shards win over the single file, and the
+    ``consolidated`` copy is dropped when other weights exist.
+    """
+    sizes: dict[str, int] = {}
     for sib in siblings or []:
         name = getattr(sib, "rfilename", "") or ""
         size = getattr(sib, "size", None)
         if name.endswith(".safetensors") and isinstance(size, int):
-            total += size
-    return total or None
+            sizes[name] = size
+    shard_prefixes = {
+        m.group(1) for name in sizes if (m := _SHARD_RE.match(name.rsplit("/", 1)[-1]))
+    }
+    kept = {
+        name: size
+        for name, size in sizes.items()
+        if name.rsplit("/", 1)[-1].removesuffix(".safetensors") not in shard_prefixes
+    }
+    others = [n for n in kept if not n.rsplit("/", 1)[-1].startswith("consolidated")]
+    if others:
+        kept = {n: kept[n] for n in others}
+    return sum(kept.values()) or None
+
+
+#: ``model-00001-of-00004.safetensors`` -> ``model``.
+_SHARD_RE = re.compile(r"^(.+)-\d+-of-\d+\.safetensors$")

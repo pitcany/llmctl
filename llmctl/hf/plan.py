@@ -271,7 +271,7 @@ def build_plan(
             f"is ≥85% of per-GPU VRAM ({per_gpu:.1f} GiB). Consider higher --tp "
             "or a quantized variant."
         )
-    if active_only and param_count is None:
+    if active_only and param_count is None and weight_gib is None:
         warnings.append(
             "The name gives the active parameter count of a mixture-of-experts model, "
             "not the total; the size, and so the fit, is unknown."

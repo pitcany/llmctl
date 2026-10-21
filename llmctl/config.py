@@ -387,6 +387,24 @@ class ManagedUnitsConfig(BaseModel):
         data["vllm_engine"] = data.pop("vllm_tp")
         return data
 
+    @model_validator(mode="after")
+    def _engine2_is_not_the_main_engine(self) -> ManagedUnitsConfig:
+        """Two engines on one unit or port would restart each other's model."""
+        two = self.vllm_engine2
+        if two is not None:
+            main = self.vllm_engine
+            if two.unit_name.removesuffix(".service") == main.unit_name.removesuffix(".service"):
+                raise ValueError(
+                    f"managed_units.vllm_engine2.unit_name must differ from vllm_engine's "
+                    f"({main.unit_name!r})"
+                )
+            if two.default_port == main.default_port:
+                raise ValueError(
+                    f"managed_units.vllm_engine2.default_port must differ from vllm_engine's "
+                    f"({main.default_port})"
+                )
+        return self
+
     @field_validator("vllm_engine2")
     @classmethod
     def _engine2_is_a_user_unit(cls, value: ManagedUnitConfig | None) -> ManagedUnitConfig | None:
