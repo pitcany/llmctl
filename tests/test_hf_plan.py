@@ -214,3 +214,52 @@ def test_expert_suffix_names_active_params_so_size_is_unknown():
 def test_a_suffix_moe_keeps_the_named_total():
     meta = _meta("Qwen/Qwen3-30B-A3B", architectures=["Qwen3MoeForCausalLM"])
     assert build_plan(meta, _hw(32.0, 32.0)).param_count_b == 30.0
+
+
+def _ct_cfg(bits: int) -> dict:
+    return {
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "quantization_config": {
+            "quant_method": "compressed-tensors",
+            "config_groups": {"group_0": {"weights": {"num_bits": bits}}},
+        },
+    }
+
+
+def test_compressed_tensors_4bit_is_sized_at_4_bits():
+    plan = build_plan(_meta("someone/Qwen3.8-27B-AWQ-INT4", **_ct_cfg(4)), _hw(32.0, 32.0))
+    estimate = next(n for n in plan.notes if "Estimated weights" in n)
+    assert "~12.6 GiB" in estimate  # 27B x 0.5 bytes, not ~50 GiB at 16-bit
+    assert plan.tensor_parallel_size == 1
+
+
+def test_modelopt_nvfp4_is_sized_at_4_bits():
+    cfg = {
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4"},
+    }
+    plan = build_plan(_meta("someone/Qwen3.8-27B-NVFP4", **cfg), _hw(32.0, 32.0))
+    assert any("~12.6 GiB" in n for n in plan.notes)
+
+
+def test_hub_file_sizes_win_over_the_estimate():
+    meta = _meta("someone/Qwen3.8-27B-AWQ-INT4", **_ct_cfg(4))
+    meta.weight_bytes = int(19.6 * 1024**3)
+    plan = build_plan(meta, _hw(32.0, 32.0))
+    assert "Weights 19.6 GiB (the Hub's safetensors file sizes)." in plan.notes
+    assert not any("Estimated weights" in n for n in plan.notes)
+
+
+def test_safetensors_bytes_sums_only_weights():
+    from types import SimpleNamespace
+
+    from llmctl.hf.inspect import _safetensors_bytes
+
+    sibs = [
+        SimpleNamespace(rfilename="model-00001.safetensors", size=10),
+        SimpleNamespace(rfilename="model-00002.safetensors", size=5),
+        SimpleNamespace(rfilename="config.json", size=99),
+        SimpleNamespace(rfilename="x.safetensors", size=None),
+    ]
+    assert _safetensors_bytes(sibs) == 15
+    assert _safetensors_bytes([]) is None

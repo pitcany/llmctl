@@ -17,6 +17,9 @@ class ModelMetadata:
     gated: bool
     private: bool
     error: str | None = None
+    #: Total size of the repo's ``*.safetensors`` files, when the Hub reports it:
+    #: the real weight size, whatever the quantization format.
+    weight_bytes: int | None = None
 
 
 def _try_load_json(model_id: str, filename: str) -> dict[str, Any]:
@@ -41,7 +44,7 @@ def inspect_model(model_id: str) -> ModelMetadata:
 
     api = HfApi()
     try:
-        info = api.model_info(model_id)
+        info = api.model_info(model_id, files_metadata=True)
     # GatedRepoError subclasses RepositoryNotFoundError, so it must come first.
     except GatedRepoError:
         return ModelMetadata(
@@ -100,4 +103,16 @@ def inspect_model(model_id: str) -> ModelMetadata:
         gated=bool(getattr(info, "gated", False)),
         private=bool(getattr(info, "private", False)),
         error=err,
+        weight_bytes=_safetensors_bytes(getattr(info, "siblings", None)),
     )
+
+
+def _safetensors_bytes(siblings: Any) -> int | None:
+    """Sum of ``*.safetensors`` file sizes, or None when the Hub gave none."""
+    total = 0
+    for sib in siblings or []:
+        name = getattr(sib, "rfilename", "") or ""
+        size = getattr(sib, "size", None)
+        if name.endswith(".safetensors") and isinstance(size, int):
+            total += size
+    return total or None

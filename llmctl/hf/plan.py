@@ -51,11 +51,44 @@ _BYTES_PER_PARAM = {
 _ACTIVE_SIZE_RE = re.compile(r"\d+(?:\.\d+)?B-\d+E\b", re.IGNORECASE)
 
 
-def _estimate_weight_gib(param_count_b: float | None, quant: str | None) -> float | None:
+def _estimate_weight_gib(
+    param_count_b: float | None, quant: str | None, cfg: dict[str, Any] | None = None
+) -> float | None:
     if param_count_b is None:
         return None
-    bpp = _BYTES_PER_PARAM.get(quant or "fp16", 2.0)
+    bpp = _BYTES_PER_PARAM.get(quant or "fp16") or _bytes_from_quant_config(cfg or {}) or 2.0
     return param_count_b * 1e9 * bpp / (1024**3)
+
+
+#: ``modelopt`` ``quant_algo`` -> bytes per parameter.
+_MODELOPT_BYTES = {"nvfp4": 0.5, "fp4": 0.5, "w4a8_awq": 0.5, "w4a16_awq": 0.5, "fp8": 1.0}
+
+
+def _bytes_from_quant_config(cfg: dict[str, Any]) -> float | None:
+    """Bytes per parameter from ``quantization_config`` when the method names no width.
+
+    ``compressed-tensors`` carries ``config_groups.*.weights.num_bits``;
+    ``modelopt`` carries ``quant_algo`` (``NVFP4``, ``FP8``). Both used to fall
+    through to 16-bit, sizing a 4-bit 27B at ~50 GiB.
+    """
+    qc = cfg.get("quantization_config")
+    if not isinstance(qc, dict):
+        return None
+    groups = qc.get("config_groups")
+    if isinstance(groups, dict):
+        bits = [
+            g["weights"]["num_bits"]
+            for g in groups.values()
+            if isinstance(g, dict)
+            and isinstance(g.get("weights"), dict)
+            and isinstance(g["weights"].get("num_bits"), int)
+        ]
+        if bits:
+            return max(bits) / 8
+    algo = qc.get("quant_algo")
+    if isinstance(algo, str):
+        return _MODELOPT_BYTES.get(algo.lower())
+    return None
 
 
 def _params_from_config(cfg: dict[str, Any]) -> float | None:
@@ -186,7 +219,13 @@ def build_plan(
         or detect_quantization(" ".join(meta.tags))
     )
 
-    weight_gib = _estimate_weight_gib(param_count, quant)
+    # The Hub's file sizes beat any estimate: they count every tensor at its
+    # real precision (vision towers, MTP heads, layers left unquantized).
+    weight_gib = (
+        meta.weight_bytes / (1024**3)
+        if getattr(meta, "weight_bytes", None)
+        else _estimate_weight_gib(param_count, quant, cfg)
+    )
     per_gpu = min((g.vram_gib for g in hw.gpus), default=None)
     heads = cfg.get("num_attention_heads")
     kv_heads = cfg.get("num_key_value_heads")
@@ -245,7 +284,9 @@ def build_plan(
             "--trust-remote-code for it, which runs that code on this machine. The "
             "command below leaves it out: read the repo's code first, then add it yourself."
         )
-    if param_count:
+    if getattr(meta, "weight_bytes", None) and weight_gib is not None:
+        notes.append(f"Weights {weight_gib:.1f} GiB (the Hub's safetensors file sizes).")
+    elif param_count:
         notes.append(f"Estimated weights ~{weight_gib:.1f} GiB at {quant or 'fp16'}.")
 
     return LaunchPlan(
