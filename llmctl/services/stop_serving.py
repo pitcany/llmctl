@@ -39,7 +39,12 @@ def serving_now(state: Any) -> list[Serving]:
     """Everything ``state`` shows as serving that llmctl knows how to stop."""
     items: list[Serving] = []
     if state.vllm_active:
-        presets = [r for r in state.catalog if r.kind == "vllm" and r.key in state.serving]
+        on_engine2 = getattr(state, "engine2_serving", set())
+        presets = [
+            r
+            for r in state.catalog
+            if r.kind == "vllm" and r.key in state.serving and r.key not in on_engine2
+        ]
         model = presets[0].key if presets else "?"
         items.append(
             Serving(

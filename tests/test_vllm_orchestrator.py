@@ -622,3 +622,18 @@ def test_failed_launch_restores_via_rollback_not_companions(tmp_path: Path) -> N
     )
     assert result.ok is False
     assert result.companions_restarted == [] and result.companions_pending == []
+
+
+def test_gpus_option_pins_the_card_for_this_start(tmp_path: Path) -> None:
+    _write_preset(tmp_path)
+    deps, _log = _build_deps(config_dir=tmp_path)
+
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-engine2", default_port=8010),
+        options=OrchestratorOptions(dry_run=True, gpus="1"),
+        deps=deps,
+    )
+
+    assert result.spec.gpus == "1"
+    assert result.spec.port == 8010

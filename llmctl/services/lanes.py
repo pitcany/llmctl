@@ -94,6 +94,8 @@ def cards_label(row: Any) -> str:
     placement = getattr(row, "placement", None)
     if getattr(row, "kind", "") == "session" and placement is not None:
         return f"any {placement.cards}" if placement.cards == 1 else f"{placement.cards} (split)"
+    if getattr(row, "kind", "") == "vllm" and getattr(row, "tp", None) == 1:
+        return "any 1"
     return format_gpus(row.gpus)
 
 
@@ -182,11 +184,17 @@ class SwapTarget:
     port: int | None = None
     #: ``session`` rows: a systemd unit that serves the same model file.
     unit: str | None = None
+    #: ``vllm`` rows: the preset's tensor-parallel size (cards it needs).
+    tp: int | None = None
+    #: ``vllm`` rows once placed (:func:`~llmctl.services.vllm_slots.place`):
+    #: the cards it will take and the engine unit that will serve it.
+    cards: Gpus = None
+    engine_unit: str | None = None
 
     @property
     def gpus(self) -> Gpus:
-        """Cards this target occupies. vLLM presets (TP=2) take every card."""
-        return self.lane.gpus if self.lane is not None else None
+        """Cards this target occupies. An unplaced vLLM preset takes every card."""
+        return self.lane.gpus if self.lane is not None else self.cards
 
     def matches(self, wanted: str) -> bool:
         """Case-insensitive match on key, served model, or lane alias."""
@@ -213,6 +221,7 @@ def build_catalog(
     rows: list[SwapTarget] = []
     for alias in sorted(presets):
         served = getattr(presets[alias], "served_name", None) or alias
+        tp = getattr(presets[alias], "tensor_parallel", None)
         rows.append(
             SwapTarget(
                 key=alias,
@@ -220,6 +229,7 @@ def build_catalog(
                 model=str(served),
                 engine=engine_label("vllm"),
                 upstream=f"http://127.0.0.1:{vllm_port}",
+                tp=tp if isinstance(tp, int) else None,
             )
         )
     for lane in lanes:
@@ -450,6 +460,7 @@ def preview_swap(
     load_times: Path | None = None,
     gpu_sessions: Sequence[Any] = (),
     alongside: Fit | None = None,
+    engine_lanes: Sequence[Lane] = (),
 ) -> SwapPreview:
     """Describe the swap to ``target`` given what is running now.
 
@@ -469,13 +480,16 @@ def preview_swap(
         last_load_s=last_load_s(target.key, load_times),
     )
     stops: list[str] = []
+    on_engine = target.engine_unit or vllm_unit
     if vllm_active:
         current = next((r.model for r in catalog if r.kind == "vllm" and r.key in serving), None)
         label = f"{vllm_unit} ({current})" if current else vllm_unit
-        if target.kind == "vllm":
+        if target.kind == "vllm" and on_engine == vllm_unit:
             stops.append(f"{label}, restarted on preset {target.key}")
         else:
             stops.append(label)
+    for lane in engine_lanes:
+        stops.append(f"{lane.unit} ({lane.served_model})")
     for row in catalog:
         if row.kind != "lane" or row.lane is None or row.lane.unit is None:
             continue
@@ -500,7 +514,8 @@ def preview_swap(
             stops.append(note)
     elif target.kind == "vllm":
         stops.append("Ollama and plugin companions (paused while vLLM loads, started again after)")
-        preview.starts = f"{vllm_unit} on preset {target.key}"
+        where = f" on GPU {format_gpus(target.cards)}" if target.cards is not None else ""
+        preview.starts = f"{on_engine} on preset {target.key}{where}"
     else:
         lane = target.lane
         assert lane is not None
@@ -611,6 +626,16 @@ class SwapState:
     vram_need: Callable[[str], dict[int, int] | None] | None = None
     #: unit -> the units its systemd ``Conflicts=`` stops.
     conflicts_of: Callable[[str], set[str]] | None = None
+    #: Cards the vLLM engine unit holds (its env's CUDA_VISIBLE_DEVICES).
+    vllm_cards: Gpus = None
+    #: Running second-engine units, as lanes: stopped and restored like one.
+    engine_lanes: list[Lane] = field(default_factory=list)
+    #: The second engine's config, when one is set up.
+    engine2: Any = None
+    #: vLLM preset keys the second engine is serving (not the main one).
+    engine2_serving: set[str] = field(default_factory=set)
+    #: GPUs on this host (placement needs it); None = unknown.
+    card_count: int | None = None
 
     def state_of(self, row: SwapTarget) -> str:
         """``serving`` / ``loading`` / ``""`` for the picker's State column."""
@@ -626,12 +651,27 @@ class SwapState:
         return lane_holds_unit(row, self.catalog, self.serving, self.active_units)
 
     def active_lanes(self, exclude: str | None = None) -> list[Lane]:
-        """Lanes whose unit is active, except ``exclude`` (a catalog key)."""
+        """Lanes whose unit is active, except ``exclude`` (a catalog key).
+
+        Includes a running second vLLM engine.
+        """
         return [
             row.lane
             for row in self.catalog
             if row.lane is not None and self._holds_unit(row) and row.key != exclude
-        ]
+        ] + list(self.engine_lanes)
+
+    def vllm_in_the_way(self, target: SwapTarget) -> bool:
+        """The vLLM engine unit is up and the swap stops or restarts it.
+
+        It does when it holds a card ``target`` needs, or when ``target`` is a
+        preset that will be started on it (a restart replaces its model).
+        """
+        if not self.vllm_active:
+            return False
+        if target.kind == "vllm" and (target.engine_unit or self.vllm_unit) == self.vllm_unit:
+            return True
+        return gpus_overlap(self.vllm_cards, target.gpus)
 
     def fits_alongside(self, target: SwapTarget) -> Fit | None:
         """A :class:`Fit` when lane ``target`` can start beside what runs, else None.
@@ -659,7 +699,7 @@ class SwapState:
 
         With ``fit`` (see :meth:`fits_alongside`), only those its unit conflicts with.
         """
-        return [
+        lanes = [
             row.lane
             for row in self.catalog
             if row.lane is not None
@@ -671,6 +711,19 @@ class SwapState:
                 else gpus_overlap(row.gpus, target.gpus)
             )
         ]
+        # A running second engine: in the way where its cards overlap, unless
+        # it is the engine the target will be (re)started on.
+        lanes += [
+            lane
+            for lane in self.engine_lanes
+            if lane.unit != target.engine_unit
+            and (
+                lane.unit in fit.conflicts
+                if fit is not None
+                else gpus_overlap(lane.gpus, target.gpus)
+            )
+        ]
+        return lanes
 
     def preview(self, target: SwapTarget, load_times: Path | None = None) -> SwapPreview:
         """:func:`preview_swap` against this state (a lane that fits stops nothing)."""
@@ -680,7 +733,12 @@ class SwapState:
             serving=self.serving,
             active_units=self.active_units,
             vllm_unit=self.vllm_unit,
-            vllm_active=self.vllm_active,
+            vllm_active=self.vllm_in_the_way(target),
+            engine_lanes=[
+                lane
+                for lane in self.engine_lanes
+                if lane.unit != target.engine_unit and gpus_overlap(lane.gpus, target.gpus)
+            ],
             load_times=load_times,
             gpu_sessions=self.gpu_sessions,
             alongside=self.fits_alongside(target),
@@ -758,9 +816,25 @@ def gather_state(
         free_mib = free_mib if free_mib is not None else vram_fit.free_mib_now()
         vram_need = vram_need or vram_fit.last_vram_mib
         conflicts_of = conflicts_of or vram_fit.unit_conflicts
+    from llmctl.services import vllm_slots
+
+    serving = serving_keys(catalog, probe, loaded_probe)
+    engine2 = getattr(settings.managed_units, "vllm_engine2", None)
+    engine_lanes: list[Lane] = []
+    engine2_serving: set[str] = set()
+    if engine2 is not None and is_active(engine2.unit_name, engine2.user_scope):
+        served = probe(f"http://127.0.0.1:{engine2.default_port}") or []
+        engine2_serving = {r.key for r in catalog if r.kind == "vllm" and r.model in served}
+        serving |= engine2_serving
+        engine_lanes.append(vllm_slots.engine_lane(engine2, served[0] if served else ""))
     return SwapState(
         catalog=catalog,
-        serving=serving_keys(catalog, probe, loaded_probe),
+        serving=serving,
+        engine_lanes=engine_lanes,
+        engine2=engine2,
+        engine2_serving=engine2_serving,
+        vllm_cards=vllm_slots.engine_cards(vllm),
+        card_count=len(free_mib) if free_mib else None,
         active_units=active_units,
         vllm_unit=vllm.unit_name,
         vllm_active=is_active(vllm.unit_name, False),

@@ -34,6 +34,7 @@ from llmctl.schemas import (
     ModelCreate,
     SessionStartRequest,
 )
+from llmctl.services import vllm_slots
 from llmctl.services.benchmarks import BenchmarkService
 from llmctl.services.lanes import (
     SwapTarget,
@@ -2013,6 +2014,8 @@ def vllm_cmd(
         if not dry_run:
             cli_swap.remember_serving(state)
         fit = state.fits_alongside(target) if target.kind == "lane" else None
+        # A one-card preset gets a card (and maybe the second engine).
+        target = vllm_slots.place(state, target, overrides.tp or target.tp)
         if not cli_swap.print_preview(state, target, console):
             return
     if overrides:
@@ -2033,7 +2036,16 @@ def vllm_cmd(
     tuned = bool(overrides) or tq or no_tq or force or no_wait
     # A lane that fits beside what runs starts directly: llm-router's lane
     # scripts always run with --take-gpus, which would stop the rest.
-    if not direct and not dry_run and target.kind in ("lane", "vllm") and not tuned and fit is None:
+    # So does a placed one-card preset: llm-router's vLLM profiles take both cards.
+    placed = target.kind == "vllm" and target.cards is not None
+    if (
+        not direct
+        and not dry_run
+        and target.kind in ("lane", "vllm")
+        and not tuned
+        and fit is None
+        and not placed
+    ):
         if cli_swap.run_router_swap(state, target, console, settings):
             return
     if target.kind == "session":
@@ -2049,14 +2061,18 @@ def vllm_cmd(
     # almost always a typo, and start_vllm_tp rejects it before touching
     # anything. Stopping FreeToken first would turn a typo into an outage.
     listed = target in state.catalog
-    stopped_lanes = cli_swap.stop_lanes_for_vllm(state, console) if listed and not dry_run else []
+    stopped_lanes = (
+        cli_swap.stop_lanes_for_vllm(state, console, target) if listed and not dry_run else []
+    )
     started_at = time.monotonic()
     options = _build_options(tq if tq else None, no_tq, dry_run, no_wait, force)
     options.preset_overrides = overrides.fields()
+    options.gpus = vllm_slots.cuda_devices(target)
+    engine = vllm_slots.engine_config(settings, target)
     try:
         result = start_vllm_tp(
             preset,
-            managed_unit=settings.managed_units.vllm_engine,
+            managed_unit=engine,
             defaults=settings.vllm.defaults,
             fleet=settings.managed_units.fleet,
             options=options,
@@ -2092,7 +2108,7 @@ def vllm_cmd(
             console.print(f"  fleet preflight failed on: {escape(', '.join(result.fleet_failed))}")
         if result.restart is not None and result.restart.error:
             console.print(f"  restart: {escape(result.restart.error)}")
-        _print_rollback(result, settings.managed_units.vllm_engine.unit_name)
+        _print_rollback(result, engine.unit_name)
         raise typer.Exit(1)
     if result.restart is not None and result.restart.ready is None:
         # --no-wait: the restart was issued and nobody probed /v1/models.

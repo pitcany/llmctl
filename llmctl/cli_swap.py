@@ -201,17 +201,20 @@ class Paused:
     sessions: list[Any] = field(default_factory=list)
 
 
-def stop_lanes_for_vllm(state: SwapState, console: Console) -> Paused:
-    """Stop every active lane, and llama.cpp processes llmctl started, before vLLM.
+def stop_lanes_for_vllm(
+    state: SwapState, console: Console, target: SwapTarget | None = None
+) -> Paused:
+    """Stop the lanes, and llama.cpp processes llmctl started, that vLLM needs gone.
 
-    vLLM takes both GPUs, so anything else on them makes it fail to load.
-    Returns what was stopped (restarted if vLLM fails). Raises
-    ``typer.Exit(1)`` if something will not stop, having restarted what
-    already did.
+    An unplaced preset takes every card, so that is every one of them; a
+    placed one-card preset (:func:`~llmctl.services.vllm_slots.place`) only
+    what holds its card. Returns what was stopped (restarted if vLLM fails).
+    Raises ``typer.Exit(1)`` if something will not stop, having restarted
+    what already did.
     """
+    vllm_row = target or SwapTarget(key="", kind="vllm", model="", engine="vLLM", upstream="")
     paused = Paused()
-    if state.gpu_sessions:  # vLLM takes every card, so all of them are in the way
-        vllm_row = SwapTarget(key="", kind="vllm", model="", engine="vLLM", upstream="")
+    if state.sessions_in_the_way(vllm_row):
         paused.sessions, error = pause_for_swap(
             state, vllm_row, settings=load_settings(), log=lambda m: console.print(escape(m))
         )
@@ -220,7 +223,7 @@ def stop_lanes_for_vllm(state: SwapState, console: Console) -> Paused:
             restore_lanes(paused, console)
             raise typer.Exit(1)
     deps = LaneSwapDeps()
-    for lane in state.active_lanes():
+    for lane in state.lanes_in_the_way(vllm_row):
         assert lane.unit is not None
         console.print(f"stopping {escape(lane.unit)} ...")
         if stop_user_unit(lane.unit, deps):
@@ -277,7 +280,7 @@ def run_lane_swap(
     result = swap_to_lane(
         target.lane,
         other_active=state.lanes_in_the_way(target, fit),
-        vllm_active=state.vllm_active,
+        vllm_active=state.vllm_in_the_way(target),
         vllm_unit=state.vllm_unit,
         share_gpus=fit is not None,
     )
@@ -419,4 +422,11 @@ def run_session_swap(
 
 def _previous_preset(state: SwapState) -> str | None:
     """The vLLM preset that was serving before the swap, if any."""
-    return next((r.key for r in state.catalog if r.kind == "vllm" and r.key in state.serving), None)
+    return next(
+        (
+            r.key
+            for r in state.catalog
+            if r.kind == "vllm" and r.key in state.serving and r.key not in state.engine2_serving
+        ),
+        None,
+    )

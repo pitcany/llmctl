@@ -231,6 +231,8 @@ class ManagedUnitConfig(BaseModel):
     launcher_marker: str | None = "vllm-launcher.sh"
     # Default port the readiness poll hits. Overridden per-spec at launch.
     default_port: int = 8003
+    # A ``systemctl --user`` unit (no sudo), like the second vLLM engine.
+    user_scope: bool = False
 
     def resolve_env_file(self) -> Path:
         """Return the env file path, with sensible fallback.
@@ -349,6 +351,9 @@ class ManagedUnitsConfig(BaseModel):
             enabled=False, unit_name="vllm-engine", default_port=8003
         )
     )
+    #: A second vLLM engine (a user unit) so two one-card presets can run at
+    #: once, one per card. None = one engine, the old behaviour.
+    vllm_engine2: ManagedUnitConfig | None = None
     fleet: FleetUnitsConfig = Field(default_factory=FleetUnitsConfig)
     units: dict[str, ManagedUnitConfig] = Field(default_factory=dict)
 

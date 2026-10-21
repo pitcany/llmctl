@@ -51,7 +51,7 @@ def calls(monkeypatch):
         lambda lane, **k: seen["lane"].append(lane.name) or LaneSwapResult(ok=True, seconds=99),
     )
 
-    def fake_stop(state, console):
+    def fake_stop(state, console, target=None):
         seen["stop"].append(True)
         return state.active_lanes()
 

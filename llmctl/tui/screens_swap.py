@@ -72,7 +72,7 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
         result = swap_to_lane(
             target.lane,
             other_active=state.lanes_in_the_way(target, fit),
-            vllm_active=state.vllm_active,
+            vllm_active=state.vllm_in_the_way(target),
             vllm_unit=state.vllm_unit,
             deps=deps,
             share_gpus=fit is not None,
