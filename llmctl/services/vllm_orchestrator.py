@@ -32,7 +32,7 @@ from llmctl.config import (
     VLLMDefaultsConfig,
 )
 from llmctl.integrations.fleet import FleetRole, FleetUnitsConfig, preflight_stop
-from llmctl.integrations.systemctl import SystemctlRunner
+from llmctl.integrations.systemctl import SystemctlRunner, UserSystemctlRunner
 from llmctl.integrations.turboquant import apply_to_spec_dict
 from llmctl.integrations.vllm_env import (
     VLLMLaunchSpec,
@@ -68,6 +68,9 @@ class OrchestratorOptions:
     tq_override: bool | None = None
     #: Preset fields replaced for this start only (``run --tp/--max-len/--gpu-mem``).
     preset_overrides: dict[str, Any] = field(default_factory=dict)
+    #: ``CUDA_VISIBLE_DEVICES`` for this start (a one-card preset placed on a
+    #: free card); None keeps the preset's own.
+    gpus: str | None = None
     dry_run: bool = False
     #: Bypass the local-model-path refusal. The check only fires on a path
     #: that is provably absent, but an unreadable parent directory can make
@@ -219,6 +222,12 @@ def start_vllm_tp(
     deps = deps or Dependencies()
     options = options or OrchestratorOptions()
     fleet = fleet or FleetUnitsConfig()
+    if managed_unit.unit_name != fleet.tp:
+        # Another engine (the second one): the main one (fleet.tp) keeps
+        # serving on its own card, so the preflight must not stop it. A user
+        # unit is invisible to the system-scope preflight, so naming it here
+        # stops nothing extra.
+        fleet = fleet.model_copy(update={"tp": managed_unit.unit_name})
 
     spec = _build_spec(
         preset_name,
@@ -228,6 +237,9 @@ def start_vllm_tp(
         tq_override=options.tq_override,
         preset_overrides=options.preset_overrides,
     )
+
+    if options.gpus is not None:
+        spec = spec.model_copy(update={"gpus": options.gpus})
 
     if not options.force:
         _check_model_path(spec)
@@ -350,6 +362,12 @@ def _run_lifecycle(
     """Start lifecycle for the TP unit."""
     result = OrchestratorResult(spec=spec, dry_run=options.dry_run)
     systemctl = deps.systemctl or SystemctlRunner()
+    # The engine's own unit may be a user unit (the second engine); the fleet
+    # (ollama) and companions stay system-scope.
+    unit_systemctl = (
+        UserSystemctlRunner() if managed_unit.user_scope and deps.systemctl is None
+        else systemctl
+    )
     companions = (
         list(deps.companions) if deps.companions is not None else _registered_companions()
     )
@@ -403,7 +421,7 @@ def _run_lifecycle(
 
     adapter = deps.adapter_factory(
         managed_unit,
-        systemctl=systemctl,
+        systemctl=unit_systemctl,
         renderer=renderer,
     )
     # Captured before the adapter overwrites it so a failed launch can put
@@ -429,6 +447,7 @@ def _run_lifecycle(
                 env_written=True,
                 env_path=env_path,
                 prior_env=prior_env,
+                unit_systemctl=unit_systemctl,
             )
         raise
 
@@ -442,6 +461,7 @@ def _run_lifecycle(
             env_written=True,
             env_path=env_path,
             prior_env=prior_env,
+            unit_systemctl=unit_systemctl,
         )
         return result
 
@@ -537,6 +557,7 @@ def _rollback(
     env_written: bool,
     env_path: Path | None = None,
     prior_env: str | object | None = None,
+    unit_systemctl: SystemctlRunner | None = None,
 ) -> RollbackReport:
     """Best-effort undo of a failed launch; every step runs and is reported.
 
@@ -553,7 +574,7 @@ def _rollback(
 
     if env_written:
         try:
-            report.tp_stopped = systemctl.try_stop(managed_unit.unit_name)
+            report.tp_stopped = (unit_systemctl or systemctl).try_stop(managed_unit.unit_name)
             if report.tp_stopped:
                 log(f"  rollback: stopped {managed_unit.unit_name}")
         except Exception as exc:  # noqa: BLE001 - rollback must keep going

@@ -21,7 +21,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from llmctl.services.lanes import Lane, record_load
+from llmctl.services.lanes import Lane, record_load, share_start_cmd
 
 #: Extra seconds the start script may run past the lane's health budget; the
 #: scripts wait for readiness themselves, then print a status block.
@@ -53,6 +53,12 @@ def _default_probe(upstream: str) -> list[str] | None:
     return probe_openai_v1_models(upstream, timeout=3.0)
 
 
+def _remember_vram(key: str, lane: Lane) -> object:
+    from llmctl.services.vram_fit import remember_lane_vram
+
+    return remember_lane_vram(key, lane)
+
+
 @dataclass
 class LaneSwapDeps:
     """Side-effect seams. Defaults are the real machine."""
@@ -64,6 +70,8 @@ class LaneSwapDeps:
     sleep: Callable[[float], None] = time.sleep
     log: Callable[[str], None] = print
     record: Callable[[str, float], None] = record_load
+    #: Measure and remember a lane's per-card VRAM once it serves.
+    remember_vram: Callable[[str, Lane], object] = _remember_vram
     poll_interval_s: float = 3.0
 
 
@@ -138,16 +146,24 @@ def swap_to_lane(
     vllm_active: bool,
     vllm_unit: str,
     deps: LaneSwapDeps | None = None,
+    share_gpus: bool = False,
 ) -> LaneSwapResult:
     """Start ``target`` and roll back on failure. See the module docstring.
 
     ``other_active`` are the lanes whose units are active now (stopped first,
     restarted on failure). ``vllm_active`` says whether vllm-tp was running,
     which the start script stops and a failure restarts.
+
+    ``share_gpus``: the target fits beside what runs (the caller checked), so
+    its script runs with ``--share-gpus`` and stops nothing; vllm-tp is left
+    alone and a failure only stops the target.
     """
     deps = deps or LaneSwapDeps()
     result = LaneSwapResult(ok=False)
     started = deps.clock()
+    start_cmd = share_start_cmd(target.start_cmd) if share_gpus else target.start_cmd
+    if share_gpus:
+        vllm_active = False
 
     for lane in other_active:
         if lane.unit is None:
@@ -160,8 +176,8 @@ def swap_to_lane(
             break
 
     if result.error is None:
-        deps.log(f"starting {target.name}: {' '.join(target.start_cmd)}")
-        rc = deps.run_script(target.start_cmd, target.health_timeout_s + _SCRIPT_GRACE_S)
+        deps.log(f"starting {target.name}: {' '.join(start_cmd)}")
+        rc = deps.run_script(start_cmd, target.health_timeout_s + _SCRIPT_GRACE_S)
         if rc != 0:
             result.error = f"start script exited {rc}"
         else:
@@ -177,6 +193,7 @@ def swap_to_lane(
     result.seconds = deps.clock() - started
     if result.ok:
         deps.record(target.name, result.seconds)
+        deps.remember_vram(target.name, target)
         return result
 
     deps.log(f"swap failed: {result.error}; restoring the previous state")

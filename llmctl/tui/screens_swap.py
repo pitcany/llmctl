@@ -34,6 +34,7 @@ from llmctl.services.session_swap import (
     run_session_swap,
 )
 from llmctl.services.vllm_orchestrator import OrchestratorOptions, start_vllm_tp
+from llmctl.services.vllm_slots import cuda_devices, engine_config, place
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 from llmctl.tui._modals import ConfirmActionModal
 
@@ -57,20 +58,32 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
             )
         return False, _failure(done.error, done)
 
+    # A one-card vLLM preset gets a card and an engine (see vllm_slots).
+    target = place(state, target, target.tp)
+    # A lane that fits beside what runs (measured VRAM) stops nothing. Free
+    # VRAM is read now: the state was gathered before the confirm dialog.
+    if target.kind == "lane":
+        from llmctl.services.vram_fit import free_mib_now
+
+        state.free_mib = free_mib_now()
+    fit = state.fits_alongside(target) if target.kind == "lane" else None
     # llama.cpp processes llmctl started are in the way of vLLM and lanes too.
-    paused, error = pause_for_swap(state, target, settings=settings, log=deps.log)
-    if error:
-        again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
-        return False, _failure(error, again)
+    paused: list[Any] = []
+    if fit is None:
+        paused, error = pause_for_swap(state, target, settings=settings, log=deps.log)
+        if error:
+            again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
+            return False, _failure(error, again)
 
     if target.kind == "lane":
         assert target.lane is not None
         result = swap_to_lane(
             target.lane,
-            other_active=state.lanes_in_the_way(target),
-            vllm_active=state.vllm_active,
+            other_active=state.lanes_in_the_way(target, fit),
+            vllm_active=state.vllm_in_the_way(target),
             vllm_unit=state.vllm_unit,
             deps=deps,
+            share_gpus=fit is not None,
         )
         if result.ok:
             return True, f"{target.model} ready ({format_duration(result.seconds)})"
@@ -84,13 +97,14 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
     def _start() -> Any:
         return start_vllm_tp(
             target.key,
-            managed_unit=settings.managed_units.vllm_engine,
+            managed_unit=engine_config(settings, target),
             defaults=settings.vllm.defaults,
             fleet=settings.managed_units.fleet,
-            options=OrchestratorOptions(dry_run=False),
+            options=OrchestratorOptions(dry_run=False, gpus=cuda_devices(target)),
         )
 
-    vllm, lanes = swap_to_vllm(state.active_lanes(), _start, deps=deps)
+    # Every lane for a preset that takes every card; only those on its card otherwise.
+    vllm, lanes = swap_to_vllm(state.lanes_in_the_way(target), _start, deps=deps)
     if vllm is None:
         again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
         lanes.restored += again.restored
@@ -185,7 +199,7 @@ class SwapScreen(DataScreen):
         row = self.query_one("#swap-table", DataTable).cursor_row
         if not 0 <= row < len(state.catalog):
             return
-        target = state.catalog[row]
+        target = place(state, state.catalog[row], state.catalog[row].tp)
         preview = state.preview(target)
         if preview.already_serving and target.kind in ("lane", "session"):
             self.app.notify(preview.lines()[0], title="Swap")

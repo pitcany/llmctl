@@ -231,6 +231,8 @@ class ManagedUnitConfig(BaseModel):
     launcher_marker: str | None = "vllm-launcher.sh"
     # Default port the readiness poll hits. Overridden per-spec at launch.
     default_port: int = 8003
+    # A ``systemctl --user`` unit (no sudo), like the second vLLM engine.
+    user_scope: bool = False
 
     def resolve_env_file(self) -> Path:
         """Return the env file path, with sensible fallback.
@@ -349,6 +351,9 @@ class ManagedUnitsConfig(BaseModel):
             enabled=False, unit_name="vllm-engine", default_port=8003
         )
     )
+    #: A second vLLM engine (a user unit) so two one-card presets can run at
+    #: once, one per card. None = one engine, the old behaviour.
+    vllm_engine2: ManagedUnitConfig | None = None
     fleet: FleetUnitsConfig = Field(default_factory=FleetUnitsConfig)
     units: dict[str, ManagedUnitConfig] = Field(default_factory=dict)
 
@@ -381,6 +386,35 @@ class ManagedUnitsConfig(BaseModel):
         data = dict(data)
         data["vllm_engine"] = data.pop("vllm_tp")
         return data
+
+    @model_validator(mode="after")
+    def _engine2_is_not_the_main_engine(self) -> ManagedUnitsConfig:
+        """Two engines on one unit or port would restart each other's model."""
+        two = self.vllm_engine2
+        if two is not None:
+            main = self.vllm_engine
+            if two.unit_name.removesuffix(".service") == main.unit_name.removesuffix(".service"):
+                raise ValueError(
+                    f"managed_units.vllm_engine2.unit_name must differ from vllm_engine's "
+                    f"({main.unit_name!r})"
+                )
+            if two.default_port == main.default_port:
+                raise ValueError(
+                    f"managed_units.vllm_engine2.default_port must differ from vllm_engine's "
+                    f"({main.default_port})"
+                )
+        return self
+
+    @field_validator("vllm_engine2")
+    @classmethod
+    def _engine2_is_a_user_unit(cls, value: ManagedUnitConfig | None) -> ManagedUnitConfig | None:
+        """The second engine is stopped and restarted as a user unit, without sudo."""
+        if value is not None and not value.user_scope:
+            raise ValueError(
+                "managed_units.vllm_engine2 must be a user unit: set user_scope: true "
+                "(llmctl stops and restarts it with systemctl --user, no sudo)"
+            )
+        return value
 
     @property
     def vllm_tp(self) -> ManagedUnitConfig:

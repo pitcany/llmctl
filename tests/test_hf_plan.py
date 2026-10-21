@@ -214,3 +214,79 @@ def test_expert_suffix_names_active_params_so_size_is_unknown():
 def test_a_suffix_moe_keeps_the_named_total():
     meta = _meta("Qwen/Qwen3-30B-A3B", architectures=["Qwen3MoeForCausalLM"])
     assert build_plan(meta, _hw(32.0, 32.0)).param_count_b == 30.0
+
+
+def _ct_cfg(bits: int) -> dict:
+    return {
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "quantization_config": {
+            "quant_method": "compressed-tensors",
+            "config_groups": {"group_0": {"weights": {"num_bits": bits}}},
+        },
+    }
+
+
+def test_compressed_tensors_4bit_is_sized_at_4_bits():
+    plan = build_plan(_meta("someone/Qwen3.8-27B-AWQ-INT4", **_ct_cfg(4)), _hw(32.0, 32.0))
+    estimate = next(n for n in plan.notes if "Estimated weights" in n)
+    assert "~12.6 GiB" in estimate  # 27B x 0.5 bytes, not ~50 GiB at 16-bit
+    assert plan.tensor_parallel_size == 1
+
+
+def test_modelopt_nvfp4_is_sized_at_4_bits():
+    cfg = {
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4"},
+    }
+    plan = build_plan(_meta("someone/Qwen3.8-27B-NVFP4", **cfg), _hw(32.0, 32.0))
+    assert any("~12.6 GiB" in n for n in plan.notes)
+
+
+def test_hub_file_sizes_win_over_the_estimate():
+    meta = _meta("someone/Qwen3.8-27B-AWQ-INT4", **_ct_cfg(4))
+    meta.weight_bytes = int(19.6 * 1024**3)
+    plan = build_plan(meta, _hw(32.0, 32.0))
+    assert "Weights 19.6 GiB (the Hub's safetensors file sizes)." in plan.notes
+    assert not any("Estimated weights" in n for n in plan.notes)
+
+
+def test_safetensors_bytes_sums_only_weights():
+    from types import SimpleNamespace
+
+    from llmctl.hf.inspect import _safetensors_bytes
+
+    sibs = [
+        SimpleNamespace(rfilename="model-00001.safetensors", size=10),
+        SimpleNamespace(rfilename="model-00002.safetensors", size=5),
+        SimpleNamespace(rfilename="config.json", size=99),
+        SimpleNamespace(rfilename="x.safetensors", size=None),
+    ]
+    assert _safetensors_bytes(sibs) == 15
+    assert _safetensors_bytes([]) is None
+
+
+def test_safetensors_bytes_counts_one_checkpoint():
+    from types import SimpleNamespace as F
+
+    from llmctl.hf.inspect import _safetensors_bytes
+
+    single_and_shards = [
+        F(rfilename="model.safetensors", size=100),
+        F(rfilename="model-00001-of-00002.safetensors", size=60),
+        F(rfilename="model-00002-of-00002.safetensors", size=40),
+        F(rfilename="model-mtp-bf16.safetensors", size=7),  # extra weights, kept
+    ]
+    assert _safetensors_bytes(single_and_shards) == 107
+    mistral = [
+        F(rfilename="consolidated.safetensors", size=100),
+        F(rfilename="model-00001-of-00001.safetensors", size=100),
+    ]
+    assert _safetensors_bytes(mistral) == 100
+    assert _safetensors_bytes([F(rfilename="consolidated.safetensors", size=9)]) == 9
+
+
+def test_measured_size_suppresses_the_unknown_moe_warning():
+    meta = _meta("someone/Llama-4-Scout-17B-16E", architectures=["Llama4ForCausalLM"])
+    assert any("is unknown" in w for w in build_plan(meta, _hw(32.0, 32.0)).warnings)
+    meta.weight_bytes = 60 * 1024**3
+    assert not any("is unknown" in w for w in build_plan(meta, _hw(32.0, 32.0)).warnings)

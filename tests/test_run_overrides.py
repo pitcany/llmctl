@@ -241,7 +241,7 @@ def _invoke(monkeypatch, tmp_path: Path, *args: str, ok: bool = True):
     monkeypatch.setattr(cli, "start_vllm_tp", fake_start)
     monkeypatch.setattr(cli, "_confirm_state_change", lambda *a, **k: None)
     monkeypatch.setattr(cli, "record_load", lambda *a, **k: None)
-    monkeypatch.setattr(cli_swap, "stop_lanes_for_vllm", lambda state, console: [])
+    monkeypatch.setattr(cli_swap, "stop_lanes_for_vllm", lambda state, console, target=None: [])
     monkeypatch.setattr(cli_swap, "restore_lanes", lambda lanes, console: None)
     monkeypatch.setattr("llmctl.presets.load_all_records", lambda *a, **k: records)
     result = CliRunner().invoke(cli.app, ["run", *args])

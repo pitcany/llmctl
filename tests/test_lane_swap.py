@@ -32,6 +32,7 @@ class Fake:
         self.ready = ready if ready is not None else {"ft-model", "ds-model"}
         self.stop_fails = set(stop_fails)
         self.recorded: list[tuple[str, float]] = []
+        self.measured: list[str] = []
         self.now = 0.0
 
     def deps(self) -> LaneSwapDeps:
@@ -43,6 +44,7 @@ class Fake:
             sleep=self.sleep,
             log=lambda _msg: None,
             record=lambda key, s: self.recorded.append((key, s)),
+            remember_vram=lambda key, _lane: self.measured.append(key),
             poll_interval_s=5,
         )
 
@@ -130,3 +132,32 @@ def test_swap_to_vllm_does_not_start_when_a_lane_will_not_stop():
     result, lanes = swap_to_vllm([FT], lambda: started.append(True), deps=fake.deps())
     assert result is None and started == []
     assert lanes.error == "could not stop ft.service"
+
+
+def test_share_gpus_stops_nothing_and_runs_share_flag():
+    fake = Fake()
+    result = swap_to_lane(
+        FT,
+        other_active=[],
+        vllm_active=True,
+        vllm_unit="vllm-tp",
+        deps=fake.deps(),
+        share_gpus=True,
+    )
+    assert result.ok
+    assert fake.events == ["script ft-start"]
+    assert fake.measured == ["flash"]
+
+
+def test_share_gpus_failure_leaves_vllm_alone():
+    fake = Fake(script_rc={"ft-start": 1})
+    seen: list[tuple[str, ...]] = []
+    deps = fake.deps()
+    deps.run_script = lambda argv, t: (seen.append(tuple(argv)), 1)[1]
+    result = swap_to_lane(
+        FT, other_active=[], vllm_active=True, vllm_unit="vllm-tp", deps=deps, share_gpus=True
+    )
+    assert not result.ok
+    assert seen == [("ft-start", "--share-gpus")]
+    # Only the half-started target is stopped; vllm-tp was never stopped, so not restarted.
+    assert fake.events == ["systemctl --user stop ft.service"]
