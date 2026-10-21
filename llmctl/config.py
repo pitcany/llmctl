@@ -387,6 +387,17 @@ class ManagedUnitsConfig(BaseModel):
         data["vllm_engine"] = data.pop("vllm_tp")
         return data
 
+    @field_validator("vllm_engine2")
+    @classmethod
+    def _engine2_is_a_user_unit(cls, value: ManagedUnitConfig | None) -> ManagedUnitConfig | None:
+        """The second engine is stopped and restarted as a user unit, without sudo."""
+        if value is not None and not value.user_scope:
+            raise ValueError(
+                "managed_units.vllm_engine2 must be a user unit: set user_scope: true "
+                "(llmctl stops and restarts it with systemctl --user, no sudo)"
+            )
+        return value
+
     @property
     def vllm_tp(self) -> ManagedUnitConfig:
         """Deprecated name of :attr:`vllm_engine`, kept so plugins keep working."""

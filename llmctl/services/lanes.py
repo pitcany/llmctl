@@ -625,7 +625,7 @@ class SwapState:
     #: catalog key -> per-card MiB last measured, or None if never.
     vram_need: Callable[[str], dict[int, int] | None] | None = None
     #: unit -> the units its systemd ``Conflicts=`` stops.
-    conflicts_of: Callable[[str], set[str]] | None = None
+    conflicts_of: Callable[[str], set[str] | None] | None = None
     #: Cards the vLLM engine unit holds (its env's CUDA_VISIBLE_DEVICES).
     vllm_cards: Gpus = None
     #: Running second-engine units, as lanes: stopped and restored like one.
@@ -692,6 +692,8 @@ class SwapState:
         if not fits(need, self.free_mib):
             return None
         conflicts = self.conflicts_of(lane.unit) if self.conflicts_of else set()
+        if conflicts is None:
+            return None  # Conflicts= unreadable: stop what overlaps, as before
         return Fit(need=dict(need), free=dict(self.free_mib), conflicts=frozenset(conflicts))
 
     def lanes_in_the_way(self, target: SwapTarget, fit: Fit | None = None) -> list[Lane]:
@@ -768,7 +770,7 @@ def gather_state(
     loaded_probe: Prober | None = None,
     free_mib: dict[int, int] | None = None,
     vram_need: Callable[[str], dict[int, int] | None] | None = None,
-    conflicts_of: Callable[[str], set[str]] | None = None,
+    conflicts_of: Callable[[str], set[str] | None] | None = None,
     live_fit: bool = True,
 ) -> SwapState:
     """Build the catalog and probe it. Read-only; every seam is injectable.

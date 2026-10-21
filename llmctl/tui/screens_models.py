@@ -189,8 +189,10 @@ class ModelsScreen(DataScreen):
 
     def _confirm_swap(self, state: Any, target: Any) -> None:
         """The Swap screen's confirm, for this row's preset or llama-server."""
+        from llmctl.services.vllm_slots import place
         from llmctl.tui.screens_swap import run_swap
 
+        target = place(state, target, target.tp)
         preview = state.preview(target)
         if preview.already_serving and target.kind in ("lane", "session"):
             self.app.notify(esc(preview.lines()[0]), title="Swap")

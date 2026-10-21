@@ -170,3 +170,67 @@ def test_user_runner_puts_every_call_in_user_scope():
     sc.restart("vllm-engine2")
     assert sc.is_active("vllm-engine2")
     assert all("--user" in argv and "sudo" not in argv for argv in seen)
+
+
+def test_unreadable_conflicts_fail_closed():
+    lane = Lane(
+        name="small-lane",
+        served_model="s",
+        upstream="http://127.0.0.1:9",
+        start_cmd=("/bin/s", "--take-gpus"),
+        unit="s.service",
+        gpus=frozenset({1}),
+    )
+    state = SwapState(
+        catalog=build_catalog({}, [lane], vllm_port=8003),
+        serving=set(),
+        active_units=set(),
+        vllm_unit="vllm-engine",
+        vllm_active=False,
+        free_mib={1: 30000},
+        vram_need=lambda key: {1: 1000},
+        conflicts_of=lambda unit: None,  # systemctl show failed
+    )
+    assert state.fits_alongside(resolve("small-lane", state.catalog)) is None
+
+
+def test_engine2_must_be_a_user_unit():
+    import pytest
+    from pydantic import ValidationError
+
+    from llmctl.config import ManagedUnitsConfig
+
+    with pytest.raises(ValidationError, match="user_scope: true"):
+        ManagedUnitsConfig(vllm_engine2={"unit_name": "vllm-engine2", "default_port": 8010})
+    ok = ManagedUnitsConfig(vllm_engine2={"unit_name": "vllm-engine2", "user_scope": True})
+    assert ok.vllm_engine2.user_scope
+
+
+def test_tui_run_swap_places_a_one_card_preset(monkeypatch):
+    from llmctl.services.lane_swap import LaneSwapResult
+    from llmctl.tui import screens_swap
+
+    state = _state(lanes_up={"flash.service"})
+    seen: dict = {}
+
+    def fake_swap_to_vllm(lanes, start, deps=None):
+        seen["stopped"] = [lane.name for lane in lanes]
+        return start(), LaneSwapResult(ok=True)
+
+    def fake_start(key, **kw):
+        seen["unit"] = kw["managed_unit"]
+        seen["gpus"] = kw["options"].gpus
+        return SimpleNamespace(ok=True, companions_failed=[])
+
+    settings = SimpleNamespace(
+        managed_units=SimpleNamespace(vllm_engine="main", vllm_engine2=ENGINE2, fleet=None),
+        vllm=SimpleNamespace(defaults=None),
+    )
+    monkeypatch.setattr(screens_swap, "load_settings", lambda: settings)
+    monkeypatch.setattr(screens_swap, "pause_for_swap", lambda *a, **k: ([], None))
+    monkeypatch.setattr(screens_swap, "swap_to_vllm", fake_swap_to_vllm)
+    monkeypatch.setattr(screens_swap, "start_vllm_tp", fake_start)
+    monkeypatch.setattr(screens_swap, "record_load", lambda *a: None)
+    ok, _msg = screens_swap.run_swap(state, resolve("small", state.catalog))
+    assert ok
+    assert seen == {"stopped": [], "unit": "main", "gpus": "1"}

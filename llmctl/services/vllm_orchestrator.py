@@ -222,10 +222,11 @@ def start_vllm_tp(
     deps = deps or Dependencies()
     options = options or OrchestratorOptions()
     fleet = fleet or FleetUnitsConfig()
-    if managed_unit.user_scope and managed_unit.unit_name != fleet.tp:
-        # The second engine: the main one (fleet.tp) keeps serving on its own
-        # card, so the preflight must not stop it. A user unit is invisible to
-        # the system-scope preflight, so naming it here stops nothing extra.
+    if managed_unit.unit_name != fleet.tp:
+        # Another engine (the second one): the main one (fleet.tp) keeps
+        # serving on its own card, so the preflight must not stop it. A user
+        # unit is invisible to the system-scope preflight, so naming it here
+        # stops nothing extra.
         fleet = fleet.model_copy(update={"tp": managed_unit.unit_name})
 
     spec = _build_spec(

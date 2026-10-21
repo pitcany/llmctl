@@ -193,19 +193,24 @@ def remember_lane_vram(
     return per_card
 
 
-def unit_conflicts(unit: str) -> set[str]:
-    """Units systemd stops when ``unit`` starts (its ``Conflicts=``)."""
+def unit_conflicts(unit: str) -> set[str] | None:
+    """Units systemd stops when ``unit`` starts (its ``Conflicts=``).
+
+    None when the query fails: the caller must not assume "no conflicts".
+    """
     try:
-        out = subprocess.run(  # noqa: S603 - fixed argv
+        result = subprocess.run(  # noqa: S603 - fixed argv
             ["systemctl", "--user", "show", "-p", "Conflicts", "--value", unit],
             check=False,
             capture_output=True,
             text=True,
             timeout=10,
-        ).stdout
+        )
     except (OSError, subprocess.TimeoutExpired):
-        return set()
-    return set(out.split())
+        return None
+    if result.returncode != 0:
+        return None
+    return set(result.stdout.split())
 
 
 def format_mib(per_card: Mapping[int, int] | None) -> str:

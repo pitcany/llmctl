@@ -2030,6 +2030,17 @@ def vllm_cmd(
             required=settings.scheduler.require_confirmation_for_start,
             assume_yes=yes,
         )
+        if fit is not None:
+            # Free VRAM may have changed while the prompt waited: check again.
+            from llmctl.services.vram_fit import free_mib_now
+
+            state.free_mib = free_mib_now()
+            fit = state.fits_alongside(target)
+            if fit is None:
+                console.print(
+                    "[yellow]No longer fits beside what is running; "
+                    "stopping what shares its cards instead.[/yellow]"
+                )
     # One switch engine (2026-10-20): llm-router starts and stops the GPU lanes.
     # Per-run vLLM tuning (--tp/--max-len/--gpu-mem/--tq/--force/--no-wait) needs
     # llmctl's own env render, so those keep the direct path.
