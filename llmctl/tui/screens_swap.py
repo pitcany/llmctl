@@ -57,20 +57,25 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
             )
         return False, _failure(done.error, done)
 
+    # A lane that fits beside what runs (measured VRAM) stops nothing.
+    fit = state.fits_alongside(target) if target.kind == "lane" else None
     # llama.cpp processes llmctl started are in the way of vLLM and lanes too.
-    paused, error = pause_for_swap(state, target, settings=settings, log=deps.log)
-    if error:
-        again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
-        return False, _failure(error, again)
+    paused: list[Any] = []
+    if fit is None:
+        paused, error = pause_for_swap(state, target, settings=settings, log=deps.log)
+        if error:
+            again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
+            return False, _failure(error, again)
 
     if target.kind == "lane":
         assert target.lane is not None
         result = swap_to_lane(
             target.lane,
-            other_active=state.lanes_in_the_way(target),
+            other_active=state.lanes_in_the_way(target, fit),
             vllm_active=state.vllm_active,
             vllm_unit=state.vllm_unit,
             deps=deps,
+            share_gpus=fit is not None,
         )
         if result.ok:
             return True, f"{target.model} ready ({format_duration(result.seconds)})"

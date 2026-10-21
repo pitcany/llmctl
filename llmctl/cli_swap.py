@@ -35,6 +35,7 @@ from llmctl.services.lane_switcher import (
     switch_via_router,
 )
 from llmctl.services.lanes import (
+    Fit,
     Lane,
     SwapState,
     SwapTarget,
@@ -56,6 +57,7 @@ from llmctl.services.swap_view import (  # noqa: F401 - re-exported for callers
     gateway_url,
     rows_json,
 )
+from llmctl.services.vram_fit import remember_lane_vram
 
 
 def render_table(state: SwapState, console: Console, *, command: str = "run") -> None:
@@ -255,11 +257,16 @@ def restore_lanes(paused: Paused | list[Lane], console: Console) -> None:
         )
 
 
-def run_lane_swap(state: SwapState, target: SwapTarget, console: Console) -> None:
-    """Swap onto a lane; exit 1 on failure after rolling back."""
+def run_lane_swap(
+    state: SwapState, target: SwapTarget, console: Console, fit: Fit | None = None
+) -> None:
+    """Swap onto a lane; exit 1 on failure after rolling back.
+
+    With ``fit`` the lane starts beside what runs (``--share-gpus``).
+    """
     assert target.lane is not None
     sessions: list[Any] = []
-    if state.sessions_in_the_way(target):
+    if state.sessions_in_the_way(target, fit):
         sessions, error = pause_for_swap(
             state, target, settings=load_settings(), log=lambda m: console.print(escape(m))
         )
@@ -269,9 +276,10 @@ def run_lane_swap(state: SwapState, target: SwapTarget, console: Console) -> Non
             raise typer.Exit(1)
     result = swap_to_lane(
         target.lane,
-        other_active=state.lanes_in_the_way(target),
+        other_active=state.lanes_in_the_way(target, fit),
         vllm_active=state.vllm_active,
         vllm_unit=state.vllm_unit,
+        share_gpus=fit is not None,
     )
     if result.ok:
         console.print(
@@ -292,6 +300,13 @@ def run_lane_swap(state: SwapState, target: SwapTarget, console: Console) -> Non
             "(commands printed above)"
         )
     raise typer.Exit(1)
+
+
+def remember_serving(state: SwapState) -> None:
+    """Measure every lane serving now, so a later swap to it can check the fit."""
+    for row in state.catalog:
+        if row.lane is not None and row.key in state.serving:
+            remember_lane_vram(row.key, row.lane)
 
 
 def run_router_swap(state: SwapState, target: SwapTarget, console: Console, settings: Any) -> bool:
@@ -350,6 +365,8 @@ def run_router_swap(state: SwapState, target: SwapTarget, console: Console, sett
             restore_lanes(Paused(sessions=sessions), console)
         return False
     seconds = time.monotonic() - started
+    if target.lane is not None:
+        remember_lane_vram(target.key, target.lane)
     if result.already_active:
         console.print(
             f"[green]Already serving[/green] — {escape(result.served_model)} "

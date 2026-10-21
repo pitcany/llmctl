@@ -371,7 +371,9 @@ def record_load(key: str, seconds: float, path: Path | None = None) -> None:
             data = {}
     except (OSError, json.JSONDecodeError):
         data = {}
-    data[key] = {"seconds": round(seconds, 1), "at": int(time.time())}
+    entry = data.get(key) if isinstance(data.get(key), dict) else {}
+    # Merge: the entry also holds the lane's measured VRAM (vram_fit.record_vram).
+    data[key] = {**entry, "seconds": round(seconds, 1), "at": int(time.time())}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
@@ -402,6 +404,8 @@ class SwapPreview:
     stops: list[str] = field(default_factory=list)
     starts: str = ""
     last_load_s: float | None = None
+    #: Why nothing is stopped (the target fits beside what runs), if so.
+    note: str = ""
 
     def lines(self) -> list[str]:
         """Plain-text preview lines (the CLI and the TUI both render these)."""
@@ -414,7 +418,11 @@ class SwapPreview:
                 f"{self.target.model} ({self.target.engine}) is already running{how}{where}; "
                 "nothing to do."
             ]
-        out = [f"stops:  {', '.join(self.stops) if self.stops else 'nothing is running'}"]
+        if self.note:
+            keeps = ", ".join(self.stops) if self.stops else "nothing; everything running stays up"
+            out = [self.note, f"stops:  {keeps}"]
+        else:
+            out = [f"stops:  {', '.join(self.stops) if self.stops else 'nothing is running'}"]
         out.append(f"starts: {self.starts}")
         out.append(f"last load took {format_duration(self.last_load_s)}")
         return out
@@ -441,12 +449,19 @@ def preview_swap(
     vllm_active: bool,
     load_times: Path | None = None,
     gpu_sessions: Sequence[Any] = (),
+    alongside: Fit | None = None,
 ) -> SwapPreview:
     """Describe the swap to ``target`` given what is running now.
 
     ``active_units`` are lane units whose systemd state is active (serving or
     still loading); ``serving`` are catalog keys answering right now.
+    ``alongside`` (a fit) means ``target`` starts beside what runs: only the
+    units its ``Conflicts=`` names are stopped.
     """
+    if alongside is not None and target.lane is not None:
+        return _preview_alongside(
+            target, catalog, serving, active_units, load_times, gpu_sessions, alongside
+        )
     preview = SwapPreview(
         target=target,
         already_serving=target.key in serving
@@ -497,6 +512,65 @@ def preview_swap(
     return preview
 
 
+@dataclass(frozen=True)
+class Fit:
+    """A lane fits beside what is running: its last measured need vs free now."""
+
+    need: dict[int, int]
+    free: dict[int, int]
+    #: Units the target's ``Conflicts=`` stops anyway.
+    conflicts: frozenset[str] = frozenset()
+
+    def describe(self) -> str:
+        from llmctl.services.vram_fit import format_mib
+
+        free = ", ".join(
+            f"{self.free[c] / 1024:.1f} GiB free on GPU {c}" for c in sorted(self.need)
+        )
+        return f"fits beside what is running: needs {format_mib(self.need)}; {free}"
+
+
+def share_start_cmd(start_cmd: Sequence[str]) -> tuple[str, ...]:
+    """The start command with ``--take-gpus`` swapped for ``--share-gpus``.
+
+    ``--share-gpus`` tells a lane script llmctl already checked the fit: start
+    without stopping vLLM, Ollama or other lanes, and without its busy-card refusal.
+    """
+    return tuple("--share-gpus" if a == "--take-gpus" else a for a in start_cmd)
+
+
+def _preview_alongside(
+    target: SwapTarget,
+    catalog: list[SwapTarget],
+    serving: set[str],
+    active_units: set[str],
+    load_times: Path | None,
+    gpu_sessions: Sequence[Any],
+    fit: Fit,
+) -> SwapPreview:
+    lane = target.lane
+    assert lane is not None
+    preview = SwapPreview(
+        target=target,
+        already_serving=target.key in serving
+        or session_is_running(target, active_units, gpu_sessions),
+        last_load_s=last_load_s(target.key, load_times),
+    )
+    stops = [
+        f"{row.lane.unit} ({row.model}, its unit Conflicts= with {lane.unit})"
+        for row in catalog
+        if row.lane is not None
+        and row.lane.unit in fit.conflicts
+        and row.key != target.key
+        and lane_holds_unit(row, catalog, serving, active_units)
+    ]
+    preview.stops = stops
+    unit = lane.unit or "its unit"
+    preview.starts = f"{unit} via {' '.join(share_start_cmd(lane.start_cmd))}"
+    preview.note = fit.describe()
+    return preview
+
+
 def lane_holds_unit(
     row: SwapTarget, catalog: list[SwapTarget], serving: set[str], active_units: set[str]
 ) -> bool:
@@ -531,6 +605,12 @@ class SwapState:
     vllm_active: bool
     #: Processes llmctl started that hold GPU memory (llama.cpp models).
     gpu_sessions: list[Any] = field(default_factory=list)
+    #: Free MiB per card now. None (unread) = nothing fits alongside.
+    free_mib: dict[int, int] | None = None
+    #: catalog key -> per-card MiB last measured, or None if never.
+    vram_need: Callable[[str], dict[int, int] | None] | None = None
+    #: unit -> the units its systemd ``Conflicts=`` stops.
+    conflicts_of: Callable[[str], set[str]] | None = None
 
     def state_of(self, row: SwapTarget) -> str:
         """``serving`` / ``loading`` / ``""`` for the picker's State column."""
@@ -553,19 +633,47 @@ class SwapState:
             if row.lane is not None and self._holds_unit(row) and row.key != exclude
         ]
 
-    def lanes_in_the_way(self, target: SwapTarget) -> list[Lane]:
-        """Active lanes a swap to ``target`` must stop: those sharing a card."""
+    def fits_alongside(self, target: SwapTarget) -> Fit | None:
+        """A :class:`Fit` when lane ``target`` can start beside what runs, else None.
+
+        Only a lane whose script takes ``--take-gpus`` (and so knows
+        ``--share-gpus``) and whose VRAM was measured before qualifies.
+        """
+        from llmctl.services.vram_fit import fits
+
+        lane = target.lane
+        if lane is None or lane.unit is None or "--take-gpus" not in lane.start_cmd:
+            return None
+        if self.free_mib is None or self.vram_need is None:
+            return None
+        need = self.vram_need(target.key)
+        if not need or (lane.gpus is not None and not set(need) <= lane.gpus):
+            return None
+        if not fits(need, self.free_mib):
+            return None
+        conflicts = self.conflicts_of(lane.unit) if self.conflicts_of else set()
+        return Fit(need=dict(need), free=dict(self.free_mib), conflicts=frozenset(conflicts))
+
+    def lanes_in_the_way(self, target: SwapTarget, fit: Fit | None = None) -> list[Lane]:
+        """Active lanes a swap to ``target`` must stop: those sharing a card.
+
+        With ``fit`` (see :meth:`fits_alongside`), only those its unit conflicts with.
+        """
         return [
             row.lane
             for row in self.catalog
             if row.lane is not None
             and self._holds_unit(row)
             and row.key != target.key
-            and gpus_overlap(row.gpus, target.gpus)
+            and (
+                row.lane.unit in fit.conflicts
+                if fit is not None
+                else gpus_overlap(row.gpus, target.gpus)
+            )
         ]
 
     def preview(self, target: SwapTarget, load_times: Path | None = None) -> SwapPreview:
-        """:func:`preview_swap` against this state."""
+        """:func:`preview_swap` against this state (a lane that fits stops nothing)."""
         return preview_swap(
             target,
             self.catalog,
@@ -575,10 +683,13 @@ class SwapState:
             vllm_active=self.vllm_active,
             load_times=load_times,
             gpu_sessions=self.gpu_sessions,
+            alongside=self.fits_alongside(target),
         )
 
-    def sessions_in_the_way(self, target: SwapTarget) -> list[Any]:
-        """llmctl-started GPU processes a swap to ``target`` must stop."""
+    def sessions_in_the_way(self, target: SwapTarget, fit: Fit | None = None) -> list[Any]:
+        """llmctl-started GPU processes a swap to ``target`` must stop (none if it fits)."""
+        if fit is not None:
+            return []
         return [
             s
             for s in self.gpu_sessions
@@ -597,6 +708,10 @@ def gather_state(
     gpu_sessions: list[Any] | None = None,
     session_rows: Callable[[list[SwapTarget]], list[SwapTarget]] | None = None,
     loaded_probe: Prober | None = None,
+    free_mib: dict[int, int] | None = None,
+    vram_need: Callable[[str], dict[int, int] | None] | None = None,
+    conflicts_of: Callable[[str], set[str]] | None = None,
+    live_fit: bool = True,
 ) -> SwapState:
     """Build the catalog and probe it. Read-only; every seam is injectable.
 
@@ -637,6 +752,12 @@ def gather_state(
     active_units = {unit for unit in units if is_active(unit, True)}
     if gpu_sessions is None:
         gpu_sessions = _load_gpu_sessions(settings)
+    if live_fit:
+        from llmctl.services import vram_fit
+
+        free_mib = free_mib if free_mib is not None else vram_fit.free_mib_now()
+        vram_need = vram_need or vram_fit.last_vram_mib
+        conflicts_of = conflicts_of or vram_fit.unit_conflicts
     return SwapState(
         catalog=catalog,
         serving=serving_keys(catalog, probe, loaded_probe),
@@ -644,6 +765,9 @@ def gather_state(
         vllm_unit=vllm.unit_name,
         vllm_active=is_active(vllm.unit_name, False),
         gpu_sessions=gpu_sessions,
+        free_mib=free_mib,
+        vram_need=vram_need,
+        conflicts_of=conflicts_of,
     )
 
 
