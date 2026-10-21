@@ -215,3 +215,17 @@ class SystemctlRunner:
         if not self.is_active(unit, user=user):
             return False
         return self.stop(unit, user=user).ok
+
+
+class UserSystemctlRunner(SystemctlRunner):
+    """A :class:`SystemctlRunner` whose every call targets ``systemctl --user``.
+
+    For a managed unit that is a user unit (``user_scope: true``, like the
+    second vLLM engine), handed to code that calls ``restart(unit)`` and friends
+    without a ``user=`` argument.
+    """
+
+    def run(
+        self, verb: SystemctlVerb, unit: str, *extra: str, user: bool = False
+    ) -> SystemctlResult:
+        return super().run(verb, unit, *extra, user=True)

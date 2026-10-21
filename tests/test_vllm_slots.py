@@ -137,3 +137,36 @@ def test_engine2_lane_restarts_its_unit():
     assert lane.unit == "vllm-engine2.service"
     assert lane.start_cmd == ("systemctl", "--user", "start", "vllm-engine2.service")
     assert lane.upstream == "http://127.0.0.1:8010"
+
+
+def test_both_cards_held_prefers_engine2_over_restarting_the_main_engine():
+    # flash on GPU 0, the main engine on GPU 1 with MORE free VRAM than GPU 0:
+    # the new preset joins on engine2 (replacing flash) instead of evicting vLLM.
+    state = _state(
+        lanes_up={"flash.service"},
+        vllm_active=True,
+        vllm_cards=frozenset({1}),
+        free={0: 800, 1: 3000},
+    )
+    small = place(state, resolve("small", state.catalog), 1)
+    assert small.cards == frozenset({0})
+    assert small.engine_unit == "vllm-engine2.service"
+    assert [lane.name for lane in state.lanes_in_the_way(small)] == ["flash"]
+    assert not state.vllm_in_the_way(small)
+
+
+def test_user_runner_puts_every_call_in_user_scope():
+    import subprocess
+
+    from llmctl.integrations.systemctl import UserSystemctlRunner
+
+    seen: list[list[str]] = []
+
+    def runner(argv, **_kw):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "active\n", "")
+
+    sc = UserSystemctlRunner(runner)
+    sc.restart("vllm-engine2")
+    assert sc.is_active("vllm-engine2")
+    assert all("--user" in argv and "sudo" not in argv for argv in seen)

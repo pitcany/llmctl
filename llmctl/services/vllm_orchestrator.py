@@ -32,7 +32,7 @@ from llmctl.config import (
     VLLMDefaultsConfig,
 )
 from llmctl.integrations.fleet import FleetRole, FleetUnitsConfig, preflight_stop
-from llmctl.integrations.systemctl import SystemctlRunner
+from llmctl.integrations.systemctl import SystemctlRunner, UserSystemctlRunner
 from llmctl.integrations.turboquant import apply_to_spec_dict
 from llmctl.integrations.vllm_env import (
     VLLMLaunchSpec,
@@ -222,6 +222,11 @@ def start_vllm_tp(
     deps = deps or Dependencies()
     options = options or OrchestratorOptions()
     fleet = fleet or FleetUnitsConfig()
+    if managed_unit.user_scope and managed_unit.unit_name != fleet.tp:
+        # The second engine: the main one (fleet.tp) keeps serving on its own
+        # card, so the preflight must not stop it. A user unit is invisible to
+        # the system-scope preflight, so naming it here stops nothing extra.
+        fleet = fleet.model_copy(update={"tp": managed_unit.unit_name})
 
     spec = _build_spec(
         preset_name,
@@ -359,7 +364,7 @@ def _run_lifecycle(
     # The engine's own unit may be a user unit (the second engine); the fleet
     # (ollama) and companions stay system-scope.
     unit_systemctl = (
-        SystemctlRunner(user=True) if managed_unit.user_scope and deps.systemctl is None
+        UserSystemctlRunner() if managed_unit.user_scope and deps.systemctl is None
         else systemctl
     )
     companions = (

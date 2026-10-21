@@ -4,7 +4,8 @@ A preset needs ``tp`` cards. One that needs every card (TP=2 on this host)
 takes the main engine (``vllm-engine``) and stops everything, as before. A
 one-card preset (``tp: 1``, or ``llmctl run NAME --tp 1``) takes one card:
 
-* the card is the one nothing holds, else the one with the most free VRAM;
+* the card is the one nothing holds; else, with a second engine, one the main
+  engine does not hold; else the one with the most free VRAM;
 * it runs on ``vllm-engine`` unless that engine is up on the *other* card,
   in which case it runs on the second engine (``managed_units.vllm_engine2``,
   a user unit) so both keep serving.
@@ -94,7 +95,17 @@ def place(state: SwapState, target: SwapTarget, tp: int | None) -> SwapTarget:
     if not tp or count is None or tp >= count or tp != 1:
         return target
     free = state.free_mib or {}
-    card = min(range(count), key=lambda c: (_held(state, c), -free.get(c, 0), c))
+
+    def main_engine_on(c: int) -> bool:
+        # With a second engine, a held card that is not the main engine's wins:
+        # the new model joins the running vLLM one instead of replacing it.
+        return (
+            state.engine2 is not None
+            and state.vllm_active
+            and gpus_overlap(state.vllm_cards, frozenset({c}))
+        )
+
+    card = min(range(count), key=lambda c: (_held(state, c), main_engine_on(c), -free.get(c, 0), c))
     engine = state.vllm_unit
     main_elsewhere = (
         state.vllm_active and state.vllm_cards is not None and card not in state.vllm_cards

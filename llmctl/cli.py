@@ -2060,7 +2060,8 @@ def vllm_cmd(
     # Only a name from the list frees the GPUs up front: an unlisted one is
     # almost always a typo, and start_vllm_tp rejects it before touching
     # anything. Stopping FreeToken first would turn a typo into an outage.
-    listed = target in state.catalog
+    # By key: a placed one-card preset is a copy of its row (cards set).
+    listed = any(row.key == target.key for row in state.catalog)
     stopped_lanes = (
         cli_swap.stop_lanes_for_vllm(state, console, target) if listed and not dry_run else []
     )

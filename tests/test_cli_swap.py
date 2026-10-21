@@ -295,3 +295,52 @@ def test_direct_flag_skips_the_router(monkeypatch, calls):
     res = _run(monkeypatch, _state({"qwen3.8-27b"}, set()), "flash", "--direct")
     assert res.exit_code == 0, res.output
     assert seen == [] and calls["lane"] == ["flash"]
+
+
+def test_placed_one_card_preset_still_frees_its_card(monkeypatch, calls):
+    """A placed preset is a copy of its row; it must still count as listed."""
+
+    class _OneCard:
+        served_name = "small"
+        tensor_parallel = 1
+
+    lane = Lane(
+        name="flash",
+        served_model="ft-model",
+        upstream="http://127.0.0.1:1919",
+        start_cmd=("ft-start", "--take-gpus"),
+        unit="ft.service",
+        gpus=frozenset({0}),
+    )
+    state = SwapState(
+        catalog=build_catalog({"small": _OneCard()}, [lane], vllm_port=8003),
+        serving={"flash"},
+        active_units={"ft.service"},
+        vllm_unit="vllm-tp",
+        vllm_active=False,
+        free_mib={0: 500, 1: 400},
+        card_count=2,
+    )
+    seen_targets: list = []
+    monkeypatch.setattr(
+        cli_swap,
+        "stop_lanes_for_vllm",
+        lambda st, console, target=None: seen_targets.append(target) or [],
+    )
+    started: dict = {}
+
+    def fake_start(*a, **k):
+        started.update(k)
+        return OrchestratorResult(
+            spec=VLLMLaunchSpec(model="m", served_name="small", port=8003),
+            restart=ManagedRestartResult(
+                env_path=Path("/tmp/x.env"), env_body="", ready=True, error=None
+            ),
+        )
+
+    monkeypatch.setattr(cli, "gather_state", lambda settings: state)
+    monkeypatch.setattr(cli, "start_vllm_tp", fake_start)
+    res = CliRunner().invoke(cli.app, ["run", "small", "--yes", "--direct"])
+    assert res.exit_code == 0, res.output
+    assert len(seen_targets) == 1 and seen_targets[0].cards == frozenset({1})
+    assert started["options"].gpus == "1"

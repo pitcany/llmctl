@@ -637,3 +637,23 @@ def test_gpus_option_pins_the_card_for_this_start(tmp_path: Path) -> None:
 
     assert result.spec.gpus == "1"
     assert result.spec.port == 8010
+
+
+def test_second_engine_preflight_keeps_the_main_engine(tmp_path: Path) -> None:
+    from llmctl.integrations.fleet import FleetRole, units_to_stop
+
+    _write_preset(tmp_path)
+    deps, log = _build_deps(config_dir=tmp_path)
+
+    start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(
+            unit_name="vllm-engine2", default_port=8010, user_scope=True
+        ),
+        fleet=FleetUnitsConfig(tp="vllm-engine", ollama="ollama"),
+        options=OrchestratorOptions(gpus="0"),
+        deps=deps,
+    )
+
+    fleet = log["preflight_calls"][0]["fleet"]
+    assert "vllm-engine" not in units_to_stop(FleetRole.TP, fleet)
