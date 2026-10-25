@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Hosts without systemd (macOS, most containers): a missing `systemctl` or
+  `sudo` now reads as "unit not active" instead of crashing `llmctl run`,
+  `ls`, `stop` and the TUI with `FileNotFoundError`.
+- Lanes without a systemd unit: a lane source can set `Lane.stop_cmd`, which
+  `llmctl stop` runs to stop it. Lanes with `runtime="llama_swap"` read as
+  serving only while llama-swap's `/running` reports them ready (its
+  `/v1/models` lists every configured model), like Ollama lanes and `/api/ps`.
+- Plugins can add `llmctl doctor` findings (`PluginRegistry.doctor_checks`)
+  and sections printed after the `llmctl status` table
+  (`PluginRegistry.status_sections`; `--json` is unchanged). A hook that
+  crashes is reported, not fatal.
+
 - `llmctl generate-systemd` / `install-systemd` and the session units' `llmctl
   start` fallback write an absolute `ExecStart` (the venv's `bin/llmctl`, or
   `<python> -m llmctl.main`). A bare `llmctl` failed under systemd, which does
