@@ -58,7 +58,7 @@ def _state(serving: set[str]) -> SwapState:
 
 def test_ollama_lanes_are_judged_by_the_loaded_model() -> None:
     assert serving_keys([CODER, GEMMA], _installed) == {"coder1", "gemma1"}
-    assert serving_keys([CODER, GEMMA], _installed, _loaded) == {"gemma1"}
+    assert serving_keys([CODER, GEMMA], _installed, {"ollama": _loaded}) == {"gemma1"}
 
 
 def test_the_sibling_of_a_serving_lane_is_idle_not_loading() -> None:

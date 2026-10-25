@@ -275,3 +275,29 @@ def test_default_runner_uses_subprocess(monkeypatch: pytest.MonkeyPatch) -> None
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is True
     assert kwargs["check"] is False
+
+
+def test_missing_systemctl_is_a_failed_result_not_a_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host without systemd (macOS) answers "not active" instead of raising."""
+
+    def no_binary(argv: list[str], **kwargs: object) -> _FakeCompleted:
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(subprocess, "run", no_binary)
+    runner = SystemctlRunner()
+    result = runner.stop("vllm-tp")
+    assert result.returncode == 127
+    assert not result.ok
+    assert "could not run sudo" in result.stderr  # write verbs go through sudo
+    assert runner.is_active("vllm-tp") is False
+    assert runner.cat("vllm-tp") == ""
+
+
+def test_an_unrunnable_systemctl_is_126_not_a_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    def denied(argv: list[str], **kwargs: object) -> _FakeCompleted:
+        raise PermissionError(13, "Permission denied", argv[0])
+
+    monkeypatch.setattr(subprocess, "run", denied)
+    result = SystemctlRunner().run(SystemctlVerb.STATUS, "vllm-tp")
+    assert result.returncode == 126
+    assert "could not run systemctl" in result.stderr

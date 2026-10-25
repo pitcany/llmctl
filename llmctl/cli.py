@@ -2723,6 +2723,12 @@ def status_cmd(json_out: _JSON_OPT = False) -> None:
             serving,
         )
     console.print(table)
+    for section in _plugin_registry().status_sections:
+        # One broken plugin section must not hide the others (or the table).
+        try:
+            console.print(section())
+        except Exception as exc:  # noqa: BLE001 - reported, not fatal
+            console.print(f"[yellow]plugin status section failed: {escape(str(exc))}[/yellow]")
 
 
 @app.command("validate", hidden=True)
