@@ -102,6 +102,22 @@ def test_a_plugin_check_returning_the_wrong_type_is_a_failure() -> None:
     assert checks["doctor:<lambda>#1"]["verdict"] == "fail"  # two lambdas, two entries
 
 
+def test_a_plugin_check_with_an_unknown_verdict_fails_doctor() -> None:
+    from llmctl.config import load_settings
+    from llmctl.services.doctor import DoctorCheck, run_doctor
+
+    def router(settings: Any) -> list[DoctorCheck]:
+        return [DoctorCheck("router", "failure", "router down")]
+
+    _install(lambda reg: reg.doctor_checks.append(router))
+    report = run_doctor(load_settings())
+
+    failure = _all_checks(report)["doctor:router#0"]
+    assert failure["verdict"] == "fail"
+    assert "'failure'" in failure["detail"]
+    assert not report["ok"]
+
+
 def test_plugin_status_sections_print_after_the_units_table() -> None:
     from llmctl.cli import app
 

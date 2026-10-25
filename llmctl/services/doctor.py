@@ -30,6 +30,7 @@ from llmctl.services.preset_loader import load_preset_views
 from llmctl.telemetry.process import is_pid_running
 
 _ACTIVE = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
+_VERDICTS = ("pass", "warn", "fail")
 
 # How long an auto-discovered row may go unseen before doctor calls it orphaned.
 # Every scan re-stamps ``updated_at`` on rows the runtime still reports, so this
@@ -113,6 +114,10 @@ def _plugin_checks(cfg: Settings) -> list[tuple[str, Callable[[], list[DoctorChe
         bad = [c for c in checks if not isinstance(c, DoctorCheck)]
         if bad:
             raise TypeError(f"returned {type(bad[0]).__name__}, not DoctorCheck")
+        # An unknown verdict lands in no report group, so doctor would hide it.
+        odd = [c for c in checks if c.verdict not in _VERDICTS]
+        if odd:
+            raise ValueError(f"{odd[0].name}: verdict {odd[0].verdict!r} is not one of {_VERDICTS}")
         return checks
 
     hooks = registry().doctor_checks
