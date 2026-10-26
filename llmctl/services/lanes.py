@@ -142,6 +142,11 @@ class Lane:
     #: How to stop a lane that has no ``unit`` (a router that runs its own
     #: backends, such as llama-swap). Empty: ``llmctl stop`` cannot stop it.
     stop_cmd: tuple[str, ...] = ()
+    #: What starting this lane stops, one line each, for lanes whose router
+    #: decides that (llama-swap evicts by group). None: llmctl works it out
+    #: from units and cards.
+    #: A fresh closure per load, so it takes no part in lane equality.
+    plan: Callable[[], list[str]] | None = field(default=None, compare=False, repr=False)
 
 
 def load_lanes(
@@ -425,6 +430,9 @@ class SwapPreview:
     last_load_s: float | None = None
     #: Why nothing is stopped (the target fits beside what runs), if so.
     note: str = ""
+    #: ``stops`` came from the lane's own plan: empty means nothing stops,
+    #: not that nothing runs.
+    planned: bool = False
 
     def lines(self) -> list[str]:
         """Plain-text preview lines (the CLI and the TUI both render these)."""
@@ -438,10 +446,12 @@ class SwapPreview:
                 "nothing to do."
             ]
         if self.note:
-            keeps = ", ".join(self.stops) if self.stops else "nothing; everything running stays up"
+            empty = "nothing" if self.planned else "nothing; everything running stays up"
+            keeps = ", ".join(self.stops) if self.stops else empty
             out = [self.note, f"stops:  {keeps}"]
         else:
-            out = [f"stops:  {', '.join(self.stops) if self.stops else 'nothing is running'}"]
+            empty = "nothing" if self.planned else "nothing is running"
+            out = [f"stops:  {', '.join(self.stops) if self.stops else empty}"]
         out.append(f"starts: {self.starts}")
         out.append(f"last load took {format_duration(self.last_load_s)}")
         return out
@@ -530,10 +540,22 @@ def preview_swap(
         assert lane is not None
         if "--take-gpus" in lane.start_cmd:
             stops.append("Ollama models on its GPUs (start script, --take-gpus)")
-        unit = lane.unit or "its unit"
-        preview.starts = f"{unit} via {' '.join(lane.start_cmd)}"
+        stops += _apply_plan(lane, preview)
+        command = " ".join(lane.start_cmd)
+        preview.starts = f"{lane.unit} via {command}" if lane.unit else command
     preview.stops = stops
     return preview
+
+
+def _apply_plan(lane: Lane, preview: SwapPreview) -> list[str]:
+    """``lane.plan``'s lines (marking ``preview`` planned), or [] without one."""
+    if lane.plan is None:
+        return []
+    preview.planned = True
+    try:
+        return list(lane.plan())
+    except Exception as exc:  # noqa: BLE001 - a preview must not fail the run
+        return [f"unknown ({exc}); the start command checks again"]
 
 
 @dataclass(frozen=True)
@@ -588,9 +610,10 @@ def _preview_alongside(
         and row.key != target.key
         and lane_holds_unit(row, catalog, serving, active_units)
     ]
+    stops += _apply_plan(lane, preview)
     preview.stops = stops
-    unit = lane.unit or "its unit"
-    preview.starts = f"{unit} via {' '.join(share_start_cmd(lane.start_cmd))}"
+    command = " ".join(share_start_cmd(lane.start_cmd))
+    preview.starts = f"{lane.unit} via {command}" if lane.unit else command
     preview.note = fit.describe()
     return preview
 

@@ -212,10 +212,17 @@ def swap_to_lane(
 
 
 def _run_captured(argv: Sequence[str], timeout: float) -> int:
-    """Like :func:`_run_streaming` but swallows output (for the TUI)."""
+    """Like :func:`_run_streaming` but swallows output (for the TUI).
+
+    No stdin either: a prompt whose output is swallowed would wait unseen.
+    """
     try:
         return subprocess.run(  # noqa: S603 - argv from router.yaml
-            list(argv), check=False, capture_output=True, timeout=timeout
+            list(argv),
+            check=False,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
         ).returncode
     except subprocess.TimeoutExpired:
         return 124

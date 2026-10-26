@@ -144,3 +144,83 @@ def test_a_failing_stop_cmd_is_reported_not_raised() -> None:
     deps = StopDeps(stop_vllm=never, stop_lane=never, stop_session=never, run_cmd=run_cmd)
     results = stop_items(serving_now(_state({"qwen27b-m5"})), deps)
     assert [ok for _, ok in results] == [False]
+
+
+# -- preview: the router decides what a start unloads ---------------------------
+
+
+def _planned(plan) -> SwapTarget:
+    lane = Lane(
+        name="glm53-m5",
+        served_model="glm53-m5",
+        upstream=ROUTER,
+        start_cmd=("llmctl-mac", "start", "glm53-m5"),
+        runtime="llama_swap",
+        plan=plan,
+    )
+    return SwapTarget(
+        key="glm53-m5", kind="lane", model="glm53-m5", engine="llama-swap", upstream=ROUTER,
+        lane=lane,
+    )
+
+
+def test_a_lanes_plan_says_what_its_start_unloads() -> None:
+    target = _planned(lambda: ["qwen35b-m5 (exclusive group big)", "mimo9b-m5 (swap group a)"])
+    lines = _state({"qwen35b-m5"}, [QWEN, TINY, target]).preview(target).lines()
+
+    assert lines[0] == "stops:  qwen35b-m5 (exclusive group big), mimo9b-m5 (swap group a)"
+    assert lines[1] == "starts: llmctl-mac start glm53-m5"  # no unit: the command itself
+
+
+def test_an_empty_plan_says_nothing_stops_not_that_nothing_runs() -> None:
+    target = _planned(lambda: [])
+    lines = _state({"qwen35b-m5"}, [QWEN, target]).preview(target).lines()
+    assert lines[0] == "stops:  nothing"
+
+
+def test_a_failing_plan_is_shown_not_raised() -> None:
+    def broken() -> list[str]:
+        raise RuntimeError("router down")
+
+    target = _planned(broken)
+    lines = _state(set(), [target]).preview(target).lines()
+    assert lines[0] == "stops:  unknown (router down); the start command checks again"
+
+
+def test_the_tui_runner_gives_the_start_command_no_stdin(monkeypatch) -> None:
+    """Its output is captured, so a prompt there would wait unseen."""
+    import subprocess
+
+    from llmctl.services import lane_swap
+
+    seen: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert lane_swap._run_captured(["true"], 5.0) == 0
+    assert seen["stdin"] is subprocess.DEVNULL
+
+
+def test_two_loads_of_a_planned_lane_are_equal() -> None:
+    """Each lane source call makes a new plan closure; the lane is still the same lane."""
+    assert _planned(lambda: []).lane == _planned(lambda: []).lane
+
+
+def test_a_planned_lane_that_fits_alongside_still_shows_its_plan() -> None:
+    from llmctl.services.lanes import Fit, preview_swap
+
+    def preview(plan):
+        target = _planned(plan)
+        return preview_swap(
+            target, [QWEN, target], serving={"qwen27b-m5"}, active_units=set(),
+            vllm_unit="vllm-tp.service", vllm_active=False,
+            alongside=Fit(need={0: 1024}, free={0: 4096}),
+        ).lines()
+
+    lines = preview(lambda: ["mimo9b-m5 (swap group a)"])
+    assert lines[1] == "stops:  mimo9b-m5 (swap group a)"
+    assert preview(lambda: [])[1] == "stops:  nothing"
+    assert lines[2] == "starts: llmctl-mac start glm53-m5"  # no unit: the command alone
