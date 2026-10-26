@@ -152,9 +152,8 @@ def test_a_screen_that_cannot_be_installed_is_skipped_not_fatal() -> None:
 
 
 def test_plugin_titles_and_keys_cannot_break_the_help_markup() -> None:
-    from textual.content import Content
+    from rich.text import Text  # Rich markup: what esc() targets, in every supported Textual
 
     _install(_host(title="Host [/]", key="h"))
     seen = _run()
-    Content.from_markup(seen["help"])  # raises on broken markup
-    assert "Host [/]" in Content.from_markup(seen["help"]).plain
+    assert "Host [/]" in Text.from_markup(seen["help"]).plain  # raises MarkupError if broken
