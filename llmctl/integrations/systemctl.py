@@ -128,6 +128,15 @@ class SystemctlRunner:
                     stdout="",
                     stderr=f"systemctl {verb.value} {unit} timed out after 120s",
                 )
+            except OSError as exc:
+                # No systemd on this host (macOS, most containers), or sudo /
+                # systemctl not executable: every unit reads as not active
+                # instead of the CLI crashing.
+                return SystemctlResult(
+                    returncode=127 if isinstance(exc, FileNotFoundError) else 126,
+                    stdout="",
+                    stderr=f"could not run {argv[0]}: {exc}",
+                )
         return SystemctlResult(
             returncode=completed.returncode,
             stdout=completed.stdout or "",

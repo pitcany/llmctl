@@ -98,6 +98,42 @@ def probe_ollama_loaded(
     return names
 
 
+def probe_llama_swap_running(
+    base_url: str,
+    timeout: float = _PROBE_TIMEOUT_S,
+    http_get: Callable[[str, float], Any] | None = None,
+) -> list[str] | None:
+    """Models llama-swap has loaded and ready now (``<base_url>/running``).
+
+    Like Ollama, llama-swap's ``/v1/models`` lists every configured model,
+    loaded or not. A model still starting is not listed. Returns ``None`` on
+    any failure, like :func:`probe_openai_v1_models`.
+    """
+    http_get = http_get or _default_http_get
+    url = f"{base_url.rstrip('/')}/running"
+    try:
+        resp = http_get(url, timeout)
+        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return None
+    rows = payload.get("running") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return []  # llama-swap (Go) sends an idle router's empty list as null
+    return [
+        m["model"]
+        for m in rows
+        if isinstance(m, dict) and isinstance(m.get("model"), str) and m.get("state") == "ready"
+    ]
+
+
+#: Runtime id -> probe for what its server holds in memory, for servers whose
+#: ``/v1/models`` lists everything they could serve.
+LOADED_PROBES: dict[str, Callable[[str], list[str] | None]] = {
+    "ollama": probe_ollama_loaded,
+    "llama_swap": probe_llama_swap_running,
+}
+
+
 def _probe_managed_unit(
     unit: ManagedUnitConfig,
     http_get: Callable[[str, float], Any] | None = None,

@@ -8,6 +8,7 @@ CLI and API render identically. Nothing here modifies the system.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -29,6 +30,7 @@ from llmctl.services.preset_loader import load_preset_views
 from llmctl.telemetry.process import is_pid_running
 
 _ACTIVE = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
+_VERDICTS = ("pass", "warn", "fail")
 
 # How long an auto-discovered row may go unseen before doctor calls it orphaned.
 # Every scan re-stamps ``updated_at`` on rows the runtime still reports, so this
@@ -75,6 +77,7 @@ def run_doctor(settings: Settings | None = None) -> dict[str, Any]:
         ("drift", lambda: _check_drift(cfg)),
         ("orphans", lambda: _check_orphan_discoveries(cfg)),
         ("gateway", lambda: _check_gateway(cfg)),
+        *_plugin_checks(cfg),
     )
     for name, check in named_checks:
         # A diagnostic must degrade one broken check (e.g. malformed YAML in
@@ -100,6 +103,29 @@ def run_doctor(settings: Settings | None = None) -> dict[str, Any]:
     }
     report["ok"] = not report["failures"]
     return report
+
+
+def _plugin_checks(cfg: Settings) -> list[tuple[str, Callable[[], list[DoctorCheck]]]]:
+    """``(name, check)`` for each plugin-registered doctor hook."""
+    from llmctl.plugins import registry
+
+    def run(hook: Callable[[Settings], list[DoctorCheck]]) -> list[DoctorCheck]:
+        checks = list(hook(cfg))
+        bad = [c for c in checks if not isinstance(c, DoctorCheck)]
+        if bad:
+            raise TypeError(f"returned {type(bad[0]).__name__}, not DoctorCheck")
+        # An unknown verdict lands in no report group, so doctor would hide it.
+        odd = [c for c in checks if c.verdict not in _VERDICTS]
+        if odd:
+            raise ValueError(f"{odd[0].name}: verdict {odd[0].verdict!r} is not one of {_VERDICTS}")
+        return checks
+
+    hooks = registry().doctor_checks
+    return [
+        # Index-suffixed so two unnamed hooks (lambdas) report apart.
+        (f"{getattr(hook, '__name__', 'plugin')}#{i}", lambda hook=hook: run(hook))
+        for i, hook in enumerate(hooks)
+    ]
 
 
 def _check_storage(cfg: Settings) -> list[DoctorCheck]:

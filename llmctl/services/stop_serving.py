@@ -9,7 +9,7 @@ Ollama and LM Studio models are left alone: their servers unload on their own.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +28,8 @@ class Serving:
     ref: str
     #: Cards stopping it frees; ``None`` = every card.
     gpus: Gpus = None
+    #: A lane without a unit is stopped by running this (its ``stop_cmd``).
+    cmd: tuple[str, ...] = ()
 
 
 def preview_line(item: Serving) -> str:
@@ -72,6 +74,22 @@ def serving_now(state: Any) -> list[Serving]:
                 gpus=lane.gpus,
             )
         )
+    for row in state.catalog:
+        lane = row.lane
+        if lane is None or lane.unit is not None or not lane.stop_cmd:
+            continue
+        if row.key not in state.serving:
+            continue
+        items.append(
+            Serving(
+                kind="lane",
+                label=f"lane {lane.name} ({lane.served_model})",
+                names=frozenset({lane.name, lane.served_model, *lane.aliases}),
+                ref=lane.name,
+                gpus=lane.gpus,
+                cmd=lane.stop_cmd,
+            )
+        )
     for session in state.gpu_sessions:
         items.append(
             Serving(
@@ -96,6 +114,12 @@ def pick(items: list[Serving], name: str) -> list[Serving]:
     return prefixed if len(prefixed) == 1 else []
 
 
+def _run_stop_cmd(argv: Sequence[str]) -> bool:
+    from llmctl.services.lane_swap import LaneSwapDeps
+
+    return LaneSwapDeps().run_quiet(argv) == 0
+
+
 @dataclass
 class StopDeps:
     """Side-effect seams; the defaults act on the real machine."""
@@ -103,6 +127,8 @@ class StopDeps:
     stop_vllm: Callable[[str], bool]
     stop_lane: Callable[[str], bool]
     stop_session: Callable[[str], bool]
+    #: Runs a unitless lane's ``stop_cmd``; True when it exits 0.
+    run_cmd: Callable[[Sequence[str]], bool] = _run_stop_cmd
 
 
 def stop_items(items: list[Serving], deps: StopDeps) -> list[tuple[Serving, bool]]:
@@ -113,7 +139,7 @@ def stop_items(items: list[Serving], deps: StopDeps) -> list[tuple[Serving, bool
             item.kind
         ]
         try:
-            ok = bool(fn(item.ref))
+            ok = bool(deps.run_cmd(item.cmd) if item.cmd else fn(item.ref))
         except Exception:  # noqa: BLE001 - reported as not stopped
             ok = False
         results.append((item, ok))

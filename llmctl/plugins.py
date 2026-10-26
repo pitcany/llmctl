@@ -31,6 +31,11 @@ Extension points
 * :data:`LaneSource` — returns extra :class:`~llmctl.services.lanes.Lane`
   rows for ``llmctl run`` (servers with their own start script and unit).
 * :data:`CommandHook` — adds Typer commands to the ``llmctl`` app.
+* :data:`DoctorHook` — returns extra ``llmctl doctor`` findings
+  (:class:`~llmctl.services.doctor.DoctorCheck`). Read-only, like doctor.
+* :data:`StatusHook` — returns a Rich renderable (a string is read as Rich
+  markup; escape untrusted text) that ``llmctl status``
+  prints after the units table (not part of ``--json``).
 
 ``LLMCTL_PLUGINS=none`` disables plugin discovery (tests, debugging); a
 plugin that fails to import is reported on stderr and skipped so one broken
@@ -49,7 +54,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     import typer
 
-    from llmctl.config import ManagedUnitsConfig
+    from llmctl.config import ManagedUnitsConfig, Settings
+    from llmctl.services.doctor import DoctorCheck
     from llmctl.services.lanes import Lane
 
 ENTRY_POINT_GROUP = "llmctl.plugins"
@@ -93,6 +99,8 @@ class PostStartCheck(Protocol):
 
 LaneSource = Callable[["ManagedUnitsConfig | None"], "list[Lane]"]
 CommandHook = Callable[["typer.Typer"], None]
+DoctorHook = Callable[["Settings"], "list[DoctorCheck]"]
+StatusHook = Callable[[], Any]
 
 
 @dataclass
@@ -103,6 +111,8 @@ class PluginRegistry:
     post_start_checks: list[PostStartCheck] = field(default_factory=list)
     lane_sources: list[LaneSource] = field(default_factory=list)
     commands: list[CommandHook] = field(default_factory=list)
+    doctor_checks: list[DoctorHook] = field(default_factory=list)
+    status_sections: list[StatusHook] = field(default_factory=list)
     #: Distribution names that registered, for ``llmctl doctor``.
     loaded: list[str] = field(default_factory=list)
     #: ``(name, error)`` for plugins that failed to load.

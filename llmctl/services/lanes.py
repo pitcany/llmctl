@@ -24,7 +24,7 @@ import difflib
 import json
 import os
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -47,6 +47,7 @@ _ENGINE_LABELS = {
     "sglang": "SGLang",
     "openai": "OpenAI-compat",
     "ollama": "Ollama",
+    "llama_swap": "llama-swap",
 }
 
 
@@ -138,6 +139,9 @@ class Lane:
     runtime: str | None = None
     #: Cards the lane occupies; None = every card.
     gpus: Gpus = None
+    #: How to stop a lane that has no ``unit`` (a router that runs its own
+    #: backends, such as llama-swap). Empty: ``llmctl stop`` cannot stop it.
+    stop_cmd: tuple[str, ...] = ()
 
 
 def load_lanes(
@@ -327,24 +331,29 @@ Prober = Callable[[str], list[str] | None]
 
 
 def serving_keys(
-    catalog: list[SwapTarget], probe: Prober, loaded_probe: Prober | None = None
+    catalog: list[SwapTarget],
+    probe: Prober,
+    loaded_probes: Mapping[str, Prober] | None = None,
 ) -> set[str]:
     """Keys of rows whose upstream lists their served model right now.
 
     Each upstream is probed once, however many rows share it (every vLLM
-    preset shares :8003). Ollama lanes use ``loaded_probe`` (``/api/ps``)
-    when given: Ollama's ``/v1/models`` lists every installed model, so two
-    lanes on one Ollama server would both read serving.
+    preset shares :8003). A lane whose runtime has an entry in
+    ``loaded_probes`` uses it instead (Ollama's ``/api/ps``, llama-swap's
+    ``/running``): those servers' ``/v1/models`` lists every model they could
+    serve, so every lane on one server would read serving.
     """
-    served_by: dict[tuple[str, bool], list[str] | None] = {}
+    loaded_probes = loaded_probes or {}
+    served_by: dict[tuple[str, str | None], list[str] | None] = {}
     keys: set[str] = set()
     for row in catalog:
         if not row.upstream:
             continue  # a session row: its port is picked at start
-        loaded = loaded_probe is not None and row.lane is not None and row.lane.runtime == "ollama"
-        cache_key = (row.upstream, loaded)
+        runtime = row.lane.runtime if row.lane is not None else None
+        loaded_probe = loaded_probes.get(runtime) if runtime else None
+        cache_key = (row.upstream, runtime if loaded_probe else None)
         if cache_key not in served_by:
-            served_by[cache_key] = (loaded_probe if loaded else probe)(row.upstream)
+            served_by[cache_key] = (loaded_probe or probe)(row.upstream)
         ids = served_by[cache_key] or []
         if row.model in ids:
             keys.add(row.key)
@@ -767,7 +776,7 @@ def gather_state(
     is_active: Callable[[str, bool], bool] | None = None,
     gpu_sessions: list[Any] | None = None,
     session_rows: Callable[[list[SwapTarget]], list[SwapTarget]] | None = None,
-    loaded_probe: Prober | None = None,
+    loaded_probes: Mapping[str, Prober] | None = None,
     free_mib: dict[int, int] | None = None,
     vram_need: Callable[[str], dict[int, int] | None] | None = None,
     conflicts_of: Callable[[str], set[str] | None] | None = None,
@@ -787,10 +796,11 @@ def gather_state(
     if lanes is None:
         lanes = load_lanes(managed_units=settings.managed_units)
     if probe is None:
-        from llmctl.services.backends import probe_ollama_loaded, probe_openai_v1_models
+        from llmctl.services.backends import LOADED_PROBES, probe_openai_v1_models
 
         probe = probe_openai_v1_models
-        loaded_probe = loaded_probe or probe_ollama_loaded
+        if loaded_probes is None:
+            loaded_probes = LOADED_PROBES
     if is_active is None:
         from llmctl.integrations.systemctl import SystemctlRunner
 
@@ -820,7 +830,7 @@ def gather_state(
         conflicts_of = conflicts_of or vram_fit.unit_conflicts
     from llmctl.services import vllm_slots
 
-    serving = serving_keys(catalog, probe, loaded_probe)
+    serving = serving_keys(catalog, probe, loaded_probes)
     engine2 = getattr(settings.managed_units, "vllm_engine2", None)
     engine_lanes: list[Lane] = []
     engine2_serving: set[str] = set()
