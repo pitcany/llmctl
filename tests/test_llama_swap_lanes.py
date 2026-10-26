@@ -207,3 +207,19 @@ def test_the_tui_runner_gives_the_start_command_no_stdin(monkeypatch) -> None:
 def test_two_loads_of_a_planned_lane_are_equal() -> None:
     """Each lane source call makes a new plan closure; the lane is still the same lane."""
     assert _planned(lambda: []).lane == _planned(lambda: []).lane
+
+
+def test_a_planned_lane_that_fits_alongside_still_shows_its_plan() -> None:
+    from llmctl.services.lanes import Fit, preview_swap
+
+    def preview(plan):
+        target = _planned(plan)
+        return preview_swap(
+            target, [QWEN, target], serving={"qwen27b-m5"}, active_units=set(),
+            vllm_unit="vllm-tp.service", vllm_active=False,
+            alongside=Fit(need={0: 1024}, free={0: 4096}),
+        ).lines()
+
+    lines = preview(lambda: ["mimo9b-m5 (swap group a)"])
+    assert lines[1] == "stops:  mimo9b-m5 (swap group a)"
+    assert preview(lambda: [])[1] == "stops:  nothing"

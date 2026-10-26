@@ -446,7 +446,8 @@ class SwapPreview:
                 "nothing to do."
             ]
         if self.note:
-            keeps = ", ".join(self.stops) if self.stops else "nothing; everything running stays up"
+            empty = "nothing" if self.planned else "nothing; everything running stays up"
+            keeps = ", ".join(self.stops) if self.stops else empty
             out = [self.note, f"stops:  {keeps}"]
         else:
             empty = "nothing" if self.planned else "nothing is running"
@@ -539,16 +540,22 @@ def preview_swap(
         assert lane is not None
         if "--take-gpus" in lane.start_cmd:
             stops.append("Ollama models on its GPUs (start script, --take-gpus)")
-        if lane.plan is not None:
-            preview.planned = True
-            try:
-                stops += lane.plan()
-            except Exception as exc:  # noqa: BLE001 - a preview must not fail the run
-                stops.append(f"unknown ({exc}); the start command checks again")
+        stops += _apply_plan(lane, preview)
         command = " ".join(lane.start_cmd)
         preview.starts = f"{lane.unit} via {command}" if lane.unit else command
     preview.stops = stops
     return preview
+
+
+def _apply_plan(lane: Lane, preview: SwapPreview) -> list[str]:
+    """``lane.plan``'s lines (marking ``preview`` planned), or [] without one."""
+    if lane.plan is None:
+        return []
+    preview.planned = True
+    try:
+        return list(lane.plan())
+    except Exception as exc:  # noqa: BLE001 - a preview must not fail the run
+        return [f"unknown ({exc}); the start command checks again"]
 
 
 @dataclass(frozen=True)
@@ -603,6 +610,7 @@ def _preview_alongside(
         and row.key != target.key
         and lane_holds_unit(row, catalog, serving, active_units)
     ]
+    stops += _apply_plan(lane, preview)
     preview.stops = stops
     unit = lane.unit or "its unit"
     preview.starts = f"{unit} via {' '.join(share_start_cmd(lane.start_cmd))}"
