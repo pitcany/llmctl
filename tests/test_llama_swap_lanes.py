@@ -223,3 +223,4 @@ def test_a_planned_lane_that_fits_alongside_still_shows_its_plan() -> None:
     lines = preview(lambda: ["mimo9b-m5 (swap group a)"])
     assert lines[1] == "stops:  mimo9b-m5 (swap group a)"
     assert preview(lambda: [])[1] == "stops:  nothing"
+    assert lines[2] == "starts: llmctl-mac start glm53-m5"  # no unit: the command alone

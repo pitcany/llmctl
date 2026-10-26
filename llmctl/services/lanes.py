@@ -612,8 +612,8 @@ def _preview_alongside(
     ]
     stops += _apply_plan(lane, preview)
     preview.stops = stops
-    unit = lane.unit or "its unit"
-    preview.starts = f"{unit} via {' '.join(share_start_cmd(lane.start_cmd))}"
+    command = " ".join(share_start_cmd(lane.start_cmd))
+    preview.starts = f"{lane.unit} via {command}" if lane.unit else command
     preview.note = fit.describe()
     return preview
 
