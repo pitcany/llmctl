@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Plugins can add screens to `llmctl tui` (`PluginRegistry.tui_screens`, a
+  `TuiScreen` with a name, title, help line, key and factory): each gets its
+  key, a line in the help (`?`) and "Go to ..." in the command palette, and
+  `start=True` makes it the screen the TUI opens on. A plugin screen on a key
+  or name the TUI already uses, or whose factory raises, is skipped with a
+  notification.
+
 - `llmctl run` preview for lanes whose router decides what a start unloads:
   a lane source can set `Lane.plan`, and its lines are the preview's
   "stops:" (llama-swap evicts by group, which llmctl cannot work out from
