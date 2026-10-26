@@ -145,7 +145,8 @@ class Lane:
     #: What starting this lane stops, one line each, for lanes whose router
     #: decides that (llama-swap evicts by group). None: llmctl works it out
     #: from units and cards.
-    plan: Callable[[], list[str]] | None = None
+    #: A fresh closure per load, so it takes no part in lane equality.
+    plan: Callable[[], list[str]] | None = field(default=None, compare=False, repr=False)
 
 
 def load_lanes(

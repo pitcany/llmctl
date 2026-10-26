@@ -202,3 +202,8 @@ def test_the_tui_runner_gives_the_start_command_no_stdin(monkeypatch) -> None:
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert lane_swap._run_captured(["true"], 5.0) == 0
     assert seen["stdin"] is subprocess.DEVNULL
+
+
+def test_two_loads_of_a_planned_lane_are_equal() -> None:
+    """Each lane source call makes a new plan closure; the lane is still the same lane."""
+    assert _planned(lambda: []).lane == _planned(lambda: []).lane
