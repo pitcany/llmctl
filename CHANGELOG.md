@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `llmctl run` preview for lanes whose router decides what a start unloads:
+  a lane source can set `Lane.plan`, and its lines are the preview's
+  "stops:" (llama-swap evicts by group, which llmctl cannot work out from
+  units). A lane without a unit previews as `starts: <its command>`. The
+  TUI runs a lane's start command with no stdin, so a prompt cannot wait
+  unseen behind captured output.
 - Hosts without systemd (macOS, most containers): a missing `systemctl` or
   `sudo` now reads as "unit not active" instead of crashing `llmctl run`,
   `ls`, `stop` and the TUI with `FileNotFoundError`.
