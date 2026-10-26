@@ -57,12 +57,48 @@ def _binding_rows(bindings: Iterable[object]) -> list[tuple[str, str]]:
 
 ScreenRow = tuple[str, str, str, str]
 
+#: (installed name, class) of every core screen, in install order.
+CORE_SCREENS: tuple[tuple[str, type[Screen]], ...] = (
+    ("dashboard", DashboardScreen),
+    ("swap", SwapScreen),
+    ("presets", PresetsScreen),
+    ("units", UnitsScreen),
+    ("models", ModelsScreen),
+    ("profiles", ProfilesScreen),
+    ("sessions", SessionsScreen),
+    ("gpus", GPUScreen),
+    ("logs", LogsScreen),
+    ("doctor", DoctorScreen),
+    ("benchmarks", BenchmarksScreen),
+)
+
+
+def _binding_keys(bindings: Iterable[object]) -> set[str]:
+    keys: set[str] = set()
+    for b in bindings:
+        raw = b.key if isinstance(b, Binding) else b[0] if isinstance(b, tuple) else ""
+        keys |= {k.strip() for k in str(raw).split(",") if k.strip()}
+    return keys
+
+
+def _reserved_keys() -> set[str]:
+    """Every key the core TUI binds, on the app or on any core screen, plus the palette's.
+
+    A plugin screen's key must be free on every screen, or it would only work
+    from some of them.
+    """
+    keys = _binding_keys(MissionControlApp.BINDINGS) | {MissionControlApp.COMMAND_PALETTE_BINDING}
+    for _name, screen_class in CORE_SCREENS:
+        for cls in screen_class.__mro__:
+            keys |= _binding_keys(getattr(cls, "BINDINGS", None) or [])
+    return keys
+
 
 def help_text(screen: object, extra: Iterable[ScreenRow] = ()) -> str:
     """Markup for the help modal: screens (plugins' too), global keys, this screen's keys."""
     lines = ["[b]Screens[/b]"]
     for _name, title, what, key in (*SCREENS, *extra):
-        lines.append(f"  [b]{key}[/b]  {title:<11} {esc(what)}")
+        lines.append(f"  [b]{esc(key)}[/b]  {esc(f'{title:<11}')} {esc(what)}")
     lines.append("\n[b]Everywhere[/b]")
     lines.append("  [b]r[/b]  refresh   [b]?[/b] / [b]F1[/b]  this help   "
                  "[b]ctrl+\\[/b]  command palette   [b]q[/b]  quit")
@@ -184,17 +220,8 @@ class MissionControlApp(App[None]):
 
     def on_mount(self) -> None:
         """Install screens, show the dashboard, and start the refresh timer."""
-        self.install_screen(DashboardScreen(), name="dashboard")
-        self.install_screen(SwapScreen(), name="swap")
-        self.install_screen(PresetsScreen(), name="presets")
-        self.install_screen(UnitsScreen(), name="units")
-        self.install_screen(ModelsScreen(), name="models")
-        self.install_screen(ProfilesScreen(), name="profiles")
-        self.install_screen(SessionsScreen(), name="sessions")
-        self.install_screen(GPUScreen(), name="gpus")
-        self.install_screen(LogsScreen(), name="logs")
-        self.install_screen(DoctorScreen(), name="doctor")
-        self.install_screen(BenchmarksScreen(), name="benchmarks")
+        for name, screen_class in CORE_SCREENS:
+            self.install_screen(screen_class(), name=name)
         start = self._install_plugin_screens()
         self.push_screen(start or "dashboard")
         self.set_interval(REFRESH_INTERVAL, self._tick_refresh)
@@ -209,8 +236,8 @@ class MissionControlApp(App[None]):
         from llmctl.plugins import registry
 
         self._plugin_rows: list[ScreenRow] = []
-        keys = {b.key for b in self.BINDINGS if isinstance(b, Binding)}
-        names = {name for name, *_ in SCREENS}
+        keys = _reserved_keys()
+        names = {name for name, _ in CORE_SCREENS}
         start: str | None = None
         for spec in registry().tui_screens:
             clash = (
@@ -223,10 +250,12 @@ class MissionControlApp(App[None]):
                 continue
             try:
                 screen = spec.factory()
+                if not isinstance(screen, Screen):
+                    raise TypeError(f"its factory returned {type(screen).__name__}, not a Screen")
+                self.install_screen(screen, name=spec.name)
             except Exception as exc:  # noqa: BLE001 - reported, the TUI still runs
                 self.notify(f"Plugin screen {spec.title} skipped: {exc}", severity="error")
                 continue
-            self.install_screen(screen, name=spec.name)
             self.bind(spec.key, f"show_plugin_screen({spec.name!r})", description=spec.title)
             keys.add(spec.key)
             names.add(spec.name)

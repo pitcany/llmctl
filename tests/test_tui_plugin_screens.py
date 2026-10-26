@@ -125,3 +125,36 @@ def test_without_plugins_the_tui_is_unchanged() -> None:
     seen = _run()
     assert seen["first"] == "DashboardScreen"
     assert "Host" not in seen["help"]
+
+
+@pytest.mark.parametrize("key", ["a", "ctrl+backslash"])  # Models' add; the command palette
+def test_a_plugin_screen_on_any_core_screens_key_is_skipped(key: str) -> None:
+    _install(_host(key=key))
+    seen = _run()
+    assert any("Host" in note and repr(key) in note for note in seen["notes"])
+    assert "Host" not in seen["help"]
+
+
+def test_a_factory_that_returns_no_screen_is_skipped() -> None:
+    _install(_host(factory=lambda: "not a screen", start=True))
+    seen = _run()
+    assert seen["first"] == "DashboardScreen"
+    assert any("not a Screen" in note for note in seen["notes"])
+
+
+def test_a_screen_that_cannot_be_installed_is_skipped_not_fatal() -> None:
+    shared = HostScreen()
+    _install(_host(factory=lambda: shared), _host(name="other", title="Other", key="k",
+                                                     factory=lambda: shared))
+    seen = _run(("h",))
+    assert seen["last"] == "HostScreen"  # the first one works
+    assert any("Other" in note for note in seen["notes"])
+
+
+def test_plugin_titles_and_keys_cannot_break_the_help_markup() -> None:
+    from textual.content import Content
+
+    _install(_host(title="Host [/]", key="h"))
+    seen = _run()
+    Content.from_markup(seen["help"])  # raises on broken markup
+    assert "Host [/]" in Content.from_markup(seen["help"]).plain
