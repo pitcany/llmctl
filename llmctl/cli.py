@@ -180,12 +180,9 @@ from llmctl import cli_hf  # noqa: E402
 
 cli_hf.register(app)
 
-# Plugins add their own verbs last (see llmctl.plugins); a plugin that fails
-# to import is reported on stderr and skipped so `llmctl` still runs.
+# Plugins (see llmctl.plugins) add their verbs at the end of this module; a
+# plugin that fails to import is reported on stderr and skipped.
 from llmctl.plugins import registry as _plugin_registry  # noqa: E402
-
-for _hook in _plugin_registry().commands:
-    _hook(app)
 
 
 def _session_model_cell(session: object, names: dict[str, str]) -> str:
@@ -3160,3 +3157,9 @@ def detach_cmd(
         f"unit={escape(str(session.systemd_unit or '-'))}). "
         "The upstream process was not touched."
     )
+
+
+# Plugins add their own verbs last, after every core verb: a plugin verb named
+# like a core one replaces it (a later command of the same name wins).
+for _hook in _plugin_registry().commands:
+    _hook(app)

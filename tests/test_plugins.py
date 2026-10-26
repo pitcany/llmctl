@@ -138,3 +138,32 @@ def test_orchestrator_defaults_to_the_registered_companions(tmp_path: Any) -> No
     load_plugins(eps=[_EntryPoint("stack", lambda r: r.companions.append(Companion()))])
     assert Dependencies().companions is None
     assert [c.name for c in _registered_companions()] == ["box"]
+
+
+def test_plugin_verbs_are_added_after_every_core_verb() -> None:
+    """A plugin verb named like a core verb replaces it (a later command of the
+    same name wins), so the plugin hook must run after the core's last verb."""
+    import importlib
+
+    import typer
+    import typer.main
+
+    from llmctl import cli
+
+    def plugin_start() -> None:
+        """The plugin's start."""
+
+    def register(reg: PluginRegistry) -> None:
+        reg.commands.append(lambda app: app.command("start")(plugin_start))
+
+    plugins.reset()  # importing llmctl.cli above loaded (and cached) the registry
+    load_plugins(eps=[_EntryPoint("host", register)])
+    try:
+        reloaded = importlib.reload(cli)
+        commands = typer.main.get_command(reloaded.app).commands
+        assert commands["start"].help == "The plugin's start."  # typer wraps the callback
+        assert isinstance(reloaded.app, typer.Typer)
+    finally:
+        plugins.reset()
+        load_plugins(eps=[])
+        importlib.reload(cli)
