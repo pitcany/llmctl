@@ -36,6 +36,9 @@ Extension points
 * :data:`StatusHook` — returns a Rich renderable (a string is read as Rich
   markup; escape untrusted text) that ``llmctl status``
   prints after the units table (not part of ``--json``).
+* :class:`TuiScreen` — a Textual screen ``llmctl tui`` installs next to its
+  own: a key to show it, a line in the help and the palette, and (``start``)
+  optionally the screen the TUI opens on.
 
 ``LLMCTL_PLUGINS=none`` disables plugin discovery (tests, debugging); a
 plugin that fails to import is reported on stderr and skipped so one broken
@@ -103,6 +106,25 @@ DoctorHook = Callable[["Settings"], "list[DoctorCheck]"]
 StatusHook = Callable[[], Any]
 
 
+@dataclass(frozen=True)
+class TuiScreen:
+    """A screen a plugin adds to ``llmctl tui``.
+
+    ``factory`` builds the screen when the TUI starts, so it must not do I/O
+    itself (the screen loads its data on mount). A ``key`` or ``name`` the
+    core already uses is refused, and a factory that raises is skipped; the
+    TUI says so in a notification either way.
+    """
+
+    name: str
+    title: str
+    help: str
+    key: str
+    factory: Callable[[], Any]
+    #: Open the TUI on this screen instead of the dashboard (the first wins).
+    start: bool = False
+
+
 @dataclass
 class PluginRegistry:
     """What plugins have registered. One instance per process."""
@@ -113,6 +135,7 @@ class PluginRegistry:
     commands: list[CommandHook] = field(default_factory=list)
     doctor_checks: list[DoctorHook] = field(default_factory=list)
     status_sections: list[StatusHook] = field(default_factory=list)
+    tui_screens: list[TuiScreen] = field(default_factory=list)
     #: Distribution names that registered, for ``llmctl doctor``.
     loaded: list[str] = field(default_factory=list)
     #: ``(name, error)`` for plugins that failed to load.

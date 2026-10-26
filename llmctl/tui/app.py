@@ -55,10 +55,13 @@ def _binding_rows(bindings: Iterable[object]) -> list[tuple[str, str]]:
     return rows
 
 
-def help_text(screen: object) -> str:
-    """Markup for the help modal: screens, global keys, this screen's keys."""
+ScreenRow = tuple[str, str, str, str]
+
+
+def help_text(screen: object, extra: Iterable[ScreenRow] = ()) -> str:
+    """Markup for the help modal: screens (plugins' too), global keys, this screen's keys."""
     lines = ["[b]Screens[/b]"]
-    for _name, title, what, key in SCREENS:
+    for _name, title, what, key in (*SCREENS, *extra):
         lines.append(f"  [b]{key}[/b]  {title:<11} {esc(what)}")
     lines.append("\n[b]Everywhere[/b]")
     lines.append("  [b]r[/b]  refresh   [b]?[/b] / [b]F1[/b]  this help   "
@@ -192,13 +195,58 @@ class MissionControlApp(App[None]):
         self.install_screen(LogsScreen(), name="logs")
         self.install_screen(DoctorScreen(), name="doctor")
         self.install_screen(BenchmarksScreen(), name="benchmarks")
-        self.push_screen("dashboard")
+        start = self._install_plugin_screens()
+        self.push_screen(start or "dashboard")
         self.set_interval(REFRESH_INTERVAL, self._tick_refresh)
+
+    def _install_plugin_screens(self) -> str | None:
+        """Install every plugin screen that fits; return the one to open on, if any.
+
+        A screen whose key or name the TUI already uses, or whose factory
+        raises, is skipped with a notification: one plugin must not take the
+        TUI down or hide a core screen.
+        """
+        from llmctl.plugins import registry
+
+        self._plugin_rows: list[ScreenRow] = []
+        keys = {b.key for b in self.BINDINGS if isinstance(b, Binding)}
+        names = {name for name, *_ in SCREENS}
+        start: str | None = None
+        for spec in registry().tui_screens:
+            clash = (
+                f"key {spec.key!r} is taken" if spec.key in keys
+                else f"name {spec.name!r} is taken" if spec.name in names
+                else None
+            )
+            if clash:
+                self.notify(f"Plugin screen {spec.title} skipped: {clash}", severity="warning")
+                continue
+            try:
+                screen = spec.factory()
+            except Exception as exc:  # noqa: BLE001 - reported, the TUI still runs
+                self.notify(f"Plugin screen {spec.title} skipped: {exc}", severity="error")
+                continue
+            self.install_screen(screen, name=spec.name)
+            self.bind(spec.key, f"show_plugin_screen({spec.name!r})", description=spec.title)
+            keys.add(spec.key)
+            names.add(spec.name)
+            self._plugin_rows.append((spec.name, spec.title, spec.help, spec.key))
+            if spec.start and start is None:
+                start = spec.name
+        return start
+
+    def plugin_screen_rows(self) -> tuple[ScreenRow, ...]:
+        """``(name, title, what, key)`` of the plugin screens installed."""
+        return tuple(getattr(self, "_plugin_rows", ()))
+
+    def action_show_plugin_screen(self, name: str) -> None:
+        """Show a plugin's screen."""
+        self._switch(name)
 
     def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
         """Command palette: every screen is reachable by name ("Go to ...")."""
         yield from super().get_system_commands(screen)
-        for name, title, help_text, key in SCREENS:
+        for name, title, help_text, key in (*SCREENS, *self.plugin_screen_rows()):
             yield SystemCommand(
                 f"Go to {title}",
                 f"{help_text}  (key: {key})",
@@ -210,7 +258,9 @@ class MissionControlApp(App[None]):
 
     def action_show_help(self) -> None:
         """Show every key: global navigation plus the current screen's own."""
-        self.push_screen(TextViewModal("Keys", help_text(self.screen), markup=True))
+        self.push_screen(
+            TextViewModal("Keys", help_text(self.screen, self.plugin_screen_rows()), markup=True)
+        )
 
     def action_ctrl_c_hint(self) -> None:
         """ctrl+c is not quit here; point at the key that is."""
