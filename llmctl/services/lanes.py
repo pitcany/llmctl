@@ -966,12 +966,19 @@ def local_file_gone(path: str | None) -> bool:
 
     Only an absolute path is evidence. No path, or a Hugging Face repo id
     (``org/name``), says nothing about local disk, so those rows stay listed.
+    An unreadable parent (``PermissionError``) is unknown, not gone: raising
+    would empty the whole list through the loader's catch-all.
     """
     raw = (path or "").strip()
     if not raw:
         return False
     candidate = Path(raw).expanduser()
-    return candidate.is_absolute() and not candidate.exists()
+    if not candidate.is_absolute():
+        return False
+    try:
+        return not candidate.exists()
+    except OSError:
+        return False
 
 
 def _load_gpu_sessions(settings: Any) -> list[Any]:

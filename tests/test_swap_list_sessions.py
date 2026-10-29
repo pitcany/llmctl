@@ -128,6 +128,16 @@ def test_local_file_gone_judges_only_absolute_paths(tmp_path: Path) -> None:
     assert not local_file_gone("unsloth/GLM-5.3-Flash-GGUF")  # a repo id, not a local path
 
 
+def test_local_file_gone_treats_an_unreadable_parent_as_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def denied(self: Path, *args: object, **kwargs: object) -> bool:
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "exists", denied)
+    assert not local_file_gone("/locked/model.gguf")
+
+
 # -- how the rows read --------------------------------------------------------------
 
 
