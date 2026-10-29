@@ -75,8 +75,12 @@ class ModelsScreen(DataScreen):
 
     def fetch(self) -> Any:
         """Return the current model list, backend availability, preset counts."""
+        models = _data.get_models()
         return {
-            "models": _data.get_models(),
+            "models": models,
+            # Judged here, on the worker thread: is_missing may stat a file,
+            # and a stalled mount must not freeze render_data on the UI thread.
+            "missing_ids": {m.id for m in models if m.id and is_missing(m)},
             "availability": _data.get_backend_map(),
             "preset_counts": _data.get_preset_count_by_model(),
             "missing_count": _data.get_missing_count(),
@@ -85,10 +89,11 @@ class ModelsScreen(DataScreen):
     def render_data(self, data: Any) -> None:
         """Render the models table, dimming models with a missing backend."""
         models = data["models"]
-        self._missing_count = data.get(
-            "missing_count",
-            sum(1 for m in models if is_missing(m)),
+        missing_ids: set[str] = data.get(
+            "missing_ids",
+            {m.id for m in models if m.id and m.status == ModelStatus.MISSING},
         )
+        self._missing_count = data.get("missing_count", len(missing_ids))
         availability = data["availability"]
         preset_counts: dict[str, int] = data.get("preset_counts", {})
         table = self.query_one("#models-table", DataTable)
@@ -100,7 +105,7 @@ class ModelsScreen(DataScreen):
             mid = model.id or ""
             runtime = model.runtime.value
             available = availability.get(runtime, True)
-            missing = is_missing(model)
+            missing = mid in missing_ids
             self._ids.append(mid)
             self._meta[mid] = (runtime, available)
             backend_cell = f"[{C_OK}]ready[/]" if available else f"[{C_ERR}]no binary[/]"
