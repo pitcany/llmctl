@@ -18,6 +18,7 @@ from llmctl._asyncutil import run_sync
 from llmctl.adapters.base import RuntimeAdapter
 from llmctl.db import ModelRecord, ModelStatus, RuntimeName, utcnow
 from llmctl.schemas import HealthState, Model, ModelCreate, ModelUpdate
+from llmctl.services.lanes import local_file_gone
 from llmctl.services.router import RuntimeRouter
 
 
@@ -62,6 +63,25 @@ def record_to_model(record: ModelRecord) -> Model:
         created_at=record.created_at,
         updated_at=record.updated_at,
     )
+
+
+_PRUNABLE = (ModelStatus.MISSING, ModelStatus.REGISTERED, ModelStatus.DISCOVERED)
+
+
+def is_missing(model: Model | ModelRecord) -> bool:
+    """Whether ``model`` is gone: flagged ``MISSING``, or its local file was deleted.
+
+    A scan flags only ``DISCOVERED`` rows, and only for a runtime whose server
+    answers, so a ``REGISTERED`` row whose weights were deleted keeps its
+    status. Judging the file here instead of writing a status keeps the row
+    honest without a scan, and it reads as present again if the file returns.
+    A row registered for another host is never judged by this machine's disk.
+    """
+    if model.status == ModelStatus.MISSING:
+        return True
+    if model.status not in _PRUNABLE or effective_host(model.host) != local_host():
+        return False
+    return local_file_gone(model.path)
 
 
 class RegistryService:
@@ -367,19 +387,21 @@ class RegistryService:
         *,
         ids: list[str] | None = None,
     ) -> int:
-        """Soft-delete (status ``DELETED``) every ``MISSING`` model.
+        """Soft-delete (status ``DELETED``) every missing model (see :func:`is_missing`).
 
         Optionally restrict to a single ``runtime``, or to an explicit ``ids``
         allow-list. The allow-list lets a caller bind the set it showed the
         user, so a concurrent scan flagging new rows cannot widen the prune
         beyond what was confirmed. Returns the count pruned.
         """
-        statement = select(ModelRecord).where(ModelRecord.status == ModelStatus.MISSING)
+        statement = select(ModelRecord).where(
+            ModelRecord.status.in_(_PRUNABLE)  # type: ignore[attr-defined]
+        )
         if runtime is not None:
             statement = statement.where(ModelRecord.runtime == runtime)
         if ids is not None:
             statement = statement.where(ModelRecord.id.in_(ids))  # type: ignore[attr-defined]
-        records = self.db.exec(statement).all()
+        records = [record for record in self.db.exec(statement).all() if is_missing(record)]
         for record in records:
             record.status = ModelStatus.DELETED
             record.updated_at = utcnow()

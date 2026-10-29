@@ -35,7 +35,7 @@ from rich.table import Table
 from sqlmodel import Session
 
 from llmctl.config import load_settings
-from llmctl.db import ModelStatus, RuntimeName, get_engine, init_db
+from llmctl.db import RuntimeName, get_engine, init_db
 from llmctl.gpu_arg import GPU_MODES, parse_gpus
 from llmctl.schemas import (
     ModelCreate,
@@ -48,7 +48,7 @@ from llmctl.schemas import (
     ValidationIssue,
 )
 from llmctl.services.profiles import ProfileService
-from llmctl.services.registry import RegistryService
+from llmctl.services.registry import RegistryService, is_missing
 from llmctl.services.sessions import SessionService
 
 console = Console()
@@ -496,7 +496,7 @@ def model_prune(
         bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")
     ] = False,
 ) -> None:
-    """Soft-delete every model flagged MISSING by the last scan."""
+    """Soft-delete every model a scan flagged MISSING or whose file was deleted."""
     rt: RuntimeName | None = None
     if runtime is not None:
         try:
@@ -510,7 +510,7 @@ def model_prune(
         missing = [
             m
             for m in service.list_models(include_inactive=True)
-            if m.status == ModelStatus.MISSING and (rt is None or m.runtime == rt)
+            if is_missing(m) and (rt is None or m.runtime == rt)
         ]
         if not missing:
             console.print("[green]No missing models to prune.[/green]")
