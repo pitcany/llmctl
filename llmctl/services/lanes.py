@@ -887,21 +887,25 @@ def session_rows_for(
     target_for: Callable[[Any], SwapTarget],
     is_local: Callable[[Any], bool],
     unit_text: Callable[[str], str] = user_unit_text,
+    is_gone: Callable[[Any], bool] = lambda model: False,
 ) -> list[SwapTarget]:
     """Swap-list rows for the models llmctl starts itself, sorted by name.
 
     That is every llama.cpp, SGLang and FreeToken model (see
     :data:`SELF_STARTED_RUNTIMES`).
 
-    Skipped: other engines, models on another machine, models a listed row
-    already serves (same name, or a lane whose unit loads the same file), and
-    models that fit on no combination of cards.
+    Skipped: other engines, models on another machine, models whose weights
+    were deleted (``is_gone``), models a listed row already serves (same name,
+    or a lane whose unit loads the same file), and models that fit on no
+    combination of cards.
     """
     rows: list[SwapTarget] = []
     for model in models:
         if getattr(model.runtime, "value", model.runtime) not in SELF_STARTED_RUNTIMES:
             continue
         if not is_local(model):
+            continue
+        if is_gone(model):
             continue
         if resolve(model.name, catalog) is not None:
             continue
@@ -947,9 +951,27 @@ def load_session_rows(settings: Any, catalog: list[SwapTarget]) -> list[SwapTarg
                 unit=unit_for_model(m.path, units),
             ),
             is_local=lambda m: effective_host(m.host) == here,
+            is_gone=lambda m: local_file_gone(m.path),
         )
     except Exception:  # noqa: BLE001 - the picker must render without the DB
         return []
+
+
+def local_file_gone(path: str | None) -> bool:
+    """Whether ``path`` names a local file that no longer exists.
+
+    A registry row outlives its weights: deleting the GGUF does not touch the
+    row, and scan reconcile never retires REGISTERED rows. Without this check
+    the run list keeps offering a model that can only fail to start.
+
+    Only an absolute path is evidence. No path, or a Hugging Face repo id
+    (``org/name``), says nothing about local disk, so those rows stay listed.
+    """
+    raw = (path or "").strip()
+    if not raw:
+        return False
+    candidate = Path(raw).expanduser()
+    return candidate.is_absolute() and not candidate.exists()
 
 
 def _load_gpu_sessions(settings: Any) -> list[Any]:
