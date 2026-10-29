@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 
 from llmctl.db import ModelRecord, ModelStatus, RuntimeName, get_engine, init_db
 from llmctl.schemas import AdapterStatus, HealthState, Model, ModelCreate
-from llmctl.services.registry import RegistryService
+from llmctl.services.registry import RegistryService, is_missing
 
 
 class FakeAdapter:
@@ -223,6 +223,62 @@ def test_prune_missing_runtime_filter(db: Session) -> None:
     assert count == 1
     assert _status(db, "oll") == ModelStatus.DELETED
     assert _status(db, "lms") == ModelStatus.MISSING
+
+
+def _seed_file_model(
+    db: Session, name: str, path: str, status: ModelStatus, host: str | None = None
+) -> None:
+    db.add(
+        ModelRecord(
+            name=name,
+            runtime=RuntimeName.LLAMA_CPP,
+            source=path,
+            path=path,
+            status=status,
+            host=host,
+            active=True,
+        )
+    )
+    db.commit()
+
+
+def test_a_registered_model_whose_file_was_deleted_reads_missing(db: Session, tmp_path) -> None:
+    kept = tmp_path / "kept.gguf"
+    kept.write_bytes(b"")
+    _seed_file_model(db, "kept", str(kept), ModelStatus.REGISTERED)
+    _seed_file_model(db, "deleted", str(tmp_path / "gone.gguf"), ModelStatus.REGISTERED)
+    _seed_file_model(db, "hub", "org/repo", ModelStatus.REGISTERED)
+    _seed_file_model(db, "pruned", str(tmp_path / "gone.gguf"), ModelStatus.DELETED)
+    _seed_file_model(
+        db, "on-the-mac", "/Users/me/m.gguf", ModelStatus.REGISTERED, host="not-this-box"
+    )
+    flagged = {
+        m.name for m in RegistryService(db).list_models(include_inactive=True) if is_missing(m)
+    }
+    assert flagged == {"deleted"}
+
+
+def test_prune_missing_removes_rows_whose_file_was_deleted(db: Session, tmp_path) -> None:
+    kept = tmp_path / "kept.gguf"
+    kept.write_bytes(b"")
+    _seed_file_model(db, "kept", str(kept), ModelStatus.REGISTERED)
+    _seed_file_model(db, "deleted", str(tmp_path / "gone.gguf"), ModelStatus.REGISTERED)
+    _seed_missing(db, "flagged", RuntimeName.OLLAMA)
+    assert RegistryService(db).prune_missing() == 2
+    assert _status(db, "deleted") == ModelStatus.DELETED
+    assert _status(db, "flagged") == ModelStatus.DELETED
+    assert _status(db, "kept") == ModelStatus.REGISTERED
+
+
+def test_prune_missing_ids_still_bind_to_the_confirmed_set(db: Session, tmp_path) -> None:
+    kept = tmp_path / "kept.gguf"
+    kept.write_bytes(b"")
+    _seed_file_model(db, "kept", str(kept), ModelStatus.REGISTERED)
+    _seed_file_model(db, "deleted", str(tmp_path / "gone.gguf"), ModelStatus.REGISTERED)
+    ids = [m.id for m in RegistryService(db).list_models() if m.id]
+    # A present file is never pruned, even when its id is in the allow-list.
+    assert RegistryService(db).prune_missing(ids=ids) == 1
+    assert _status(db, "kept") == ModelStatus.REGISTERED
 
 
 def test_scan_batches_commits_but_still_dedupes_within_a_runtime(db: Session) -> None:

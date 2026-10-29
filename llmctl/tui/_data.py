@@ -21,7 +21,7 @@ import yaml
 from sqlmodel import Session
 
 from llmctl.config import load_settings
-from llmctl.db import BenchmarkKind, ModelStatus, RuntimeName, get_engine, init_db
+from llmctl.db import BenchmarkKind, RuntimeName, get_engine, init_db
 from llmctl.presets import (
     Model as PresetModel,
 )
@@ -57,7 +57,7 @@ from llmctl.services.events import list_events
 from llmctl.services.gateway import GatewayService
 from llmctl.services.health import HealthService
 from llmctl.services.profiles import ProfileService
-from llmctl.services.registry import RegistryService
+from llmctl.services.registry import RegistryService, is_missing
 from llmctl.services.sessions import SessionService
 from llmctl.telemetry.gpu import get_gpu_info, nvml_available
 
@@ -152,7 +152,7 @@ def get_models() -> list[Model]:
 
 
 def get_missing_count() -> int:
-    """Return the count of MISSING models (active or inactive).
+    """Return the count of missing models (active or inactive).
 
     Matches the scope of :func:`prune_missing_models`, which soft-deletes every
     MISSING row regardless of the active flag, so the TUI confirm count never
@@ -160,7 +160,7 @@ def get_missing_count() -> int:
     """
     with db_session() as db:
         models = RegistryService(db).list_models(include_inactive=True)
-    return sum(1 for model in models if model.status == ModelStatus.MISSING)
+    return sum(1 for model in models if is_missing(model))
 
 
 def get_missing_model_ids() -> list[str]:
@@ -171,7 +171,7 @@ def get_missing_model_ids() -> list[str]:
     """
     with db_session() as db:
         models = RegistryService(db).list_models(include_inactive=True)
-    return [m.id for m in models if m.status == ModelStatus.MISSING and m.id]
+    return [m.id for m in models if is_missing(m) and m.id]
 
 
 def get_served_on_tp_unit() -> list[str] | None:
@@ -288,7 +288,7 @@ def write_starter_preset(model_id: str) -> Any:
 def prune_missing_models(
     runtime: str | None = None, *, ids: list[str] | None = None
 ) -> int:
-    """Soft-delete MISSING models; returns the count pruned.
+    """Soft-delete missing models; returns the count pruned.
 
     ``ids`` restricts the prune to an explicit allow-list, so the TUI can bind
     the set at keypress and guarantee the confirm dialog's count is exactly

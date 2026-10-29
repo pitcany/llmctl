@@ -11,6 +11,7 @@ from textual.widgets import DataTable, Footer, Header, Static
 
 from llmctl.db import ModelStatus
 from llmctl.schemas import ModelCreate, ModelUpdate
+from llmctl.services.registry import is_missing
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 from llmctl.tui._modals import ConfirmActionModal, LaunchPlanModal
@@ -74,8 +75,12 @@ class ModelsScreen(DataScreen):
 
     def fetch(self) -> Any:
         """Return the current model list, backend availability, preset counts."""
+        models = _data.get_models()
         return {
-            "models": _data.get_models(),
+            "models": models,
+            # Judged here, on the worker thread: is_missing may stat a file,
+            # and a stalled mount must not freeze render_data on the UI thread.
+            "missing_ids": {m.id for m in models if m.id and is_missing(m)},
             "availability": _data.get_backend_map(),
             "preset_counts": _data.get_preset_count_by_model(),
             "missing_count": _data.get_missing_count(),
@@ -84,10 +89,11 @@ class ModelsScreen(DataScreen):
     def render_data(self, data: Any) -> None:
         """Render the models table, dimming models with a missing backend."""
         models = data["models"]
-        self._missing_count = data.get(
-            "missing_count",
-            sum(1 for m in models if m.status == ModelStatus.MISSING),
+        missing_ids: set[str] = data.get(
+            "missing_ids",
+            {m.id for m in models if m.id and m.status == ModelStatus.MISSING},
         )
+        self._missing_count = data.get("missing_count", len(missing_ids))
         availability = data["availability"]
         preset_counts: dict[str, int] = data.get("preset_counts", {})
         table = self.query_one("#models-table", DataTable)
@@ -99,16 +105,16 @@ class ModelsScreen(DataScreen):
             mid = model.id or ""
             runtime = model.runtime.value
             available = availability.get(runtime, True)
-            is_missing = model.status == ModelStatus.MISSING
+            missing = mid in missing_ids
             self._ids.append(mid)
             self._meta[mid] = (runtime, available)
             backend_cell = f"[{C_OK}]ready[/]" if available else f"[{C_ERR}]no binary[/]"
-            if available and not is_missing:
+            if available and not missing:
                 name_cell = esc(model.name)
             else:
                 name_cell = f"[{C_MUTED}]{esc(model.name)}[/]"
             status_cell = (
-                f"[{C_WARN}]{model.status.value}[/]" if is_missing else model.status.value
+                f"[{C_WARN}]{ModelStatus.MISSING.value}[/]" if missing else model.status.value
             )
             count = preset_counts.get(mid, 0)
             preset_cell = str(count) if count else f"[{C_MUTED}]-[/]"
