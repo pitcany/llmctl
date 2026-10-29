@@ -23,6 +23,7 @@ from llmctl.services.lanes import (
     SwapTarget,
     cards_label,
     lane_for_model,
+    local_file_gone,
     serving_keys,
     session_rows_for,
 )
@@ -102,6 +103,39 @@ def test_session_rows_list_only_local_fitting_models_no_lane_serves() -> None:
         unit_text=_units,
     )
     assert [r.key for r in rows] == ["gpt-oss", "zeta-gguf"]
+
+
+def test_session_rows_skip_models_whose_weights_were_deleted() -> None:
+    models = [_model("kept", "/m/kept.gguf"), _model("deleted", "/m/deleted.gguf")]
+    rows = session_rows_for(
+        models,
+        [],
+        target_for=_target,
+        is_local=lambda m: True,
+        unit_text=_units,
+        is_gone=lambda m: m.path == "/m/deleted.gguf",
+    )
+    assert [r.key for r in rows] == ["kept"]
+
+
+def test_local_file_gone_judges_only_absolute_paths(tmp_path: Path) -> None:
+    present = tmp_path / "model.gguf"
+    present.write_bytes(b"")
+    assert local_file_gone(str(tmp_path / "deleted.gguf"))
+    assert not local_file_gone(str(present))
+    assert not local_file_gone(None)
+    assert not local_file_gone("")
+    assert not local_file_gone("unsloth/GLM-5.3-Flash-GGUF")  # a repo id, not a local path
+
+
+def test_local_file_gone_treats_an_unreadable_parent_as_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def denied(self: Path, *args: object, **kwargs: object) -> object:
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "stat", denied)
+    assert not local_file_gone("/locked/model.gguf")
 
 
 # -- how the rows read --------------------------------------------------------------
