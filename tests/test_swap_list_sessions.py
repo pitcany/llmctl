@@ -131,10 +131,10 @@ def test_local_file_gone_judges_only_absolute_paths(tmp_path: Path) -> None:
 def test_local_file_gone_treats_an_unreadable_parent_as_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def denied(self: Path, *args: object, **kwargs: object) -> bool:
+    def denied(self: Path, *args: object, **kwargs: object) -> object:
         raise PermissionError(13, "Permission denied", str(self))
 
-    monkeypatch.setattr(Path, "exists", denied)
+    monkeypatch.setattr(Path, "stat", denied)
     assert not local_file_gone("/locked/model.gguf")
 
 

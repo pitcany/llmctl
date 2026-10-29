@@ -966,8 +966,10 @@ def local_file_gone(path: str | None) -> bool:
 
     Only an absolute path is evidence. No path, or a Hugging Face repo id
     (``org/name``), says nothing about local disk, so those rows stay listed.
-    An unreadable parent (``PermissionError``) is unknown, not gone: raising
-    would empty the whole list through the loader's catch-all.
+    Only "not found" means gone. Any other error (an unreadable parent) is
+    unknown, so the row stays listed. ``stat()`` rather than ``exists()``:
+    ``exists()`` raises on such errors before Python 3.14 (which would empty
+    the whole list through the loader's catch-all) and returns False after.
     """
     raw = (path or "").strip()
     if not raw:
@@ -976,9 +978,12 @@ def local_file_gone(path: str | None) -> bool:
     if not candidate.is_absolute():
         return False
     try:
-        return not candidate.exists()
+        candidate.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return True
     except OSError:
         return False
+    return False
 
 
 def _load_gpu_sessions(settings: Any) -> list[Any]:
