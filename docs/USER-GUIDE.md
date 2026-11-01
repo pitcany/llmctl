@@ -96,6 +96,7 @@ holding the previous preset.
 | `llmctl runtimes` | All runtimes: health, version, endpoint, loaded models |
 | `llmctl runtimes inspect <rt>` | One runtime in detail, with capability flags |
 | `llmctl health` | Per-runtime health rollup (vLLM, llama.cpp, LM Studio, Ollama) |
+| `llmctl metrics [--watch N] [--all] [--json]` | Live engine load per endpoint: requests running/waiting, KV-cache fill, prefix-cache and speculative-decoding hit rates, preemptions, and a `pressure` verdict (`ok` / `high` / `saturated`). Read-only; `health` and `doctor` show the same numbers |
 | `llmctl run NAME` | Serve anything: a preset, a lane, or any registered model (routed by engine). `NAME` can also be the row number (`#`) from `llmctl ls` |
 | `llmctl ls [--json]` | List models with row numbers, whole names at 80 columns; endpoint and gateway aliases are listed below the table and in `--json`. `--json` for machine-readable output |
 | `llmctl model add SOURCE` | Add a model for any engine: `qwen3:8b` (Ollama), `Qwen/Qwen3-8B` (vLLM), `org/X-GGUF:Q4_K_M` (llama.cpp), `lmstudio:KEY`, or a local path |

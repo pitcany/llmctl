@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- `llmctl metrics` (`--watch N`, `--all`, `--json`): what each serving engine
+  is doing right now -- requests running and waiting, KV-cache fill,
+  prefix-cache hit rate, speculative-decoding acceptance, preemptions -- read
+  from vLLM, SGLang and llama.cpp `/metrics`, Strata's JSON `/metrics` and
+  Ollama's `/api/ps`. One `pressure` column says whether one more request is
+  safe (`ok`), will evict the prefix cache (`high`) or will queue and be
+  preempted (`saturated`). `llmctl health` prints the same line under each
+  serving session (and `--json` carries it as `load` plus a per-runtime
+  `pressure`), and `llmctl doctor` warns (`engine-load:<unit>`) when an engine
+  is under pressure or has preempted requests since it started, with the
+  remedy. GPU telemetry alone could not tell "99% busy" from "KV cache full,
+  generation stalled at 3 tok/s"; now it can.
 - Plugins can add screens to `llmctl tui` (`PluginRegistry.tui_screens`, a
   `TuiScreen` with a name, title, help line, key and factory): each gets its
   key, a line in the help (`?`) and "Go to ..." in the command palette, and
