@@ -6,8 +6,12 @@ serving and only then fails to load. The refusal must fire before any side
 effect (fleet preflight stops ollama, companions are stopped, the
 adapter writes the env file).
 
-HuggingFace repo ids must fail OPEN — they resolve from the HF cache or are
-fetched on demand, so an absent local directory says nothing about them.
+HuggingFace repo ids fail CLOSED since 2026-11-01: a repo id must have a
+snapshot in a hub cache (``HF_HOME``, ``HUGGINGFACE_HUB_CACHE``,
+``~/.cache/huggingface``). vLLM would otherwise download it on the way up --
+a minutes-long outage of the single unit, or a crash loop when the download
+cannot complete -- which is what the Muse preset would have done after its
+hub snapshot was moved off the disk. The same rule llm-router applies.
 """
 
 from __future__ import annotations
@@ -150,14 +154,43 @@ def test_present_local_path_passes(tmp_path: Path) -> None:
     assert log["preflight"] == [FleetRole.TP]
 
 
-def test_hf_repo_id_fails_open(tmp_path: Path) -> None:
-    """``org/name`` is not a filesystem path — never refuse on it."""
+def _hub_snapshot(hub: Path, repo_id: str, *, with_config: bool = True) -> None:
+    snap = hub / ("models--" + repo_id.replace("/", "--")) / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    if with_config:
+        (snap / "config.json").write_text("{}")
+
+
+def test_hf_repo_id_in_hub_cache_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``org/name`` with a cached snapshot is what vLLM will load; let it through."""
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    _hub_snapshot(tmp_path / "hf" / "hub", "Qwen/Qwen3.6-27B-FP8")
     _write_preset(tmp_path / "presets", "qwen-hf", "Qwen/Qwen3.6-27B-FP8")
     deps, log = _deps(tmp_path / "presets")
 
     with pytest.raises(AssertionError, match="adapter must not run"):
         start_vllm_tp("qwen-hf", managed_unit=_unit(), deps=deps)
     assert log["preflight"] == [FleetRole.TP]
+
+
+def test_hf_repo_id_missing_from_every_hub_cache_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Muse scenario: the preset names a repo id whose snapshot left the disk."""
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    _hub_snapshot(tmp_path / "hf" / "hub", "meta-models/Muse-Glimmer-30B", with_config=False)
+    _write_preset(tmp_path / "presets", "muse", "meta-models/Muse-Glimmer-30B")
+    deps, log = _deps(tmp_path / "presets")
+
+    with pytest.raises(MissingModelPathError) as excinfo:
+        start_vllm_tp("muse", managed_unit=_unit(), deps=deps)
+
+    assert "meta-models/Muse-Glimmer-30B" in str(excinfo.value)
+    assert "--force" in str(excinfo.value)
+    assert log == {"preflight": [], "companions": [], "checks": []}
 
 
 def test_force_bypasses_the_refusal(tmp_path: Path) -> None:

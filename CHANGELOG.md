@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `llmctl ls` marks a vLLM preset or Ollama lane whose weights are not on
+  this machine as `weights gone` (a preset `model_id` that is an absent path
+  or a Hugging Face repo id with no snapshot in any hub cache; an Ollama
+  lane whose model `ollama list` does not have), and `llmctl run` refuses it
+  before stopping anything, on every surface that shows the preview (CLI,
+  TUI, API). Starting such a row first evicted what was serving and then
+  failed to load. The orchestrator's own guard now fails closed on repo ids
+  too (it used to let them through as "fetched on demand"), the rule
+  llm-router already applied; `--force` still overrides it for vLLM presets.
 - `llmctl metrics` (`--watch N`, `--all`, `--json`): what each serving engine
   is doing right now -- requests running and waiting, KV-cache fill,
   prefix-cache hit rate, speculative-decoding acceptance, preemptions -- read

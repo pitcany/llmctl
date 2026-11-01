@@ -102,7 +102,7 @@ def render_table(state: SwapState, console: Console, *, command: str = "run") ->
     for index, row, (*_, status, load) in zip(
         range(1, len(rows) + 1), state.catalog, rows, strict=True
     ):
-        style = {"serving": "green", "loading": "yellow"}.get(status, "")
+        style = {"serving": "green", "loading": "yellow", "weights gone": "red"}.get(status, "")
         table.add_row(
             str(index),
             escape(row.model),
@@ -173,6 +173,12 @@ def print_preview(state: SwapState, target: SwapTarget, console: Console) -> boo
     )
     for line in preview.lines():
         console.print(f"  {escape(line)}")
+    if preview.blocked:
+        # Refused before anything stops: starting it would evict what serves
+        # now and then fail to load. There is no --force for lanes; the fix is
+        # the weights (pull the model, restore the cache) or the lane itself.
+        console.print(f"[red]Refusing to run {escape(target.key)}: its weights are gone.[/red]")
+        raise typer.Exit(1)
     if preview.already_serving:
         url = _serving_endpoint(state, target)
         if url:
