@@ -249,6 +249,8 @@ def _check_engines(cfg: Settings) -> list[DoctorCheck]:
             checks.append(DoctorCheck(name, "pass", f"found{version}: {row.binary}"))
         elif row.source == "lane":
             checks.append(DoctorCheck(name, "pass", f"served by lane {row.binary}"))
+        if row.engine == "vllm" and checks and checks[-1].name == name:
+            checks[-1] = _with_live_vllm_version(cfg, checks[-1])
         elif not users.get(row.engine):
             checks.append(DoctorCheck(name, "pass", "not used"))
         else:
@@ -261,6 +263,29 @@ def _check_engines(cfg: Settings) -> list[DoctorCheck]:
                 )
             )
     return checks
+
+
+def _with_live_vllm_version(cfg: Settings, check: DoctorCheck) -> DoctorCheck:
+    """Append the version the SERVING vLLM reports to the ``engine:vllm`` row.
+
+    The row describes the setup binary (``runtimes.vllm.binary``), which is
+    the 0.25.1 rollback env here while the deployed preset runs 0.30.0 from
+    its own ``python_root``; read alone it was the wrong number (2026-11-01).
+    """
+    from llmctl.services.engine_load import collect_engine_loads
+
+    try:
+        rows = collect_engine_loads(cfg)
+    except Exception:  # noqa: BLE001 - the live probe is advisory
+        return check
+    live = [
+        f"{r.load.version} on {r.name}"
+        for r in rows
+        if r.load is not None and r.load.runtime == "vllm" and r.load.version
+    ]
+    if not live:
+        return check
+    return DoctorCheck(check.name, check.verdict, f"{check.detail}; serving vLLM {', '.join(live)}", check.remediation)
 
 
 def _check_engine_load(cfg: Settings) -> list[DoctorCheck]:
