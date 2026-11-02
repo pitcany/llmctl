@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -213,8 +214,12 @@ def test_launcher_env_raises_when_no_python_root_resolvable(
         render_vllm_env(VLLMLaunchSpec(model="m", served_name="s"))
 
 
-def test_default_hf_home_is_huggingfaces_own(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_hf_home_is_huggingfaces_own(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """When $HF_HOME is unset, fall back to ~/.cache/huggingface like every HF tool."""
+    # A clean home: a machine whose real default is a symlink renders its target.
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("HF_HOME", raising=False)
     body = render_vllm_env(VLLMLaunchSpec(model="m", served_name="s"))
     expected = f"HF_HOME={os.path.expanduser('~/.cache/huggingface')}"

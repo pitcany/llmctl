@@ -1295,11 +1295,124 @@ def health(json_out: _JSON_OPT = False) -> None:
         stopped = [escape(str(lane["name"])) for lane in info.get("stopped_lanes", [])]
         if stopped:
             serving += f"\n[dim]stopped: {', '.join(stopped)}[/dim]"
+        for s in sessions:
+            load = s.get("load")
+            if not isinstance(load, dict):
+                continue
+            summary = _load_summary(load)
+            style = _PRESSURE_STYLE.get(str(load.get("pressure")), "dim")
+            serving += f"\n[{style}]{escape(summary)}[/{style}]"
         cells = [escape(str(name)), escape(str(info["state"])), escape(str(info["message"]))]
         if info["state"] == "not_used":
             cells = [f"[dim]{c}[/]" for c in cells]
         table.add_row(cells[0], cells[1], serving, cells[2])
     console.print(table)
+
+
+_PRESSURE_STYLE = {"ok": "green", "high": "yellow", "saturated": "red", "unknown": "dim"}
+
+
+def _load_summary(load: dict[str, Any]) -> str:
+    """One line from a ``load`` dict (the ``--json`` shape of an EngineLoad)."""
+    from llmctl.telemetry.engine_metrics import EngineLoad
+
+    fields = {k: v for k, v in load.items() if k != "pressure"}
+    try:
+        return EngineLoad(**fields).summary()
+    except TypeError:
+        return "no load data"
+
+
+def _metrics_table(rows: list[Any], *, show_all: bool) -> Table:
+    table = Table(title="Engine load")
+    _id_column(table, "Endpoint", style="cyan")
+    _id_column(table, "Model")
+    table.add_column("Engine")
+    table.add_column("Running", justify="right")
+    table.add_column("Waiting", justify="right")
+    table.add_column("KV", justify="right")
+    table.add_column("Prefix hit", justify="right")
+    table.add_column("Spec accept", justify="right")
+    table.add_column("Preempted", justify="right")
+    table.add_column("Pressure")
+    for row in rows:
+        load = row.load
+        if load is None:
+            if show_all:
+                table.add_row(
+                    escape(row.name),
+                    "[dim]—[/dim]",
+                    escape(str(row.runtime or "")),
+                    "", "", "", "", "", "",
+                    "[dim]not answering[/dim]",
+                )
+            continue
+        pct = lambda v: "[dim]—[/dim]" if v is None else f"{v:.0f}%"  # noqa: E731
+        num = lambda v: "[dim]—[/dim]" if v is None else str(v)  # noqa: E731
+        engine = escape(str(row.runtime or load.runtime))
+        if load.version:
+            engine += f" {escape(load.version)}"
+        style = _PRESSURE_STYLE.get(load.pressure, "")
+        extra = f"  [dim]{load.tokens_per_s:.0f} tok/s[/dim]" if load.tokens_per_s else ""
+        table.add_row(
+            escape(row.name),
+            escape(load.model or ""),
+            engine,
+            num(load.running),
+            num(load.waiting),
+            pct(load.kv_usage_pct),
+            pct(load.prefix_hit_pct),
+            pct(load.spec_accept_pct),
+            num(load.preemptions),
+            f"[{style}]{load.pressure}[/{style}]{extra}",
+        )
+    return table
+
+
+@app.command(hidden=True)
+def metrics(
+    json_out: _JSON_OPT = False,
+    watch: Annotated[
+        float | None,
+        typer.Option("--watch", "-w", help="Refresh every N seconds until Ctrl-C.", min=0.5),
+    ] = None,
+    show_all: Annotated[
+        bool, typer.Option("--all", "-a", help="Also list endpoints that did not answer.")
+    ] = False,
+) -> None:
+    """Live engine load: requests in flight, KV-cache fill, prefix-cache and MTP hit rates.
+
+    Read-only. Probes every managed unit, server runtime and lane on its own
+    port and shows what the engine reports (vLLM, SGLang and llama.cpp on
+    ``/metrics``, Strata on its JSON ``/metrics``, Ollama on ``/api/ps``).
+    ``Pressure`` is the one column to watch: ``high`` means one more long
+    request will start evicting the prefix cache; ``saturated`` means requests
+    are queued or the KV cache is full and the engine is preempting and
+    recomputing, which is why generation stalls. Siblings: `health` = is each
+    backend answering; `gpus` = NVML telemetry.
+    """
+    from llmctl.services.engine_load import collect_engine_loads
+
+    settings = load_settings()
+    if json_out:
+        _emit_json([row.as_dict() for row in collect_engine_loads(settings)])
+        return
+    if watch is None:
+        console.print(_metrics_table(collect_engine_loads(settings), show_all=show_all))
+        return
+    import time as _time
+
+    from rich.live import Live
+
+    with Live(console=console, refresh_per_second=4, transient=False) as live:
+        try:
+            while True:
+                table = _metrics_table(collect_engine_loads(settings), show_all=show_all)
+                table.caption = f"refreshed {_time.strftime('%H:%M:%S')}  (Ctrl-C to stop)"
+                live.update(table)
+                _time.sleep(watch)
+        except KeyboardInterrupt:
+            pass
 
 
 def _resolve_bench_target(
@@ -2013,7 +2126,7 @@ def vllm_cmd(
         fit = state.fits_alongside(target) if target.kind == "lane" else None
         # A one-card preset gets a card (and maybe the second engine).
         target = vllm_slots.place(state, target, overrides.tp or target.tp)
-        if not cli_swap.print_preview(state, target, console):
+        if not cli_swap.print_preview(state, target, console, force=force):
             return
     if overrides:
         console.print(f"  for this run: {escape(overrides.describe())}")

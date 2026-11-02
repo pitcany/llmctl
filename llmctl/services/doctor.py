@@ -73,6 +73,7 @@ def run_doctor(settings: Settings | None = None) -> dict[str, Any]:
         ("backends", lambda: _check_backends(cfg)),
         ("engines", lambda: _check_engines(cfg)),
         ("gpu", _check_gpu),
+        ("engine-load", lambda: _check_engine_load(cfg)),
         ("sessions", lambda: _check_sessions(cfg)),
         ("drift", lambda: _check_drift(cfg)),
         ("orphans", lambda: _check_orphan_discoveries(cfg)),
@@ -259,6 +260,92 @@ def _check_engines(cfg: Settings) -> list[DoctorCheck]:
                     f"`llmctl setup {row.engine}` installs it.",
                 )
             )
+        if row.engine == "vllm" and row.source in ("llmctl", "path", "lane"):
+            checks[-1] = _with_live_vllm_version(cfg, checks[-1])
+    return checks
+
+
+def _with_live_vllm_version(cfg: Settings, check: DoctorCheck) -> DoctorCheck:
+    """Append the version the SERVING vLLM reports to the ``engine:vllm`` row.
+
+    The row describes the setup binary (``runtimes.vllm.binary``), which is
+    the 0.25.1 rollback env here while the deployed preset runs 0.30.0 from
+    its own ``python_root``; read alone it was the wrong number (2026-11-01).
+    """
+    from llmctl.services.engine_load import collect_engine_loads
+
+    try:
+        rows = collect_engine_loads(cfg)
+    except Exception:  # noqa: BLE001 - the live probe is advisory
+        return check
+    live = [
+        f"{r.load.version} on {r.name}"
+        for r in rows
+        if r.load is not None and r.load.runtime == "vllm" and r.load.version
+    ]
+    if not live:
+        return check
+    detail = f"{check.detail}; serving vLLM {', '.join(live)}"
+    return DoctorCheck(check.name, check.verdict, detail, check.remediation)
+
+
+def _check_engine_load(cfg: Settings) -> list[DoctorCheck]:
+    """What each answering engine is doing, and whether it is under pressure.
+
+    A unit that answers ``/v1/models`` passes every other check while its KV
+    cache is full and it preempts and recomputes every request -- the state
+    behind "the model is up but generation crawls". The engine publishes the
+    numbers (``llmctl metrics``); this check reads them once. ``warn``, never
+    ``fail``: a busy engine is working, and the remedy is a config or load
+    decision for the operator.
+    """
+    from llmctl.services.engine_load import collect_engine_loads
+
+    checks: list[DoctorCheck] = []
+    for row in collect_engine_loads(cfg):
+        load = row.load
+        if load is None:
+            continue
+        name = f"engine-load:{row.name}"
+        version = f" (vLLM {load.version})" if load.version and load.runtime == "vllm" else ""
+        model = f"{load.model}: " if load.model else ""
+        detail = f"{model}{load.summary()}{version}"
+        if load.pressure == "saturated":
+            checks.append(
+                DoctorCheck(
+                    name,
+                    "warn",
+                    f"saturated -- {detail}",
+                    "Requests are queued or the KV cache is full, so the engine preempts "
+                    "and recomputes running requests and generation stalls. Send fewer "
+                    "concurrent requests, raise the engine's GPU memory share, or give "
+                    "vLLM CPU KV offload (--kv-offloading-size) so evicted prefixes "
+                    "survive. `llmctl metrics --watch 5` shows it live.",
+                )
+            )
+        elif load.pressure == "high":
+            checks.append(
+                DoctorCheck(
+                    name,
+                    "warn",
+                    f"high -- {detail}",
+                    "One more long request will start evicting the prefix cache. "
+                    "`llmctl metrics --watch 5` shows it live.",
+                )
+            )
+        elif load.preemptions:
+            checks.append(
+                DoctorCheck(
+                    name,
+                    "warn",
+                    f"{detail}; the KV cache overflowed {load.preemptions} times since start",
+                    "Each preemption recomputes a running request. Fewer concurrent "
+                    "clients, a larger GPU memory share, or vLLM CPU KV offload "
+                    "(--kv-offloading-size) stop it.",
+                )
+            )
+        else:
+            checks.append(DoctorCheck(name, "pass", detail))
     return checks
 
 

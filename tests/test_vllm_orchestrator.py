@@ -31,6 +31,17 @@ from llmctl.services.vllm_orchestrator import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _seed_hub_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default preset names a repo id; the orchestrator refuses one that is
+    in no hub cache (fail closed since 2026-11-01), so give it a snapshot."""
+    hub = tmp_path / "hub-cache"
+    snap = hub / "models--casperhansen--llama-3.3-70b-instruct-awq" / "snapshots" / "x"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+
+
 def _write_preset(
     config_dir: Path,
     alias: str = "llama-3.3-70b",
