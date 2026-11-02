@@ -249,8 +249,6 @@ def _check_engines(cfg: Settings) -> list[DoctorCheck]:
             checks.append(DoctorCheck(name, "pass", f"found{version}: {row.binary}"))
         elif row.source == "lane":
             checks.append(DoctorCheck(name, "pass", f"served by lane {row.binary}"))
-        if row.engine == "vllm" and checks and checks[-1].name == name:
-            checks[-1] = _with_live_vllm_version(cfg, checks[-1])
         elif not users.get(row.engine):
             checks.append(DoctorCheck(name, "pass", "not used"))
         else:
@@ -262,6 +260,8 @@ def _check_engines(cfg: Settings) -> list[DoctorCheck]:
                     f"`llmctl setup {row.engine}` installs it.",
                 )
             )
+        if row.engine == "vllm" and row.source in ("llmctl", "path", "lane"):
+            checks[-1] = _with_live_vllm_version(cfg, checks[-1])
     return checks
 
 
@@ -285,7 +285,8 @@ def _with_live_vllm_version(cfg: Settings, check: DoctorCheck) -> DoctorCheck:
     ]
     if not live:
         return check
-    return DoctorCheck(check.name, check.verdict, f"{check.detail}; serving vLLM {', '.join(live)}", check.remediation)
+    detail = f"{check.detail}; serving vLLM {', '.join(live)}"
+    return DoctorCheck(check.name, check.verdict, detail, check.remediation)
 
 
 def _check_engine_load(cfg: Settings) -> list[DoctorCheck]:

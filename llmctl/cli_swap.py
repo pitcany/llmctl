@@ -165,15 +165,21 @@ def pick(
     return target
 
 
-def print_preview(state: SwapState, target: SwapTarget, console: Console) -> bool:
-    """Print what the swap will do. Returns False when there is nothing to do."""
+def print_preview(
+    state: SwapState, target: SwapTarget, console: Console, *, force: bool = False
+) -> bool:
+    """Print what the swap will do. Returns False when there is nothing to do.
+
+    ``force`` lets a vLLM preset past the missing-weights refusal, as the
+    orchestrator's own guard allows. Lanes and sessions have no override.
+    """
     preview = state.preview(target)
     console.print(
         f"[bold]Run {escape(target.model)}[/bold] ({target.engine}, `{escape(target.key)}`)"
     )
     for line in preview.lines():
         console.print(f"  {escape(line)}")
-    if preview.blocked:
+    if preview.blocked and not (force and target.kind == "vllm"):
         # Refused before anything stops: starting it would evict what serves
         # now and then fail to load. There is no --force for lanes; the fix is
         # the weights (pull the model, restore the cache) or the lane itself.

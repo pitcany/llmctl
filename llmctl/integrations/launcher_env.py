@@ -107,8 +107,9 @@ def resolve_hf_home() -> str:
         try:
             return str(path.resolve())
         except OSError:
-            return val
-    return val
+            return str(path)
+    # Expanded: this lands in an EnvironmentFile, and systemd does not expand ``~``.
+    return str(path)
 
 
 def launcher_env_lines(python_root: str | None = None) -> list[str]:

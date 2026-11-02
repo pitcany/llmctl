@@ -2126,7 +2126,7 @@ def vllm_cmd(
         fit = state.fits_alongside(target) if target.kind == "lane" else None
         # A one-card preset gets a card (and maybe the second engine).
         target = vllm_slots.place(state, target, overrides.tp or target.tp)
-        if not cli_swap.print_preview(state, target, console):
+        if not cli_swap.print_preview(state, target, console, force=force):
             return
     if overrides:
         console.print(f"  for this run: {escape(overrides.describe())}")
