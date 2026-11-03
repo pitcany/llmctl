@@ -181,6 +181,55 @@ def test_estimated_token_counts_are_labeled(temp_db) -> None:
     assert "estimated" in hint.lower()
 
 
+def test_incomparable_rows_render_nc_not_green(temp_db) -> None:
+    """FIXPLAN §1D: a synthetic row never gets a green/red delta against a
+    live baseline, and the explanation line says why."""
+
+    baseline = _fake_result(name="base")
+    baseline.id = "bench-base"
+    baseline.parameters = {"mode": "live"}
+    synthetic = _fake_result(name="synth")
+    synthetic.id = "bench-synth"
+    synthetic.parameters = {"mode": "mock"}
+    synthetic.tokens_per_second = 999.0
+
+    async def _run() -> tuple[list[str], str, str]:
+        with patch(
+            "llmctl.tui._data.get_benchmarks",
+            return_value=[baseline, synthetic],
+        ):
+            app = MissionControlApp()
+            async with app.run_test() as pilot:
+                await pilot.press("b")
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, BenchmarksScreen):
+                        break
+                screen = app.screen
+                assert isinstance(screen, BenchmarksScreen)
+                screen._baseline_id = "bench-base"
+                screen.refresh_data()
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if screen.query_one("#benchmarks-table", DataTable).row_count:
+                        break
+                table = screen.query_one("#benchmarks-table", DataTable)
+                table.move_cursor(row=0)  # newest row first: the synthetic one
+                await pilot.pause(0.05)
+                delta_cells = [
+                    str(table.get_cell_at(Coordinate(row, 6)))
+                    for row in range(table.row_count)
+                ]
+                compare_line = screen.query_one("#benchmarks-compare", Static).content
+                hint = screen.query_one("#benchmarks-hint", Static).content
+                return delta_cells, str(compare_line), str(hint)
+
+    delta_cells, compare_line, _hint = asyncio.run(_run())
+    assert any("n/c" in cell for cell in delta_cells), delta_cells
+    assert not any("999" in cell or "+8" in cell for cell in delta_cells), delta_cells
+    assert "not comparable" in compare_line.lower(), compare_line
+
+
 def test_delete_action_invokes_data_layer(temp_db) -> None:
     """Confirming the delete modal calls _data.delete_benchmark for the cursor row."""
 

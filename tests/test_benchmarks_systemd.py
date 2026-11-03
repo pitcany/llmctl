@@ -399,16 +399,33 @@ def test_benchmark_delta_helpers() -> None:
 
     from llmctl.tui.screens_benchmarks import BenchmarksScreen
 
-    base = SimpleNamespace(
-        id="b", tokens_per_second=100.0, time_to_first_token_ms=50.0
-    )
-    faster = SimpleNamespace(
-        id="f", tokens_per_second=120.0, time_to_first_token_ms=40.0
-    )
+    def row(rid: str, tps: float, ttft: float, **param_overrides: object):
+        params: dict[str, object] = {"mode": "live"}
+        params.update(param_overrides)
+        return SimpleNamespace(
+            id=rid,
+            tokens_per_second=tps,
+            time_to_first_token_ms=ttft,
+            success=True,
+            kind=None,
+            parameters=params,
+            manifest={},
+        )
+
+    base = row("b", 100.0, 50.0)
+    faster = row("f", 120.0, 40.0)
     assert "+20.0" in BenchmarksScreen._delta_tps(faster, base, False)
     assert "-10 ms" in BenchmarksScreen._delta_ttft(faster, base, False)
     assert "baseline" in BenchmarksScreen._delta_tps(base, base, True)
     assert BenchmarksScreen._delta_tps(faster, None, False) == "-"
+
+    # FIXPLAN §1D: never a green delta for incomparable runs.
+    synthetic = row("s", 999.0, 1.0, mode="mock")
+    assert "n/c" in BenchmarksScreen._delta_tps(synthetic, base, False)
+    assert "n/c" in BenchmarksScreen._delta_ttft(synthetic, base, False)
+    failed = row("x", 999.0, 1.0)
+    failed.success = False
+    assert "n/c" in BenchmarksScreen._delta_tps(failed, base, False)
 
 
 def test_benchmark_mock_has_samples_and_ttft(db: Session) -> None:

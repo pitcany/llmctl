@@ -8,6 +8,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Header, Static
 
+from llmctl.services.benchmark_compare import comparison_verdict
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 from llmctl.tui._modals_benchmarks import BenchmarkLaunch, BenchmarkLaunchModal
@@ -37,6 +38,10 @@ class BenchmarksScreen(DataScreen):
         #: name a row the operator can actually see (the table
         #: has no ID column).
         self._names: dict[str, str] = {}
+        #: benchmark id -> why it is not comparable with the baseline
+        #: (empty when comparable); drives the "n/c" cells and the
+        #: explanation line under the table.
+        self._nc_reasons: dict[str, str] = {}
         self._baseline_id: str | None = None
         self._model_filter = model_filter
 
@@ -71,6 +76,7 @@ class BenchmarksScreen(DataScreen):
             "When",
         )
         yield table
+        yield Static("", classes="panel safe", id="benchmarks-compare")
         yield Static("", classes="panel safe", id="benchmarks-hint")
         yield Footer()
 
@@ -93,6 +99,7 @@ class BenchmarksScreen(DataScreen):
         table.clear()
         self._ids = []
         self._names = {}
+        self._nc_reasons = {}
         baseline = self._baseline_for(data)
         any_estimated = False
         for result in data:
@@ -131,6 +138,10 @@ class BenchmarksScreen(DataScreen):
             )
             self._ids.append(result.id or "")
             self._names[result.id or ""] = result.name
+            if baseline is not None and not is_baseline:
+                verdict = comparison_verdict(result, baseline)
+                if not verdict.eligible:
+                    self._nc_reasons[result.id or ""] = verdict.summary
             table.add_row(
                 name_cell,
                 result.kind.value if result.kind else "-",
@@ -163,6 +174,28 @@ class BenchmarksScreen(DataScreen):
             table.move_cursor(row=cursor)
         elif self._ids:
             table.move_cursor(row=0)
+        self._update_compare_line()
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Explain why the highlighted row is (not) comparable to the baseline."""
+        self._update_compare_line()
+
+    def _update_compare_line(self) -> None:
+        """Render the comparison-eligibility note for the cursor row."""
+        line = self.query_one("#benchmarks-compare", Static)
+        benchmark_id = self._selected_id()
+        if (
+            self._baseline_id is None
+            or not benchmark_id
+            or benchmark_id == self._baseline_id
+        ):
+            line.update("")
+            return
+        reason = self._nc_reasons.get(benchmark_id)
+        if reason:
+            line.update(f"[{C_WARN}]vs baseline: not comparable -- {esc(reason)}[/]")
+        else:
+            line.update(f"[{C_MUTED}]vs baseline: comparable[/]")
 
     def _baseline_for(self, data: Any) -> Any | None:
         """Return the current baseline result if it is still present."""
@@ -175,7 +208,12 @@ class BenchmarksScreen(DataScreen):
 
     @staticmethod
     def _delta_tps(result: Any, baseline: Any, is_baseline: bool) -> str:
-        """Render throughput delta vs. baseline (higher is better)."""
+        """Render throughput delta vs. baseline (higher is better).
+
+        Deltas are only rendered when the shared eligibility gate says the
+        two runs measured the same thing; otherwise the cell reads "n/c"
+        (never a green or red number that would read as an improvement).
+        """
         if is_baseline:
             return f"[{C_MUTED}]baseline[/]"
         if (
@@ -184,13 +222,15 @@ class BenchmarksScreen(DataScreen):
             or baseline.tokens_per_second is None
         ):
             return "-"
+        if not comparison_verdict(result, baseline).eligible:
+            return f"[{C_MUTED}]n/c[/]"
         delta = result.tokens_per_second - baseline.tokens_per_second
         color = C_OK if delta >= 0 else C_ERR
         return f"[{color}]{delta:+.1f}[/]"
 
     @staticmethod
     def _delta_ttft(result: Any, baseline: Any, is_baseline: bool) -> str:
-        """Render TTFT delta vs. baseline (lower is better)."""
+        """Render TTFT delta vs. baseline (lower is better), gated like tps."""
         if is_baseline:
             return f"[{C_MUTED}]baseline[/]"
         if (
@@ -199,6 +239,8 @@ class BenchmarksScreen(DataScreen):
             or baseline.time_to_first_token_ms is None
         ):
             return "-"
+        if not comparison_verdict(result, baseline).eligible:
+            return f"[{C_MUTED}]n/c[/]"
         delta = result.time_to_first_token_ms - baseline.time_to_first_token_ms
         color = C_OK if delta <= 0 else C_ERR
         return f"[{color}]{delta:+.0f} ms[/]"
