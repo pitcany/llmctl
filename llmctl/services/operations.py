@@ -39,6 +39,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
+from sqlalchemy import update
 from sqlmodel import Session, select
 from typer import Exit as TyperExit
 
@@ -276,16 +277,27 @@ class OperationStore:
         if phase not in TERMINAL_PHASES:
             raise ValueError(f"{phase} is not a terminal phase")
         with self._session() as db:
-            record = db.get(OperationRecord, operation_id)
-            if record is None:
-                return
-            record.phase = phase.value
-            record.error = error
-            record.recovery = recovery or {}
-            record.finished_at = utcnow()
-            record.updated_at = utcnow()
-            db.add(record)
+            now = utcnow()
+            db.execute(
+                update(OperationRecord)
+                .where(
+                    OperationRecord.id == operation_id,
+                    OperationRecord.phase.notin_([p.value for p in TERMINAL_PHASES]),
+                )
+                .values(
+                    phase=phase.value, error=error, recovery=recovery or {},
+                    finished_at=now, updated_at=now,
+                )
+            )
             db.commit()
+
+    def discard_unstarted(self, operation_id: str) -> None:
+        """Remove intent when no worker started, releasing its idempotency key."""
+        with self._session() as db:
+            record = db.get(OperationRecord, operation_id)
+            if record is not None:
+                db.delete(record)
+                db.commit()
 
     def get(self, operation_id: str) -> OperationRecord | None:
         with self._session() as db:

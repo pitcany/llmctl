@@ -209,3 +209,19 @@ def test_enter_in_search_returns_to_table_without_serving(monkeypatch) -> None:
                 assert screen._selected_id() == "m-beta"
                 assert launches == []
     asyncio.run(run())
+
+
+def test_refresh_preserves_engine_filter_choice() -> None:
+    async def run() -> None:
+        with _patched(MODELS):
+            app = MissionControlApp()
+            async with app.run_test(size=(80, 24)) as pilot:
+                screen = await _boot_to_models(pilot, app)
+                screen._filter_engine = "vllm"
+                screen.render_data(screen._last_data)
+                await pilot.pause()
+                screen.render_data(screen._last_data)
+                await pilot.pause()
+                assert screen._filter_engine == "vllm"
+                assert screen._ids == ["m-beta", "m-eps"]
+    asyncio.run(run())

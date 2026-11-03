@@ -183,3 +183,16 @@ Compatibility: nullable `operations.job_id` and `operations.job_exit_code` colum
 Integrated current `main` (engine metrics and missing-weights guards). An isolated Textual walkthrough at 80×24 with 150 fixture models passed keyboard filtering, return to the table, filter clearing with selection retained, and navigation to Benchmarks and Dashboard. The walkthrough found that priority Enter intercepted the search field; Enter now returns focus to the table without launching a model, covered by a permanent regression test. The walkthrough plus model-selection tests passed **8 tests**. Ruff and whitespace checks passed.
 
 Headless Chromium at an exact 375×812 viewport rendered 150 fixture rows, filtered to one, kept page width at 375px, and exposed the action button through the table's horizontal scroll container. The rendered screenshot was visually inspected. Temporary artifacts: `/tmp/llmctl-375px.png` and `/tmp/llmctl-80col-150models.svg`. These checks use inert fixtures and do not start or stop production models.
+
+### PR review corrections on 2026-11-03
+
+Verified the 14 automated findings against the implementation and addressed them:
+
+- Store resolved base prompts independently of samples; reruns preserve failed custom workloads and long-context inputs, with legacy sample reconstruction retained.
+- Forward session/kind/explicit limits through CLI exports; omit the export limit by default while retaining the history display's 20-row default.
+- Record unknown serving hardware when no endpoint resolved, and distinguish insufficient workload size from unobserved concurrency overlap.
+- Finalize exceptional API stops, create CLI swap intent after confirmation, hold session-start ownership before planning/validation, preserve restoration phases, and atomically retain terminal outcomes against stale finalizers.
+- Discard intent for workers that never started so refused requests do not consume idempotency keys; preserve outcomes for workers that did start.
+- Normalize naive operation timestamps defensively, retain engine-filter choices across renders, select latest evidence by timestamp, and wait for actual reordered swap data in the selection regression.
+
+The initial failed-custom-prompt reproduction changed the workload hash on rerun. Its permanent regression now passes for chat and long-context requests. Focused verification passed 93 tests, followed by 53 tests including actual busy-key retry and terminal-outcome protection. Full-suite and CI results are recorded in PR #30.

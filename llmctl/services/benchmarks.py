@@ -350,6 +350,8 @@ class BenchmarkService:
         benchmark_id: str | None = None,
         model_id: str | None = None,
         limit: int | None = None,
+        session_id: str | None = None,
+        kind: BenchmarkKind | str | None = None,
     ) -> list[dict[str, object]]:
         """Return portable export payloads (result + manifest) for records.
 
@@ -360,7 +362,9 @@ class BenchmarkService:
         if benchmark_id is not None:
             result = self.get_result(benchmark_id)
             return [export_payload(result)] if result is not None else []
-        results = self.list_results(model_id=model_id, limit=limit)
+        results = self.list_results(
+            model_id=model_id, session_id=session_id, kind=kind, limit=limit,
+        )
         return [export_payload(result) for result in results]
 
     def run(self, request: BenchmarkRunRequest) -> BenchmarkResult:
@@ -451,7 +455,9 @@ class BenchmarkService:
         # ``repetitions`` times), so the first ``prompt_count`` entries are
         # the base list. Legacy rows without workload metadata replay their
         # stored sample prompts once.
-        if repetitions > 1 and prompt_count >= 1 and len(workload_prompts) >= prompt_count:
+        if "base_prompts" in stored:
+            base_prompts = list(stored["base_prompts"])
+        elif repetitions > 1 and prompt_count >= 1 and len(workload_prompts) >= prompt_count:
             base_prompts = workload_prompts[:prompt_count]
         else:
             base_prompts = workload_prompts
@@ -675,9 +681,10 @@ class BenchmarkService:
         return [prompt for _ in range(repetitions) for prompt in prompts]
 
     @staticmethod
-    def _workload_meta(base_prompts: list[str], repetitions: int) -> dict[str, int | str]:
+    def _workload_meta(base_prompts: list[str], repetitions: int) -> dict[str, object]:
         """Return the workload-size metadata recorded on every benchmark."""
         return {
+            "base_prompts": list(base_prompts),
             "prompt_count": len(base_prompts),
             "repetitions": repetitions,
             "total_requests": len(base_prompts) * repetitions,
@@ -855,10 +862,14 @@ class BenchmarkService:
         wall_seconds = time.perf_counter() - wall_start
         peak = inflight["peak"]
         warnings: list[str] = []
-        if prompts and peak < requested:
+        if prompts and len(prompts) < requested:
             warnings.append(
                 f"underfilled workload: {len(prompts)} request(s) cannot reach "
                 f"requested concurrency {requested}; achieved {peak}"
+            )
+        elif prompts and peak < requested:
+            warnings.append(
+                f"requested concurrency {requested} was not observed; achieved {peak}"
             )
         for warmup_error in warmup_errors[:3]:
             warnings.append(f"warm-up request failed: {warmup_error}")

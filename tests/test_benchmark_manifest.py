@@ -347,3 +347,31 @@ def test_invalid_generation_setting_remains_a_recorded_failure(db: Session) -> N
     assert not result.success
     assert result.id is not None
     assert "invalid" in result.error
+
+
+@pytest.mark.parametrize("kind", [BenchmarkKind.CHAT, BenchmarkKind.LONG_CONTEXT])
+def test_failed_custom_prompt_rerun_preserves_workload(db: Session, kind) -> None:
+    service = BenchmarkService(db)
+    first = service.run(BenchmarkRunRequest(
+        prompts=["unique research prompt"], kind=kind, repetitions=2, context_length=128,
+    ))
+    assert not first.success
+    second = service.rerun(first.id)
+    assert second.manifest["workload"]["hash"] == first.manifest["workload"]["hash"]
+    assert second.parameters["base_prompts"] == first.parameters["base_prompts"]
+
+
+def test_unresolved_serving_host_has_no_runner_gpu_attribution() -> None:
+    from llmctl.services.benchmark_manifest import _serving_host_section
+
+    result = _serving_host_section(None, [{"name": "runner GPU"}])
+    assert result["location"] == "unknown"
+    assert "gpu_identity" not in result
+
+
+def test_export_forwards_all_history_filters(db: Session, monkeypatch) -> None:
+    service = BenchmarkService(db)
+    seen = []
+    monkeypatch.setattr(service, "list_results", lambda **kwargs: seen.append(kwargs) or [])
+    assert service.export(session_id="session", kind=BenchmarkKind.CHAT, limit=20) == []
+    assert seen == [dict(model_id=None, session_id="session", kind=BenchmarkKind.CHAT, limit=20)]

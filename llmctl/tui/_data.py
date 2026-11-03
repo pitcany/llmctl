@@ -795,7 +795,12 @@ def get_current_operation() -> dict[str, Any] | None:
     unfinished = store.unfinished()
     if unfinished:
         record = sorted(unfinished, key=lambda r: r.created_at)[-1]
-        elapsed = (_op_now() - record.created_at).total_seconds()
+        created_at = record.created_at
+        if created_at.tzinfo is None:
+            from datetime import UTC
+
+            created_at = created_at.replace(tzinfo=UTC)
+        elapsed = (_op_now() - created_at).total_seconds()
         return {
             "id": record.id,
             "kind": record.kind,

@@ -1695,7 +1695,7 @@ def benchmarks_cmd(
         BenchmarkKind | None,
         typer.Option(help="Filter by kind.", case_sensitive=False),
     ] = None,
-    limit: Annotated[int, typer.Option(help="Maximum rows to return.")] = 20,
+    limit: Annotated[int | None, typer.Option(help="Maximum rows to return.")] = None,
     export: Annotated[
         str | None,
         typer.Option(
@@ -1716,13 +1716,17 @@ def benchmarks_cmd(
         if export:
             from llmctl.services.benchmark_manifest import write_export
 
-            payloads = service.export(model_id=model, limit=None if limit >= 20 else limit)
+            payloads = service.export(
+                model_id=model, session_id=session, kind=kind, limit=limit,
+            )
             path = write_export(Path(export).expanduser(), payloads)
             console.print(
                 f"[green]Exported {len(payloads)} result(s) to {escape(str(path))}[/green]"
             )
             return
-        results = service.list_results(model_id=model, session_id=session, kind=kind, limit=limit)
+        results = service.list_results(
+            model_id=model, session_id=session, kind=kind, limit=20 if limit is None else limit,
+        )
     if not results:
         console.print("[yellow]No benchmarks recorded yet.[/yellow]")
         return
@@ -2247,6 +2251,11 @@ def vllm_cmd(
             from llmctl.services import operations as _operations
             from llmctl.services.operations import cli_operation_guard
 
+            _confirm_state_change(
+                f"Swap to {target.model} ({target.engine})",
+                required=settings.scheduler.require_confirmation_for_start,
+                assume_yes=yes,
+            )
             _stack.enter_context(
                 cli_operation_guard(
                     db_url=os.environ.get(_operations.OP_DB_ENV) or settings.database_url,
@@ -2254,12 +2263,6 @@ def vllm_cmd(
                     target=target.key,
                     model=target.model,
                 )
-            )
-        if not dry_run:
-            _confirm_state_change(
-                f"Swap to {target.model} ({target.engine})",
-                required=settings.scheduler.require_confirmation_for_start,
-                assume_yes=yes,
             )
             if fit is not None:
                 # Free VRAM may have changed while the prompt waited: check again.

@@ -94,6 +94,8 @@ def _serving_host_section(
     identity applies. Anything else is remote: llmctl can see its endpoint
     but not its hardware, and the manifest says so instead of guessing.
     """
+    if not endpoint_url:
+        return {"location": UNKNOWN, "endpoint_host": UNKNOWN}
     host = _endpoint_host(endpoint_url)
     if endpoint_url and host not in _LOOPBACK_HOSTS:
         return {

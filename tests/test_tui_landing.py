@@ -273,8 +273,9 @@ def test_swap_screen_shows_operation_and_keeps_anchor() -> None:
                     for _ in range(40):
                         await pilot.pause(0.05)
                         row_now = table.cursor_row
-                        if table.row_count == 2 and row_now is not None:
+                        if screen._state and screen._state.catalog[0].key == "beta":
                             break
+                assert screen._state.catalog[0].key == "beta"
                 return str(panel), str(screen._state.catalog[row_now].key)
 
     panel, selected = asyncio.run(_run())

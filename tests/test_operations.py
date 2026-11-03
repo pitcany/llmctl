@@ -469,3 +469,44 @@ def test_operation_job_columns_migrate_without_rewriting_history(tmp_path: Path)
             text("SELECT phase, job_id, job_exit_code FROM operations WHERE id = 'old'")
         ).one()
     assert row == ("completed", None, None)
+
+
+def test_terminal_outcome_cannot_be_overwritten(tmp_path: Path) -> None:
+    store = OperationStore(f"sqlite:///{tmp_path / 'terminal.db'}")
+    record, _ = store.begin(
+        kind="swap", target="demo", interface="cli", purpose="test", request={},
+    )
+    store.finish(record.id, OperationPhase.NEEDS_ATTENTION, recovery={"not_restored": ["old"]})
+    store.finish(record.id, OperationPhase.COMPLETED)
+    result = store.get(record.id)
+    assert result.phase == "needs_attention"
+    assert result.recovery["not_restored"] == ["old"]
+
+
+def test_unstarted_intent_releases_idempotency_key(store: OperationStore) -> None:
+    args = dict(kind="swap", target="demo", interface="api", purpose="test",
+                request={}, idempotency_key="retry")
+    first, _ = store.begin(**args)
+    store.discard_unstarted(first.id)
+    second, created = store.begin(**args)
+    assert created
+    assert first.id != second.id
+
+
+def test_busy_refusal_does_not_consume_key(tmp_path: Path) -> None:
+    from llmctl.services.swap_jobs import JobBusy
+
+    jobs = SwapJobs(database_url=f"sqlite:///{tmp_path / 'busy-key.db'}")
+    gate = threading.Event()
+    with patch("llmctl.services.swap_jobs.run_argv", lambda *a, **k: gate.wait(5) and 0):
+        first = jobs.start_with_operation("first", "model", ["argv"])
+        try:
+            with pytest.raises(JobBusy):
+                jobs.start_with_operation("second", "model", ["argv"], idempotency_key="retry")
+        finally:
+            gate.set()
+            jobs.wait(first.job.job_id, 3)
+        second = jobs.start_with_operation("second", "model", ["argv"], idempotency_key="retry")
+        jobs.wait(second.job.job_id, 3)
+        assert not second.replayed
+        assert second.job is not None

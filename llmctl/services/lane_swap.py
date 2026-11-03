@@ -95,11 +95,14 @@ def stop_user_unit(unit: str, deps: LaneSwapDeps) -> bool:
         return deps.run_quiet(["systemctl", "--user", "stop", unit]) == 0
 
 
-def wait_ready(upstream: str, model: str, timeout_s: float, deps: LaneSwapDeps) -> bool:
+def wait_ready(
+    upstream: str, model: str, timeout_s: float, deps: LaneSwapDeps, *, restoring: bool = False,
+) -> bool:
     """Poll ``upstream/v1/models`` until ``model`` is listed or time runs out."""
     from llmctl.services.operations import OperationPhase, mark_phase
 
-    mark_phase(OperationPhase.CHECKING_READINESS)
+    if not restoring:
+        mark_phase(OperationPhase.CHECKING_READINESS)
     deadline = deps.clock() + timeout_s
     last_note = deps.clock()
     while True:
@@ -125,6 +128,9 @@ def restore_previous(
 ) -> None:
     """Bring back what was serving before a failed swap."""
 
+    from llmctl.services.operations import OperationPhase, mark_phase
+
+    mark_phase(OperationPhase.RESTORING)
     with gpu_operation_lock(purpose="rollback restart", interface="llmctl"):
         if restart_vllm:
             argv = ["sudo", "-n", "systemctl", "start", vllm_unit]
@@ -141,7 +147,9 @@ def restore_previous(
             deps.log(f"  rollback: restarting {lane.name} ({' '.join(lane.start_cmd)})")
             rc = deps.run_script(lane.start_cmd, lane.health_timeout_s + _SCRIPT_GRACE_S)
             label = lane.unit or lane.name
-            ready = wait_ready(lane.upstream, lane.served_model, lane.health_timeout_s, deps)
+            ready = wait_ready(
+                lane.upstream, lane.served_model, lane.health_timeout_s, deps, restoring=True,
+            )
             if rc == 0 and ready:
                 result.restored.append(label)
             else:

@@ -216,6 +216,7 @@ class SwapJobs:
         """Start a swap job with its persistent operation record (§2B)."""
         store = self._store
         record: OperationRecord | None = None
+        started = False
         job_id = uuid.uuid4().hex
         if store is not None and idempotency_key:
             # Idempotency wins over busy: repeating a key with the same
@@ -264,6 +265,7 @@ class SwapJobs:
                 self._threads[job.job_id] = thread
             try:
                 thread.start()
+                started = True
             except BaseException as exc:
                 # Left "running", the job would refuse every later swap until restart.
                 self._finish(job, None, f"error: could not start the swap thread: {exc}")
@@ -275,12 +277,8 @@ class SwapJobs:
                     )
                 raise
         except BaseException:
-            # The record was created but nothing will run: finalize it so it
-            # cannot wedge future swaps as a phantom unfinished operation.
-            if record is not None and store is not None:
-                store.finish(
-                    record.id or "", OperationPhase.FAILED, error="swap was not started"
-                )
+            if not started and record is not None and store is not None:
+                store.discard_unstarted(record.id or "")
             raise
         return StartOutcome(job=job, operation=record)
 

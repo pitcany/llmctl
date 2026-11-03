@@ -268,6 +268,12 @@ def stop_swap(
         if record is not None:
             store.finish(record.id, OperationPhase.FAILED, error=str(exc))
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except BaseException as exc:
+        if record is not None:
+            store.finish(
+                record.id, OperationPhase.INTERRUPTED, error=f"{type(exc).__name__}: {exc}",
+            )
+        raise
     results = [{"label": i.label, "ref": i.ref, "stopped": ok} for i, ok in outcome]
     ok = all(r["stopped"] for r in results)
     if record is not None:

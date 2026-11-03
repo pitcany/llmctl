@@ -10,6 +10,7 @@ never retarget an action to a different model.
 from __future__ import annotations
 
 import functools
+from datetime import UTC, datetime
 from typing import Any
 
 from textual.app import ComposeResult
@@ -69,6 +70,7 @@ class ModelsScreen(DataScreen):
         self._meta: dict[str, tuple[str, bool]] = {}
         self._missing_count: int = 0
         #: §3B: text + engine filters and the id-anchored selection.
+        self._engine_options: list[tuple[str, str]] = []
         self._filter_text: str = ""
         self._filter_engine: str = "all"
         self._anchor_id: str | None = None
@@ -251,15 +253,12 @@ class ModelsScreen(DataScreen):
         runtimes = sorted({m.runtime.value for m in models if m.runtime})
         options = [("all engines", "all")] + [(rt, rt) for rt in runtimes]
         select = self.query_one("#models-engine", Select)
-        try:
-            current = [(o.label, o.value) for o in select.options]
-        except Exception:  # noqa: BLE001 — option shape varies by version
-            current = None
-        if current != options:
+        if self._engine_options != options:
             select.set_options(options)
+            self._engine_options = options
             if self._filter_engine not in {value for _, value in options}:
                 self._filter_engine = "all"
-                select.value = "all"
+            select.value = self._filter_engine
 
     def _update_detail(self) -> None:
         """Render the anchored model's detail panel (§3B)."""
@@ -291,7 +290,14 @@ class ModelsScreen(DataScreen):
         )
         if not results:
             return "none yet"
-        latest = results[-1]
+        latest = max(
+            results,
+            key=lambda result: (
+                (result.created_at or datetime.min).replace(tzinfo=UTC)
+                if result.created_at is None or result.created_at.tzinfo is None
+                else result.created_at.astimezone(UTC)
+            ),
+        )
         mode = str(latest.parameters.get("mode", "?"))
         source = str(latest.parameters.get("token_count_source", ""))
         est = "~" if source in {"estimate", "mixed", "synthetic"} else ""

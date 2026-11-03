@@ -172,6 +172,9 @@ def resume_gpu_sessions(
     result: SessionSwapResult | LaneSwapResult,
 ) -> None:
     """Start ``sessions`` again after a failed swap."""
+    from llmctl.services.operations import OperationPhase, mark_phase
+
+    mark_phase(OperationPhase.RESTORING)
     for session in sessions:
         try:
             restart(session.id)

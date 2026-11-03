@@ -638,6 +638,13 @@ class SessionService:
 
     def start(self, request: SessionStartRequest) -> Session:
         """Plan and (when not dry-run) launch a runtime session."""
+        if request.dry_run:
+            return self._start_planned(request)
+        with gpu_operation_lock(purpose="start session", interface="llmctl"):
+            return self._start_planned(request)
+
+    def _start_planned(self, request: SessionStartRequest) -> Session:
+        """Plan and launch while the caller holds mutation ownership."""
         plan = self.scheduler.create_launch_plan(request)
         self.scheduler.validate(plan, force=request.force, dry_run=request.dry_run)
         record = SessionRecord(
