@@ -189,3 +189,23 @@ def test_detail_shows_latest_benchmark_evidence() -> None:
     assert "smoke" in detail
     assert "48.5 tok/s" in detail
     assert "ok" in detail
+
+
+def test_enter_in_search_returns_to_table_without_serving(monkeypatch) -> None:
+    async def run() -> None:
+        with _patched(MODELS):
+            app = MissionControlApp()
+            async with app.run_test(size=(80, 24)) as pilot:
+                screen = await _boot_to_models(pilot, app)
+                launches = []
+                monkeypatch.setattr(
+                    screen, "run_action_worker", lambda *args: launches.append(args),
+                )
+                await pilot.press("/")
+                await pilot.press(*"beta")
+                await pilot.press("enter")
+                await pilot.pause()
+                assert app.focused is screen.query_one("#models-table", DataTable)
+                assert screen._selected_id() == "m-beta"
+                assert launches == []
+    asyncio.run(run())

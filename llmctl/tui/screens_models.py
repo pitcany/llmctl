@@ -321,6 +321,9 @@ class ModelsScreen(DataScreen):
         Studio say they load on demand. Routing probes what is serving, so it runs off
         the UI thread.
         """
+        if self.query_one("#models-search", Input).has_focus:
+            self.query_one("#models-table", DataTable).focus()
+            return
         model_id = self._selected_id()
         if not model_id:
             self.app.notify("No model selected.", severity="warning")

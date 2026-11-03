@@ -177,3 +177,9 @@ Final verification: **1,595 passed, 1 skipped in 355.08 seconds**, with **85% ov
 Temporary verification artifacts: `/tmp/llmctl-research-followup.log`, `/tmp/llmctl-research-followup.xml`, and `/tmp/llmctl-research-followup-coverage.xml`. These paths may not survive a later session. No production service change was made during this follow-up.
 
 Compatibility: nullable `operations.job_id` and `operations.job_exit_code` columns are added by the existing migration mechanism. Older operation history is preserved. Job IDs lost before this change cannot be reconstructed from old rows that never stored them. Existing benchmark manifests are immutable; missing provenance in historical records is not retroactively filled in. The deferred items above remain open.
+
+### Pre-merge acceptance on 2026-11-03
+
+Integrated current `main` (engine metrics and missing-weights guards). An isolated Textual walkthrough at 80×24 with 150 fixture models passed keyboard filtering, return to the table, filter clearing with selection retained, and navigation to Benchmarks and Dashboard. The walkthrough found that priority Enter intercepted the search field; Enter now returns focus to the table without launching a model, covered by a permanent regression test. The walkthrough plus model-selection tests passed **8 tests**. Ruff and whitespace checks passed.
+
+Headless Chromium at an exact 375×812 viewport rendered 150 fixture rows, filtered to one, kept page width at 375px, and exposed the action button through the table's horizontal scroll container. The rendered screenshot was visually inspected. Temporary artifacts: `/tmp/llmctl-375px.png` and `/tmp/llmctl-80col-150models.svg`. These checks use inert fixtures and do not start or stop production models.
