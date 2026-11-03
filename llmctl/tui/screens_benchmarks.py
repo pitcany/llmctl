@@ -319,6 +319,7 @@ class BenchmarksScreen(DataScreen):
                 kind=launch.kind,
                 context_length=launch.context_length,
                 max_tokens=launch.max_tokens,
+                repetitions=launch.repetitions,
                 dry_run=launch.dry_run,
                 require_live=launch.require_live,
             ),

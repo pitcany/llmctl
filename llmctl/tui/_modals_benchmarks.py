@@ -34,10 +34,12 @@ class BenchmarkLaunch:
     max_tokens: int
     context_length: int | None
     dry_run: bool
-    #: True when the operator explicitly picked "live" (vs. left blank).
-    #: The screen forwards this to the service as ``require_live`` so a
-    #: missing endpoint records a failure rather than a silent mock.
+    #: Live is the default posture: a missing endpoint records a failure
+    #: rather than a silent mock, so every mode except explicit "mock"
+    #: carries ``require_live=True`` through to the service.
     require_live: bool
+    #: Workload repetition: total requests = prompts x repetitions.
+    repetitions: int = 1
 
 
 _KIND_OPTIONS: list[tuple[str, str]] = [
@@ -112,13 +114,15 @@ class BenchmarkLaunchModal(ModalScreen[BenchmarkLaunch | None]):
             yield Label("max_tokens (per prompt; ignored for kind=health)")
             yield Input(value="256", id="bench-max-tokens")
 
+            yield Label("repetitions (send the workload N times; ignored for kind=health)")
+            yield Input(value="1", id="bench-repetitions")
+
             yield Label("context_length (long_context only; blank = ~8K)")
             yield Input(value="", id="bench-context-length")
 
             yield Label(
-                "Mode: blank = live (best-effort, mocks if no endpoint); "
-                "'live' = strict (fails if no endpoint); "
-                "'mock' = synthetic dry-run"
+                "Mode: blank or 'live' = live (fails if no endpoint resolves); "
+                "'mock' = synthetic dry-run (deterministic, labeled)"
             )
             yield Input(value="", id="bench-mode")
 
@@ -156,6 +160,7 @@ class BenchmarkLaunchModal(ModalScreen[BenchmarkLaunch | None]):
         kind_select = self.query_one("#bench-kind", Select)
         name_input = self.query_one("#bench-name", Input)
         max_tokens_input = self.query_one("#bench-max-tokens", Input)
+        repetitions_input = self.query_one("#bench-repetitions", Input)
         ctx_input = self.query_one("#bench-context-length", Input)
         mode_input = self.query_one("#bench-mode", Input)
 
@@ -173,6 +178,12 @@ class BenchmarkLaunchModal(ModalScreen[BenchmarkLaunch | None]):
                 raise ValueError
         except ValueError as exc:
             raise ValueError("max_tokens must be a positive integer.") from exc
+        try:
+            repetitions = int((repetitions_input.value or "1").strip())
+            if repetitions <= 0:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("repetitions must be a positive integer.") from exc
         ctx_text = (ctx_input.value or "").strip()
         context_length: int | None
         if not ctx_text:
@@ -190,10 +201,10 @@ class BenchmarkLaunchModal(ModalScreen[BenchmarkLaunch | None]):
         if mode not in {"", "live", "mock"}:
             raise ValueError("Mode must be blank, 'live', or 'mock'.")
         dry_run = mode == "mock"
-        # Blank defaults to live but tolerates an endpoint miss; an explicit
-        # "live" is a contract that we should fail loudly if no endpoint
-        # resolves, instead of silently mocking.
-        require_live = mode == "live"
+        # Live is the default posture: every mode except an explicit "mock"
+        # is strict-live, so an endpoint miss records a failure instead of
+        # silently producing a synthetic measurement.
+        require_live = not dry_run
         return BenchmarkLaunch(
             model_id=model_id,
             kind=kind,
@@ -202,6 +213,7 @@ class BenchmarkLaunchModal(ModalScreen[BenchmarkLaunch | None]):
             context_length=context_length,
             dry_run=dry_run,
             require_live=require_live,
+            repetitions=repetitions,
         )
 
     def _show_error(self, message: str) -> None:

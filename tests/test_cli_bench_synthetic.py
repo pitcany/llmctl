@@ -60,3 +60,24 @@ def test_bad_sweep_is_a_usage_error_not_a_traceback(captured: list[Any]) -> None
     assert res.exit_code == 2, res.output
     assert "--sweep" in res.output
     assert captured == []
+
+
+def test_default_request_is_strict_live(captured: list[Any]) -> None:
+    """FIXPLAN §1A: a plain `llmctl bench` run must not silently mock."""
+    res = CliRunner().invoke(cli.app, ["bench", "m1"])
+    assert res.exit_code in (0, 1), res.output  # SystemExit(0) from the stub
+    assert captured
+    assert captured[0].dry_run is False
+    assert captured[0].require_live is True
+
+
+def test_repetitions_flag_maps_to_payload(captured: list[Any]) -> None:
+    res = CliRunner().invoke(cli.app, ["bench", "m1", "--repetitions", "3"])
+    assert res.exit_code in (0, 1), res.output
+    assert captured and captured[0].repetitions == 3
+
+
+def test_repetitions_must_be_positive(captured: list[Any]) -> None:
+    res = CliRunner().invoke(cli.app, ["bench", "m1", "--repetitions", "0"])
+    assert res.exit_code == 2, res.output
+    assert captured == []

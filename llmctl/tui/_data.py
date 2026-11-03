@@ -734,16 +734,16 @@ def run_benchmark(
     context_length: int | None = None,
     profile_id: str | None = None,
     max_tokens: int | None = None,
+    repetitions: int = 1,
     dry_run: bool = False,
-    require_live: bool = False,
+    require_live: bool = True,
 ) -> BenchmarkResult:
     """Run a new benchmark for a model.
 
-    Live failures persist as ``success=False`` records; the caller can
-    surface ``result.error`` in the UI to point at what broke. Set
-    ``require_live=True`` to also turn a missing endpoint into a failure
-    record rather than letting it silently degrade to a synthetic mock —
-    the TUI uses this when the operator explicitly picked "live" mode.
+    Live is the default: failures (including a missing endpoint) persist
+    as ``success=False`` records and the caller surfaces ``result.error``
+    in the UI. ``dry_run=True`` is the explicit synthetic mode; it stays
+    deterministic and labeled ``mode=mock`` in the history.
     """
     parameters: dict[str, object] = {}
     if max_tokens is not None:
@@ -757,6 +757,7 @@ def run_benchmark(
                 kind=kind,
                 context_length=context_length,
                 parameters=parameters,
+                repetitions=repetitions,
                 dry_run=dry_run,
                 require_live=require_live,
             )

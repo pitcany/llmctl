@@ -1,11 +1,17 @@
-"""Benchmark service: real (streaming) execution with a graceful-mock fallback.
+"""Benchmark service: real (streaming) execution with explicit synthetic mode.
 
-Streams prompts against a live OpenAI-compatible endpoint (vLLM, llama.cpp, LM
-Studio and Ollama all expose ``/v1/chat/completions``) and measures end-to-end
-latency, time-to-first-token (TTFT) and token throughput. When no endpoint is
-reachable -- e.g. on a host without the runtime installed, or for an explicit
-dry run -- it degrades gracefully to a deterministic synthetic benchmark so the
-control plane stays usable everywhere, including the no-GPU CI container.
+Streams the request workload against a live OpenAI-compatible endpoint (vLLM,
+llama.cpp, LM Studio and Ollama all expose ``/v1/chat/completions``) and
+measures end-to-end latency, time-to-first-token (TTFT) and token throughput.
+
+Execution-mode contract (FIXPLAN 2026-11-03 §1A): ordinary runs are
+strict-live. When no endpoint resolves, the run is persisted as a *failure*
+record -- never a fabricated synthetic measurement -- so benchmark history is
+trustworthy evidence. Synthetic execution is the explicit ``dry_run=True``
+path (``--synthetic`` on the CLI, 'mock' mode in the TUI): deterministic,
+labeled ``mode=mock`` in every surface, and intended for hosts without a
+runtime (e.g. CI). The historical silent fallback remains reachable only via
+the deprecated ``require_live=False`` escape hatch.
 
 Each prompt/response sample is persisted on the record so the TUI can show
 history and offer a one-key re-run.
@@ -14,6 +20,7 @@ history and offer a one-key re-run.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -240,18 +247,22 @@ class BenchmarkService:
     def run(self, request: BenchmarkRunRequest) -> BenchmarkResult:
         """Execute a benchmark and persist its result.
 
-        Streams a real run against a live runtime endpoint. On ``--dry-run`` (or
-        when no endpoint can be resolved at all) it records a deterministic
-        synthetic result with ``parameters.mode == "mock"``. Live runs that
-        fail mid-flight are persisted with ``success=False`` and the error
-        message so failures are inspectable in the history.
+        Streams a real run against a live runtime endpoint. On an explicit
+        synthetic request (``dry_run=True``) it records a deterministic mock
+        result with ``parameters.mode == "mock"``. Live runs are strict: a
+        missing endpoint records a failure (``require_live=False`` opts back
+        into the deprecated mock fallback), and live runs that fail mid-flight
+        are persisted with ``success=False`` and the error message so failures
+        are inspectable in the history.
         """
-        prompts = self._resolve_prompts(request)
+        base_prompts = self._resolve_prompts(request)
+        workload = self._expand_workload(base_prompts, request.repetitions)
         params = dict(request.parameters)
         params.setdefault("concurrency", max(1, request.concurrency))
+        params.update(self._workload_meta(base_prompts, request.repetitions))
         snapshot = _gpu_snapshot()
         with GPUSampler() as sampler:
-            metrics = self._measure(request, prompts, params)
+            metrics = self._measure(request, workload, params)
         gpu_summary = sampler.summary()
         record = BenchmarkRecord(
             model_id=request.model_id,
@@ -282,19 +293,38 @@ class BenchmarkService:
         return record_to_benchmark(record)
 
     def rerun(self, benchmark_id: str) -> BenchmarkResult | None:
-        """Re-execute a stored benchmark, reusing its prompts and parameters."""
+        """Re-execute a stored benchmark, reusing its prompts and parameters.
+
+        Reuses the stored *workload*: the base prompt list and repetition
+        count recorded on the source run, in their original order. A record
+        originally produced in synthetic mode re-runs synthetically (it was
+        an explicitly-mock experiment); anything else re-runs strict-live so
+        a missing endpoint surfaces as a failure instead of a silent mock.
+        """
         record = self.db.get(BenchmarkRecord, benchmark_id)
         if record is None:
             return None
-        prompts = [
+        stored: dict[str, object] = dict(record.parameters or {})
+        workload_prompts = [
             str(sample["prompt"])
             for sample in (record.samples or [])
             if sample.get("prompt")
         ]
+        repetitions = max(1, int(stored.get("repetitions", 1) or 1))
+        prompt_count = int(stored.get("prompt_count", 0) or 0)
+        # Samples are stored in workload order (base prompts repeated
+        # ``repetitions`` times), so the first ``prompt_count`` entries are
+        # the base list. Legacy rows without workload metadata replay their
+        # stored sample prompts once.
+        if repetitions > 1 and prompt_count >= 1 and len(workload_prompts) >= prompt_count:
+            base_prompts = workload_prompts[:prompt_count]
+        else:
+            base_prompts = workload_prompts
+            repetitions = 1
         params = {
-            key: record.parameters[key]
+            key: stored[key]
             for key in ("max_tokens", "temperature", "concurrency")
-            if key in record.parameters
+            if key in stored
         }
         kind = (
             BenchmarkKind(record.kind)
@@ -308,10 +338,12 @@ class BenchmarkService:
             profile_id=record.profile_id,
             kind=kind,
             context_length=record.context_length,
-            prompts=prompts,
+            prompts=base_prompts,
             parameters=params,
-            concurrency=int(record.parameters.get("concurrency", 1) or 1),
-            dry_run=False,
+            concurrency=int(stored.get("concurrency", 1) or 1),
+            repetitions=repetitions,
+            dry_run=str(stored.get("mode", "live")) == "mock",
+            require_live=True,
         )
         return self.run(request)
 
@@ -320,7 +352,10 @@ class BenchmarkService:
 
         Each level is persisted as its own record named ``"{name} (c=N)"`` with
         ``parameters.concurrency == N`` so throughput-under-load can be compared
-        directly in the Benchmarks screen.
+        directly in the Benchmarks screen. The total workload (prompts x
+        repetitions) stays fixed across levels -- only the concurrency ceiling
+        changes, so a level whose workload cannot fill its concurrency records
+        the shortfall instead of silently shrinking the experiment.
         """
         levels = request.sweep or [max(1, request.concurrency)]
         ordered = sorted({max(1, int(level)) for level in levels})
@@ -351,7 +386,9 @@ class BenchmarkService:
 
         Behaviour:
           * Explicit ``dry_run`` -> deterministic mock result for the kind.
-          * No reachable endpoint -> mock result with reason
+          * No reachable endpoint -> failure record (strict live is the
+            default). Only an explicit ``require_live=False`` restores the
+            deprecated mock fallback with reason
             ``"no reachable runtime endpoint"``.
           * Endpoint reachable but the call fails -> *failure record*:
             ``success=False``, the exception in ``error``. Mock fallback is
@@ -384,8 +421,10 @@ class BenchmarkService:
         if request.kind == BenchmarkKind.COMPLETION:
             return self._run_live(target, prompts, params, endpoint="completion")
         if request.kind == BenchmarkKind.LONG_CONTEXT:
-            ctx_prompts = [self._build_long_context_prompt(request)]
-            return self._run_live(target, ctx_prompts, params, endpoint="chat")
+            ctx = [self._build_long_context_prompt(request)]
+            return self._run_live(
+                target, self._expand_workload(ctx, request.repetitions), params, endpoint="chat"
+            )
         return self._run_live(target, prompts, params, endpoint="chat")
 
     def _resolve_target(self, request: BenchmarkRunRequest) -> _Target | None:
@@ -460,6 +499,29 @@ class BenchmarkService:
         if request.prompts:
             return list(request.prompts)
         return [DEFAULT_PROMPT]
+
+    @staticmethod
+    def _expand_workload(prompts: list[str], repetitions: int) -> list[str]:
+        """Expand base prompts into the full request workload.
+
+        Repetition is cyclic (``a, b, a, b``), not blocked (``a, a, b, b``),
+        so concurrent workers spread across distinct prompts instead of
+        hammering the same one. The policy is recorded on the result via
+        :meth:`_workload_meta`; prompts are never duplicated implicitly.
+        """
+        if repetitions <= 1:
+            return list(prompts)
+        return [prompt for _ in range(repetitions) for prompt in prompts]
+
+    @staticmethod
+    def _workload_meta(base_prompts: list[str], repetitions: int) -> dict[str, int | str]:
+        """Return the workload-size metadata recorded on every benchmark."""
+        return {
+            "prompt_count": len(base_prompts),
+            "repetitions": repetitions,
+            "total_requests": len(base_prompts) * repetitions,
+            "repetition_policy": "cyclic" if repetitions > 1 else "none",
+        }
 
     @staticmethod
     def _build_long_context_prompt(request: BenchmarkRunRequest) -> str:
@@ -543,18 +605,24 @@ class BenchmarkService:
         *,
         endpoint: str = "chat",
     ) -> dict[str, object]:
-        """Stream prompts against a live endpoint; aggregate latency/TTFT/tps.
+        """Stream the request workload against a live endpoint; aggregate.
 
-        With ``concurrency > 1`` requests are dispatched in parallel and
-        throughput is computed from wall-clock time, measuring sustained
-        tokens/sec under load. TTFT is averaged across requests. The
-        ``endpoint`` selector picks between ``"chat"`` (``/v1/chat/completions``)
-        and ``"completion"`` (``/v1/completions``) -- the same streaming
-        runner handles both, since both speak SSE with the same delta shape.
+        ``concurrency`` is the maximum number of simultaneous in-flight
+        requests. The pool never spins up more workers than there are
+        requests, and the record stores both the requested ceiling
+        (``requested_concurrency``) and the peak actually observed
+        (``achieved_concurrency``); an underfilled workload is flagged in
+        ``parameters.warnings`` instead of being reported as if it reached
+        the ceiling. Throughput is computed from wall-clock time; TTFT is
+        averaged across requests. The ``endpoint`` selector picks between
+        ``"chat"`` (``/v1/chat/completions``) and ``"completion"``
+        (``/v1/completions``) -- the same streaming runner handles both,
+        since both speak SSE with the same delta shape.
         """
         max_tokens = int(params.get("max_tokens", DEFAULT_MAX_TOKENS))
         temperature = float(params.get("temperature", 0.0))
-        concurrency = max(1, int(params.get("concurrency", 1)))
+        requested = max(1, int(params.get("concurrency", 1)))
+        workers = max(1, min(requested, len(prompts))) if prompts else 1
         client = (
             self._client_factory()
             if self._client_factory is not None
@@ -563,32 +631,39 @@ class BenchmarkService:
         endpoint_url = (
             target.completion_url if endpoint == "completion" else target.chat_url
         )
+        inflight_lock = threading.Lock()
+        inflight = {"now": 0, "peak": 0}
+
+        def _tracked(prompt: str) -> dict[str, object]:
+            with inflight_lock:
+                inflight["now"] += 1
+                inflight["peak"] = max(inflight["peak"], inflight["now"])
+            try:
+                return self._stream_one(
+                    client, target, prompt, max_tokens, temperature, endpoint
+                )
+            finally:
+                with inflight_lock:
+                    inflight["now"] -= 1
+
         wall_start = time.perf_counter()
         samples: list[dict[str, object]] = []
         with client:
-            if concurrency == 1:
+            if workers == 1:
                 for prompt in prompts:
-                    samples.append(
-                        self._stream_one(
-                            client, target, prompt, max_tokens, temperature, endpoint
-                        )
-                    )
+                    samples.append(_tracked(prompt))
             else:
-                with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                    futures = [
-                        pool.submit(
-                            self._stream_one,
-                            client,
-                            target,
-                            prompt,
-                            max_tokens,
-                            temperature,
-                            endpoint,
-                        )
-                        for prompt in prompts
-                    ]
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [pool.submit(_tracked, prompt) for prompt in prompts]
                     samples = [future.result() for future in futures]
         wall_seconds = time.perf_counter() - wall_start
+        peak = inflight["peak"]
+        warnings: list[str] = []
+        if prompts and peak < requested:
+            warnings.append(
+                f"underfilled workload: {len(prompts)} request(s) cannot reach "
+                f"requested concurrency {requested}; achieved {peak}"
+            )
         total_prompt = sum(int(sample["prompt_tokens"]) for sample in samples)
         total_completion = sum(int(sample["completion_tokens"]) for sample in samples)
         ttft_values = [
@@ -611,8 +686,10 @@ class BenchmarkService:
                 "mode": "live",
                 "endpoint": endpoint_url,
                 "endpoint_kind": endpoint,
-                "prompt_count": len(prompts),
-                "concurrency": concurrency,
+                "requested_concurrency": requested,
+                "concurrency": requested,
+                "achieved_concurrency": peak,
+                "warnings": warnings,
             },
             "backend": target.backend,
             "success": True,
@@ -733,7 +810,6 @@ class BenchmarkService:
                 "mode": "live",
                 "endpoint": endpoint_url,
                 "kind": request.kind.value,
-                "prompt_count": len(prompts),
                 "concurrency": max(1, int(params.get("concurrency", 1))),
             },
             "backend": target.backend,
@@ -772,7 +848,6 @@ class BenchmarkService:
                 "mode": "live",
                 "reason": "no reachable runtime endpoint",
                 "kind": request.kind.value,
-                "prompt_count": len(prompts),
                 "concurrency": max(1, int(params.get("concurrency", 1))),
             },
             "backend": None,
@@ -852,7 +927,6 @@ class BenchmarkService:
                 "mode": "mock",
                 "reason": reason,
                 "kind": request.kind.value,
-                "prompt_count": len(prompts),
                 "concurrency": max(1, int(params.get("concurrency", 1))),
             },
             "backend": None,

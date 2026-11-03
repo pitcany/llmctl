@@ -63,6 +63,31 @@ def test_default_prompt_is_spec_mle_bayes() -> None:
     assert "Bayesian" in DEFAULT_PROMPT
 
 
+# -- execution mode + workload validation (FIXPLAN 2026-11-03 §1A) ----------
+
+
+def test_request_defaults_are_strict_live_single_pass() -> None:
+    """Ordinary requests default to strict live, one pass, no sweep."""
+    request = BenchmarkRunRequest(name="x")
+    assert request.require_live is True
+    assert request.dry_run is False
+    assert request.repetitions == 1
+    assert request.concurrency == 1
+    assert request.sweep == []
+
+
+def test_request_rejects_invalid_workload_numbers() -> None:
+    """repetitions/concurrency/sweep are validated at the schema boundary."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        BenchmarkRunRequest(repetitions=0)
+    with pytest.raises(ValidationError):
+        BenchmarkRunRequest(concurrency=0)
+    with pytest.raises(ValidationError):
+        BenchmarkRunRequest(sweep=[0, 2])
+
+
 # -- kind dispatch ----------------------------------------------------------
 
 

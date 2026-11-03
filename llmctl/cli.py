@@ -1358,6 +1358,13 @@ def bench(
         typer.Option(help="Target context length in tokens (long_context kind)."),
     ] = None,
     concurrency: Annotated[int, typer.Option(help="Parallel in-flight requests (load level).")] = 1,
+    repetitions: Annotated[
+        int,
+        typer.Option(
+            help="Send the prompt workload this many times (total requests = prompts x N).",
+            min=1,
+        ),
+    ] = 1,
     sweep: Annotated[
         str | None,
         typer.Option(help="Concurrency sweep, e.g. '1,2,4,8' (overrides --concurrency)."),
@@ -1416,6 +1423,7 @@ def bench(
         prompts=list(prompt) if prompt else [],
         parameters={"max_tokens": max_tokens},
         concurrency=concurrency,
+        repetitions=repetitions,
         sweep=sweep_levels,
         dry_run=synthetic,
     )
@@ -1465,7 +1473,14 @@ def _print_benchmark_result(result: object) -> None:
         table.add_row("Backend", result.backend)
     if result.context_length:
         table.add_row("Context length", str(result.context_length))
-    table.add_row("Concurrency", str(result.parameters.get("concurrency", 1)))
+    requested = result.parameters.get("concurrency", 1)
+    achieved = result.parameters.get("achieved_concurrency")
+    if achieved is not None and int(achieved) != int(requested):
+        table.add_row("Concurrency", f"{requested} (achieved {achieved})")
+    else:
+        table.add_row("Concurrency", str(requested))
+    for warning in result.parameters.get("warnings", []) or []:
+        table.add_row("Warning", f"[yellow]{escape(str(warning))}[/yellow]")
     table.add_row("Prompt tokens", str(result.prompt_tokens))
     table.add_row("Completion tokens", str(result.completion_tokens))
     table.add_row("Total tokens", str(result.total_tokens))
