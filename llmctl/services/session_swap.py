@@ -36,6 +36,7 @@ from llmctl.services.lane_swap import (
     stop_user_unit,
 )
 from llmctl.services.lanes import Gpus, Lane, gpus_overlap
+from llmctl.services.op_lock import gpu_operation_lock
 
 #: GiB kept free per card on top of the model's own estimate.
 DEFAULT_MARGIN_GB = 1.0
@@ -202,83 +203,85 @@ def swap_to_session(
     ``start(cards)`` launches and returns the session (it blocks until the
     server answers or fails); it may raise when the scheduler refuses.
     """
-    deps = deps or LaneSwapDeps()
-    result = SessionSwapResult(ok=False)
-    if placement.problem:
-        result.error = placement.problem
-        return result
-    began = deps.clock()
 
-    stopped_sessions, error = pause_gpu_sessions(gpu_sessions, stop, deps.log)
-    result.stopped += [s.label() for s in stopped_sessions]
-    stopped_lanes: list[Lane] = []
-    if error is None:
-        for lane in active_lanes:
-            if lane.unit is None:
-                continue
-            deps.log(f"stopping {lane.unit} ...")
-            if not stop_user_unit(lane.unit, deps):
-                error = f"could not stop {lane.unit}"
-                break
-            stopped_lanes.append(lane)
-            result.stopped.append(lane.unit)
-    stopped_vllm = False
-    if error is None and vllm_active:
-        deps.log(f"stopping {vllm_unit} ...")
-        if deps.run_quiet(["sudo", "-n", "systemctl", "stop", vllm_unit]) == 0:
-            stopped_vllm = True
-            result.stopped.append(vllm_unit)
-        else:
-            error = f"could not stop {vllm_unit} (sudo -n systemctl stop {vllm_unit})"
+    with gpu_operation_lock(purpose="session swap", interface="llmctl"):
+        deps = deps or LaneSwapDeps()
+        result = SessionSwapResult(ok=False)
+        if placement.problem:
+            result.error = placement.problem
+            return result
+        began = deps.clock()
 
-    if error is None:
-        where = "one GPU" if placement.cards == 1 else f"{placement.cards} GPUs"
-        deps.log(f"starting {engine} for {name} on {where} (this can take minutes) ...")
-        for attempt in range(_VRAM_RETRIES + 1):
-            try:
-                session = start(placement.cards)
-            except Exception as exc:  # noqa: BLE001 - scheduler refusal, retried
-                message = str(exc)
-                if "exceeds free" in message and attempt < _VRAM_RETRIES:
-                    deps.sleep(_VRAM_RETRY_S)  # memory from the stopped units lags
+        stopped_sessions, error = pause_gpu_sessions(gpu_sessions, stop, deps.log)
+        result.stopped += [s.label() for s in stopped_sessions]
+        stopped_lanes: list[Lane] = []
+        if error is None:
+            for lane in active_lanes:
+                if lane.unit is None:
                     continue
-                error = message
-                break
-            result.session = session
-            status = getattr(getattr(session, "status", None), "value", "")
-            if status == "running":
-                result.ok = True
+                deps.log(f"stopping {lane.unit} ...")
+                if not stop_user_unit(lane.unit, deps):
+                    error = f"could not stop {lane.unit}"
+                    break
+                stopped_lanes.append(lane)
+                result.stopped.append(lane.unit)
+        stopped_vllm = False
+        if error is None and vllm_active:
+            deps.log(f"stopping {vllm_unit} ...")
+            if deps.run_quiet(["sudo", "-n", "systemctl", "stop", vllm_unit]) == 0:
+                stopped_vllm = True
+                result.stopped.append(vllm_unit)
             else:
-                detail = getattr(session, "error", None) or f"status {status or 'unknown'}"
-                error = f"{engine} did not come up: {detail}"
-            break
+                error = f"could not stop {vllm_unit} (sudo -n systemctl stop {vllm_unit})"
 
-    result.seconds = deps.clock() - began
-    if result.ok:
-        deps.record(name, result.seconds)
+        if error is None:
+            where = "one GPU" if placement.cards == 1 else f"{placement.cards} GPUs"
+            deps.log(f"starting {engine} for {name} on {where} (this can take minutes) ...")
+            for attempt in range(_VRAM_RETRIES + 1):
+                try:
+                    session = start(placement.cards)
+                except Exception as exc:  # noqa: BLE001 - scheduler refusal, retried
+                    message = str(exc)
+                    if "exceeds free" in message and attempt < _VRAM_RETRIES:
+                        deps.sleep(_VRAM_RETRY_S)  # memory from the stopped units lags
+                        continue
+                    error = message
+                    break
+                result.session = session
+                status = getattr(getattr(session, "status", None), "value", "")
+                if status == "running":
+                    result.ok = True
+                else:
+                    detail = getattr(session, "error", None) or f"status {status or 'unknown'}"
+                    error = f"{engine} did not come up: {detail}"
+                break
+
+        result.seconds = deps.clock() - began
+        if result.ok:
+            deps.record(name, result.seconds)
+            return result
+
+        result.error = error
+        deps.log(f"swap failed: {error}; restoring the previous state")
+        session = result.session
+        if session is not None and getattr(session, "id", None):
+            try:
+                stop(session.id)
+                deps.log(f"  rollback: stopped the half-started {engine}")
+            except Exception:  # noqa: BLE001 - best effort; reported by status
+                deps.log(f"  rollback: could not stop it; run: llmctl stop {session.id[:8]}")
+        lane_result = LaneSwapResult(ok=False)
+        restore_previous(
+            stopped_lanes,
+            restart_vllm=stopped_vllm,
+            vllm_unit=vllm_unit,
+            deps=deps,
+            result=lane_result,
+        )
+        result.restored += lane_result.restored
+        result.restore_failed += lane_result.restore_failed
+        resume_gpu_sessions(stopped_sessions, restart, deps.log, result)
         return result
-
-    result.error = error
-    deps.log(f"swap failed: {error}; restoring the previous state")
-    session = result.session
-    if session is not None and getattr(session, "id", None):
-        try:
-            stop(session.id)
-            deps.log(f"  rollback: stopped the half-started {engine}")
-        except Exception:  # noqa: BLE001 - best effort; reported by status
-            deps.log(f"  rollback: could not stop it; run: llmctl stop {session.id[:8]}")
-    lane_result = LaneSwapResult(ok=False)
-    restore_previous(
-        stopped_lanes,
-        restart_vllm=stopped_vllm,
-        vllm_unit=vllm_unit,
-        deps=deps,
-        result=lane_result,
-    )
-    result.restored += lane_result.restored
-    result.restore_failed += lane_result.restore_failed
-    resume_gpu_sessions(stopped_sessions, restart, deps.log, result)
-    return result
 
 
 def pinned_port(db: Any, model: Any) -> int | None:
@@ -409,22 +412,26 @@ def pause_for_swap(
     state: Any, target: Any, *, settings: Any, log: Callable[[str], None]
 ) -> tuple[list[GpuSession], str | None]:
     """Before a vLLM or lane swap: stop llmctl's GPU processes in its way."""
-    in_the_way = state.sessions_in_the_way(target)
-    if not in_the_way:
-        return [], None
-    with _service(settings) as service:
-        return pause_gpu_sessions(in_the_way, lambda sid: service.stop(sid), log)
+
+    with gpu_operation_lock(purpose="pause sessions for swap", interface="llmctl"):
+        in_the_way = state.sessions_in_the_way(target)
+        if not in_the_way:
+            return [], None
+        with _service(settings) as service:
+            return pause_gpu_sessions(in_the_way, lambda sid: service.stop(sid), log)
 
 
 def resume_after_failed_swap(
     sessions: Sequence[GpuSession], *, settings: Any, log: Callable[[str], None]
 ) -> SessionSwapResult:
     """After a failed vLLM or lane swap: start the paused processes again."""
-    result = SessionSwapResult(ok=False)
-    if sessions:
-        with _service(settings) as service:
-            resume_gpu_sessions(sessions, lambda sid: service.restart(sid), log, result)
-    return result
+
+    with gpu_operation_lock(purpose="resume sessions after failed swap", interface="llmctl"):
+        result = SessionSwapResult(ok=False)
+        if sessions:
+            with _service(settings) as service:
+                resume_gpu_sessions(sessions, lambda sid: service.restart(sid), log, result)
+        return result
 
 
 class _service:

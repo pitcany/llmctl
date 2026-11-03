@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from llmctl.services.lanes import Gpus, format_gpus
+from llmctl.services.op_lock import gpu_operation_lock
 
 
 @dataclass(frozen=True)
@@ -133,17 +134,19 @@ class StopDeps:
 
 def stop_items(items: list[Serving], deps: StopDeps) -> list[tuple[Serving, bool]]:
     """Stop each item; returns ``(item, stopped)`` pairs in order."""
-    results = []
-    for item in items:
-        fn = {"vllm": deps.stop_vllm, "lane": deps.stop_lane, "session": deps.stop_session}[
-            item.kind
-        ]
-        try:
-            ok = bool(deps.run_cmd(item.cmd) if item.cmd else fn(item.ref))
-        except Exception:  # noqa: BLE001 - reported as not stopped
-            ok = False
-        results.append((item, ok))
-    return results
+
+    with gpu_operation_lock(purpose=f"stop {len(items)} serving item(s)", interface="llmctl"):
+        results = []
+        for item in items:
+            fn = {"vllm": deps.stop_vllm, "lane": deps.stop_lane, "session": deps.stop_session}[
+                item.kind
+            ]
+            try:
+                ok = bool(deps.run_cmd(item.cmd) if item.cmd else fn(item.ref))
+            except Exception:  # noqa: BLE001 - reported as not stopped
+                ok = False
+            results.append((item, ok))
+        return results
 
 
 def real_deps(settings: Any) -> StopDeps:

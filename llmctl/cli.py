@@ -615,6 +615,9 @@ def _start_request(db: Session, request: SessionStartRequest) -> None:
         session = SessionService(db).start(request)
     except SchedulerError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    except LockBusy as exc:
+        console.print(f"[red]Cannot start:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
     if session.launch_plan is not None:
         _print_plan_warnings(session.launch_plan)
     # Exit 1 on a failed launch, like `restart`. It used to return 0 (kept for
@@ -797,6 +800,9 @@ def start_unit(
         except AdoptError as exc:
             console.print(f"[red]Start refused:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
+        except LockBusy as exc:
+            console.print(f"[red]Cannot start unit:[/red] {escape(str(exc))}")
+            raise typer.Exit(1) from exc
     if dry_run:
         flag = " --user" if scope == "user" else ""
         state = "already active — nothing would happen" if was_active else "inactive"
@@ -892,12 +898,16 @@ def stop(
         assume_yes=yes,
     )
     failed = False
-    for item, ok in stop_items(items, real_deps(settings)):
-        if ok:
-            console.print(f"[green]Stopped[/green] {escape(item.label)}")
-        else:
-            failed = True
-            console.print(f"[red]Could not stop[/red] {escape(item.label)}")
+    try:
+        for item, ok in stop_items(items, real_deps(settings)):
+            if ok:
+                console.print(f"[green]Stopped[/green] {escape(item.label)}")
+            else:
+                failed = True
+                console.print(f"[red]Could not stop[/red] {escape(item.label)}")
+    except LockBusy as exc:
+        console.print(f"[red]Cannot stop:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
     if failed:
         raise typer.Exit(1)
 
@@ -965,6 +975,9 @@ def _stop_session(
         except AdoptError as exc:
             console.print(f"[red]Stop refused:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
+        except LockBusy as exc:
+            console.print(f"[red]Cannot stop:[/red] {escape(str(exc))}")
+            raise typer.Exit(1) from exc
     if not session:
         raise typer.BadParameter(f"Session not found: {session_id}")
     if session.status.value != "stopped":
@@ -1016,6 +1029,9 @@ def restart(
             session = SessionService(db).restart(session_id, restart_unit=systemd)
         except AdoptError as exc:
             console.print(f"[red]Restart refused:[/red] {escape(str(exc))}")
+            raise typer.Exit(1) from exc
+        except LockBusy as exc:
+            console.print(f"[red]Cannot restart:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
     if not session:
         raise typer.BadParameter(f"Session not found: {session_id}")
@@ -2103,11 +2119,15 @@ def vllm_cmd(
 
     with ExitStack() as _stack:
         if not dry_run:
-            _stack.enter_context(
-                gpu_operation_lock(
-                    purpose=f"run {target.model}", interface="cli", settings=settings
+            try:
+                _stack.enter_context(
+                    gpu_operation_lock(
+                        purpose=f"run {target.model}", interface="cli", settings=settings
+                    )
                 )
-            )
+            except LockBusy as exc:
+                console.print(f"[red]Cannot swap:[/red] {escape(str(exc))}")
+                raise typer.Exit(1) from exc
         if not dry_run:
             _confirm_state_change(
                 f"Swap to {target.model} ({target.engine})",

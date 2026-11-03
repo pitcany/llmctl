@@ -323,36 +323,50 @@ def stop_managed_unit(unit_name: str) -> str:
     """Stop a managed systemd unit in whichever scope owns it.
 
     Unit-level, not session-level: the Units screen is showing units, and a
-    unit may have no session row at all. Returns the scope used.
+    unit may have no session row at all. Returns the scope used. Holds the
+    host-wide GPU operation lock (FIXPLAN §2A) so a TUI stop cannot race a
+    CLI swap or an API request on the same cards.
     """
     from llmctl.integrations.systemctl import SystemctlRunner
+    from llmctl.services.op_lock import gpu_operation_lock
 
-    sysctl = SystemctlRunner()
-    user_scope = sysctl.is_user_unit(unit_name)
-    result = sysctl.stop(unit_name, user=user_scope)
-    if not result.ok:
-        flag = " --user" if user_scope else ""
-        raise RuntimeError(
-            f"`systemctl{flag} stop {unit_name}` failed "
-            f"(exit {result.returncode}): {result.stderr.strip()}"
-        )
-    return "user" if user_scope else "system"
+    with gpu_operation_lock(
+        purpose=f"stop unit {unit_name}", interface="tui"
+    ):
+        sysctl = SystemctlRunner()
+        user_scope = sysctl.is_user_unit(unit_name)
+        result = sysctl.stop(unit_name, user=user_scope)
+        if not result.ok:
+            flag = " --user" if user_scope else ""
+            raise RuntimeError(
+                f"`systemctl{flag} stop {unit_name}` failed "
+                f"(exit {result.returncode}): {result.stderr.strip()}"
+            )
+        return "user" if user_scope else "system"
 
 
 def restart_managed_unit(unit_name: str) -> str:
-    """Restart a managed systemd unit in whichever scope owns it; returns scope."""
-    from llmctl.integrations.systemctl import SystemctlRunner
+    """Restart a managed systemd unit in whichever scope owns it; returns scope.
 
-    sysctl = SystemctlRunner()
-    user_scope = sysctl.is_user_unit(unit_name)
-    result = sysctl.restart(unit_name, user=user_scope)
-    if not result.ok:
-        flag = " --user" if user_scope else ""
-        raise RuntimeError(
-            f"`systemctl{flag} restart {unit_name}` failed "
-            f"(exit {result.returncode}): {result.stderr.strip()}"
-        )
-    return "user" if user_scope else "system"
+    Takes the host-wide GPU operation lock for the same reason as
+    :func:`stop_managed_unit`.
+    """
+    from llmctl.integrations.systemctl import SystemctlRunner
+    from llmctl.services.op_lock import gpu_operation_lock
+
+    with gpu_operation_lock(
+        purpose=f"restart unit {unit_name}", interface="tui"
+    ):
+        sysctl = SystemctlRunner()
+        user_scope = sysctl.is_user_unit(unit_name)
+        result = sysctl.restart(unit_name, user=user_scope)
+        if not result.ok:
+            flag = " --user" if user_scope else ""
+            raise RuntimeError(
+                f"`systemctl{flag} restart {unit_name}` failed "
+                f"(exit {result.returncode}): {result.stderr.strip()}"
+            )
+        return "user" if user_scope else "system"
 
 
 def get_preset_views_with_links() -> list[Any]:

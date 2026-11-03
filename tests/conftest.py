@@ -65,3 +65,14 @@ def _no_live_settings(monkeypatch, tmp_path) -> None:
     ``LLMCTL_CONFIG_DIR`` themselves still get theirs."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.delenv("LLMCTL_API_TOKEN", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_op_lock(monkeypatch, tmp_path) -> None:
+    """Point the host-wide GPU operation lock at a per-test tmp path.
+
+    Mutating paths (llmctl run/stop/restart, swaps, API mutations) take an
+    flock on this file. Without the override every test would share (and
+    could block on) the developer's real lock at
+    ``~/.local/share/llmctl/operations.lock``."""
+    monkeypatch.setenv("LLMCTL_OP_LOCK", str(tmp_path / "operations.lock"))

@@ -7,6 +7,7 @@ from sqlmodel import Session as DBSession
 
 from llmctl.api.deps import get_db_session
 from llmctl.schemas import LaunchPlan, Session, SessionStartRequest
+from llmctl.services.op_lock import LockBusy
 from llmctl.services.scheduler import SchedulerError
 from llmctl.services.sessions import AdoptError, SessionService
 
@@ -42,6 +43,8 @@ def start_session(payload: SessionStartRequest, db: DBSession = Depends(get_db_s
         return SessionService(db).start(payload)
     except SchedulerError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except LockBusy as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.post("/{session_id}/stop", response_model=Session)
@@ -54,6 +57,8 @@ def stop_session(session_id: str, db: DBSession = Depends(get_db_session)) -> Se
     try:
         result = SessionService(db).stop(session_id)
     except AdoptError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except LockBusy as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
@@ -70,6 +75,8 @@ def restart_session(session_id: str, db: DBSession = Depends(get_db_session)) ->
     try:
         result = SessionService(db).restart(session_id)
     except AdoptError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except LockBusy as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")

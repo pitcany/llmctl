@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from llmctl.api.deps import get_settings, get_swap_jobs
 from llmctl.config import Settings
 from llmctl.services import stop_serving, swap_jobs, swap_view
+from llmctl.services.op_lock import LockBusy
 from llmctl.services.swap_jobs import JobBusy, StopInProgress, SwapJobs
 
 router = APIRouter(prefix="/swap", tags=["swap"])
@@ -188,5 +189,9 @@ def stop_swap(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Swap job {busy.job.job_id} is running",
         ) from busy
+    except LockBusy as exc:
+        # Another process (CLI swap, TUI action) holds the GPU operation
+        # lock; the stop cannot run concurrently with it.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     results = [{"label": i.label, "ref": i.ref, "stopped": ok} for i, ok in outcome]
     return {"items": shown, "results": results, "ok": all(r["stopped"] for r in results)}

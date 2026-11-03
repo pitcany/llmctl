@@ -22,6 +22,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from llmctl.services.lanes import Lane, record_load, share_start_cmd
+from llmctl.services.op_lock import gpu_operation_lock
 
 #: Extra seconds the start script may run past the lane's health budget; the
 #: scripts wait for readiness themselves, then print a status block.
@@ -89,7 +90,9 @@ class LaneSwapResult:
 
 def stop_user_unit(unit: str, deps: LaneSwapDeps) -> bool:
     """``systemctl --user stop unit``; True on success."""
-    return deps.run_quiet(["systemctl", "--user", "stop", unit]) == 0
+
+    with gpu_operation_lock(purpose=f"stop unit {unit}", interface="llmctl"):
+        return deps.run_quiet(["systemctl", "--user", "stop", unit]) == 0
 
 
 def wait_ready(upstream: str, model: str, timeout_s: float, deps: LaneSwapDeps) -> bool:
@@ -118,25 +121,27 @@ def restore_previous(
     result: LaneSwapResult,
 ) -> None:
     """Bring back what was serving before a failed swap."""
-    if restart_vllm:
-        argv = ["sudo", "-n", "systemctl", "start", vllm_unit]
-        if deps.run_quiet(argv) == 0:
-            result.restored.append(vllm_unit)
-            deps.log(f"  rollback: started {vllm_unit} again (previous preset)")
-        else:
-            result.restore_failed.append(vllm_unit)
-            deps.log(
-                f"  rollback: could not start {vllm_unit}; run: sudo systemctl start {vllm_unit}"
-            )
-    for lane in previous_lanes:
-        deps.log(f"  rollback: restarting {lane.name} ({' '.join(lane.start_cmd)})")
-        rc = deps.run_script(lane.start_cmd, lane.health_timeout_s + _SCRIPT_GRACE_S)
-        label = lane.unit or lane.name
-        if rc == 0 and wait_ready(lane.upstream, lane.served_model, lane.health_timeout_s, deps):
-            result.restored.append(label)
-        else:
-            result.restore_failed.append(label)
-            deps.log(f"  rollback: {lane.name} did not come back; run: {' '.join(lane.start_cmd)}")
+
+    with gpu_operation_lock(purpose="rollback restart", interface="llmctl"):
+        if restart_vllm:
+            argv = ["sudo", "-n", "systemctl", "start", vllm_unit]
+            if deps.run_quiet(argv) == 0:
+                result.restored.append(vllm_unit)
+                deps.log(f"  rollback: started {vllm_unit} again (previous preset)")
+            else:
+                result.restore_failed.append(vllm_unit)
+                deps.log(
+                    f"  rollback: could not start {vllm_unit}; run: sudo systemctl start {vllm_unit}"
+                )
+        for lane in previous_lanes:
+            deps.log(f"  rollback: restarting {lane.name} ({' '.join(lane.start_cmd)})")
+            rc = deps.run_script(lane.start_cmd, lane.health_timeout_s + _SCRIPT_GRACE_S)
+            label = lane.unit or lane.name
+            if rc == 0 and wait_ready(lane.upstream, lane.served_model, lane.health_timeout_s, deps):
+                result.restored.append(label)
+            else:
+                result.restore_failed.append(label)
+                deps.log(f"  rollback: {lane.name} did not come back; run: {' '.join(lane.start_cmd)}")
 
 
 def swap_to_lane(
@@ -158,57 +163,59 @@ def swap_to_lane(
     its script runs with ``--share-gpus`` and stops nothing; vllm-tp is left
     alone and a failure only stops the target.
     """
-    deps = deps or LaneSwapDeps()
-    result = LaneSwapResult(ok=False)
-    started = deps.clock()
-    start_cmd = share_start_cmd(target.start_cmd) if share_gpus else target.start_cmd
-    if share_gpus:
-        vllm_active = False
 
-    for lane in other_active:
-        if lane.unit is None:
-            continue
-        deps.log(f"stopping {lane.unit} ...")
-        if stop_user_unit(lane.unit, deps):
-            result.stopped_units.append(lane.unit)
-        else:
-            result.error = f"could not stop {lane.unit}"
-            break
+    with gpu_operation_lock(purpose=f"swap to lane {target.name}", interface="llmctl"):
+        deps = deps or LaneSwapDeps()
+        result = LaneSwapResult(ok=False)
+        started = deps.clock()
+        start_cmd = share_start_cmd(target.start_cmd) if share_gpus else target.start_cmd
+        if share_gpus:
+            vllm_active = False
 
-    if result.error is None:
-        deps.log(f"starting {target.name}: {' '.join(start_cmd)}")
-        rc = deps.run_script(start_cmd, target.health_timeout_s + _SCRIPT_GRACE_S)
-        if rc != 0:
-            result.error = f"start script exited {rc}"
-        else:
-            deps.log(f"waiting for {target.served_model} on {target.upstream} ...")
-            if wait_ready(target.upstream, target.served_model, target.health_timeout_s, deps):
-                result.ok = True
+        for lane in other_active:
+            if lane.unit is None:
+                continue
+            deps.log(f"stopping {lane.unit} ...")
+            if stop_user_unit(lane.unit, deps):
+                result.stopped_units.append(lane.unit)
             else:
-                result.error = (
-                    f"{target.served_model} not listed on {target.upstream} "
-                    f"after {int(target.health_timeout_s)}s"
-                )
+                result.error = f"could not stop {lane.unit}"
+                break
 
-    result.seconds = deps.clock() - started
-    if result.ok:
-        deps.record(target.name, result.seconds)
-        deps.remember_vram(target.name, target)
+        if result.error is None:
+            deps.log(f"starting {target.name}: {' '.join(start_cmd)}")
+            rc = deps.run_script(start_cmd, target.health_timeout_s + _SCRIPT_GRACE_S)
+            if rc != 0:
+                result.error = f"start script exited {rc}"
+            else:
+                deps.log(f"waiting for {target.served_model} on {target.upstream} ...")
+                if wait_ready(target.upstream, target.served_model, target.health_timeout_s, deps):
+                    result.ok = True
+                else:
+                    result.error = (
+                        f"{target.served_model} not listed on {target.upstream} "
+                        f"after {int(target.health_timeout_s)}s"
+                    )
+
+        result.seconds = deps.clock() - started
+        if result.ok:
+            deps.record(target.name, result.seconds)
+            deps.remember_vram(target.name, target)
+            return result
+
+        deps.log(f"swap failed: {result.error}; restoring the previous state")
+        if target.unit is not None:
+            stop_user_unit(target.unit, deps)
+            deps.log(f"  rollback: stopped {target.unit}")
+        stopped = [lane for lane in other_active if lane.unit in result.stopped_units]
+        restore_previous(
+            stopped,
+            restart_vllm=vllm_active,
+            vllm_unit=vllm_unit,
+            deps=deps,
+            result=result,
+        )
         return result
-
-    deps.log(f"swap failed: {result.error}; restoring the previous state")
-    if target.unit is not None:
-        stop_user_unit(target.unit, deps)
-        deps.log(f"  rollback: stopped {target.unit}")
-    stopped = [lane for lane in other_active if lane.unit in result.stopped_units]
-    restore_previous(
-        stopped,
-        restart_vllm=vllm_active,
-        vllm_unit=vllm_unit,
-        deps=deps,
-        result=result,
-    )
-    return result
 
 
 def _run_captured(argv: Sequence[str], timeout: float) -> int:
@@ -248,22 +255,24 @@ def swap_to_vllm(
     the lanes already stopped are restarted. Returns ``(start_result, lanes)``;
     ``start_result`` is None when vLLM was never started.
     """
-    deps = deps or LaneSwapDeps()
-    lanes = LaneSwapResult(ok=True)
-    stopped: list[Lane] = []
-    for lane in active_lanes:
-        if lane.unit is None:
-            continue
-        if stop_user_unit(lane.unit, deps):
-            stopped.append(lane)
-            lanes.stopped_units.append(lane.unit)
-        else:
+
+    with gpu_operation_lock(purpose="swap to vllm", interface="llmctl"):
+        deps = deps or LaneSwapDeps()
+        lanes = LaneSwapResult(ok=True)
+        stopped: list[Lane] = []
+        for lane in active_lanes:
+            if lane.unit is None:
+                continue
+            if stop_user_unit(lane.unit, deps):
+                stopped.append(lane)
+                lanes.stopped_units.append(lane.unit)
+            else:
+                lanes.ok = False
+                lanes.error = f"could not stop {lane.unit}"
+                restore_previous(stopped, restart_vllm=False, vllm_unit="", deps=deps, result=lanes)
+                return None, lanes
+        result = start()
+        if not getattr(result, "ok", False) and stopped:
             lanes.ok = False
-            lanes.error = f"could not stop {lane.unit}"
             restore_previous(stopped, restart_vllm=False, vllm_unit="", deps=deps, result=lanes)
-            return None, lanes
-    result = start()
-    if not getattr(result, "ok", False) and stopped:
-        lanes.ok = False
-        restore_previous(stopped, restart_vllm=False, vllm_unit="", deps=deps, result=lanes)
-    return result, lanes
+        return result, lanes
