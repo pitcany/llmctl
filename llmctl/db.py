@@ -257,6 +257,35 @@ class BenchmarkRecord(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
+class OperationRecord(SQLModel, table=True):
+    """A managed GPU lifecycle operation (swap/stop/start), persisted for
+    coordination and recovery across processes and restarts (FIXPLAN §2B).
+
+    Intent is written before side effects; phases and the final outcome are
+    updated as the executor progresses. See ``services/operations.py``.
+    """
+
+    __tablename__ = "operations"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    kind: str = Field(index=True)
+    target: str
+    phase: str = Field(index=True)
+    #: Optional caller-supplied idempotency key; repeating it with the same
+    #: request returns the same operation, a different request is refused.
+    idempotency_key: str | None = Field(default=None, index=True)
+    request_fingerprint: str
+    request: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    previous_state: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    owner: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    recovery: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    output: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    error: str | None = None
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow)
+    finished_at: datetime | None = None
+
+
 class EventRecord(SQLModel, table=True):
     """Audit/event/log record."""
 

@@ -97,6 +97,9 @@ def stop_user_unit(unit: str, deps: LaneSwapDeps) -> bool:
 
 def wait_ready(upstream: str, model: str, timeout_s: float, deps: LaneSwapDeps) -> bool:
     """Poll ``upstream/v1/models`` until ``model`` is listed or time runs out."""
+    from llmctl.services.operations import OperationPhase, mark_phase
+
+    mark_phase(OperationPhase.CHECKING_READINESS)
     deadline = deps.clock() + timeout_s
     last_note = deps.clock()
     while True:

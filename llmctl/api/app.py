@@ -99,7 +99,9 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
 
     app.dependency_overrides[get_db_session] = session_dependency
 
-    swap_jobs = SwapJobs()
+    # §2B: the job registry persists operations to the same database so a
+    # restart can reconcile unfinished swaps instead of forgetting them.
+    swap_jobs = SwapJobs(database_url=effective_database_url)
     app.dependency_overrides[get_settings] = lambda: effective_settings
     app.dependency_overrides[get_swap_jobs] = lambda: swap_jobs
 

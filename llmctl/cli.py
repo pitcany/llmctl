@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Annotated, Any
@@ -2128,6 +2129,19 @@ def vllm_cmd(
             except LockBusy as exc:
                 console.print(f"[red]Cannot swap:[/red] {escape(str(exc))}")
                 raise typer.Exit(1) from exc
+            # §2B: persist the operation (adopting the record an API parent
+            # handed over) so a crash or restart leaves a recoverable trail.
+            from llmctl.services import operations as _operations
+            from llmctl.services.operations import cli_operation_guard
+
+            _stack.enter_context(
+                cli_operation_guard(
+                    db_url=os.environ.get(_operations.OP_DB_ENV) or settings.database_url,
+                    kind="swap",
+                    target=target.key,
+                    model=target.model,
+                )
+            )
         if not dry_run:
             _confirm_state_change(
                 f"Swap to {target.model} ({target.engine})",
@@ -2181,6 +2195,9 @@ def vllm_cmd(
             cli_swap.stop_lanes_for_vllm(state, console, target) if listed and not dry_run else []
         )
         started_at = time.monotonic()
+        from llmctl.services.operations import OperationPhase, mark_phase
+
+        mark_phase(OperationPhase.LOADING)
         options = _build_options(tq if tq else None, no_tq, dry_run, no_wait, force)
         options.preset_overrides = overrides.fields()
         options.gpus = vllm_slots.cuda_devices(target)

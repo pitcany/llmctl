@@ -212,6 +212,9 @@ def stop_lanes_for_vllm(
     Raises ``typer.Exit(1)`` if something will not stop, having restarted
     what already did.
     """
+    from llmctl.services.operations import OperationPhase, mark_phase
+
+    mark_phase(OperationPhase.STOPPING)
     vllm_row = target or SwapTarget(key="", kind="vllm", model="", engine="vLLM", upstream="")
     paused = Paused()
     if state.sessions_in_the_way(vllm_row):
@@ -237,6 +240,13 @@ def stop_lanes_for_vllm(
 
 def restore_lanes(paused: Paused | list[Lane], console: Console) -> None:
     """Restart what a failed vLLM swap had stopped: lanes, then llama.cpp processes."""
+    from llmctl.services.operations import (
+        OperationPhase,
+        mark_phase,
+        note_restore_failure,
+    )
+
+    mark_phase(OperationPhase.RESTORING)
     if isinstance(paused, list):
         paused = Paused(lanes=paused)
     result = LaneSwapResult(ok=False)
@@ -255,6 +265,9 @@ def restore_lanes(paused: Paused | list[Lane], console: Console) -> None:
             f"  [green]rollback: started again:[/green] {escape(', '.join(result.restored))}"
         )
     if result.restore_failed:
+        # The operation record must never claim a clean failure when the
+        # world was left different from where it started.
+        note_restore_failure(result.restore_failed)
         console.print(
             f"  [red]rollback: could not start:[/red] {escape(', '.join(result.restore_failed))}"
         )
@@ -267,6 +280,9 @@ def run_lane_swap(
 
     With ``fit`` the lane starts beside what runs (``--share-gpus``).
     """
+    from llmctl.services.operations import OperationPhase, mark_phase
+
+    mark_phase(OperationPhase.STOPPING)
     assert target.lane is not None
     sessions: list[Any] = []
     if state.sessions_in_the_way(target, fit):
@@ -277,6 +293,7 @@ def run_lane_swap(
             console.print(f"[red]Swap failed:[/red] {escape(error)}")
             restore_lanes(Paused(sessions=sessions), console)
             raise typer.Exit(1)
+    mark_phase(OperationPhase.LOADING)
     result = swap_to_lane(
         target.lane,
         other_active=state.lanes_in_the_way(target, fit),
@@ -319,6 +336,9 @@ def run_router_swap(state: SwapState, target: SwapTarget, console: Console, sett
     ended the command). Returns False when llmctl must use its own path: the
     switcher is disabled, down, has no key, or does not know the model.
     """
+    from llmctl.services.operations import OperationPhase, mark_phase
+
+    mark_phase(OperationPhase.STOPPING)
     cfg = settings.lane_switcher
     if not cfg.enabled:
         return False
@@ -390,7 +410,11 @@ def run_session_swap(
     parameters: dict | None = None,
 ) -> None:
     """Free the GPUs and start a llama.cpp model; exit 1 after rolling back."""
+    from llmctl.services.operations import OperationPhase, mark_phase
+
+    mark_phase(OperationPhase.STOPPING)
     deps = LaneSwapDeps(log=lambda m: console.print(escape(m)))
+    mark_phase(OperationPhase.LOADING)
     result = run_session_swap_service(
         state, target, settings=load_settings(), deps=deps, parameters=parameters
     )
