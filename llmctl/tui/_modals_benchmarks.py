@@ -50,6 +50,37 @@ _KIND_OPTIONS: list[tuple[str, str]] = [
 ]
 
 
+class BenchmarkInspectModal(ModalScreen[None]):
+    """Read-only inspection of one benchmark record (FIXPLAN §3D).
+
+    Shows what the number was made of: sample counts and distributions,
+    token provenance, errors, drift vs. the source run, and (when a
+    baseline is set) the comparison verdict. Enter inspects; re-running is
+    a separate, clearly labeled action on the table.
+    """
+
+    BINDINGS = [("escape", "close", "Close"), ("enter", "close", "Close")]
+
+    def __init__(self, title: str, lines: list[str]) -> None:
+        super().__init__()
+        self._title = title
+        self._lines = lines
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import ScrollableContainer
+
+        with ScrollableContainer(id="bench-inspect-scroll", classes="panel"):
+            yield Static(f"[b]{self._title}[/b]", id="bench-inspect-title")
+            yield Static("\n".join(self._lines), id="bench-inspect-body")
+        yield Static(
+            "[dim]esc = close · re-run is 'r' on the table, not here[/]",
+            id="bench-inspect-hint",
+        )
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class BenchmarkLaunchModal(ModalScreen[BenchmarkLaunch | None]):
     """Pick model + kind + a few knobs and dispatch a benchmark."""
 

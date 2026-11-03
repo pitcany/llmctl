@@ -171,8 +171,10 @@ class OperationStore:
     """Create, update, reconcile, and read operation records."""
 
     def __init__(self, database_url: str) -> None:
-        self.database_url = database_url
+        # init_db is process-wide idempotent and thread-guarded (see
+        # llmctl.db), so concurrent store construction cannot race DDL.
         init_db(database_url)
+        self.database_url = database_url
 
     def _session(self) -> Session:
         return Session(get_engine(self.database_url))

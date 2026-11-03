@@ -10,6 +10,7 @@ from collections.abc import Generator
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+import threading
 from typing import Any
 from uuid import uuid4
 
@@ -356,11 +357,29 @@ def apply_migrations(engine) -> None:
                 )
 
 
+#: Table creation is not atomic across threads (create_all inspects then
+#: creates, and SQLite DDL is not concurrent). Every init path — create_app,
+#: the TUI's db_session, OperationStore — funnels through this one guard so
+#: two threads cannot race "CREATE TABLE" against each other.
+_init_lock = threading.Lock()
+_initialised_urls: set[str] = set()
+
+
 def init_db(database_url: str | None = None) -> None:
-    """Create all tables for the configured database and apply migrations."""
-    engine = get_engine(database_url)
-    SQLModel.metadata.create_all(engine)
-    apply_migrations(engine)
+    """Create all tables for the configured database and apply migrations.
+
+    Idempotent per URL within the process: a second call for an already
+    initialised URL returns immediately (nothing drops tables in-process,
+    so this cannot skip needed work).
+    """
+    url = database_url or load_settings().database_url
+    with _init_lock:
+        if url in _initialised_urls:
+            return
+        engine = get_engine(url)
+        SQLModel.metadata.create_all(engine)
+        apply_migrations(engine)
+        _initialised_urls.add(url)
 
 
 def get_session(database_url: str | None = None) -> Generator[Session, None, None]:

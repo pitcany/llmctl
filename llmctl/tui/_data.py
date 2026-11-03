@@ -778,6 +778,126 @@ def run_benchmark(
         )
 
 
+def get_current_operation() -> dict[str, Any] | None:
+    """The current GPU operation for TUI surfaces (§2D/§3C).
+
+    Reads the same persistent records the API and CLI write, so the TUI
+    shows an operation started anywhere -- including one adopted by a CLI
+    child that outlived the API. Returns the unfinished operation if any,
+    else the most recent terminal one (so a failed restoration stays
+    visible), else ``None``.
+    """
+    from llmctl.services.operations import OperationStore
+    from llmctl.services.operations import utcnow as _op_now
+
+    settings = load_settings()
+    store = OperationStore(settings.database_url)
+    unfinished = store.unfinished()
+    if unfinished:
+        record = sorted(unfinished, key=lambda r: r.created_at)[-1]
+        elapsed = (_op_now() - record.created_at).total_seconds()
+        return {
+            "id": record.id,
+            "kind": record.kind,
+            "target": record.target,
+            "phase": record.phase,
+            "elapsed_s": round(elapsed, 1),
+            "interface": (record.owner or {}).get("interface"),
+            "pid": (record.owner or {}).get("pid"),
+            "terminal": False,
+            "recovery": record.recovery or {},
+            "output_tail": list(record.output or [])[-5:],
+            "store_url": store.database_url,
+        }
+    # Most recent terminal record (recovery history after restarts).
+    from sqlmodel import select as _select
+
+    from llmctl.db import OperationRecord
+
+    with db_session() as db:
+        latest = db.exec(
+            _select(OperationRecord).order_by(OperationRecord.created_at.desc()).limit(1)
+        ).first()
+    if latest is None:
+        return None
+    return {
+        "id": latest.id,
+        "kind": latest.kind,
+        "target": latest.target,
+        "phase": latest.phase,
+        "elapsed_s": None,
+        "interface": (latest.owner or {}).get("interface"),
+        "pid": (latest.owner or {}).get("pid"),
+        "terminal": True,
+        "recovery": latest.recovery or {},
+        "output_tail": list(latest.output or [])[-5:],
+        "store_url": settings.database_url,
+    }
+
+
+def get_landing() -> dict[str, Any]:
+    """The research-workflow landing snapshot (FIXPLAN §3A).
+
+    Answers, in one view: what is serving (identity, endpoint, readiness,
+    observation time), what operation is running (phase, elapsed, recovery),
+    and the recent experiments. Inventory totals ride along as secondary
+    detail.
+    """
+    from llmctl.services import lanes, swap_view
+    from llmctl.services.operations import utcnow as _op_now
+
+    settings = load_settings()
+    state = lanes.gather_state(settings)
+    serving_rows: list[dict[str, Any]] = []
+    for row in state.catalog:
+        lane_state = state.state_of(row)
+        if lane_state not in ("serving", "loading"):
+            continue
+        serving_rows.append(
+            {
+                "key": row.key,
+                "model": row.model,
+                "engine": row.engine,
+                "state": lane_state,
+                "endpoint": swap_view.endpoint_for(state, row),
+                "last_load_s": lanes.last_load_s(row.key),
+            }
+        )
+    recent = [
+        {
+            "name": r.name,
+            "kind": r.kind.value if r.kind else "-",
+            "mode": str(r.parameters.get("mode", "?")),
+            "tokens_per_second": r.tokens_per_second,
+            "token_count_source": str(r.parameters.get("token_count_source", "")),
+            "success": r.success,
+            "created_at": r.created_at.isoformat(timespec="seconds")
+            if r.created_at
+            else None,
+            "model_id": r.model_id,
+        }
+        for r in list(reversed(get_benchmarks()))[:3]
+    ]
+    overview = get_overview()
+    return {
+        "fetched_at": _op_now().isoformat(timespec="seconds"),
+        "serving": serving_rows,
+        "operation": get_current_operation(),
+        "recent_experiments": recent,
+        "inventory": {
+            "models": overview["models"],
+            "sessions_running": overview["sessions_running"],
+            "profiles": overview["profiles"],
+            "gpus": overview["gpu_count"],
+        },
+        "safe_mode": overview["safe_mode"],
+        "runtimes": overview.get("runtimes", {}),
+        "scheduler_warnings": overview.get("scheduler_warnings", []),
+        "router": overview.get("router"),
+        "nvml_available": overview["nvml_available"],
+    }
+
+
 def get_overview() -> dict[str, Any]:
     """Return aggregate counts and health for the dashboard."""
     settings = load_settings()

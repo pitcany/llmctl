@@ -1,4 +1,11 @@
-"""Models registry TUI screen with live data and start/scan actions."""
+"""Models registry TUI screen with live data and start/scan actions.
+
+FIXPLAN §3B: text search + engine filter narrow the list; a detail panel
+under the table shows the selected model's fit information, launch
+settings and latest benchmark evidence — with unknowns labeled as
+unknown. Selection is anchored to the model id, so refreshes and filters
+never retarget an action to a different model.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +14,8 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.containers import Horizontal
+from textual.widgets import DataTable, Footer, Header, Input, Select, Static
 
 from llmctl.db import ModelStatus
 from llmctl.schemas import ModelCreate, ModelUpdate
@@ -26,6 +34,20 @@ from llmctl.tui._modals_registry import (
 )
 
 
+def _gb(value: Any) -> str:
+    return f"{value:.1f} GB" if isinstance(value, (int, float)) else "unknown"
+
+
+def _ctx(value: Any) -> str:
+    return f"{value:,}" if isinstance(value, int) else "unknown"
+
+
+def _params(value: Any) -> str:
+    if not isinstance(value, int):
+        return "unknown"
+    return f"{value / 1e9:.1f}B" if value >= 1e9 else str(value)
+
+
 class ModelsScreen(DataScreen):
     """Model registry screen: lists models and plans sessions."""
 
@@ -37,6 +59,7 @@ class ModelsScreen(DataScreen):
         Binding("delete", "delete_model", "Remove", show=True, key_display="del"),
         Binding("x", "prune_missing", "Prune missing", show=True),
         Binding("c", "clone_model", "Clone", show=True),
+        Binding("/", "focus_search", "Filter", show=True),
     ]
 
     def __init__(self) -> None:
@@ -45,20 +68,48 @@ class ModelsScreen(DataScreen):
         #: model id -> (runtime_value, backend_available)
         self._meta: dict[str, tuple[str, bool]] = {}
         self._missing_count: int = 0
+        #: §3B: text + engine filters and the id-anchored selection.
+        self._filter_text: str = ""
+        self._filter_engine: str = "all"
+        self._anchor_id: str | None = None
+        self._last_data: Any = None
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Open the launch-plan preview when a row is activated (enter/click)."""
         self.action_start_model()
 
+    def on_mount(self) -> None:
+        """Focus the table, not the filter input, so keys keep navigating."""
+        super().on_mount()
+        try:
+            self.query_one("#models-table", DataTable).focus()
+        except Exception:  # noqa: BLE001 — best-effort focus
+            pass
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Track the highlighted model by id and refresh the detail panel."""
+        row = event.cursor_row
+        if 0 <= row < len(self._ids):
+            self._anchor_id = self._ids[row]
+            self._update_detail()
+
     def compose(self) -> ComposeResult:
         """Compose the models table with screen-scoped Header/Footer."""
         yield Header()
         yield Static(
-            f"Models Registry  -  [{C_MUTED}]a = add (any engine), del = remove, "
-            "enter = serve (any engine), ctrl+s = scan[/]",
+            f"Models Registry  -  [{C_MUTED}]/ = filter, a = add (any engine), "
+            "del = remove, enter = serve (any engine), ctrl+s = scan[/]",
             classes="panel safe",
             id="models-title",
         )
+        with Horizontal(id="models-filters"):
+            yield Input(placeholder="filter by name / source / path…", id="models-search")
+            yield Select(
+                [("all engines", "all")],
+                value="all",
+                id="models-engine",
+                allow_blank=False,
+            )
         table: DataTable[str] = DataTable(id="models-table", cursor_type="row")
         table.add_columns(
             "ID",
@@ -71,7 +122,53 @@ class ModelsScreen(DataScreen):
             "Presets",
         )
         yield table
+        yield Static(
+            f"[{C_MUTED}]select a model to see fit, launch and benchmark detail[/]",
+            classes="panel",
+            id="models-detail",
+        )
         yield Footer()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Re-filter the cached list as the operator types."""
+        if event.input.id == "models-search":
+            self._filter_text = (event.value or "").strip().lower()
+            if self._last_data is not None:
+                self.render_data(self._last_data)
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "models-engine":
+            self._filter_engine = str(event.value or "all")
+            if self._last_data is not None:
+                self.render_data(self._last_data)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Return focus to the table once the filter is set."""
+        if event.input.id == "models-search":
+            try:
+                self.query_one("#models-table", DataTable).focus()
+            except Exception:  # noqa: BLE001 — best-effort focus
+                pass
+
+    def action_focus_search(self) -> None:
+        """Focus the filter input."""
+        self.query_one("#models-search", Input).focus()
+
+    def _matches(self, model: Any) -> bool:
+        """Text + engine filter predicate."""
+        if self._filter_engine != "all":
+            runtime = model.runtime.value if model.runtime else ""
+            if runtime != self._filter_engine:
+                return False
+        if self._filter_text:
+            haystack = " ".join(
+                part
+                for part in (model.name, model.source, model.path, model.quantization)
+                if part
+            ).lower()
+            if self._filter_text not in haystack:
+                return False
+        return True
 
     def fetch(self) -> Any:
         """Return the current model list, backend availability, preset counts."""
@@ -87,11 +184,12 @@ class ModelsScreen(DataScreen):
         }
 
     def render_data(self, data: Any) -> None:
-        """Render the models table, dimming models with a missing backend."""
-        models = data["models"]
+        """Render the filtered table, anchored to the selected model id."""
+        self._last_data = data
+        models = [m for m in data["models"] if self._matches(m)]
         missing_ids: set[str] = data.get(
             "missing_ids",
-            {m.id for m in models if m.id and m.status == ModelStatus.MISSING},
+            {m.id for m in data["models"] if m.id and m.status == ModelStatus.MISSING},
         )
         self._missing_count = data.get("missing_count", len(missing_ids))
         availability = data["availability"]
@@ -101,8 +199,12 @@ class ModelsScreen(DataScreen):
         table.clear()
         self._ids = []
         self._meta = {}
+        self._sync_engine_options(data["models"])
+        anchored_row: int | None = None
         for model in models:
             mid = model.id or ""
+            if mid == self._anchor_id:
+                anchored_row = len(self._ids)
             runtime = model.runtime.value
             available = availability.get(runtime, True)
             missing = mid in missing_ids
@@ -132,10 +234,76 @@ class ModelsScreen(DataScreen):
             )
         if not models:
             table.add_row(
-                "-", "No models yet: a to add one, ctrl+s to scan", "-", "-", "-", "-", "-", "-"
+                "-",
+                "No models match — clear the filter, a to add one, ctrl+s to scan",
+                "-", "-", "-", "-", "-", "-",
             )
-        if 0 <= cursor < len(self._ids):
+        if anchored_row is not None and 0 <= anchored_row < len(self._ids):
+            table.move_cursor(row=anchored_row)
+        elif self._ids and 0 <= cursor < len(self._ids):
             table.move_cursor(row=cursor)
+        elif self._ids:
+            table.move_cursor(row=0)
+        self._update_detail()
+
+    def _sync_engine_options(self, models: Any) -> None:
+        """Keep the engine filter's options in sync with the registry."""
+        runtimes = sorted({m.runtime.value for m in models if m.runtime})
+        options = [("all engines", "all")] + [(rt, rt) for rt in runtimes]
+        select = self.query_one("#models-engine", Select)
+        try:
+            current = [(o.label, o.value) for o in select.options]
+        except Exception:  # noqa: BLE001 — option shape varies by version
+            current = None
+        if current != options:
+            select.set_options(options)
+            if self._filter_engine not in {value for _, value in options}:
+                self._filter_engine = "all"
+                select.value = "all"
+
+    def _update_detail(self) -> None:
+        """Render the anchored model's detail panel (§3B)."""
+        panel = self.query_one("#models-detail", Static)
+        models = (self._last_data or {}).get("models", [])
+        model = next((m for m in models if m.id == self._anchor_id), None)
+        if model is None:
+            panel.update(
+                f"[{C_MUTED}]select a model to see fit, launch and benchmark detail[/]"
+            )
+            return
+        runtime, available = self._meta.get(model.id or "", ("", True))
+        lines = [f"[b]{esc(model.name)}[/]  [{C_MUTED}]({esc(runtime)})[/]"]
+        lines.append(
+            f"  fit: vram ~{_gb(model.estimated_vram_gb)} · "
+            f"context {_ctx(model.max_context)} · params {_params(model.parameter_count)}"
+        )
+        lines.append(f"  source: {esc(model.source or 'unknown')}")
+        lines.append(f"  path: {esc(model.path or 'unknown')}")
+        state = "ready" if available else "no backend binary"
+        lines.append(f"  backend: {esc(state)} · status: {esc(model.status.value)}")
+        lines.append(f"  last benchmark: {self._latest_benchmark(model.id or '')}")
+        panel.update("\n".join(lines))
+
+    def _latest_benchmark(self, model_id: str) -> str:
+        """Latest benchmark evidence for the model, labeled honestly."""
+        results = self.query_data(
+            lambda: _data.get_benchmarks(model_id=model_id), what="Benchmark lookup"
+        )
+        if not results:
+            return "none yet"
+        latest = results[-1]
+        mode = str(latest.parameters.get("mode", "?"))
+        source = str(latest.parameters.get("token_count_source", ""))
+        est = "~" if source in {"estimate", "mixed", "synthetic"} else ""
+        tps = (
+            f"{latest.tokens_per_second:.1f}{est} tok/s"
+            if latest.tokens_per_second is not None
+            else "—"
+        )
+        ok = "ok" if latest.success else "failed"
+        when = latest.created_at.strftime("%Y-%m-%d %H:%M") if latest.created_at else "?"
+        kind = latest.kind.value if latest.kind else "?"
+        return f"{esc(latest.name)} ({esc(kind)}, {mode}, {tps}, {ok}, {when})"
 
     def _selected_id(self) -> str | None:
         """Return the model id under the cursor, if any."""

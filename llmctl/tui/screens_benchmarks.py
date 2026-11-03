@@ -11,16 +11,26 @@ from textual.widgets import DataTable, Footer, Header, Static
 from llmctl.services.benchmark_compare import comparison_verdict
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
-from llmctl.tui._modals_benchmarks import BenchmarkLaunch, BenchmarkLaunchModal
+from llmctl.tui._modals_benchmarks import (
+    BenchmarkInspectModal,
+    BenchmarkLaunch,
+    BenchmarkLaunchModal,
+)
 from llmctl.tui._modals_registry import ConfirmDelete, DeleteModal
 
 
 class BenchmarksScreen(DataScreen):
-    """Benchmark history: lists results, compares to a baseline, and re-runs."""
+    """Benchmark history: lists results, compares to a baseline, and re-runs.
+
+    §3D: Enter *inspects* the highlighted record (samples, provenance,
+    errors, drift, comparison). Re-running is the separate, labeled ``r``
+    action — inspecting must never launch another workload by accident.
+    """
 
     BINDINGS = [
         Binding("n", "new_benchmark", "New run", show=True),
-        Binding("enter", "rerun", "Re-run", show=True, priority=True),
+        Binding("enter", "inspect", "Inspect", show=True, priority=True),
+        Binding("r", "rerun", "Re-run", show=True),
         Binding("c", "set_baseline", "Baseline", show=True),
         Binding("x", "clear_baseline", "Clear baseline", show=True),
         Binding("delete", "delete_benchmark", "Delete", show=True, key_display="del"),
@@ -34,6 +44,9 @@ class BenchmarksScreen(DataScreen):
         """
         super().__init__()
         self._ids: list[str] = []
+        #: The most recent fetch payload, so inspect can resolve a row id
+        #: without a second database read.
+        self._last_data: Any = []
         #: benchmark id -> display name, so confirm dialogs can
         #: name a row the operator can actually see (the table
         #: has no ID column).
@@ -46,14 +59,14 @@ class BenchmarksScreen(DataScreen):
         self._model_filter = model_filter
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Re-run the selected benchmark when a row is activated."""
-        self.action_rerun()
+        """Inspect the selected benchmark when a row is activated (§3D)."""
+        self.action_inspect()
 
     def compose(self) -> ComposeResult:
         """Compose the benchmarks history table with screen-scoped chrome."""
         yield Header()
         chrome = (
-            f"Benchmarks  -  [{C_MUTED}]n = new run, enter = re-run, "
+            f"Benchmarks  -  [{C_MUTED}]n = new run, enter = inspect, r = re-run, "
             f"c = baseline, x = clear baseline, del = delete[/]"
         )
         if self._model_filter:
@@ -94,6 +107,7 @@ class BenchmarksScreen(DataScreen):
 
     def render_data(self, data: Any) -> None:
         """Render the benchmark history with optional baseline deltas."""
+        self._last_data = data
         table = self.query_one("#benchmarks-table", DataTable)
         cursor = table.cursor_row
         table.clear()
@@ -279,6 +293,123 @@ class BenchmarksScreen(DataScreen):
         self._baseline_id = None
         self.app.notify("Baseline cleared.", title="Compare")
         self.refresh_data()
+
+    def action_inspect(self) -> None:
+        """Open the read-only inspection view for the cursor-row record."""
+        benchmark_id = self._selected_id()
+        if not benchmark_id:
+            self.app.notify(
+                "No benchmark selected.", severity="warning"
+            )
+            return
+        data = self._last_data or []
+        result = next((r for r in data if r.id == benchmark_id), None)
+        if result is None:
+            self.app.notify("Benchmark not found.", severity="warning")
+            return
+        baseline = next(
+            (r for r in data if r.id == self._baseline_id), None
+        ) if self._baseline_id else None
+        self.app.push_screen(
+            BenchmarkInspectModal(
+                f"Benchmark: {result.name}", self._inspect_lines(result, baseline)
+            )
+        )
+
+    @staticmethod
+    def _inspect_lines(result: Any, baseline: Any | None) -> list[str]:
+        """Build the §3D inspection view: what the number was made of."""
+        params = result.parameters or {}
+        mode = str(params.get("mode", "?"))
+        lines = [
+            f"kind: {result.kind.value if result.kind else '-'}   mode: {mode}"
+            f"   engine/backend: {esc(result.backend or '-')}",
+            f"success: {'yes' if result.success else 'no'}"
+            + (f"   error: {esc(str(result.error))}" if result.error else ""),
+        ]
+        request_count = params.get("request_count")
+        if request_count is not None:
+            failed = int(params.get("failed_request_count", 0) or 0)
+            sample_note = (
+                f"{request_count} request(s)"
+                + (f", {failed} failed" if failed else "")
+            )
+        else:
+            sample_note = f"{len(result.samples or [])} sample(s)"
+        lines.append(f"samples: {sample_note}   concurrency: "
+                     f"{params.get('concurrency', 1)}"
+                     + (
+                         f" (achieved {params.get('achieved_concurrency')})"
+                         if params.get("achieved_concurrency") is not None
+                         else ""
+                     ))
+        source = str(params.get("token_count_source", ""))
+        if source:
+            label = {
+                "server_usage": "server usage (precise)",
+                "estimate": "estimated (no server usage)",
+                "mixed": "mixed (precise + estimated)",
+                "synthetic": "synthetic (mock run)",
+            }.get(source, source)
+            lines.append(f"token counts: {label}")
+        est = "~" if source in {"estimate", "mixed"} else ""
+        lines.append(
+            f"throughput: "
+            + (
+                f"{result.tokens_per_second:.1f}{est} tok/s"
+                if result.tokens_per_second is not None
+                else "n/a"
+            )
+            + f"   latency: "
+            + (
+                f"{result.latency_ms:.1f} ms"
+                if result.latency_ms is not None
+                else "n/a"
+            )
+        )
+        percentiles = params.get("percentiles") or {}
+        for metric in ("latency_ms", "ttft_ms"):
+            stats = percentiles.get(metric) if isinstance(percentiles, dict) else None
+            if not stats:
+                continue
+            note = " (few samples)" if stats.get("insufficient_samples") else ""
+            lines.append(
+                f"{metric} p50/p90/p99: {stats.get('p50')} / {stats.get('p90')} / "
+                f"{stats.get('p99')} ms  (n={stats.get('n')}){note}"
+            )
+        warnings = params.get("warnings") or []
+        for warning in warnings:
+            lines.append(f"[{C_WARN}]warning: {esc(str(warning))}[/]")
+        manifest = getattr(result, "manifest", None) or {}
+        if manifest:
+            workload = manifest.get("workload") or {}
+            served = manifest.get("served") or {}
+            gpus = (manifest.get("serving_host") or {}).get("gpu_identity")
+            lines.append(
+                f"manifest: {manifest.get('execution', '?')} · workload "
+                f"{str(workload.get('hash', ''))[:12]} · endpoint "
+                f"{esc(str(served.get('endpoint_url', '-')))} · "
+                f"hardware {esc(', '.join(gpus) if gpus else 'unknown')}"
+            )
+        else:
+            lines.append(
+                f"[{C_MUTED}]manifest: unknown (record predates manifests)[/]"
+            )
+        rerun_of = params.get("rerun_of")
+        if rerun_of:
+            lines.append(f"re-run of: {rerun_of}")
+        for entry in params.get("drift", []) or []:
+            lines.append(f"[{C_WARN}]drift: {esc(str(entry))}[/]")
+        if baseline is not None and baseline.id != result.id:
+            verdict = comparison_verdict(result, baseline)
+            if verdict.eligible:
+                lines.append(f"[{C_OK}]vs baseline: comparable[/]")
+            else:
+                lines.append(
+                    f"[{C_WARN}]vs baseline: not comparable — "
+                    f"{esc(verdict.summary)}[/]"
+                )
+        return lines
 
     def action_rerun(self) -> None:
         """Re-run the selected benchmark off-thread, then refresh."""

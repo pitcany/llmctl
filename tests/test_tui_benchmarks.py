@@ -230,6 +230,134 @@ def test_incomparable_rows_render_nc_not_green(temp_db) -> None:
     assert "not comparable" in compare_line.lower(), compare_line
 
 
+def test_enter_inspects_without_rerunning(temp_db) -> None:
+    """§3D: Enter opens the inspection view; it must not launch a workload.
+    Re-run is the separate, labeled 'r' action."""
+    rerun_calls: list[str] = []
+
+    async def _run() -> bool:
+        with patch(
+            "llmctl.tui._data.get_benchmarks", return_value=[_fake_result()]
+        ), patch(
+            "llmctl.tui._data.rerun_benchmark",
+            side_effect=lambda bench_id: rerun_calls.append(bench_id),
+        ):
+            app = MissionControlApp()
+            async with app.run_test() as pilot:
+                await pilot.press("b")
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, BenchmarksScreen):
+                        break
+                screen = app.screen
+                assert isinstance(screen, BenchmarksScreen)
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if screen.query_one("#benchmarks-table", DataTable).row_count:
+                        break
+                await pilot.press("enter")
+                for _ in range(20):
+                    await pilot.pause(0.05)
+                    from llmctl.tui._modals_benchmarks import BenchmarkInspectModal
+
+                    if isinstance(app.screen, BenchmarkInspectModal):
+                        break
+                opened = isinstance(app.screen, BenchmarkInspectModal)
+                if opened:
+                    await pilot.press("escape")
+                    for _ in range(20):
+                        await pilot.pause(0.05)
+                        if isinstance(app.screen, BenchmarksScreen):
+                            break
+                return opened
+
+    assert asyncio.run(_run()) is True
+    assert rerun_calls == []  # Enter never re-ran anything
+
+
+def test_inspect_lines_show_provenance_samples_and_drift() -> None:
+    """§3D: the inspection text carries counts, provenance, drift and the
+    comparison verdict."""
+    result = _fake_result(name="deep")
+    result.parameters = {
+        "mode": "live",
+        "request_count": 6,
+        "failed_request_count": 1,
+        "concurrency": 4,
+        "achieved_concurrency": 4,
+        "token_count_source": "estimate",
+        "percentiles": {
+            "latency_ms": {"n": 5, "p50": 100.0, "p90": 200.0, "p99": 300.0},
+            "ttft_ms": {
+                "n": 2,
+                "p50": 10.0,
+                "p90": 20.0,
+                "p99": 25.0,
+                "insufficient_samples": True,
+            },
+        },
+        "warnings": ["underfilled workload: 4 request(s) cannot reach 8"],
+        "rerun_of": "source-run",
+        "drift": ["served.endpoint_url: http://a -> http://b"],
+    }
+    result.manifest = {
+        "execution": "live",
+        "workload": {"hash": "abcdef1234567890"},
+        "served": {"endpoint_url": "http://b"},
+        "serving_host": {"gpu_identity": ["RTX 5090"]},
+    }
+    baseline = _fake_result(name="base")
+    baseline.id = "base-id"
+    baseline.parameters = {"mode": "mock"}
+
+    lines = BenchmarksScreen._inspect_lines(result, baseline)
+    text = "\n".join(lines)
+    assert "6 request(s), 1 failed" in text
+    assert "estimated (no server usage)" in text
+    assert "~" in text  # estimated throughput marker
+    assert "n=5" in text and "few samples" in text  # ttft n=2 flagged
+    assert "underfilled" in text
+    assert "abcdef123456" in text
+    assert "RTX 5090" in text
+    assert "source-run" in text
+    assert "drift" in text
+    assert "not comparable" in text
+
+
+def test_r_key_reruns_selected(temp_db) -> None:
+    rerun_calls: list[str] = []
+
+    async def _run() -> list[str]:
+        with patch(
+            "llmctl.tui._data.get_benchmarks", return_value=[_fake_result()]
+        ), patch(
+            "llmctl.tui._data.rerun_benchmark",
+            side_effect=lambda bench_id: rerun_calls.append(bench_id)
+            or _fake_result(name="again"),
+        ):
+            app = MissionControlApp()
+            async with app.run_test() as pilot:
+                await pilot.press("b")
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, BenchmarksScreen):
+                        break
+                screen = app.screen
+                assert isinstance(screen, BenchmarksScreen)
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if screen.query_one("#benchmarks-table", DataTable).row_count:
+                        break
+                await pilot.press("r")
+                for _ in range(100):
+                    await pilot.pause(0.05)
+                    if rerun_calls:
+                        break
+        return rerun_calls
+
+    assert asyncio.run(_run()) == ["bench-1"]
+
+
 def test_delete_action_invokes_data_layer(temp_db) -> None:
     """Confirming the delete modal calls _data.delete_benchmark for the cursor row."""
 
