@@ -31,12 +31,12 @@ import llmctl.services.swap_jobs as swap_jobs  # self-reference so patches apply
 from llmctl.services.operations import (
     OP_DB_ENV,
     OP_ID_ENV,
+    TERMINAL_PHASES,
     IdempotencyConflict,  # noqa: F401 - re-exported for route handlers
     OperationPhase,
     OperationRecord,
     OperationStore,
     ReconciledOperation,
-    TERMINAL_PHASES,
 )
 
 MAX_OUTPUT_LINES = 5000

@@ -64,7 +64,9 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
     from llmctl.services import operations
     from llmctl.services.operations import OperationPhase
 
-    store = operations.OperationStore(load_settings().database_url)
+    settings = load_settings()
+    db_url = getattr(settings, "database_url", None) or "sqlite:///:memory:"
+    store = operations.OperationStore(db_url)
     record, _ = store.begin(
         kind="swap",
         target=target.key,

@@ -6,12 +6,12 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
+from textual.widgets import Static
 
 from llmctl._testing import isolate_tui
 from llmctl.tui.app import MissionControlApp
 from llmctl.tui.screens_dashboard import DashboardScreen
 from llmctl.tui.screens_swap import SwapScreen
-from textual.widgets import Static
 
 
 @pytest.fixture(autouse=True)
@@ -263,7 +263,7 @@ def test_swap_screen_shows_operation_and_keeps_anchor() -> None:
                 table = screen.query_one("#swap-table")
                 table.move_cursor(row=1)  # select "beta"
                 await pilot.pause(0.05)
-                anchored = screen._anchor_key
+                assert screen._anchor_key == "beta"
                 # A refresh with the same catalog must not retarget.
                 with patch(
                     "llmctl.tui.screens_swap.gather_state",

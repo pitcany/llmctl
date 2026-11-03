@@ -354,13 +354,13 @@ class BenchmarksScreen(DataScreen):
             lines.append(f"token counts: {label}")
         est = "~" if source in {"estimate", "mixed"} else ""
         lines.append(
-            f"throughput: "
+            "throughput: "
             + (
                 f"{result.tokens_per_second:.1f}{est} tok/s"
                 if result.tokens_per_second is not None
                 else "n/a"
             )
-            + f"   latency: "
+            + "   latency: "
             + (
                 f"{result.latency_ms:.1f} ms"
                 if result.latency_ms is not None

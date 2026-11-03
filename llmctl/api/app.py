@@ -22,7 +22,7 @@ from llmctl.api import (
 )
 from llmctl.api.deps import get_db_session, get_settings, get_swap_jobs
 from llmctl.config import Settings, load_settings, resolve_api_auth_token
-from llmctl.db import get_engine, init_db
+from llmctl.db import ensure_tables, get_engine
 from llmctl.services.health import HealthService
 from llmctl.services.swap_jobs import SwapJobs
 
@@ -42,8 +42,9 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
     effective_settings = settings or load_settings()
     effective_database_url = database_url or effective_settings.database_url
     engine = get_engine(effective_database_url)
-    # Thread-guarded, idempotent table creation (see llmctl.db.init_db).
-    init_db(effective_database_url)
+    # Populate THIS engine (thread-guarded per URL; in-memory engines are
+    # always distinct so they are always populated).
+    ensure_tables(engine, effective_database_url)
     app = FastAPI(
         title="LLM Mission Control",
         version=__version__,

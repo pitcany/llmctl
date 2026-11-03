@@ -6,20 +6,18 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
-from unittest.mock import patch
 
 from llmctl.api.app import create_app
 from llmctl.db import OperationRecord, get_engine
 from llmctl.services.operations import (
     OperationPhase,
     OperationStore,
-    TERMINAL_PHASES,
     cli_operation_guard,
     sanitize_line,
 )
@@ -32,12 +30,15 @@ def store(tmp_path) -> OperationStore:
 
 
 def _state():
-    from types import SimpleNamespace
 
     from llmctl.services.lanes import SwapState, SwapTarget
 
-    catalog = [SwapTarget(key="sess-b", kind="session", model="b", engine="llama.cpp", upstream="")]
-    return SwapState(catalog=catalog, serving=set(), active_units=set(), vllm_unit="v", vllm_active=False)
+    catalog = [
+        SwapTarget(key="sess-b", kind="session", model="b", engine="llama.cpp", upstream="")
+    ]
+    return SwapState(
+        catalog=catalog, serving=set(), active_units=set(), vllm_unit="v", vllm_active=False
+    )
 
 
 # -- record lifecycle --------------------------------------------------------
@@ -133,7 +134,7 @@ def test_cli_guard_failed_exit_records_failed(tmp_path) -> None:
     assert excinfo.value.exit_code == 1
     store = OperationStore(db_url)
     assert store.unfinished() == []
-    from sqlmodel import Session, select
+    from sqlmodel import Session
 
     from llmctl.db import OperationRecord, get_engine
 
@@ -162,10 +163,10 @@ def test_cli_guard_restore_failure_upgrades_to_needs_attention(tmp_path) -> None
             raise typer.Exit(1)
     clear_current()
     store = OperationStore(db_url)
-    from sqlmodel import select
+
+    from sqlmodel import Session
 
     from llmctl.db import OperationRecord, get_engine
-    from sqlmodel import Session
 
     with Session(get_engine(db_url)) as db:
         row = db.exec(select(OperationRecord)).one()
@@ -178,11 +179,9 @@ def test_cli_guard_keyboard_interrupt_is_interrupted(tmp_path) -> None:
     with pytest.raises(KeyboardInterrupt):
         with cli_operation_guard(db_url=db_url, kind="swap", target="k", model="m"):
             raise KeyboardInterrupt()
-    store = OperationStore(db_url)
-    from sqlmodel import select
+    from sqlmodel import Session
 
     from llmctl.db import OperationRecord, get_engine
-    from sqlmodel import Session
 
     with Session(get_engine(db_url)) as db:
         row = db.exec(select(OperationRecord)).one()
@@ -193,7 +192,6 @@ def test_cli_guard_keyboard_interrupt_is_interrupted(tmp_path) -> None:
 def test_cli_guard_adopts_parent_record(tmp_path) -> None:
     """The API parent hands over a record; the CLI adopts it instead of
     creating a second one."""
-    import typer
 
     db_url = f"sqlite:///{tmp_path / 'a.db'}"
     parent = OperationStore(db_url)
@@ -208,10 +206,10 @@ def test_cli_guard_adopts_parent_record(tmp_path) -> None:
     finally:
         os.environ.pop("LLMCTL_OPERATION_ID")
         os.environ.pop("LLMCTL_OPERATION_DB_URL")
-    from sqlmodel import select
+
+    from sqlmodel import Session
 
     from llmctl.db import OperationRecord, get_engine
-    from sqlmodel import Session
 
     with Session(get_engine(db_url)) as db:
         rows = db.exec(select(OperationRecord)).all()
@@ -229,8 +227,9 @@ def test_reconcile_dead_owner_interrupted_with_guidance(store: OperationStore) -
     # Owner "died": point at a pid that does not exist.
     dead = dict(record.owner)
     dead["pid"] = 99999999
-    from llmctl.db import OperationRecord, get_engine
     from sqlmodel import Session
+
+    from llmctl.db import OperationRecord, get_engine
 
     with Session(get_engine(store.database_url)) as db:
         row = db.get(OperationRecord, record.id)

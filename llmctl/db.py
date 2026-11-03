@@ -6,11 +6,11 @@ so tests and future services can create isolated databases easily.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Generator
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-import threading
 from typing import Any
 from uuid import uuid4
 
@@ -365,21 +365,30 @@ _init_lock = threading.Lock()
 _initialised_urls: set[str] = set()
 
 
-def init_db(database_url: str | None = None) -> None:
-    """Create all tables for the configured database and apply migrations.
+def ensure_tables(engine: Any, database_url: str | None = None) -> None:
+    """Create all tables on ``engine`` and apply migrations.
 
-    Idempotent per URL within the process: a second call for an already
-    initialised URL returns immediately (nothing drops tables in-process,
-    so this cannot skip needed work).
+    Idempotent per file-backed URL within the process: a second call
+    returns immediately (nothing drops tables in-process, so this cannot
+    skip needed work). In-memory URLs are always (re)created: every
+    ``get_engine(":memory:")`` is a distinct database, so caching by URL
+    string would leave later engines tableless.
     """
     url = database_url or load_settings().database_url
+    in_memory = url == "sqlite://" or ":memory:" in url
     with _init_lock:
-        if url in _initialised_urls:
+        if not in_memory and url in _initialised_urls:
             return
-        engine = get_engine(url)
         SQLModel.metadata.create_all(engine)
         apply_migrations(engine)
-        _initialised_urls.add(url)
+        if not in_memory:
+            _initialised_urls.add(url)
+
+
+def init_db(database_url: str | None = None) -> None:
+    """Create all tables for the configured database and apply migrations."""
+    url = database_url or load_settings().database_url
+    ensure_tables(get_engine(url), url)
 
 
 def get_session(database_url: str | None = None) -> Generator[Session, None, None]:

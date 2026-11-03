@@ -37,7 +37,6 @@ from llmctl.schemas import (
 )
 from llmctl.services import vllm_slots
 from llmctl.services.benchmarks import BenchmarkService
-from llmctl.services.op_lock import LockBusy, gpu_operation_lock
 from llmctl.services.lanes import (
     SwapTarget,
     close_matches,
@@ -45,6 +44,7 @@ from llmctl.services.lanes import (
     record_load,
     resolve,
 )
+from llmctl.services.op_lock import LockBusy, gpu_operation_lock
 from llmctl.services.preset_loader import load_preset_views
 from llmctl.services.registry import RegistryService
 from llmctl.services.sessions import AdoptError, SessionService
@@ -2238,7 +2238,8 @@ def vllm_cmd(
             console.print("[red]vLLM start did not complete cleanly.[/red]")
             cli_swap.restore_lanes(stopped_lanes, console)
             if result.fleet_failed:
-                console.print(f"  fleet preflight failed on: {escape(', '.join(result.fleet_failed))}")
+                failed = escape(", ".join(result.fleet_failed))
+                console.print(f"  fleet preflight failed on: {failed}")
             if result.restart is not None and result.restart.error:
                 console.print(f"  restart: {escape(result.restart.error)}")
             _print_rollback(result, engine.unit_name)

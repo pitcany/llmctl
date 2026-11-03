@@ -7,13 +7,13 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
+from textual.widgets import DataTable, Static
 
 from llmctl._testing import isolate_tui
 from llmctl.db import BenchmarkKind, RuntimeName
 from llmctl.schemas import BenchmarkResult, Model
 from llmctl.tui.app import MissionControlApp
 from llmctl.tui.screens_models import ModelsScreen
-from textual.widgets import DataTable, Input, Static
 
 
 @pytest.fixture(autouse=True)

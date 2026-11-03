@@ -134,17 +134,22 @@ def restore_previous(
             else:
                 result.restore_failed.append(vllm_unit)
                 deps.log(
-                    f"  rollback: could not start {vllm_unit}; run: sudo systemctl start {vllm_unit}"
+                    f"  rollback: could not start {vllm_unit}; run: "
+                    f"sudo systemctl start {vllm_unit}"
                 )
         for lane in previous_lanes:
             deps.log(f"  rollback: restarting {lane.name} ({' '.join(lane.start_cmd)})")
             rc = deps.run_script(lane.start_cmd, lane.health_timeout_s + _SCRIPT_GRACE_S)
             label = lane.unit or lane.name
-            if rc == 0 and wait_ready(lane.upstream, lane.served_model, lane.health_timeout_s, deps):
+            ready = wait_ready(lane.upstream, lane.served_model, lane.health_timeout_s, deps)
+            if rc == 0 and ready:
                 result.restored.append(label)
             else:
                 result.restore_failed.append(label)
-                deps.log(f"  rollback: {lane.name} did not come back; run: {' '.join(lane.start_cmd)}")
+                deps.log(
+                    f"  rollback: {lane.name} did not come back; "
+                    f"run: {' '.join(lane.start_cmd)}"
+                )
 
 
 def swap_to_lane(

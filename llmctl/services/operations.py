@@ -42,7 +42,7 @@ from typing import Any
 from sqlmodel import Session, select
 from typer import Exit as TyperExit
 
-from llmctl.db import OperationRecord, get_engine, init_db, new_id
+from llmctl.db import OperationRecord, ensure_tables, get_engine, new_id
 
 #: Environment variables used to hand an operation from a parent (the API)
 #: to the CLI child that actually executes it.
@@ -171,13 +171,15 @@ class OperationStore:
     """Create, update, reconcile, and read operation records."""
 
     def __init__(self, database_url: str) -> None:
-        # init_db is process-wide idempotent and thread-guarded (see
-        # llmctl.db), so concurrent store construction cannot race DDL.
-        init_db(database_url)
+        # One engine for the store's lifetime: every get_engine() call can
+        # be a distinct database (in-memory URLs always are), so opening a
+        # fresh engine per _session() would read tableless copies.
         self.database_url = database_url
+        self._engine = get_engine(database_url)
+        ensure_tables(self._engine, database_url)
 
     def _session(self) -> Session:
-        return Session(get_engine(self.database_url))
+        return Session(self._engine)
 
     def begin(
         self,
