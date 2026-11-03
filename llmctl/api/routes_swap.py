@@ -256,6 +256,7 @@ def stop_swap(
         with jobs.stopping():
             outcome = stop_serving.stop_items(
                 items, stop_serving.real_deps(settings), settings=settings,
+                refresh=lambda: stop_serving.serving_now(lanes.gather_state(settings)),
             )
     except JobBusy as busy:
         if record is not None:

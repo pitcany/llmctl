@@ -134,14 +134,27 @@ class StopDeps:
 
 def stop_items(
     items: list[Serving], deps: StopDeps, *, settings: Any = None,
+    refresh: Callable[[], list[Serving]] | None = None,
 ) -> list[tuple[Serving, bool]]:
     """Stop each item; returns ``(item, stopped)`` pairs in order."""
 
     with gpu_operation_lock(
         purpose=f"stop {len(items)} serving item(s)", interface="llmctl", settings=settings,
     ):
+        current = None
+        if refresh is not None:
+            current = refresh()
+        elif settings is not None:
+            from llmctl.services.lanes import gather_state
+
+            current = serving_now(gather_state(settings))
         results = []
         for item in items:
+            if current is not None and item not in current:
+                # A unit may now serve another model. Never stop its replacement
+                # based on the preview that preceded lock acquisition.
+                results.append((item, False))
+                continue
             fn = {"vllm": deps.stop_vllm, "lane": deps.stop_lane, "session": deps.stop_session}[
                 item.kind
             ]
