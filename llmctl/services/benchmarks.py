@@ -40,6 +40,11 @@ from llmctl.db import (
     SessionStatus,
 )
 from llmctl.schemas import BenchmarkResult, BenchmarkRunRequest
+from llmctl.services.benchmark_manifest import (
+    build_manifest,
+    export_payload,
+    manifest_drift,
+)
 from llmctl.telemetry.gpu import get_gpu_info, nvml_available
 from llmctl.telemetry.gpu_sampler import GPUSampler, GPUSamplerSummary
 
@@ -84,6 +89,9 @@ class _Target:
     base_url: str
     model_name: str
     backend: str | None = None
+    #: The session row the endpoint was resolved through, if any (used to
+    #: capture launch configuration for the run manifest).
+    session: SessionRecord | None = None
 
     @property
     def chat_url(self) -> str:
@@ -129,6 +137,7 @@ def record_to_benchmark(record: BenchmarkRecord) -> BenchmarkResult:
         gpu_snapshot=record.gpu_snapshot,
         parameters=record.parameters,
         samples=record.samples,
+        manifest=record.manifest or {},
         success=record.success,
         error=record.error,
         created_at=record.created_at,
@@ -336,6 +345,25 @@ class BenchmarkService:
         self.db.commit()
         return True
 
+    def export(
+        self,
+        *,
+        benchmark_id: str | None = None,
+        model_id: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, object]]:
+        """Return portable export payloads (result + manifest) for records.
+
+        A single ``benchmark_id`` exports that record; otherwise the filtered
+        history (same filters as :meth:`list_results`). Legacy rows without a
+        manifest export with ``manifest.provenance == "unknown"``.
+        """
+        if benchmark_id is not None:
+            result = self.get_result(benchmark_id)
+            return [export_payload(result)] if result is not None else []
+        results = self.list_results(model_id=model_id, limit=limit)
+        return [export_payload(result) for result in results]
+
     def run(self, request: BenchmarkRunRequest) -> BenchmarkResult:
         """Execute a benchmark and persist its result.
 
@@ -354,9 +382,23 @@ class BenchmarkService:
         params.setdefault("warmup", max(0, request.warmup))
         params.update(self._workload_meta(base_prompts, request.repetitions))
         snapshot = _gpu_snapshot()
+        target = None if request.dry_run else self._resolve_target(request)
         with GPUSampler() as sampler:
-            metrics = self._measure(request, workload, params)
+            metrics = self._measure(request, workload, params, target)
         gpu_summary = sampler.summary()
+        mode = str((metrics.get("parameters") or {}).get("mode", "live"))
+        manifest = build_manifest(
+            request,
+            model=self.db.get(ModelRecord, request.model_id)
+            if request.model_id
+            else None,
+            session=target.session if target is not None else None,
+            backend=(target.backend if target else None) or metrics.get("backend"),
+            endpoint_url=target.base_url if target is not None else None,
+            base_prompts=base_prompts,
+            gpu_snapshot=snapshot,
+            execution="synthetic" if mode == "mock" else "live",
+        )
         record = BenchmarkRecord(
             model_id=request.model_id,
             session_id=request.session_id,
@@ -377,6 +419,7 @@ class BenchmarkService:
             gpu_snapshot=self._merge_snapshot(snapshot, gpu_summary),
             parameters=metrics["parameters"],
             samples=metrics["samples"],
+            manifest=manifest,
             success=metrics["success"],
             error=metrics["error"],
         )
@@ -439,7 +482,26 @@ class BenchmarkService:
             dry_run=str(stored.get("mode", "live")) == "mock",
             require_live=True,
         )
-        return self.run(request)
+        result = self.run(request)
+        if result is None or result.id is None:
+            return result
+        # The re-run is a new experiment with its own identity, linked to
+        # its source. Configuration drift between the two manifests is
+        # recorded on the new row so "same benchmark, different number" is
+        # explainable instead of mysterious.
+        new_record = self.db.get(BenchmarkRecord, result.id)
+        if new_record is None:
+            return result
+        drift = manifest_drift(record.manifest, result.manifest)
+        updated = dict(new_record.parameters or {})
+        updated["rerun_of"] = benchmark_id
+        if drift:
+            updated["drift"] = drift
+        new_record.parameters = updated
+        self.db.add(new_record)
+        self.db.commit()
+        self.db.refresh(new_record)
+        return record_to_benchmark(new_record)
 
     def run_sweep(self, request: BenchmarkRunRequest) -> list[BenchmarkResult]:
         """Run the benchmark at several concurrency levels (a load sweep).
@@ -475,10 +537,12 @@ class BenchmarkService:
         request: BenchmarkRunRequest,
         prompts: list[str],
         params: dict[str, object],
+        target: _Target | None,
     ) -> dict[str, object]:
         """Return benchmark metrics for the requested ``kind``.
 
-        Behaviour:
+        ``target`` is the pre-resolved endpoint (``None`` means dry-run, or
+        strict-live with no endpoint). Behaviour:
           * Explicit ``dry_run`` -> deterministic mock result for the kind.
           * No reachable endpoint -> failure record (strict live is the
             default). Only an explicit ``require_live=False`` restores the
@@ -490,7 +554,6 @@ class BenchmarkService:
         """
         if request.dry_run:
             return self._mock(request, prompts, params, "dry-run requested")
-        target = self._resolve_target(request)
         if target is None:
             if request.require_live:
                 return self._no_endpoint_failure(request, prompts, params)
@@ -523,26 +586,31 @@ class BenchmarkService:
 
     def _resolve_target(self, request: BenchmarkRunRequest) -> _Target | None:
         """Resolve the live OpenAI-compatible endpoint for the request, if any."""
-        endpoint, model_name, backend = self._resolve_endpoint(request)
+        endpoint, model_name, backend, session = self._resolve_endpoint(request)
         if not endpoint:
             return None
         return _Target(
             base_url=endpoint,
             model_name=model_name or "local-model",
             backend=backend,
+            session=session,
         )
 
     def _resolve_endpoint(
         self, request: BenchmarkRunRequest
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, SessionRecord | None]:
         """Find a serving endpoint via an explicit session, a running session,
-        or the runtime's default server endpoint. Returns (url, model, backend).
+        or the runtime's default server endpoint.
+
+        Returns ``(url, model, backend, session)``; the session (when the
+        endpoint was resolved through one) carries launch configuration for
+        the run manifest.
         """
         if request.session_id:
             record = self.db.get(SessionRecord, request.session_id)
             if record and record.endpoint_url:
                 backend = record.runtime.value if record.runtime else None
-                return record.endpoint_url, self._model_name(record.model_id), backend
+                return record.endpoint_url, self._model_name(record.model_id), backend, record
         if request.model_id:
             model = self.db.get(ModelRecord, request.model_id)
             if model:
@@ -573,11 +641,11 @@ class BenchmarkService:
                         )
                     ).first()
                 if running and running.endpoint_url:
-                    return running.endpoint_url, name, backend
+                    return running.endpoint_url, name, backend, running
                 config = self.settings.runtime_config(model.runtime.value)
                 if config.endpoint:
-                    return config.endpoint, name, backend
-        return None, None, None
+                    return config.endpoint, name, backend, None
+        return None, None, None, None
 
     def _model_name(self, model_id: str | None) -> str | None:
         """Return a model's served name (source preferred) by id."""

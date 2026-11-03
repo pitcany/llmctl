@@ -27,6 +27,23 @@ def list_benchmarks(
     )
 
 
+@router.get("/export")
+def export_benchmarks(
+    model_id: str | None = Query(default=None, description="Filter by model ID."),
+    limit: int | None = Query(default=None, ge=1, description="Max rows (newest first)."),
+    db: Session = Depends(get_db_session),
+) -> dict[str, object]:
+    """Export results plus their immutable manifests as one JSON document.
+
+    Declared before ``/{benchmark_id}`` so "export" is not parsed as an id.
+    """
+    return {
+        "format": "llmctl-benchmark-export",
+        "version": 1,
+        "results": BenchmarkService(db).export(model_id=model_id, limit=limit),
+    }
+
+
 @router.get("/{benchmark_id}", response_model=BenchmarkResult)
 def get_benchmark(
     benchmark_id: str, db: Session = Depends(get_db_session)
@@ -65,6 +82,17 @@ def rerun_benchmark(
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Benchmark not found")
     return result
+
+
+@router.get("/{benchmark_id}/export")
+def export_benchmark(
+    benchmark_id: str, db: Session = Depends(get_db_session)
+) -> dict[str, object]:
+    """Export one benchmark result plus its immutable manifest."""
+    payloads = BenchmarkService(db).export(benchmark_id=benchmark_id)
+    if not payloads:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Benchmark not found")
+    return payloads[0]
 
 
 @router.delete("/{benchmark_id}", status_code=status.HTTP_204_NO_CONTENT)

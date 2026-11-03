@@ -283,6 +283,9 @@ class BenchmarkResult(BaseModel):
     gpu_snapshot: dict[str, Any] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
     samples: list[dict[str, Any]] = Field(default_factory=list)
+    #: Immutable experiment manifest (empty dict on legacy rows -- unknown
+    #: provenance, not fabricated). See ``services/benchmark_manifest.py``.
+    manifest: dict[str, Any] = Field(default_factory=dict)
     success: bool = True
     error: str | None = None
     created_at: datetime | None = None

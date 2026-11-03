@@ -247,6 +247,11 @@ class BenchmarkRecord(SQLModel, table=True):
     gpu_snapshot: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     parameters: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     samples: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    #: Immutable experiment manifest (FIXPLAN 2026-11-03 §1C): a versioned,
+    #: allowlisted snapshot of the resolved model/engine/launch/hardware/
+    #: workload identity at run time. ``NULL`` on legacy rows -- readers
+    #: treat that as "unknown provenance", never fabricate one.
+    manifest: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     success: bool = Field(default=True, index=True)
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow, index=True)

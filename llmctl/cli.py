@@ -1489,6 +1489,16 @@ def _print_benchmark_result(result: object) -> None:
         table.add_row("Concurrency", str(requested))
     for warning in result.parameters.get("warnings", []) or []:
         table.add_row("Warning", f"[yellow]{escape(str(warning))}[/yellow]")
+    rerun_of = result.parameters.get("rerun_of")
+    if rerun_of:
+        table.add_row("Re-run of", str(rerun_of))
+    for entry in result.parameters.get("drift", []) or []:
+        table.add_row("Config drift", f"[yellow]{escape(str(entry))}[/yellow]")
+    has_manifest = bool(getattr(result, "manifest", None))
+    table.add_row(
+        "Manifest",
+        "captured" if has_manifest else "[dim]unknown (pre-manifest record)[/dim]",
+    )
     table.add_row("Prompt tokens", str(result.prompt_tokens))
     table.add_row("Completion tokens", str(result.completion_tokens))
     table.add_row("Total tokens", str(result.total_tokens))
@@ -1555,6 +1565,13 @@ def benchmarks_cmd(
         typer.Option(help="Filter by kind.", case_sensitive=False),
     ] = None,
     limit: Annotated[int, typer.Option(help="Maximum rows to return.")] = 20,
+    export: Annotated[
+        str | None,
+        typer.Option(
+            "--export",
+            help="Write the (filtered) history as JSON with manifests to this path.",
+        ),
+    ] = None,
 ) -> None:
     """List benchmark history (newest first) or show one in detail (run one: `llmctl bench`)."""
     with _session() as db:
@@ -1564,6 +1581,13 @@ def benchmarks_cmd(
             if result is None:
                 raise typer.Exit(code=1)
             _print_benchmark_result(result)
+            return
+        if export:
+            from llmctl.services.benchmark_manifest import write_export
+
+            payloads = service.export(model_id=model, limit=None if limit >= 20 else limit)
+            path = write_export(Path(export).expanduser(), payloads)
+            console.print(f"[green]Exported {len(payloads)} result(s) to {path}[/green]")
             return
         results = service.list_results(model_id=model, session_id=session, kind=kind, limit=limit)
     if not results:
