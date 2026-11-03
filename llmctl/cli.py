@@ -36,6 +36,7 @@ from llmctl.schemas import (
 )
 from llmctl.services import vllm_slots
 from llmctl.services.benchmarks import BenchmarkService
+from llmctl.services.op_lock import LockBusy, gpu_operation_lock
 from llmctl.services.lanes import (
     SwapTarget,
     close_matches,
@@ -1587,7 +1588,9 @@ def benchmarks_cmd(
 
             payloads = service.export(model_id=model, limit=None if limit >= 20 else limit)
             path = write_export(Path(export).expanduser(), payloads)
-            console.print(f"[green]Exported {len(payloads)} result(s) to {path}[/green]")
+            console.print(
+                f"[green]Exported {len(payloads)} result(s) to {escape(str(path))}[/green]"
+            )
             return
         results = service.list_results(model_id=model, session_id=session, kind=kind, limit=limit)
     if not results:
@@ -2093,124 +2096,136 @@ def vllm_cmd(
         if save and target.kind == "session":
             _save_run_settings(target, overrides, dry_run=True)
         return
-    if not dry_run:
-        _confirm_state_change(
-            f"Swap to {target.model} ({target.engine})",
-            required=settings.scheduler.require_confirmation_for_start,
-            assume_yes=yes,
-        )
-        if fit is not None:
-            # Free VRAM may have changed while the prompt waited: check again.
-            from llmctl.services.vram_fit import free_mib_now
+    # FIXPLAN 2026-11-03 §2A: hold the host-wide GPU operation lock from
+    # the first mutation until the swap -- including rollback -- is done.
+    # Reentrant, so helpers that take the lock nest instead of deadlocking.
+    from contextlib import ExitStack
 
-            state.free_mib = free_mib_now()
-            fit = state.fits_alongside(target)
-            if fit is None:
-                console.print(
-                    "[yellow]No longer fits beside what is running; "
-                    "stopping what shares its cards instead.[/yellow]"
+    with ExitStack() as _stack:
+        if not dry_run:
+            _stack.enter_context(
+                gpu_operation_lock(
+                    purpose=f"run {target.model}", interface="cli", settings=settings
                 )
-    # One switch engine (2026-10-20): llm-router starts and stops the GPU lanes.
-    # Per-run vLLM tuning (--tp/--max-len/--gpu-mem/--tq/--force/--no-wait) needs
-    # llmctl's own env render, so those keep the direct path.
-    tuned = bool(overrides) or tq or no_tq or force or no_wait
-    # A lane that fits beside what runs starts directly: llm-router's lane
-    # scripts always run with --take-gpus, which would stop the rest.
-    # So does a placed one-card preset: llm-router's vLLM profiles take both cards.
-    placed = target.kind == "vllm" and target.cards is not None
-    if (
-        not direct
-        and not dry_run
-        and target.kind in ("lane", "vllm")
-        and not tuned
-        and fit is None
-        and not placed
-    ):
-        if cli_swap.run_router_swap(state, target, console, settings):
-            return
-    if target.kind == "session":
-        cli_swap.run_session_swap(state, target, console, parameters=session_parameters)
-        if save:
-            _save_run_settings(target, overrides, dry_run=False)
-        return
-    if target.kind == "lane":
-        cli_swap.run_lane_swap(state, target, console, fit)
-        return
-    preset = target.key
-    # Only a name from the list frees the GPUs up front: an unlisted one is
-    # almost always a typo, and start_vllm_tp rejects it before touching
-    # anything. Stopping FreeToken first would turn a typo into an outage.
-    # By key: a placed one-card preset is a copy of its row (cards set).
-    listed = any(row.key == target.key for row in state.catalog)
-    stopped_lanes = (
-        cli_swap.stop_lanes_for_vllm(state, console, target) if listed and not dry_run else []
-    )
-    started_at = time.monotonic()
-    options = _build_options(tq if tq else None, no_tq, dry_run, no_wait, force)
-    options.preset_overrides = overrides.fields()
-    options.gpus = vllm_slots.cuda_devices(target)
-    engine = vllm_slots.engine_config(settings, target)
-    try:
-        result = start_vllm_tp(
-            preset,
-            managed_unit=engine,
-            defaults=settings.vllm.defaults,
-            fleet=settings.managed_units.fleet,
-            options=options,
-        )
-    except UnknownPresetError as exc:
-        # The exception text is a sentence ("unknown preset 'x'. Available: ..."),
-        # not the name, so suggest from what was typed.
-        console.print(f"[red]No model named '{escape(str(preset))}'.[/red]")
-        close = close_matches(str(preset), state.catalog)
-        if close:
-            console.print(f"Did you mean: {escape(', '.join(close))}?")
-        console.print("Run `llmctl ls` to see what you can run.")
-        cli_swap.restore_lanes(stopped_lanes, console)
-        raise typer.Exit(2) from exc
-    except MissingModelPathError as exc:
-        console.print(f"[red]Refusing to start {escape(str(preset))}:[/red] {escape(str(exc))}")
-        cli_swap.restore_lanes(stopped_lanes, console)
-        raise typer.Exit(2) from exc
-    except LauncherEnvError as exc:
-        # Nothing was touched: the env file is rendered before any stop.
-        console.print(f"[red]Cannot render the launch env:[/red] {escape(str(exc))}")
-        cli_swap.restore_lanes(stopped_lanes, console)
-        raise typer.Exit(2) from exc
+            )
+        if not dry_run:
+            _confirm_state_change(
+                f"Swap to {target.model} ({target.engine})",
+                required=settings.scheduler.require_confirmation_for_start,
+                assume_yes=yes,
+            )
+            if fit is not None:
+                # Free VRAM may have changed while the prompt waited: check again.
+                from llmctl.services.vram_fit import free_mib_now
 
-    if result.dry_run:
-        if save:
-            _save_run_settings(target, overrides, dry_run=True)
-        return
-    if not result.ok:
-        console.print("[red]vLLM start did not complete cleanly.[/red]")
-        cli_swap.restore_lanes(stopped_lanes, console)
-        if result.fleet_failed:
-            console.print(f"  fleet preflight failed on: {escape(', '.join(result.fleet_failed))}")
-        if result.restart is not None and result.restart.error:
-            console.print(f"  restart: {escape(result.restart.error)}")
-        _print_rollback(result, engine.unit_name)
-        raise typer.Exit(1)
-    if result.restart is not None and result.restart.ready is None:
-        # --no-wait: the restart was issued and nobody probed /v1/models.
-        # Announcing "ready" here would be a claim no code checked.
+                state.free_mib = free_mib_now()
+                fit = state.fits_alongside(target)
+                if fit is None:
+                    console.print(
+                        "[yellow]No longer fits beside what is running; "
+                        "stopping what shares its cards instead.[/yellow]"
+                    )
+        # One switch engine (2026-10-20): llm-router starts and stops the GPU lanes.
+        # Per-run vLLM tuning (--tp/--max-len/--gpu-mem/--tq/--force/--no-wait) needs
+        # llmctl's own env render, so those keep the direct path.
+        tuned = bool(overrides) or tq or no_tq or force or no_wait
+        # A lane that fits beside what runs starts directly: llm-router's lane
+        # scripts always run with --take-gpus, which would stop the rest.
+        # So does a placed one-card preset: llm-router's vLLM profiles take both cards.
+        placed = target.kind == "vllm" and target.cards is not None
+        if (
+            not direct
+            and not dry_run
+            and target.kind in ("lane", "vllm")
+            and not tuned
+            and fit is None
+            and not placed
+        ):
+            if cli_swap.run_router_swap(state, target, console, settings):
+                return
+        if target.kind == "session":
+            cli_swap.run_session_swap(state, target, console, parameters=session_parameters)
+            if save:
+                _save_run_settings(target, overrides, dry_run=False)
+            return
+        if target.kind == "lane":
+            cli_swap.run_lane_swap(state, target, console, fit)
+            return
+        preset = target.key
+        # Only a name from the list frees the GPUs up front: an unlisted one is
+        # almost always a typo, and start_vllm_tp rejects it before touching
+        # anything. Stopping FreeToken first would turn a typo into an outage.
+        # By key: a placed one-card preset is a copy of its row (cards set).
+        listed = any(row.key == target.key for row in state.catalog)
+        stopped_lanes = (
+            cli_swap.stop_lanes_for_vllm(state, console, target) if listed and not dry_run else []
+        )
+        started_at = time.monotonic()
+        options = _build_options(tq if tq else None, no_tq, dry_run, no_wait, force)
+        options.preset_overrides = overrides.fields()
+        options.gpus = vllm_slots.cuda_devices(target)
+        engine = vllm_slots.engine_config(settings, target)
+        try:
+            result = start_vllm_tp(
+                preset,
+                managed_unit=engine,
+                defaults=settings.vllm.defaults,
+                fleet=settings.managed_units.fleet,
+                options=options,
+            )
+        except UnknownPresetError as exc:
+            # The exception text is a sentence ("unknown preset 'x'. Available: ..."),
+            # not the name, so suggest from what was typed.
+            console.print(f"[red]No model named '{escape(str(preset))}'.[/red]")
+            close = close_matches(str(preset), state.catalog)
+            if close:
+                console.print(f"Did you mean: {escape(', '.join(close))}?")
+            console.print("Run `llmctl ls` to see what you can run.")
+            cli_swap.restore_lanes(stopped_lanes, console)
+            raise typer.Exit(2) from exc
+        except MissingModelPathError as exc:
+            console.print(f"[red]Refusing to start {escape(str(preset))}:[/red] {escape(str(exc))}")
+            cli_swap.restore_lanes(stopped_lanes, console)
+            raise typer.Exit(2) from exc
+        except LauncherEnvError as exc:
+            # Nothing was touched: the env file is rendered before any stop.
+            console.print(f"[red]Cannot render the launch env:[/red] {escape(str(exc))}")
+            cli_swap.restore_lanes(stopped_lanes, console)
+            raise typer.Exit(2) from exc
+
+        if result.dry_run:
+            if save:
+                _save_run_settings(target, overrides, dry_run=True)
+            return
+        if not result.ok:
+            console.print("[red]vLLM start did not complete cleanly.[/red]")
+            cli_swap.restore_lanes(stopped_lanes, console)
+            if result.fleet_failed:
+                console.print(f"  fleet preflight failed on: {escape(', '.join(result.fleet_failed))}")
+            if result.restart is not None and result.restart.error:
+                console.print(f"  restart: {escape(result.restart.error)}")
+            _print_rollback(result, engine.unit_name)
+            raise typer.Exit(1)
+        if result.restart is not None and result.restart.ready is None:
+            # --no-wait: the restart was issued and nobody probed /v1/models.
+            # Announcing "ready" here would be a claim no code checked.
+            console.print(
+                f"[cyan]Restart issued[/cyan] for {escape(result.spec.served_name)} "
+                f"on port {result.spec.port}; readiness not checked (--no-wait). "
+                "Run `llmctl status` once it has loaded."
+            )
+            _print_companions(result)
+            if save:
+                _save_run_settings(target, overrides, dry_run=False)
+            return
+        record_load(preset, time.monotonic() - started_at)
         console.print(
-            f"[cyan]Restart issued[/cyan] for {escape(result.spec.served_name)} "
-            f"on port {result.spec.port}; readiness not checked (--no-wait). "
-            "Run `llmctl status` once it has loaded."
+            f"[green]vLLM ready[/green] — serving {escape(result.spec.served_name)} "
+            f"on port {result.spec.port}"
         )
         _print_companions(result)
         if save:
             _save_run_settings(target, overrides, dry_run=False)
-        return
-    record_load(preset, time.monotonic() - started_at)
-    console.print(
-        f"[green]vLLM ready[/green] — serving {escape(result.spec.served_name)} "
-        f"on port {result.spec.port}"
-    )
-    _print_companions(result)
-    if save:
-        _save_run_settings(target, overrides, dry_run=False)
 
 
 #: Engines whose launch settings llmctl owns (it starts their servers).
