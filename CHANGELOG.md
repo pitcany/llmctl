@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- Benchmarks are trustworthy evidence now (2026-11-03 research-workflow
+  plan): ordinary runs are strict-live (a missing endpoint records a
+  failure, never a synthetic number; `--synthetic` stays the explicit
+  labeled mode), workloads carry a recorded size (`--repetitions`,
+  `--warmup`) separate from concurrency, and every result notes requested
+  vs achieved concurrency, token-count provenance, per-request failures
+  and p50/p90/p99 with sample counts. Each run stores an immutable
+  manifest (model/engine identity, launch config, workload hash, runner
+  vs serving hardware; unknowns recorded as unknown) exportable via
+  `llmctl benchmarks --export` and `GET /benchmarks/{id}/export`; re-runs
+  link their source and record drift. Result comparisons are gated by a
+  shared eligibility check — live-vs-synthetic, failed, or incompatible
+  runs render `n/c`, never a green delta.
+- GPU lifecycle changes are coordinated across processes: a host-wide
+  operation lock (flock, holder identity in refusals) covers `llmctl
+  run/stop/restart`, the swap/session cores, and TUI/API mutations, with
+  the API handing lock ownership to the CLI child it spawns. Every
+  operation is persisted with explicit phases and honest outcomes
+  (`needs_attention` when a rollback could not restore), idempotency keys
+  on `POST /swap/run`, and conservative recovery after restarts: a
+  verified-surviving child blocks conflicting work; dead owners become
+  `interrupted` with guidance; nothing is replayed.
+- The TUI opens on the research view — Serving now (endpoint, readiness,
+  observation time), Current operation (phase, elapsed, recovery), Recent
+  experiments — with inventory and config flags demoted. Models gains
+  text/engine filters and a detail panel; selection is anchored to model
+  ids so refreshes never retarget an action. Benchmarks `enter` inspects
+  instead of re-running (`r` re-runs). The web dashboard gains a model
+  filter and shows the operation phase.
 - Plugins can add screens to `llmctl tui` (`PluginRegistry.tui_screens`, a
   `TuiScreen` with a name, title, help line, key and factory): each gets its
   key, a line in the help (`?`) and "Go to ..." in the command palette, and
