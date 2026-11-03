@@ -28,6 +28,7 @@ from llmctl.services.lanes import (
     last_load_s,
     record_load,
 )
+from llmctl.services.op_lock import gpu_operation_lock
 from llmctl.services.session_swap import (
     pause_for_swap,
     resume_after_failed_swap,
@@ -66,24 +67,28 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
 
     settings = load_settings()
     db_url = getattr(settings, "database_url", None) or "sqlite:///:memory:"
-    store = operations.OperationStore(db_url)
-    record, _ = store.begin(
-        kind="swap",
-        target=target.key,
-        interface="tui",
-        purpose=f"run {target.model}",
-        request={"key": target.key, "model": target.model},
-    )
-    operations.bind_current(store, record.id or "")
-    try:
-        ok, message = _do_swap(state, target)
-        if ok:
-            operations.finish_current(OperationPhase.COMPLETED)
-        else:
-            operations.finish_current(OperationPhase.FAILED, error=message)
-        return ok, message
-    finally:
-        operations.clear_current()
+    with gpu_operation_lock(purpose=f"run {target.model}", interface="tui"):
+        store = operations.OperationStore(db_url)
+        record, _ = store.begin(
+            kind="swap",
+            target=target.key,
+            interface="tui",
+            purpose=f"run {target.model}",
+            request={"key": target.key, "model": target.model},
+        )
+        operations.bind_current(store, record.id or "")
+        try:
+            ok, message = _do_swap(state, target)
+            if ok:
+                operations.finish_current(OperationPhase.COMPLETED)
+            else:
+                operations.finish_current(OperationPhase.FAILED, error=message)
+            return ok, message
+        except BaseException as exc:  # record interruption, then let the worker report it
+            operations.interrupt_current(f"{type(exc).__name__}: {exc}")
+            raise
+        finally:
+            operations.clear_current()
 
 
 def _do_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
@@ -169,10 +174,13 @@ def _do_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
 
 
 def _failure(reason: str | None, lanes: Any) -> str:
+    from llmctl.services.operations import note_restore_failure
+
     text = esc(reason or "unknown error")
     if lanes.restored:
         text += f"\nStarted again: {esc(', '.join(lanes.restored))}"
     if lanes.restore_failed:
+        note_restore_failure(lanes.restore_failed)
         text += f"\nStill stopped: {esc(', '.join(lanes.restore_failed))} — start it by hand."
     return text
 

@@ -275,6 +275,9 @@ class OperationRecord(SQLModel, table=True):
     #: Optional caller-supplied idempotency key; repeating it with the same
     #: request returns the same operation, a different request is refused.
     idempotency_key: str | None = Field(default=None, index=True)
+    #: Browser polling identity and child outcome, retained across API restarts.
+    job_id: str | None = Field(default=None, index=True)
+    job_exit_code: int | None = None
     request_fingerprint: str
     request: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     previous_state: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))

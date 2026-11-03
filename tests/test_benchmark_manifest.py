@@ -307,3 +307,43 @@ def test_cli_export_writes_file(tmp_path: Path, monkeypatch) -> None:
     assert document["format"] == "llmctl-benchmark-export"
     assert len(document["results"]) == 1
     assert document["results"][0]["manifest"]["execution"] == "synthetic"
+
+
+@pytest.mark.parametrize("parameters", [{}, {"max_tokens": 64}, {"temperature": 0.7}])
+def test_manifest_and_export_match_effective_request_defaults(
+    db: Session, parameters: dict[str, object],
+) -> None:
+    sent = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, content=SSE_CHUNK.encode())
+
+    service = BenchmarkService(
+        db, client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    request = BenchmarkRunRequest(
+        model_id=_ollama_model(db), prompts=["q"], parameters=parameters,
+    )
+    result = service.run(request)
+    exported = service.export(benchmark_id=result.id)[0]
+    for key in ("max_tokens", "temperature"):
+        assert result.manifest["effective_parameters"][key] == sent[0][key]
+        assert result.parameters[key] == sent[0][key]
+        assert exported["manifest"]["effective_parameters"][key] == sent[0][key]
+    assert request.parameters == parameters
+
+
+def test_implicit_and_explicit_generation_defaults_share_workload_hash() -> None:
+    implicit = BenchmarkRunRequest(prompts=["q"])
+    explicit = BenchmarkRunRequest(
+        prompts=["q"], parameters={"max_tokens": 256, "temperature": 0.0},
+    )
+    assert workload_hash(implicit, ["q"]) == workload_hash(explicit, ["q"])
+
+
+def test_invalid_generation_setting_remains_a_recorded_failure(db: Session) -> None:
+    result = _live_run(db, parameters={"max_tokens": "invalid"})
+    assert not result.success
+    assert result.id is not None
+    assert "invalid" in result.error

@@ -92,6 +92,29 @@ class SwapJob:
     #: (legacy in-memory-only usage, e.g. unit tests).
     operation_id: str | None = None
 
+    @classmethod
+    def from_operation(cls, record: OperationRecord) -> SwapJob:
+        """Rebuild the browser's job snapshot from durable operation state."""
+        if record.job_id is None:
+            raise ValueError("operation has no persisted browser job ID")
+        terminal = record.phase in {phase.value for phase in TERMINAL_PHASES}
+        succeeded = record.phase == OperationPhase.COMPLETED.value
+        output = list(record.output or [])
+        if record.error:
+            output.append(record.error)
+        return cls(
+            name=record.target,
+            model=str((record.request or {}).get("model", record.target)),
+            job_id=record.job_id,
+            status=("succeeded" if succeeded else "failed") if terminal else "running",
+            exit_code=(record.job_exit_code if record.job_exit_code is not None
+                       else 0 if succeeded else None),
+            output=deque(output, maxlen=MAX_OUTPUT_LINES),
+            started_at=record.created_at,
+            finished_at=record.finished_at,
+            operation_id=record.id,
+        )
+
     def summary(self) -> dict[str, Any]:
         return {
             "job_id": self.job_id,
@@ -193,6 +216,7 @@ class SwapJobs:
         """Start a swap job with its persistent operation record (§2B)."""
         store = self._store
         record: OperationRecord | None = None
+        job_id = uuid.uuid4().hex
         if store is not None and idempotency_key:
             # Idempotency wins over busy: repeating a key with the same
             # request must return the existing operation, not a 409.
@@ -204,6 +228,7 @@ class SwapJobs:
                 request={"name": name, "model": model, "argv": argv},
                 previous_state=previous_state,
                 idempotency_key=idempotency_key,
+                job_id=job_id,
             )
             if not created:
                 return StartOutcome(job=None, operation=record, replayed=True)
@@ -228,9 +253,11 @@ class SwapJobs:
                             purpose=f"swap to {model}",
                             request={"name": name, "model": model, "argv": argv},
                             previous_state=previous_state,
+                            job_id=job_id,
                         )
                 job = SwapJob(
-                    name=name, model=model, operation_id=record.id if record else None
+                    name=name, model=model, job_id=job_id,
+                    operation_id=record.id if record else None,
                 )
                 self._jobs[job.job_id] = job
                 thread = threading.Thread(target=self._run, args=(job, argv), daemon=True)
@@ -318,19 +345,21 @@ class SwapJobs:
         except BaseException as exc:  # noqa: BLE001 - surfaced in job output
             error = f"error: {exc}"
         finally:
-            self._finish(job, code, error)
-            if self._store is not None and job.operation_id:
-                record = self._store.get(job.operation_id)
-                if record is None or record.phase not in {
-                    phase.value for phase in TERMINAL_PHASES
-                }:
-                    # The child sets richer outcomes itself; this is the
-                    # fallback when it died before finishing the record.
-                    self._store.finish(
-                        job.operation_id,
-                        OperationPhase.FAILED if code != 0 else OperationPhase.COMPLETED,
-                        error=error,
-                    )
+            try:
+                if self._store is not None and job.operation_id:
+                    record = self._store.get(job.operation_id)
+                    if record is None or record.phase not in {
+                        phase.value for phase in TERMINAL_PHASES
+                    }:
+                        # Preserve the child's richer outcome when it recorded one.
+                        self._store.finish(
+                            job.operation_id,
+                            OperationPhase.FAILED if code != 0 else OperationPhase.COMPLETED,
+                            error=error,
+                        )
+                    self._store.record_job_exit(job.operation_id, code)
+            finally:
+                self._finish(job, code, error)
 
     def _finish(self, job: SwapJob, code: int | None, error: str | None) -> None:
         with self._lock:
@@ -343,13 +372,26 @@ class SwapJobs:
 
     def get(self, job_id: str) -> SwapJob | None:
         with self._lock:
-            return self._jobs.get(job_id)
+            job = self._jobs.get(job_id)
+        if job is not None:
+            return job
+        if self._store is not None:
+            self._store.reconcile()
+            record = self._store.get_job(job_id)
+            if record is not None:
+                return SwapJob.from_operation(record)
+        return None
 
     def running(self) -> SwapJob | None:
         with self._lock:
             for job in self._jobs.values():
                 if job.status == "running":
                     return job
+        if self._store is not None:
+            self._store.reconcile()
+            for record in self._store.unfinished():
+                if record.job_id:
+                    return SwapJob.from_operation(record)
         return None
 
     def operation_for(self, job: SwapJob) -> OperationRecord | None:

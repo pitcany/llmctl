@@ -27,6 +27,7 @@ from typing import Any
 
 from llmctl.db import ModelRecord, SessionRecord
 from llmctl.schemas import BenchmarkRunRequest
+from llmctl.services.benchmark_parameters import effective_parameters
 
 #: Bump when the allowlist changes shape; readers can branch on this.
 MANIFEST_VERSION = 1
@@ -59,13 +60,14 @@ def workload_hash(request: BenchmarkRunRequest, base_prompts: list[str]) -> str:
     settings; concurrency is excluded on purpose -- a sweep changes only the
     concurrency ceiling, not the workload.
     """
+    parameters = effective_parameters(request.parameters)
     payload = {
         "kind": request.kind.value,
         "prompts": list(base_prompts),
         "prompt_count": len(base_prompts),
         "repetitions": request.repetitions,
-        "max_tokens": request.parameters.get("max_tokens"),
-        "temperature": request.parameters.get("temperature"),
+        "max_tokens": parameters["max_tokens"],
+        "temperature": parameters["temperature"],
         "context_length": request.context_length,
     }
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -178,6 +180,7 @@ def build_manifest(
     runner-host point-in-time snapshot captured by the benchmark service.
     """
     runner_gpus = list((gpu_snapshot or {}).get("gpus", []))
+    parameters = effective_parameters(request.parameters)
     return {
         "version": MANIFEST_VERSION,
         "execution": execution,
@@ -201,8 +204,8 @@ def build_manifest(
             "context_length": request.context_length,
         },
         "effective_parameters": {
-            "max_tokens": request.parameters.get("max_tokens", UNKNOWN),
-            "temperature": request.parameters.get("temperature", UNKNOWN),
+            "max_tokens": parameters["max_tokens"],
+            "temperature": parameters["temperature"],
             "stream": True,
             "endpoint_kind": request.kind.value,
         },

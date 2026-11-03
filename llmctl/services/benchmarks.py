@@ -45,6 +45,7 @@ from llmctl.services.benchmark_manifest import (
     export_payload,
     manifest_drift,
 )
+from llmctl.services.benchmark_parameters import DEFAULT_MAX_TOKENS, effective_parameters
 from llmctl.telemetry.gpu import get_gpu_info, nvml_available
 from llmctl.telemetry.gpu_sampler import GPUSampler, GPUSamplerSummary
 
@@ -54,8 +55,6 @@ DEFAULT_PROMPT = (
     "Explain the difference between maximum likelihood and Bayesian inference "
     "in one paragraph."
 )
-#: Default completion length requested per prompt.
-DEFAULT_MAX_TOKENS = 256
 #: Long-context smoke test prompt seed; we repeat this to fill the requested
 #: context_length so the model has to ingest a real load.
 LONG_CONTEXT_SEED = (
@@ -377,7 +376,7 @@ class BenchmarkService:
         """
         base_prompts = self._resolve_prompts(request)
         workload = self._expand_workload(base_prompts, request.repetitions)
-        params = dict(request.parameters)
+        params = effective_parameters(request.parameters)
         params.setdefault("concurrency", max(1, request.concurrency))
         params.setdefault("warmup", max(0, request.warmup))
         params.update(self._workload_meta(base_prompts, request.repetitions))
@@ -791,8 +790,9 @@ class BenchmarkService:
         (``/v1/completions``) -- the same streaming runner handles both,
         since both speak SSE with the same delta shape.
         """
-        max_tokens = int(params.get("max_tokens", DEFAULT_MAX_TOKENS))
-        temperature = float(params.get("temperature", 0.0))
+        params = effective_parameters(params)
+        max_tokens = int(params["max_tokens"])
+        temperature = float(params["temperature"])
         requested = max(1, int(params.get("concurrency", 1)))
         workers = max(1, min(requested, len(prompts))) if prompts else 1
         client = (

@@ -191,6 +191,7 @@ class OperationStore:
         request: Any,
         previous_state: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        job_id: str | None = None,
     ) -> tuple[OperationRecord, bool]:
         """Persist intent before any side effect.
 
@@ -218,6 +219,7 @@ class OperationStore:
                 target=target,
                 phase=OperationPhase.PREPARING.value,
                 idempotency_key=idempotency_key,
+                job_id=job_id,
                 request_fingerprint=fp,
                 request=request if isinstance(request, dict) else {"value": str(request)},
                 previous_state=previous_state or {},
@@ -288,6 +290,22 @@ class OperationStore:
     def get(self, operation_id: str) -> OperationRecord | None:
         with self._session() as db:
             return db.get(OperationRecord, operation_id)
+
+    def get_job(self, job_id: str) -> OperationRecord | None:
+        """Return the operation belonging to a persisted browser job ID."""
+        with self._session() as db:
+            return db.exec(
+                select(OperationRecord).where(OperationRecord.job_id == job_id)
+            ).first()
+
+    def record_job_exit(self, operation_id: str, exit_code: int | None) -> None:
+        """Save the child exit code without overwriting its recovery outcome."""
+        with self._session() as db:
+            record = db.get(OperationRecord, operation_id)
+            if record is not None:
+                record.job_exit_code = exit_code
+                db.add(record)
+                db.commit()
 
     def unfinished(self) -> list[OperationRecord]:
         with self._session() as db:
@@ -417,6 +435,29 @@ def finish_current(
     )
 
 
+def interrupt_current(error: str) -> None:
+    """Finalize the bound operation after an exception, retaining recovery facts."""
+    store = getattr(_current, "store", None)
+    op_id = current_operation_id()
+    if store is None or op_id is None:
+        return
+    record = store.get(op_id)
+    restoring = record is not None and record.phase == OperationPhase.RESTORING.value
+    failed = restore_failures()
+    recovery: dict[str, Any] = {
+        "guidance": "The runner was interrupted; check `llmctl status` and the serving "
+        "endpoint before retrying. Nothing was auto-replayed.",
+    }
+    if failed:
+        recovery["not_restored"] = failed
+    store.finish(
+        op_id,
+        OperationPhase.NEEDS_ATTENTION if failed or restoring else OperationPhase.INTERRUPTED,
+        error=error,
+        recovery=recovery,
+    )
+
+
 @contextmanager
 def cli_operation_guard(
     *,
@@ -450,17 +491,7 @@ def cli_operation_guard(
     try:
         yield record
     except KeyboardInterrupt:
-        store.finish(
-            record.id or "",
-            OperationPhase.INTERRUPTED,
-            error="interrupted (Ctrl-C)",
-            recovery={
-                "guidance": (
-                    "interrupted mid-run; check `llmctl status` and the serving "
-                    "endpoint before starting another swap. Nothing was auto-replayed."
-                )
-            },
-        )
+        interrupt_current("interrupted (Ctrl-C)")
         raise
     except SystemExit as exc:
         if exc.code in (None, 0):
@@ -476,17 +507,7 @@ def cli_operation_guard(
             finish_current(OperationPhase.FAILED, error=f"exit {code}")
         raise
     except BaseException as exc:  # noqa: BLE001 - crash: record, then propagate
-        store.finish(
-            record.id or "",
-            OperationPhase.INTERRUPTED,
-            error=f"{type(exc).__name__}: {exc}",
-            recovery={
-                "guidance": (
-                    "the runner crashed mid-run; check `llmctl status` and the "
-                    "serving endpoint before starting another swap."
-                )
-            },
-        )
+        interrupt_current(f"{type(exc).__name__}: {exc}")
         raise
     else:
         finish_current(OperationPhase.COMPLETED)

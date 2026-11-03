@@ -340,6 +340,7 @@ def test_api_idempotent_run_starts_one_switch(tmp_path: Path) -> None:
         assert replay.status_code == 200
         assert replay.json()["status"] == "already-started"
         assert replay.json()["operation_id"] == operation_id
+        assert replay.json()["job_id"] == first.json()["job_id"]
 
         # A different request under the same key is refused.
         conflict = client.post(
@@ -381,3 +382,90 @@ def test_api_operation_survives_app_restart(tmp_path: Path) -> None:
     ):
         again = client2.post("/swap/run", json={"name": "sess-b"})
     assert again.status_code == 202
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_browser_job_polling_survives_api_restart(tmp_path: Path, exit_code: int) -> None:
+    """The browser can rediscover and keep polling the same job after restart."""
+    from llmctl.api.deps import get_swap_jobs
+
+    url = f"sqlite:///{tmp_path / 'polling.db'}"
+    first = TestClient(create_app(database_url=url))
+    gate = threading.Event()
+    started = threading.Event()
+
+    def runner(argv, on_line, extra_env):
+        store = OperationStore(url)
+        store.set_phase(extra_env["LLMCTL_OPERATION_ID"], OperationPhase.LOADING)
+        on_line("loading test model")
+        started.set()
+        assert gate.wait(10)
+        return exit_code
+
+    with patch("llmctl.services.lanes.gather_state", return_value=_state()), patch(
+        "llmctl.services.swap_jobs.run_argv", runner,
+    ):
+        response = first.post("/swap/run", json={"name": "sess-b"})
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+        jobs = first.app.dependency_overrides[get_swap_jobs]()
+        try:
+            assert started.wait(3)
+            restarted = TestClient(create_app(database_url=url))
+            listed = restarted.get("/swap").json()
+            assert listed["job"]["job_id"] == job_id
+            live = restarted.get(f"/swap/jobs/{job_id}")
+            assert live.status_code == 200
+            assert live.json()["phase"] == "loading"
+            assert "loading test model" in live.json()["output"]
+        finally:
+            gate.set()
+            jobs.wait(job_id, 3)
+        finished = restarted.get(f"/swap/jobs/{job_id}")
+        assert finished.status_code == 200
+        assert finished.json()["status"] == ("succeeded" if exit_code == 0 else "failed")
+        assert finished.json()["exit_code"] == exit_code
+        assert finished.json()["finished_at"] is not None
+        assert restarted.get("/swap").json()["job"] is None
+        assert restarted.get("/swap/jobs/unknown").status_code == 404
+
+
+def test_recovered_browser_job_reports_interrupted_restoration(tmp_path: Path) -> None:
+    url = f"sqlite:///{tmp_path / 'interrupted-job.db'}"
+    store = OperationStore(url)
+    record, _ = store.begin(
+        kind="swap", target="demo", interface="cli", purpose="test",
+        request={"model": "demo"}, job_id="browser-job",
+    )
+    store.set_phase(record.id, OperationPhase.RESTORING)
+    # Start an API while the owner is alive, then simulate its death. Polls
+    # must reconcile again, not trust the startup observation indefinitely.
+    client = TestClient(create_app(database_url=url))
+    with Session(get_engine(url)) as db:
+        row = db.get(OperationRecord, record.id)
+        row.owner = {"pid": 99999999}
+        db.add(row)
+        db.commit()
+    detail = client.get("/swap/jobs/browser-job")
+    assert detail.status_code == 200
+    assert detail.json()["phase"] == "needs_attention"
+    assert detail.json()["status"] == "failed"
+    assert "guidance" in detail.json()["recovery"]
+    assert detail.json()["finished_at"] is not None
+
+
+def test_operation_job_columns_migrate_without_rewriting_history(tmp_path: Path) -> None:
+    from sqlalchemy import text
+
+    from llmctl.db import apply_migrations
+
+    engine = get_engine(f"sqlite:///{tmp_path / 'old-operations.db'}")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE operations (id VARCHAR PRIMARY KEY, phase VARCHAR)"))
+        connection.execute(text("INSERT INTO operations VALUES ('old', 'completed')"))
+    apply_migrations(engine)
+    with engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT phase, job_id, job_exit_code FROM operations WHERE id = 'old'")
+        ).one()
+    assert row == ("completed", None, None)

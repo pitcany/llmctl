@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Research-workflow follow-up: TUI swaps hold the operation lock through
+  the whole swap and finalize interrupted records. Failed lane/session
+  restoration retains the unrestored model names and `needs_attention`.
+  Browser job IDs and child exit codes survive API restarts, allowing
+  polling to resume with phase, output, and recovery details. New benchmark
+  manifests and exports include default generation settings; equivalent
+  implicit and explicit defaults produce the same workload hash.
 - Benchmarks are trustworthy evidence now (2026-11-03 research-workflow
   plan): ordinary runs are strict-live (a missing endpoint records a
   failure, never a synthetic number; `--synthetic` stays the explicit

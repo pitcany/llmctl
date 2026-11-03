@@ -1,7 +1,8 @@
 # llmctl Research Workflow Fix Plan
 
 Date: 2026-11-03  
-Status: implemented 2026-11-03 on branch `fix/research-workflow-2026-11-03` (see Completion record)  
+Status: implementation and review follow-up on `fix/research-workflow-2026-11-03`; deferred acceptance checks remain (see Completion record)
+
 Reviewed commit: `555f56c229f5ab7e7afb5236b143168cc7c14edd`
 
 The three priorities are trustworthy benchmark comparisons, recoverable model switching, and a clearer research workflow. Implement them in that order: benchmark conclusions need sound measurements, and interface progress needs reliable operation state.
@@ -159,3 +160,20 @@ Implemented 2026-11-03 on branch `fix/research-workflow-2026-11-03`, one commit 
 - The 80-column keyboard-only walkthrough, 150-model fixture walkthrough, and 375px web viewport checks are covered only indirectly by navigation/render tests, not as a scripted walkthrough suite.
 - Web phase display is one line (current phase), not a full phase timeline.
 - Systemd-triggered restarts outside llmctl remain outside the lock by design; mutating paths probe state before acting.
+
+### Review follow-up on 2026-11-03
+
+The independent review at `124b9a1` reproduced four integration gaps despite the passing suite. The following corrections are now implemented:
+
+- [x] Hold the TUI operation lock across the entire swap, including the interval between pausing sessions and starting the replacement. Finalize exceptions and cancellation as interrupted, or needs attention when restoration was interrupted. A busy lock must not create an unfinished record.
+- [x] Persist browser job IDs and child exit codes with operation records. A new API instance discovers unfinished jobs and serves the original polling URL, including output, phase, recovery, and completion. Reconcile recovered owners again during polling so a child that subsequently dies does not appear permanently running. Idempotent responses include the existing job ID.
+- [x] Forward failed-restoration labels from the CLI lane/session callers and TUI failure formatter into the operation recorder. These outcomes persist as `needs_attention` with `recovery.not_restored` instead of a plain failure with empty recovery data.
+- [x] Share generation defaults between benchmark execution, stored parameters, manifests, and workload hashes. New default requests record `max_tokens=256` and `temperature=0.0`; exports retain those values. Explicitly supplying those same defaults no longer changes the workload hash.
+
+Regression coverage is in `tests/test_research_swap_regressions.py`, `tests/test_operations.py`, and `tests/test_benchmark_manifest.py`. The initial 12 regression cases all failed before the fixes. The related switching/API/TUI/benchmark run passed 151 tests; additional interruption, migration, and invalid-input checks passed in a subsequent 59-test focused run.
+
+Final verification: **1,595 passed, 1 skipped in 355.08 seconds**, with **85% overall line coverage**. The same optional schema-parity dependency remains unavailable. Ruff passed on all changed Python files, and `git diff --check` passed. The coverage run reported 1,998 warnings, chiefly unclosed SQLite connections; connection-resource cleanup remains separate follow-up work. The first coverage attempt selected individual importable modules and failed during collection in SQLAlchemy; rerunning with directory-based `--cov=llmctl` completed successfully. Startup database/config/state were redirected to temporary locations.
+
+Temporary verification artifacts: `/tmp/llmctl-research-followup.log`, `/tmp/llmctl-research-followup.xml`, and `/tmp/llmctl-research-followup-coverage.xml`. These paths may not survive a later session. No production service change was made during this follow-up.
+
+Compatibility: nullable `operations.job_id` and `operations.job_exit_code` columns are added by the existing migration mechanism. Older operation history is preserved. Job IDs lost before this change cannot be reconstructed from old rows that never stored them. Existing benchmark manifests are immutable; missing provenance in historical records is not retroactively filled in. The deferred items above remain open.

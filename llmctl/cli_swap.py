@@ -280,7 +280,7 @@ def run_lane_swap(
 
     With ``fit`` the lane starts beside what runs (``--share-gpus``).
     """
-    from llmctl.services.operations import OperationPhase, mark_phase
+    from llmctl.services.operations import OperationPhase, mark_phase, note_restore_failure
 
     mark_phase(OperationPhase.STOPPING)
     assert target.lane is not None
@@ -315,6 +315,7 @@ def run_lane_swap(
             f"  [green]rolled back:[/green] {escape(', '.join(result.restored))} serving again"
         )
     if result.restore_failed:
+        note_restore_failure(result.restore_failed)
         console.print(
             f"  [red]not restored:[/red] {escape(', '.join(result.restore_failed))} "
             "(commands printed above)"
@@ -410,7 +411,7 @@ def run_session_swap(
     parameters: dict | None = None,
 ) -> None:
     """Free the GPUs and start a llama.cpp model; exit 1 after rolling back."""
-    from llmctl.services.operations import OperationPhase, mark_phase
+    from llmctl.services.operations import OperationPhase, mark_phase, note_restore_failure
 
     mark_phase(OperationPhase.STOPPING)
     deps = LaneSwapDeps(log=lambda m: console.print(escape(m)))
@@ -437,6 +438,7 @@ def run_session_swap(
             f"  [green]rolled back:[/green] {escape(', '.join(result.restored))} serving again"
         )
     if result.restore_failed:
+        note_restore_failure(result.restore_failed)
         console.print(
             f"  [red]not restored:[/red] {escape(', '.join(result.restore_failed))} "
             "(commands printed above)"

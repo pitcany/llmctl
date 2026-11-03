@@ -182,6 +182,7 @@ def run_swap(
         # Same key, same request: the existing operation is the answer.
         return {
             **info,
+            "job_id": outcome.operation.job_id,
             "operation_id": outcome.operation.id,
             "phase": outcome.operation.phase,
             "status": "already-started",
