@@ -196,3 +196,5 @@ Verified the 14 automated findings against the implementation and addressed them
 - Normalize naive operation timestamps defensively, retain engine-filter choices across renders, select latest evidence by timestamp, and wait for actual reordered swap data in the selection regression.
 
 The initial failed-custom-prompt reproduction changed the workload hash on rerun. Its permanent regression now passes for chat and long-context requests. Focused verification passed 93 tests, followed by 53 tests including actual busy-key retry and terminal-outcome protection. Full-suite and CI results are recorded in PR #30.
+
+Final local full-suite result after review corrections: **1,658 passed, 1 skipped in 464.60 seconds**; the subsequently added busy-retry case passed in the focused run. CI on `66d17e3` passed with **1,657 passed, 3 skipped** on both Python 3.12 and 3.13. A second automated review identified a custom-data-directory lock mismatch: implicit callers now load application settings, matching explicit CLI lock paths while preserving the environment override. A regression reproduced the differing paths before this correction.

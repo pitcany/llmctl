@@ -84,6 +84,10 @@ def lock_path(settings: Any = None) -> Path:
     env = os.environ.get(LOCK_PATH_ENV)
     if env:
         return Path(env).expanduser()
+    if settings is None:
+        from llmctl.config import load_settings
+
+        settings = load_settings()
     data_dir = getattr(getattr(settings, "paths", None), "data_dir", None) if settings else None
     if data_dir:
         return Path(data_dir).expanduser() / "operations.lock"

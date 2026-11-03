@@ -199,3 +199,14 @@ def test_api_session_start_refused_while_lock_held(tmp_path) -> None:
 def test_lock_path_env_override_wins(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LLMCTL_OP_LOCK", str(tmp_path / "custom.lock"))
     assert lock_path() == tmp_path / "custom.lock"
+
+
+def test_implicit_settings_share_configured_lock_path(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    settings = SimpleNamespace(paths=SimpleNamespace(data_dir=tmp_path / "configured"))
+    monkeypatch.delenv("LLMCTL_OP_LOCK", raising=False)
+    monkeypatch.setattr("llmctl.config.load_settings", lambda: settings)
+    assert lock_path() == lock_path(settings) == tmp_path / "configured" / "operations.lock"
+    monkeypatch.setenv("LLMCTL_OP_LOCK", str(tmp_path / "override.lock"))
+    assert lock_path() == tmp_path / "override.lock"
