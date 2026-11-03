@@ -20,6 +20,7 @@ history and offer a one-key re-run.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -135,8 +136,14 @@ def record_to_benchmark(record: BenchmarkRecord) -> BenchmarkResult:
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimate (~whitespace words) when a server omits usage data."""
-    return max(1, len(text.split()))
+    """Rough token estimate (~whitespace words) when a server omits usage data.
+
+    An empty response estimates to zero -- never a fabricated single token.
+    Every count produced here is labeled ``token_count_source="estimate"``
+    on the sample so downstream surfaces can distinguish it from server
+    usage counts.
+    """
+    return len(text.split())
 
 
 def _parse_sse_line(line: str) -> object | None:
@@ -153,7 +160,7 @@ def _parse_sse_line(line: str) -> object | None:
 
 
 def _extract_delta(payload: dict[str, object]) -> str:
-    """Pull incremental text out of an OpenAI-style streaming chunk."""
+    """Pull incremental *content* text out of an OpenAI-style streaming chunk."""
     try:
         choice = payload["choices"][0]  # type: ignore[index]
     except (KeyError, IndexError, TypeError):
@@ -165,6 +172,91 @@ def _extract_delta(payload: dict[str, object]) -> str:
         if choice.get("text"):
             return str(choice["text"])
     return ""
+
+
+def _extract_reasoning(payload: dict[str, object]) -> str:
+    """Pull incremental reasoning text (e.g. ``reasoning_content``) from a chunk.
+
+    vLLM/OpenRouter-style servers stream model reasoning separately from the
+    final answer. Reasoning is generated activity (it counts for
+    ``first_token_ms``) but is *not* answer content, so it does not start the
+    TTFT clock -- see :meth:`BenchmarkService._stream_one`.
+    """
+    try:
+        choice = payload["choices"][0]  # type: ignore[index]
+    except (KeyError, IndexError, TypeError):
+        return ""
+    if isinstance(choice, dict):
+        delta = choice.get("delta")
+        if isinstance(delta, dict) and delta.get("reasoning_content"):
+            return str(delta["reasoning_content"])
+    return ""
+
+
+def _has_tool_delta(payload: dict[str, object]) -> bool:
+    """Return True when a streaming chunk carries tool-call deltas.
+
+    Like reasoning chunks, tool activity is generated output (counted for
+    ``first_token_ms``) but not answer content, so it does not define TTFT.
+    """
+    try:
+        choice = payload["choices"][0]  # type: ignore[index]
+    except (KeyError, IndexError, TypeError):
+        return False
+    if not isinstance(choice, dict):
+        return False
+    delta = choice.get("delta")
+    return isinstance(delta, dict) and bool(delta.get("tool_calls"))
+
+
+#: Sample count below which a percentile is flagged as insufficient: with
+#: very few samples the p90/p99 spread says more about scheduling noise than
+#: about the endpoint.
+MIN_PERCENTILE_SAMPLES = 5
+
+
+def _percentiles(values: list[float]) -> dict[str, object] | None:
+    """Nearest-rank p50/p90/p99 with the sample count and a small-n flag.
+
+    ``insufficient_samples`` marks estimates computed from fewer than
+    :data:`MIN_PERCENTILE_SAMPLES` observations so surfaces can say
+    "p90 ≈ X ms (n=2, too few samples)" instead of implying precision.
+    """
+    n = len(values)
+    if n == 0:
+        return None
+    ordered = sorted(values)
+
+    def _rank(pct: float) -> float:
+        return ordered[max(0, min(n - 1, math.ceil(pct * n) - 1))]
+
+    return {
+        "n": n,
+        "p50": round(float(_rank(0.50)), 2),
+        "p90": round(float(_rank(0.90)), 2),
+        "p99": round(float(_rank(0.99)), 2),
+        "insufficient_samples": n < MIN_PERCENTILE_SAMPLES,
+    }
+
+
+def _aggregate_token_source(samples: list[dict[str, object]]) -> str | None:
+    """Summarize per-sample token provenance for the record.
+
+    ``server_usage`` when every counted token came from the server's usage
+    block; ``estimate`` when every count was estimated; ``mixed`` when both
+    are present. Returns ``None`` when there is nothing to summarize.
+    """
+    sources = {
+        str(sample.get("token_count_source"))
+        for sample in samples
+        if sample.get("token_count_source")
+    }
+    sources.discard("none")
+    if not sources:
+        return None
+    if len(sources) == 1:
+        return sources.pop()
+    return "mixed"
 
 
 def _gpu_snapshot() -> dict[str, object]:
@@ -259,6 +351,7 @@ class BenchmarkService:
         workload = self._expand_workload(base_prompts, request.repetitions)
         params = dict(request.parameters)
         params.setdefault("concurrency", max(1, request.concurrency))
+        params.setdefault("warmup", max(0, request.warmup))
         params.update(self._workload_meta(base_prompts, request.repetitions))
         snapshot = _gpu_snapshot()
         with GPUSampler() as sampler:
@@ -323,7 +416,7 @@ class BenchmarkService:
             repetitions = 1
         params = {
             key: stored[key]
-            for key in ("max_tokens", "temperature", "concurrency")
+            for key in ("max_tokens", "temperature", "concurrency", "warmup")
             if key in stored
         }
         kind = (
@@ -342,6 +435,7 @@ class BenchmarkService:
             parameters=params,
             concurrency=int(stored.get("concurrency", 1) or 1),
             repetitions=repetitions,
+            warmup=max(0, int(stored.get("warmup", 0) or 0)),
             dry_run=str(stored.get("mode", "live")) == "mock",
             require_live=True,
         )
@@ -553,7 +647,14 @@ class BenchmarkService:
     def _run_health(
         self, target: _Target, params: dict[str, object]
     ) -> dict[str, object]:
-        """Time a GET against ``/v1/models``; record latency as ttft+total."""
+        """Time a GET against ``/v1/models``.
+
+        This is an endpoint health check, not generation: the measured
+        number is request latency only. ``ttft_ms`` stays ``None`` (no
+        tokens were generated) and the sample is marked
+        ``measurement="health_check"`` so surfaces never present health
+        latency as generation TTFT.
+        """
         client = (
             self._client_factory()
             if self._client_factory is not None
@@ -574,7 +675,7 @@ class BenchmarkService:
             "total_tokens": 0,
             "latency_ms": elapsed_ms,
             "tokens_per_second": None,
-            "ttft_ms": elapsed_ms,
+            "ttft_ms": None,
             "samples": [
                 {
                     "prompt": "GET /v1/models",
@@ -582,8 +683,10 @@ class BenchmarkService:
                     "status_code": status_code,
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
+                    "token_count_source": "none",
+                    "measurement": "health_check",
                     "latency_ms": elapsed_ms,
-                    "ttft_ms": elapsed_ms,
+                    "ttft_ms": None,
                 }
             ],
             "parameters": {
@@ -591,6 +694,7 @@ class BenchmarkService:
                 "mode": "live",
                 "endpoint": target.models_url,
                 "kind": BenchmarkKind.HEALTH.value,
+                "measurement": "health_check",
             },
             "backend": target.backend,
             "success": True,
@@ -642,13 +746,37 @@ class BenchmarkService:
                 return self._stream_one(
                     client, target, prompt, max_tokens, temperature, endpoint
                 )
+            except Exception as exc:  # noqa: BLE001 - per-request outcome
+                return {
+                    "prompt": prompt,
+                    "response": "",
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "token_count_source": "none",
+                    "latency_ms": None,
+                    "ttft_ms": None,
+                    "first_token_ms": None,
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
             finally:
                 with inflight_lock:
                     inflight["now"] -= 1
 
-        wall_start = time.perf_counter()
-        samples: list[dict[str, object]] = []
+        warmup = max(0, int(params.get("warmup", 0) or 0))
+        warmup_errors: list[str] = []
         with client:
+            if warmup and prompts:
+                for i in range(warmup):
+                    warm_prompt = prompts[i % len(prompts)]
+                    try:
+                        self._stream_one(
+                            client, target, warm_prompt, max_tokens, temperature, endpoint
+                        )
+                    except Exception as exc:  # noqa: BLE001 - recorded as warning
+                        warmup_errors.append(f"{type(exc).__name__}: {exc}")
+            wall_start = time.perf_counter()
+            samples: list[dict[str, object]] = []
             if workers == 1:
                 for prompt in prompts:
                     samples.append(_tracked(prompt))
@@ -664,15 +792,27 @@ class BenchmarkService:
                 f"underfilled workload: {len(prompts)} request(s) cannot reach "
                 f"requested concurrency {requested}; achieved {peak}"
             )
-        total_prompt = sum(int(sample["prompt_tokens"]) for sample in samples)
-        total_completion = sum(int(sample["completion_tokens"]) for sample in samples)
+        for warmup_error in warmup_errors[:3]:
+            warnings.append(f"warm-up request failed: {warmup_error}")
+        failed_samples = [s for s in samples if s.get("ok") is False]
+        ok_samples = [s for s in samples if s.get("ok") is not False]
+        total_prompt = sum(int(sample["prompt_tokens"]) for sample in ok_samples)
+        total_completion = sum(int(sample["completion_tokens"]) for sample in ok_samples)
         ttft_values = [
             float(sample["ttft_ms"])
-            for sample in samples
+            for sample in ok_samples
             if sample["ttft_ms"] is not None
         ]
         tps = round(total_completion / wall_seconds, 2) if wall_seconds > 0 else None
         avg_ttft = round(sum(ttft_values) / len(ttft_values), 2) if ttft_values else None
+        success = not failed_samples
+        error: str | None = None
+        if failed_samples:
+            error = (
+                f"{len(failed_samples)} of {len(samples)} request(s) failed; "
+                f"first: {failed_samples[0].get('error')}"
+            )
+        token_source = _aggregate_token_source(ok_samples)
         return {
             "prompt_tokens": total_prompt,
             "completion_tokens": total_completion,
@@ -689,11 +829,21 @@ class BenchmarkService:
                 "requested_concurrency": requested,
                 "concurrency": requested,
                 "achieved_concurrency": peak,
+                "request_count": len(samples),
+                "failed_request_count": len(failed_samples),
+                "warmup_requests": warmup,
                 "warnings": warnings,
+                "percentiles": {
+                    "latency_ms": _percentiles(
+                        [s["latency_ms"] for s in ok_samples if s.get("latency_ms") is not None]
+                    ),
+                    "ttft_ms": _percentiles(ttft_values),
+                },
+                **({"token_count_source": token_source} if token_source else {}),
             },
             "backend": target.backend,
-            "success": True,
-            "error": None,
+            "success": success,
+            "error": error,
         }
 
     def _stream_one(
@@ -733,7 +883,9 @@ class BenchmarkService:
             }
         start = time.perf_counter()
         ttft: float | None = None
+        first_token: float | None = None
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         usage: dict[str, object] = {}
         with client.stream("POST", url, json=body) as response:
             response.raise_for_status()
@@ -747,25 +899,46 @@ class BenchmarkService:
                 if chunk_usage:
                     usage = chunk_usage  # type: ignore[assignment]
                 delta = _extract_delta(payload)  # type: ignore[arg-type]
+                reasoning = _extract_reasoning(payload)  # type: ignore[arg-type]
+                generated = bool(delta or reasoning or _has_tool_delta(payload))  # type: ignore[arg-type]
+                if generated and first_token is None:
+                    # First *any* generated output: content, reasoning or a
+                    # tool call. TTFT below stays content-only.
+                    first_token = time.perf_counter() - start
                 if delta:
                     if ttft is None:
                         ttft = time.perf_counter() - start
                     content_parts.append(delta)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
         elapsed = time.perf_counter() - start
         text = "".join(content_parts)
         completion = usage.get("completion_tokens")
-        completion = int(completion) if completion is not None else _estimate_tokens(text)
         prompt_tokens = usage.get("prompt_tokens")
+        have_completion = completion is not None
+        have_prompt = prompt_tokens is not None
+        completion = int(completion) if have_completion else _estimate_tokens(text)
         prompt_tokens = (
-            int(prompt_tokens) if prompt_tokens is not None else _estimate_tokens(prompt)
+            int(prompt_tokens) if have_prompt else _estimate_tokens(prompt)
         )
+        if have_completion and have_prompt:
+            token_source = "server_usage"
+        elif have_completion or have_prompt:
+            token_source = "mixed"
+        else:
+            token_source = "estimate"
         return {
             "prompt": prompt,
             "response": text[:SAMPLE_CHAR_LIMIT],
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion,
+            "token_count_source": token_source,
             "latency_ms": round(elapsed * 1000.0, 2),
             "ttft_ms": round(ttft * 1000.0, 2) if ttft is not None else None,
+            "first_token_ms": (
+                round(first_token * 1000.0, 2) if first_token is not None else None
+            ),
+            "reasoning_chars": len("".join(reasoning_parts)),
         }
 
     def _failure(
@@ -800,8 +973,10 @@ class BenchmarkService:
                     "response": "",
                     "prompt_tokens": _estimate_tokens(prompt),
                     "completion_tokens": 0,
+                    "token_count_source": "none",
                     "latency_ms": None,
                     "ttft_ms": None,
+                    "ok": False,
                 }
                 for prompt in prompts
             ],
@@ -878,8 +1053,10 @@ class BenchmarkService:
                     "status_code": None,
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
+                    "token_count_source": "synthetic",
+                    "measurement": "health_check",
                     "latency_ms": ttft_ms,
-                    "ttft_ms": ttft_ms,
+                    "ttft_ms": None,
                 }
             ]
             return {
@@ -888,13 +1065,15 @@ class BenchmarkService:
                 "total_tokens": 0,
                 "latency_ms": ttft_ms,
                 "tokens_per_second": None,
-                "ttft_ms": ttft_ms,
+                "ttft_ms": None,
                 "samples": samples,
                 "parameters": {
                     **params,
                     "mode": "mock",
                     "reason": reason,
                     "kind": request.kind.value,
+                    "measurement": "health_check",
+                    "token_count_source": "synthetic",
                     "concurrency": max(1, int(params.get("concurrency", 1))),
                 },
                 "backend": None,
@@ -907,6 +1086,7 @@ class BenchmarkService:
                 "response": f"[mock benchmark: {reason}]",
                 "prompt_tokens": _estimate_tokens(prompt),
                 "completion_tokens": max_tokens,
+                "token_count_source": "synthetic",
                 "latency_ms": per_prompt_latency_ms,
                 "ttft_ms": ttft_ms,
             }
@@ -927,6 +1107,7 @@ class BenchmarkService:
                 "mode": "mock",
                 "reason": reason,
                 "kind": request.kind.value,
+                "token_count_source": "synthetic",
                 "concurrency": max(1, int(params.get("concurrency", 1))),
             },
             "backend": None,

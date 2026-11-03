@@ -94,11 +94,22 @@ class BenchmarksScreen(DataScreen):
         self._ids = []
         self._names = {}
         baseline = self._baseline_for(data)
+        any_estimated = False
         for result in data:
             mode = str(result.parameters.get("mode", "?"))
             color = C_OK if mode == "live" else C_WARN
             is_baseline = baseline is not None and result.id == baseline.id
-            tps = "-" if result.tokens_per_second is None else f"{result.tokens_per_second:.1f}"
+            token_source = str(result.parameters.get("token_count_source", ""))
+            estimated = token_source in {"estimate", "mixed"}
+            any_estimated = any_estimated or estimated
+            if result.tokens_per_second is None:
+                tps = "-"
+            elif estimated:
+                # "~" marks throughput computed from estimated token counts
+                # (no server usage data), never from precise measurements.
+                tps = f"{result.tokens_per_second:.1f}~"
+            else:
+                tps = f"{result.tokens_per_second:.1f}"
             ttft = (
                 "-"
                 if result.time_to_first_token_ms is None
@@ -140,6 +151,11 @@ class BenchmarksScreen(DataScreen):
             hint.update(
                 f"[{C_MUTED}]No benchmarks recorded yet. Press [b]n[/b] "
                 f"to launch one.[/]"
+            )
+        elif any_estimated:
+            hint.update(
+                f"[{C_MUTED}]~ = throughput from estimated token counts "
+                f"(server sent no usage data)[/]"
             )
         else:
             hint.update("")

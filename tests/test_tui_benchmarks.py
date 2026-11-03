@@ -16,6 +16,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from textual.coordinate import Coordinate
+from textual.widgets import DataTable, Static
 
 from llmctl._testing import isolate_tui
 from llmctl.config import Settings
@@ -141,6 +143,42 @@ def test_launch_modal_dispatches_run_with_chosen_kind(temp_db) -> None:
     assert captured["name"] == "probe"
     assert captured["dry_run"] is False
     assert captured["require_live"] is True
+
+
+def test_estimated_token_counts_are_labeled(temp_db) -> None:
+    """FIXPLAN §1B: throughput from estimated tokens is marked '~' and the
+    hint explains the marker; precise (server usage) rows are unmarked."""
+
+    estimated = _fake_result(name="est")
+    estimated.parameters = {"mode": "live", "token_count_source": "estimate"}
+    precise = _fake_result(name="exact")
+    precise.parameters = {"mode": "live", "token_count_source": "server_usage"}
+
+    async def _run() -> tuple[list[str], str]:
+        with patch(
+            "llmctl.tui._data.get_benchmarks", return_value=[estimated, precise]
+        ):
+            app = MissionControlApp()
+            async with app.run_test() as pilot:
+                await pilot.press("b")
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, BenchmarksScreen):
+                        break
+                screen = app.screen
+                assert isinstance(screen, BenchmarksScreen)
+                table = screen.query_one("#benchmarks-table", DataTable)
+                tps_cells = [
+                    str(table.get_cell_at(Coordinate(row, 5)))
+                    for row in range(table.row_count)
+                ]
+                hint = screen.query_one("#benchmarks-hint", Static).content
+                return tps_cells, hint
+
+    tps_cells, hint = asyncio.run(_run())
+    assert any(cell.endswith("~") for cell in tps_cells), tps_cells
+    assert any(not cell.endswith("~") for cell in tps_cells), tps_cells
+    assert "estimated" in hint.lower()
 
 
 def test_delete_action_invokes_data_layer(temp_db) -> None:

@@ -1365,6 +1365,13 @@ def bench(
             min=1,
         ),
     ] = 1,
+    warmup: Annotated[
+        int,
+        typer.Option(
+            help="Warm-up requests before measurement (excluded from results).",
+            min=0,
+        ),
+    ] = 0,
     sweep: Annotated[
         str | None,
         typer.Option(help="Concurrency sweep, e.g. '1,2,4,8' (overrides --concurrency)."),
@@ -1424,6 +1431,7 @@ def bench(
         parameters={"max_tokens": max_tokens},
         concurrency=concurrency,
         repetitions=repetitions,
+        warmup=warmup,
         sweep=sweep_levels,
         dry_run=synthetic,
     )
@@ -1484,16 +1492,41 @@ def _print_benchmark_result(result: object) -> None:
     table.add_row("Prompt tokens", str(result.prompt_tokens))
     table.add_row("Completion tokens", str(result.completion_tokens))
     table.add_row("Total tokens", str(result.total_tokens))
+    token_source = str(result.parameters.get("token_count_source", ""))
+    if token_source in {"estimate", "mixed", "synthetic"}:
+        label = {
+            "estimate": "estimated (no server usage data)",
+            "mixed": "mixed (server usage + estimates)",
+            "synthetic": "synthetic (mock run)",
+        }[token_source]
+        table.add_row("Token counts", f"[yellow]{label}[/yellow]")
     latency = "n/a" if result.latency_ms is None else f"{result.latency_ms:.1f} ms"
+    est_suffix = " (estimated tokens)" if token_source in {"estimate", "mixed"} else ""
     tps = "n/a" if result.tokens_per_second is None else f"{result.tokens_per_second:.1f} tok/s"
     table.add_row("Latency", latency)
-    table.add_row("Throughput", tps)
+    table.add_row("Throughput", f"{tps}{est_suffix}")
     ttft = (
         "n/a"
         if result.time_to_first_token_ms is None
         else f"{result.time_to_first_token_ms:.1f} ms"
     )
     table.add_row("Time to first token", ttft)
+    request_count = result.parameters.get("request_count")
+    if request_count is not None:
+        failed = int(result.parameters.get("failed_request_count", 0) or 0)
+        cell = str(request_count) if not failed else f"{request_count} ({failed} failed)"
+        table.add_row("Requests", cell)
+    percentiles = result.parameters.get("percentiles") or {}
+    for metric in ("latency_ms", "ttft_ms"):
+        stats = percentiles.get(metric) if isinstance(percentiles, dict) else None
+        if not stats:
+            continue
+        note = " (few samples)" if stats.get("insufficient_samples") else ""
+        table.add_row(
+            f"{metric} p50/p90/p99",
+            f"{stats.get('p50')} / {stats.get('p90')} / {stats.get('p99')} ms"
+            f" (n={stats.get('n')}){note}",
+        )
     if result.peak_vram_mb is not None:
         table.add_row("Peak VRAM", f"{result.peak_vram_mb} MB")
     if result.avg_gpu_util_pct is not None:

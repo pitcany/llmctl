@@ -317,6 +317,10 @@ class BenchmarkRunRequest(BaseModel):
     #: is independent of ``concurrency`` on purpose -- a concurrency sweep
     #: must not silently change the total workload.
     repetitions: int = Field(default=1, ge=1)
+    #: Warm-up requests executed before measurement; excluded from samples,
+    #: timings and throughput. Warms caches/compilation so the recorded
+    #: measurements describe steady state.
+    warmup: int = Field(default=0, ge=0)
     sweep: list[int] = Field(default_factory=list)
     dry_run: bool = False
     #: Default True: refuse to mock-fallback when no endpoint resolves.
