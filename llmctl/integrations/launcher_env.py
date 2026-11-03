@@ -91,11 +91,25 @@ def resolve_cuda_root() -> str:
 
 
 def resolve_hf_home() -> str:
-    """Return ``HF_HOME``. Default ``~/.cache/huggingface``."""
-    val = os.environ.get("HF_HOME")
-    if val:
-        return val
-    return str(Path.home() / _DEFAULT_HF_CACHE)
+    """Return ``HF_HOME``, canonical. Default ``~/.cache/huggingface``.
+
+    A value that is itself a symlink is resolved to its target, so a rendered
+    profile reads the same whether the caller's shell set ``HF_HOME`` to the
+    link (``~/.cache/huggingface``) or to its target (``~/AI/cache/huggingface``).
+    From systemd, llmctl-api or a bare ssh, where ``HF_HOME`` is unset, every
+    profile used to "drift" and ``router-profiles --write`` rewrote five files
+    to the non-canonical path (2026-11-01). Only the path itself is resolved:
+    a symlinked parent (macOS ``/tmp``) is left alone.
+    """
+    val = os.environ.get("HF_HOME") or str(Path.home() / _DEFAULT_HF_CACHE)
+    path = Path(os.path.expanduser(val))
+    if path.is_symlink():
+        try:
+            return str(path.resolve())
+        except OSError:
+            return str(path)
+    # Expanded: this lands in an EnvironmentFile, and systemd does not expand ``~``.
+    return str(path)
 
 
 def launcher_env_lines(python_root: str | None = None) -> list[str]:

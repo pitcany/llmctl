@@ -19,6 +19,7 @@ from llmctl.services.backends import probe_ollama_loaded
 from llmctl.services.engines import ENGINE_NAMES
 from llmctl.services.lanes import Lane, load_lanes
 from llmctl.services.router import RuntimeRouter
+from llmctl.telemetry.engine_metrics import EngineLoad, fetch_engine_load
 from llmctl.telemetry.gpu import get_gpu_info, nvml_available
 
 #: Seconds a lane may take to answer its ``/v1/models`` probe.
@@ -52,6 +53,14 @@ async def _default_lane_probe(lane: Lane) -> bool:
         return False
 
 
+LoadProbe = Callable[[str, str], "EngineLoad | None"]
+
+
+def _default_load_probe(endpoint: str, runtime: str) -> EngineLoad | None:
+    """What the engine at ``endpoint`` reports about its load, or ``None``."""
+    return fetch_engine_load(endpoint, runtime, timeout=LANE_PROBE_TIMEOUT_S)
+
+
 #: The adapters' "start it" hint; wrong next to a live session.
 _START_HINT = re.compile(r";?\s*`llmctl run NAME` starts it\.?")
 
@@ -74,12 +83,14 @@ class HealthService:
         engines: Any | None = None,
         model_users: Any | None = None,
         lane_probe: LaneProbe | None = None,
+        load_probe: LoadProbe | None = None,
     ) -> None:
         self.settings = settings or load_settings()
         self._lanes = list(lanes) if lanes is not None else None
         self._engines = engines
         self._model_users = model_users
         self._lane_probe: LaneProbe = lane_probe or _default_lane_probe
+        self._load_probe: LoadProbe = load_probe or _default_load_probe
         self._router = router
         # Optional: with a DB session, health also reports what is actually
         # SERVING per runtime. Without one it degrades to binary presence,
@@ -357,6 +368,36 @@ class HealthService:
                     f"`llmctl setup {name}` installs it."
                 )
 
+    def _attach_load(self, runtimes: dict[str, dict[str, Any]]) -> None:
+        """Add what each serving endpoint reports about its load (rule G).
+
+        A runtime that answers its probe is "ok" even when its KV cache is
+        full and it is preempting every request; that is the state the
+        operator most needs to see, so each session with an endpoint gets a
+        ``load`` dict (see :class:`~llmctl.telemetry.engine_metrics.EngineLoad`)
+        and the runtime a ``pressure`` rollup. Best effort: an endpoint that
+        does not report load keeps ``load: None``.
+        """
+        for name, info in runtimes.items():
+            worst: str | None = None
+            for session in info.get("sessions", []):
+                endpoint = session.get("endpoint_url")
+                session["load"] = None
+                if not endpoint:
+                    continue
+                try:
+                    load = self._load_probe(str(endpoint), name)
+                except Exception:  # noqa: BLE001 - load is advisory
+                    load = None
+                if load is None:
+                    continue
+                session["load"] = load.as_dict()
+                rank = {"ok": 0, "unknown": 0, "high": 1, "saturated": 2}
+                if worst is None or rank.get(load.pressure, 0) > rank.get(worst, 0):
+                    worst = load.pressure
+            if worst is not None:
+                info["pressure"] = worst
+
     def get_health(self) -> dict[str, Any]:
         """Return a conservative health snapshot."""
         gpus = get_gpu_info()
@@ -370,6 +411,7 @@ class HealthService:
             info["unmanaged_count"] = sum(1 for s in info["sessions"] if not s.get("managed", True))
         self._apply_engine_rules(runtimes, lanes, answers)
         self._apply_status_rules(runtimes, lanes, answers)
+        self._attach_load(runtimes)
         return {
             "state": HealthState.OK,
             "safe_mode": self.settings.app.safe_mode,

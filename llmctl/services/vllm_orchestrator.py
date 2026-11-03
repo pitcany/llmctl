@@ -51,10 +51,6 @@ class MissingModelPathError(FileNotFoundError):
     """Raised when a preset's *local* model path is not present on disk."""
 
 
-#: Prefixes that mark a preset ``model_id`` as a filesystem path rather than
-#: a HuggingFace repo id. Repo ids ("org/name") never start with these.
-_LOCAL_PATH_PREFIXES = ("/", "~", "./", "../")
-
 
 @dataclass
 class OrchestratorOptions:
@@ -320,32 +316,35 @@ def _build_spec(
 
 
 def _check_model_path(spec: VLLMLaunchSpec) -> None:
-    """Refuse to swap the managed unit onto a local model path that is gone.
+    """Refuse to swap the managed unit onto weights that are not on this machine.
 
     ``llmctl vllm <preset>`` rewrites the env file and restarts the
     **single** TP unit, so a preset naming deleted weights first evicts
-    whatever is currently serving and only then fails to load — the
+    whatever is currently serving and only then fails to load -- the
     generator stays down until a human notices and re-points it by hand.
     That is precisely what a stale ``ornith-35b-refusal`` preset would
     have done after its checkpoint was deleted on 2026-07-26.
 
-    Only **local paths** are checked. A HuggingFace repo id (``org/name``)
-    resolves from the HF cache or is fetched on demand, so it fails OPEN —
-    the same rule the scheduler's shard-completeness check follows. The
-    refusal fires before fleet preflight, so a refused start never stops
-    ollama or touches the env file.
+    A **local path** must exist. A **HuggingFace repo id** (``org/name``)
+    must be in a hub cache (``HF_HOME``, ``HUGGINGFACE_HUB_CACHE``,
+    ``~/.cache/huggingface``): vLLM would otherwise download it on the way
+    up, which for a 30 GB checkpoint is a minutes-long outage of the unit
+    at best and a crash loop at worst (the Muse preset on 2026-11-01, its
+    hub snapshot moved off the disk). This is the same fail-closed rule
+    llm-router applies before it swaps. The refusal fires before fleet
+    preflight, so a refused start never stops ollama or touches the env
+    file; ``--force`` overrides it.
     """
-    model = (spec.model or "").strip()
-    if not model.startswith(_LOCAL_PATH_PREFIXES):
-        return
-    path = Path(model).expanduser()
-    if path.exists():
+    from llmctl.services.weights import vllm_model_verdict
+
+    verdict = vllm_model_verdict(spec.model)
+    if not verdict.gone:
         return
     raise MissingModelPathError(
-        f"preset model path does not exist: {path}. Refusing to restart the "
-        f"unit onto missing weights — it would evict the currently served "
-        f"model and then fail to load. Fix the preset's model_id, or pass "
-        f"--force to override."
+        f"preset {verdict.reason}. Refusing to restart the unit onto missing "
+        f"weights -- it would evict the currently served model and then fail "
+        f"to load. Fix the preset's model_id (or `llmctl add` the model), or "
+        f"pass --force to override."
     )
 
 

@@ -433,9 +433,17 @@ class SwapPreview:
     #: ``stops`` came from the lane's own plan: empty means nothing stops,
     #: not that nothing runs.
     planned: bool = False
+    #: Why the swap must not run (its weights are gone), if so. Shown first,
+    #: before the stops it would have made.
+    blocked: str = ""
 
     def lines(self) -> list[str]:
         """Plain-text preview lines (the CLI and the TUI both render these)."""
+        if self.blocked:
+            return [
+                f"weights gone: {self.blocked}",
+                "not starting: it would stop what serves now and then fail to load.",
+            ]
         if self.already_serving and self.target.kind == "lane":
             return [f"{self.target.model} ({self.target.engine}) is already serving."]
         if self.already_serving and self.target.kind == "session":
@@ -668,15 +676,20 @@ class SwapState:
     engine2_serving: set[str] = field(default_factory=set)
     #: GPUs on this host (placement needs it); None = unknown.
     card_count: int | None = None
+    #: catalog key -> why its weights are gone (:func:`~llmctl.services.weights.gone_targets`).
+    #: Such a row is listed, marked, and refused by ``run``.
+    gone: dict[str, str] = field(default_factory=dict)
 
     def state_of(self, row: SwapTarget) -> str:
-        """``serving`` / ``loading`` / ``""`` for the picker's State column."""
+        """``serving`` / ``loading`` / ``weights gone`` / ``""`` for the picker's State column."""
         if row.key in self.serving:
             return "serving"
         if session_is_running(row, self.active_units, self.gpu_sessions):
             return "serving"
         if self._holds_unit(row):
             return "loading"
+        if row.key in self.gone:
+            return "weights gone"
         return ""
 
     def _holds_unit(self, row: SwapTarget) -> bool:
@@ -760,7 +773,19 @@ class SwapState:
         return lanes
 
     def preview(self, target: SwapTarget, load_times: Path | None = None) -> SwapPreview:
-        """:func:`preview_swap` against this state (a lane that fits stops nothing)."""
+        """:func:`preview_swap` against this state (a lane that fits stops nothing).
+
+        A target whose weights are gone previews as blocked (and :meth:`state_of`
+        says ``weights gone``), so every surface that shows the preview says
+        why before anything is stopped.
+        """
+        preview = self._preview(target, load_times)
+        reason = self.gone.get(target.key)
+        if reason and target.key not in self.serving:
+            preview.blocked = reason
+        return preview
+
+    def _preview(self, target: SwapTarget, load_times: Path | None = None) -> SwapPreview:
         return preview_swap(
             target,
             self.catalog,
@@ -804,6 +829,7 @@ def gather_state(
     vram_need: Callable[[str], dict[int, int] | None] | None = None,
     conflicts_of: Callable[[str], set[str] | None] | None = None,
     live_fit: bool = True,
+    weights_check: Callable[[list[SwapTarget], dict[str, Any]], dict[str, str]] | None = None,
 ) -> SwapState:
     """Build the catalog and probe it. Read-only; every seam is injectable.
 
@@ -811,6 +837,10 @@ def gather_state(
     after the lanes (default: :func:`load_session_rows`).
 
     ``is_active(unit, user_scope)`` answers systemd's is-active.
+
+    ``weights_check(catalog, presets)`` returns catalog key -> why that row's
+    weights are gone (default: :func:`~llmctl.services.weights.gone_targets`
+    against the hub caches and the Ollama servers).
     """
     if presets is None:
         from llmctl.services.preset_loader import load_presets
@@ -854,6 +884,20 @@ def gather_state(
     from llmctl.services import vllm_slots
 
     serving = serving_keys(catalog, probe, loaded_probes)
+    if weights_check is None:
+
+        def weights_check(listed: list[SwapTarget], specs: dict[str, Any]) -> dict[str, str]:
+            from llmctl.adapters.ollama import DEFAULT_ENDPOINT
+            from llmctl.services.weights import gone_targets
+
+            ollama = (settings.runtimes.get("ollama") if hasattr(settings, "runtimes") else None)
+            default = getattr(ollama, "endpoint", None) or DEFAULT_ENDPOINT
+            return gone_targets(listed, presets=specs, ollama_default=default)
+
+    try:
+        gone = weights_check(catalog, presets)
+    except Exception:  # noqa: BLE001 - the verdict is advisory; the list must render
+        gone = {}
     engine2 = getattr(settings.managed_units, "vllm_engine2", None)
     engine_lanes: list[Lane] = []
     engine2_serving: set[str] = set()
@@ -877,6 +921,7 @@ def gather_state(
         free_mib=free_mib,
         vram_need=vram_need,
         conflicts_of=conflicts_of,
+        gone=gone,
     )
 
 
