@@ -210,3 +210,25 @@ def test_implicit_settings_share_configured_lock_path(tmp_path, monkeypatch) -> 
     assert lock_path() == lock_path(settings) == tmp_path / "configured" / "operations.lock"
     monkeypatch.setenv("LLMCTL_OP_LOCK", str(tmp_path / "override.lock"))
     assert lock_path() == tmp_path / "override.lock"
+
+
+def test_session_routes_pass_injected_settings(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from llmctl.api import routes_sessions
+
+    settings = object()
+    seen = []
+    result = object()
+
+    def service(db, *, settings):
+        seen.append(settings)
+        return SimpleNamespace(
+            start=lambda payload: result, stop=lambda sid: result, restart=lambda sid: result,
+        )
+
+    monkeypatch.setattr(routes_sessions, "SessionService", service)
+    assert routes_sessions.start_session(object(), db=object(), settings=settings) is result
+    assert routes_sessions.stop_session("id", db=object(), settings=settings) is result
+    assert routes_sessions.restart_session("id", db=object(), settings=settings) is result
+    assert seen == [settings, settings, settings]

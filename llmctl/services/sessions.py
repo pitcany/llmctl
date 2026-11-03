@@ -640,7 +640,9 @@ class SessionService:
         """Plan and (when not dry-run) launch a runtime session."""
         if request.dry_run:
             return self._start_planned(request)
-        with gpu_operation_lock(purpose="start session", interface="llmctl"):
+        with gpu_operation_lock(
+            purpose="start session", interface="llmctl", settings=self.settings,
+        ):
             return self._start_planned(request)
 
     def _start_planned(self, request: SessionStartRequest) -> Session:
@@ -667,7 +669,7 @@ class SessionService:
             # Planning only: no GPU mutation, so read paths stay available.
             return self._launch_record(record, plan)
         with gpu_operation_lock(
-            purpose=f"start session {record.id}", interface="llmctl"
+            purpose=f"start session {record.id}", interface="llmctl", settings=self.settings
         ):
             return self._launch_record(record, plan)
 
@@ -681,7 +683,9 @@ class SessionService:
         ``STOPPED`` (the row is kept; ``detach`` is the verb that deletes).
         An adopted session without a known unit still refuses.
         """
-        with gpu_operation_lock(purpose=f"stop session {session_id}", interface="llmctl"):
+        with gpu_operation_lock(
+            purpose=f"stop session {session_id}", interface="llmctl", settings=self.settings,
+        ):
             record = self._resolve_record(session_id)
             if not record:
                 return None
@@ -764,7 +768,9 @@ class SessionService:
         that a previous ``stop --systemd`` took down. An adopted session
         without a known unit still refuses.
         """
-        with gpu_operation_lock(purpose=f"restart session {session_id}", interface="llmctl"):
+        with gpu_operation_lock(
+            purpose=f"restart session {session_id}", interface="llmctl", settings=self.settings,
+        ):
             record = self._resolve_record(session_id)
             if not record:
                 return None
@@ -1020,7 +1026,9 @@ class SessionService:
         from their own ``ExecStartPost``; inventing a row here would race
         that hook and could leave two rows for one endpoint.
         """
-        with gpu_operation_lock(purpose=f"start unit {unit_name}", interface="llmctl"):
+        with gpu_operation_lock(
+            purpose=f"start unit {unit_name}", interface="llmctl", settings=self.settings,
+        ):
             if not unit_name:
                 raise AdoptError("A unit name is required.")
 

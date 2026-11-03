@@ -900,7 +900,7 @@ def stop(
     )
     failed = False
     try:
-        for item, ok in stop_items(items, real_deps(settings)):
+        for item, ok in stop_items(items, real_deps(settings), settings=settings):
             if ok:
                 console.print(f"[green]Stopped[/green] {escape(item.label)}")
             else:

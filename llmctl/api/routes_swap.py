@@ -254,7 +254,9 @@ def stop_swap(
         )
     try:
         with jobs.stopping():
-            outcome = stop_serving.stop_items(items, stop_serving.real_deps(settings))
+            outcome = stop_serving.stop_items(
+                items, stop_serving.real_deps(settings), settings=settings,
+            )
     except JobBusy as busy:
         if record is not None:
             store.finish(record.id, OperationPhase.FAILED, error="a swap job was running")

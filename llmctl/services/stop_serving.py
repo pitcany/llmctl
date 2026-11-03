@@ -132,10 +132,14 @@ class StopDeps:
     run_cmd: Callable[[Sequence[str]], bool] = _run_stop_cmd
 
 
-def stop_items(items: list[Serving], deps: StopDeps) -> list[tuple[Serving, bool]]:
+def stop_items(
+    items: list[Serving], deps: StopDeps, *, settings: Any = None,
+) -> list[tuple[Serving, bool]]:
     """Stop each item; returns ``(item, stopped)`` pairs in order."""
 
-    with gpu_operation_lock(purpose=f"stop {len(items)} serving item(s)", interface="llmctl"):
+    with gpu_operation_lock(
+        purpose=f"stop {len(items)} serving item(s)", interface="llmctl", settings=settings,
+    ):
         results = []
         for item in items:
             fn = {"vllm": deps.stop_vllm, "lane": deps.stop_lane, "session": deps.stop_session}[
