@@ -179,8 +179,11 @@ class StartOutcome:
 
 
 class SwapJobs:
-    def __init__(self, database_url: str | None = None) -> None:
+    def __init__(
+        self, database_url: str | None = None, *, lock_path: str | None = None,
+    ) -> None:
         self._lock = threading.Lock()
+        self._lock_path = lock_path
         self._jobs: dict[str, SwapJob] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._stopping = 0
@@ -320,6 +323,8 @@ class SwapJobs:
                 self._store.append_output(job.operation_id, line)
 
         extra_env: dict[str, str] = {}
+        if self._lock_path is not None:
+            extra_env["LLMCTL_OP_LOCK"] = self._lock_path
         if self._store is not None and job.operation_id:
             # Hand the record to the child: it owns the lock and the phases.
             extra_env[OP_ID_ENV] = job.operation_id

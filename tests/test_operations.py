@@ -510,3 +510,18 @@ def test_busy_refusal_does_not_consume_key(tmp_path: Path) -> None:
         jobs.wait(second.job.job_id, 3)
         assert not second.replayed
         assert second.job is not None
+
+
+def test_swap_child_receives_effective_lock_path(tmp_path: Path) -> None:
+    seen = []
+
+    def runner(argv, on_line, extra_env):
+        seen.append(extra_env["LLMCTL_OP_LOCK"])
+        return 0
+
+    path = str(tmp_path / "embedded" / "operations.lock")
+    jobs = SwapJobs(database_url=f"sqlite:///{tmp_path / 'child-lock.db'}", lock_path=path)
+    with patch("llmctl.services.swap_jobs.run_argv", runner):
+        outcome = jobs.start_with_operation("demo", "model", ["argv"])
+        jobs.wait(outcome.job.job_id, 3)
+    assert seen == [path]

@@ -24,6 +24,7 @@ from llmctl.api.deps import get_db_session, get_settings, get_swap_jobs
 from llmctl.config import Settings, load_settings, resolve_api_auth_token
 from llmctl.db import ensure_tables, get_engine
 from llmctl.services.health import HealthService
+from llmctl.services.op_lock import lock_path
 from llmctl.services.swap_jobs import SwapJobs
 
 #: Paths that stay reachable without a bearer token when
@@ -102,7 +103,9 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
 
     # §2B: the job registry persists operations to the same database so a
     # restart can reconcile unfinished swaps instead of forgetting them.
-    swap_jobs = SwapJobs(database_url=effective_database_url)
+    swap_jobs = SwapJobs(
+        database_url=effective_database_url, lock_path=str(lock_path(effective_settings)),
+    )
     app.dependency_overrides[get_settings] = lambda: effective_settings
     app.dependency_overrides[get_swap_jobs] = lambda: swap_jobs
 
