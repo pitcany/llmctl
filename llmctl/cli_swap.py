@@ -44,6 +44,7 @@ from llmctl.services.lanes import (
     last_load_s,
     resolve,
 )
+from llmctl.services.op_lock import LockBusy, handed_off
 from llmctl.services.session_swap import (
     pause_for_swap,
     resume_after_failed_swap,
@@ -378,9 +379,16 @@ def run_router_swap(state: SwapState, target: SwapTarget, console: Console, sett
     )
     started = time.monotonic()
     try:
-        result = switch_via_router(
-            target.model, url=cfg.url, key=key, force=True, timeout_s=cfg.timeout_s
-        )
+        # llm-router owns the GPUs (same host lock) for its switch and rollback;
+        # holding the lock across this call would make each wait on the other.
+        with handed_off(settings=settings):
+            result = switch_via_router(
+                target.model, url=cfg.url, key=key, force=True, timeout_s=cfg.timeout_s
+            )
+    except LockBusy as exc:
+        console.print(f"[red]Cannot finish the swap:[/red] {escape(str(exc))}")
+        console.print("  the router call returned; check `llmctl status` before retrying")
+        raise typer.Exit(1) from exc
     except RouterRefused as exc:
         console.print(f"[red]llm-router refused:[/red] {escape(str(exc))}")
         if exc.retry_after:

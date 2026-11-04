@@ -232,3 +232,119 @@ def test_session_routes_pass_injected_settings(monkeypatch) -> None:
     assert routes_sessions.stop_session("id", db=object(), settings=settings) is result
     assert routes_sessions.restart_session("id", db=object(), settings=settings) is result
     assert seen == [settings, settings, settings]
+
+
+# --- delegation handoff (NEXT-AGENT-PLAN 2026-11-03 §6, package B) --------------
+# llm-router now takes this same flock around its switch. A CLI that held the lock
+# across `POST /admin/switch` would wait on a router waiting on it, so the CLI
+# hands ownership to the router for that call and takes it back afterwards.
+
+_TAKE = r"""
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+deadline = time.monotonic() + float(sys.argv[2])
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except OSError:
+        if time.monotonic() >= deadline:
+            sys.exit(3)
+        time.sleep(0.02)
+print("held", flush=True)
+time.sleep(float(sys.argv[3]))
+print("released", time.monotonic(), flush=True)
+"""
+
+
+def _take(path: Path, wait: float, hold: float) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [sys.executable, "-c", _TAKE, str(path), str(wait), str(hold)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _free_elsewhere(path: Path) -> bool:
+    proc = _take(path, 0, 0)
+    proc.communicate(timeout=10)
+    return proc.returncode == 0
+
+
+def test_handoff_lets_a_delegate_process_take_the_lock(tmp_path, monkeypatch) -> None:
+    from llmctl.services.op_lock import handed_off, held_by_us
+
+    path = tmp_path / "op.lock"
+    monkeypatch.setenv("LLMCTL_OP_LOCK", str(path))
+    with gpu_operation_lock(purpose="run x", interface="cli"):
+        assert not _free_elsewhere(path)
+        with handed_off():
+            assert not held_by_us()
+            assert _free_elsewhere(path), "delegate (llm-router) could not take the lock"
+        assert held_by_us()
+        assert not _free_elsewhere(path), "ownership not taken back after the call"
+        assert json.loads(path.read_text())["purpose"] == "run x"
+    assert _free_elsewhere(path)
+
+
+def test_handoff_waits_for_the_delegate_before_resuming(tmp_path, monkeypatch) -> None:
+    import time
+
+    from llmctl.services.op_lock import handed_off
+
+    path = tmp_path / "op.lock"
+    monkeypatch.setenv("LLMCTL_OP_LOCK", str(path))
+    with gpu_operation_lock(purpose="run x", interface="cli"):
+        with handed_off(timeout=10):
+            delegate = _take(path, 5, 0.3)
+            assert delegate.stdout is not None
+            assert delegate.stdout.readline().strip() == "held"
+        resumed = time.monotonic()
+        out, _ = delegate.communicate(timeout=10)
+    assert resumed >= float(out.split()[-1]), "resumed while the delegate still owned the GPUs"
+
+
+def test_handoff_refuses_to_resume_when_someone_kept_the_lock(tmp_path, monkeypatch) -> None:
+    from llmctl.services.op_lock import handed_off
+
+    path = tmp_path / "op.lock"
+    monkeypatch.setenv("LLMCTL_OP_LOCK", str(path))
+    squatter = None
+    try:
+        with pytest.raises(LockBusy):
+            with gpu_operation_lock(purpose="run x", interface="cli"):
+                with handed_off(timeout=0.2):
+                    squatter = _take(path, 5, 30)
+                    assert squatter.stdout is not None
+                    assert squatter.stdout.readline().strip() == "held"
+                pytest.fail("must not continue without ownership")
+    finally:
+        if squatter is not None:
+            squatter.kill()
+            squatter.wait()
+    # The failed resume left nothing registered: a fresh acquire works.
+    with gpu_operation_lock(purpose="after", interface="cli", timeout=2):
+        pass
+
+
+def test_handoff_keeps_reentrant_depth(tmp_path, monkeypatch) -> None:
+    from llmctl.services.op_lock import handed_off, held_by_us
+
+    path = tmp_path / "op.lock"
+    monkeypatch.setenv("LLMCTL_OP_LOCK", str(path))
+    with gpu_operation_lock(purpose="outer", interface="cli"):
+        with gpu_operation_lock(purpose="inner", interface="cli"):
+            with handed_off():
+                assert _free_elsewhere(path)
+            assert held_by_us()
+        assert held_by_us(), "inner exit must not release the outer hold"
+    assert not held_by_us() and _free_elsewhere(path)
+
+
+def test_handoff_without_a_hold_is_a_no_op(tmp_path, monkeypatch) -> None:
+    from llmctl.services.op_lock import handed_off, held_by_us
+
+    monkeypatch.setenv("LLMCTL_OP_LOCK", str(tmp_path / "op.lock"))
+    with handed_off():
+        assert not held_by_us()
+    assert not held_by_us()

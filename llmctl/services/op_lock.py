@@ -228,6 +228,66 @@ def _release(key: str, held: _Held) -> None:
         pass
 
 
+@contextmanager
+def handed_off(*, timeout: float = 30.0, settings: Any = None) -> Iterator[None]:
+    """Hand this thread's hold to a cooperating owner for the block.
+
+    llm-router takes this same flock around its switch (and rollback). A CLI
+    that kept holding it across ``POST /admin/switch`` would wait on a router
+    that waits on it, so the delegated call runs inside this block: the flock
+    is released (the reentrancy depth is kept), the router owns the GPUs for
+    its whole mutation, and the hold is taken back -- waiting up to
+    ``timeout`` -- for the caller's remaining work (restoring paused lanes,
+    recording the outcome). If someone else still owns it then,
+    :class:`LockBusy` is raised and nothing stays registered: the caller must
+    not continue without ownership.
+
+    A no-op when this thread holds nothing. No token or bypass is involved:
+    whoever owns the GPUs during the call holds the flock like anyone else.
+    """
+    path = lock_path(settings)
+    key = str(path)
+    me = threading.get_ident()
+    with _guard:
+        held = _held.get(key)
+        if held is None or held.thread_id != me:
+            held = None
+        else:
+            del _held[key]
+            try:
+                fcntl.flock(held.fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+    if held is None:
+        yield
+        return
+    try:
+        yield
+    finally:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            try:
+                fcntl.flock(held.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                if time.monotonic() >= deadline:
+                    try:
+                        os.close(held.fd)
+                    except OSError:
+                        pass
+                    raise LockBusy(_read_holder(path), timeout) from exc
+                time.sleep(0.05)
+        held.holder = {**held.holder, "acquired_at": time.time()}
+        os.lseek(held.fd, 0, os.SEEK_SET)
+        os.truncate(held.fd, 0)
+        os.write(held.fd, json.dumps(held.holder).encode("utf-8"))
+        os.fsync(held.fd)
+        with _guard:
+            _held[key] = held
+
+
 def held_by_us(settings: Any = None) -> bool:
     """True when the current thread already holds the lock (test helper)."""
     path = str(lock_path(settings))
