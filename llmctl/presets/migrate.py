@@ -176,6 +176,16 @@ def _canonical_before(canonical: Path) -> dict[str, Any]:
     return {"type": "absent"}
 
 
+def _restore_canonical(canonical: Path, before: dict[str, Any]) -> None:
+    """Put ``canonical`` back the way :func:`_canonical_before` recorded it."""
+    if before["type"] == "symlink":
+        _replace_with_symlink(canonical, before["target"])
+    elif before["type"] == "absent":
+        with contextlib.suppress(FileNotFoundError):
+            canonical.unlink()
+    # "file": only the identical action writes over a real file, with the same bytes.
+
+
 def _write_manifest(canonical_dir: Path, payload: dict[str, Any]) -> Path:
     mdir = canonical_dir / MANIFEST_DIRNAME
     mdir.mkdir(parents=True, exist_ok=True)
@@ -215,7 +225,13 @@ def apply(legacy_dir: Path | None = None, canonical_dir: Path | None = None) -> 
             before = _canonical_before(a.canonical)
             _replace_with_file(a.canonical, data, mode)
             rel = os.path.relpath(os.path.realpath(a.canonical), os.path.realpath(a.legacy.parent))
-            _replace_with_symlink(a.legacy, rel)
+            try:
+                _replace_with_symlink(a.legacy, rel)
+            except BaseException:
+                # The legacy file is untouched; undo the canonical write so no
+                # unrecorded file is left behind for a rollback to miss.
+                _restore_canonical(a.canonical, before)
+                raise
             changes.append(
                 {
                     "alias": a.alias,

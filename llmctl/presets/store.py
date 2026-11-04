@@ -170,6 +170,11 @@ def _write_yaml(path: Path, model: Model) -> None:
         except (ValueError, yaml.YAMLError, OSError):
             text = None
     if text is None:
+        if path.exists():
+            log.warning(
+                "%s: could not edit the preset line by line; rewriting the whole file "
+                "(its comments are not kept)", path,
+            )
         text = dump_mapping(desired)
     try:
         reloaded = Model.model_validate(yaml.safe_load(text) or {})
