@@ -16,25 +16,29 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
 @router.get("", response_model=list[Session])
-def list_sessions(db: DBSession = Depends(get_db_session)) -> list[Session]:
+def list_sessions(
+    db: DBSession = Depends(get_db_session), settings: Settings = Depends(get_settings),
+) -> list[Session]:
     """List sessions."""
-    return SessionService(db).list_sessions()
+    return SessionService(db, settings=settings).list_sessions()
 
 
 @router.post("/plan", response_model=LaunchPlan)
 def plan_session(
-    payload: SessionStartRequest, db: DBSession = Depends(get_db_session)
+    payload: SessionStartRequest, db: DBSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
 ) -> LaunchPlan:
     """Return an inspectable launch plan without launching."""
-    return SessionService(db).plan(payload)
+    return SessionService(db, settings=settings).plan(payload)
 
 
 @router.post("/cleanup")
 def cleanup_sessions(
-    remove_stale: bool = False, db: DBSession = Depends(get_db_session)
+    remove_stale: bool = False, db: DBSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     """Reconcile dead sessions, free ports, and optionally purge stale records."""
-    return SessionService(db).cleanup(remove_stale=remove_stale)
+    return SessionService(db, settings=settings).cleanup(remove_stale=remove_stale)
 
 
 @router.post("/start", response_model=Session, status_code=status.HTTP_201_CREATED)
@@ -95,7 +99,8 @@ def restart_session(
 
 @router.get("/{session_id}/systemd-unit")
 def session_systemd_unit(
-    session_id: str, user: bool = True, db: DBSession = Depends(get_db_session)
+    session_id: str, user: bool = True, db: DBSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     """Return a systemd unit that relaunches the session on boot.
 
@@ -105,7 +110,7 @@ def session_systemd_unit(
     """
     from llmctl.services.systemd import render_session_unit
 
-    session = SessionService(db).get_session(session_id)
+    session = SessionService(db, settings=settings).get_session(session_id)
     if session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
     try:

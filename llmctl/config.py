@@ -314,7 +314,9 @@ _ROLE_ALIASES = {"vllm-tp": VLLM_ROLE}
 
 #: Role names claimed by ManagedUnitsConfig's typed fields; the generic
 #: ``units`` mapping may not redefine them.
-_RESERVED_ROLE_NAMES = {VLLM_ROLE, "vllm_engine", "vllm-tp", "vllm_tp", "fleet"}
+_RESERVED_ROLE_NAMES = {
+    VLLM_ROLE, "vllm_engine", "vllm-tp", "vllm_tp", "vllm-engine2", "vllm_engine2", "fleet",
+}
 
 
 def resolve_role(name: str) -> str:
@@ -431,16 +433,20 @@ class ManagedUnitsConfig(BaseModel):
             raise ValueError(
                 f"managed_units.units may not redefine reserved role(s) "
                 f"{', '.join(clashes)}; configure managed_units.vllm_engine / "
+                f"managed_units.vllm_engine2 / "
                 f"managed_units.fleet directly."
             )
         return value
 
     def roles(self) -> dict[str, ManagedUnitConfig]:
-        """All unit roles by CLI name: the built-in ``vllm-engine`` plus ``units``.
+        """All unit roles by CLI name, including the optional second engine.
 
         Look a name up with :func:`resolve_role` first, so ``vllm-tp`` works.
         """
-        return {VLLM_ROLE: self.vllm_engine, **self.units}
+        roles = {VLLM_ROLE: self.vllm_engine}
+        if self.vllm_engine2 is not None:
+            roles["vllm-engine2"] = self.vllm_engine2
+        return {**roles, **self.units}
 
 
 def _recorded_engine_binary(config_dir: Path, runtime: str) -> str | None:
