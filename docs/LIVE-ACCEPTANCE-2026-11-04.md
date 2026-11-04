@@ -149,16 +149,30 @@ environment (the value was not printed). Peer session ai-64 held its GPU embeddi
    qwen3.8-27b-awq, 311s ago`, an llmctl that had already exited. The real holder was a plain
    `flock` (pid 67651). The router reads metadata left in the lock file by the last writer
    without checking that the pid is alive. Cosmetic for llmctl/router/healer holders, which
-   rewrite the metadata, but misleading for any other holder.
+   rewrite the metadata, but misleading for any other holder. **Fixed 2026-11-04:** both
+   sides check the record against `/proc/locks` and, when another pid holds the flock, name
+   that pid and say the record is stale (router `06dea69`, llmctl `8226149`; tested with a
+   real bare-`flock` holder process).
 3. **The start limit is a latent risk, not hit here.** `StartLimitBurst=3` per 1,800 s counts
    every start. Three planned switches in 30 min, or a crash loop, will make the next
    restart (including a rollback restart) fail, as on 2026-11-01 15:38:47. The router does
-   not run `reset-failed` before restarting. Candidate fix: the router (it already has sudoers
-   rights) runs `systemctl reset-failed vllm-engine` before a switch or rollback restart, or
-   the unit's burst is raised.
+   not run `reset-failed` before restarting. **Fixed 2026-11-04:** new `switch.reset_failed_cmd`
+   (router `711e18a`) runs `sudo -n systemctl reset-failed vllm-engine` before the switch
+   restart and the rollback restart, best effort. `reset-failed` also zeroes `NRestarts`
+   (checked on a throwaway user unit: 5 → 0), so the crash baseline is read again afterwards;
+   a test proves a crash after the reset is still caught (mutation-checked). Enabled in
+   router.yaml `0b0e8fa`, router restarted 11:54:27; the next switch logged
+   `reset-failed` then `restart` (journal 11:54:28).
 4. **Minor log wording.** `model.switch.rollback to=acc-badstart` names the *failed* target,
    not the restored one. `previous` / `from_` is `none` after a router restart, even when a
    lane is loaded.
 5. **T5 needs a different setup.** To prove the deferral live, the healer has to want a repair
    (engine `failed`) while the lock is held, which means extra downtime and start-limit risk.
    Not attempted.
+6. **The router restarts an engine that is still loading (new, 2026-11-04 11:54).**
+   Something run from `~/AI/packages/hf2local` started `vllm-engine` at 11:52:54. A request
+   at 11:54:28 found nothing serving yet (vLLM `Type=simple` is `active` while it loads), so
+   the router switched to `qwen27b`, the same model, and restarted the loading engine (stop
+   took 60 s and ended in SIGKILL). Cost: about 2.5 min of extra downtime. Not fixed. A fix
+   would treat an `active` unit whose env already names the target profile as loading, and
+   wait for it instead of restarting.
