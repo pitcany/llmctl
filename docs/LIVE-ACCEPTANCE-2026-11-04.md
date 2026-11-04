@@ -141,7 +141,10 @@ environment (the value was not printed). Peer session ai-64 held its GPU embeddi
    `qwen3coder30b`. **Fixed 2026-11-04 ~09:55:** link `qwen3coder30b-start` added (`~/AI`
    `8557b8f6`, `~/bin`), `start_cmd` pointed at it (router `9373e71`, router restarted),
    RUNBOOK note `72afa21e`. Verified: `qwen3coder30b-start --show-model` resolves
-   `qwen3-coder:30b` from router.yaml. A live switch to the lane was not re-run.
+   `qwen3-coder:30b` from router.yaml. **Live check 10:03–10:05 PASS:** `ccl --ask qwen3coder30b`
+   answered "OK" via the router in 30.6 s (switch begin → done 30.5 s; vLLM stopped,
+   `qwen3-coder:30b` resident on GPU 1, 31.5 GB); forced switch back to `qwen27b` in 93.8 s, TP=2,
+   `ccl --ask local` OK, `ollama-gpu1` inactive.
 2. **The op-lock holder text can be stale.** In T1b the 503 named `pid 3950843 … run
    qwen3.8-27b-awq, 311s ago`, an llmctl that had already exited. The real holder was a plain
    `flock` (pid 67651). The router reads metadata left in the lock file by the last writer
