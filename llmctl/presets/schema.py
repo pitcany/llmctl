@@ -128,7 +128,7 @@ class Model(BaseModel):
             "`llmctl run --tq/--no-tq`. Kept so existing YAMLs still validate."
         ),
     )
-    #: Extra names for this preset, resolved by llm-models-config's ``load``;
+    #: Extra names for this preset, kept in the YAML for external tooling;
     #: llmctl itself only matches ``alias``. Not a launch input.
     shortcuts: tuple[str, ...] = Field(default_factory=tuple)
 

@@ -901,7 +901,9 @@ def stop(
     failed = False
     try:
         for item, ok in stop_items(
-            items, real_deps(settings), settings=settings,
+            items,
+            real_deps(settings),
+            settings=settings,
             refresh=lambda: serving_now(gather_state(settings)),
         ):
             if ok:
@@ -1364,7 +1366,12 @@ def _metrics_table(rows: list[Any], *, show_all: bool) -> Table:
                     escape(row.name),
                     "[dim]—[/dim]",
                     escape(str(row.runtime or "")),
-                    "", "", "", "", "", "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
                     "[dim]not answering[/dim]",
                 )
             continue
@@ -1720,7 +1727,10 @@ def benchmarks_cmd(
             from llmctl.services.benchmark_manifest import write_export
 
             payloads = service.export(
-                model_id=model, session_id=session, kind=kind, limit=limit,
+                model_id=model,
+                session_id=session,
+                kind=kind,
+                limit=limit,
             )
             path = write_export(Path(export).expanduser(), payloads)
             console.print(
@@ -1728,7 +1738,10 @@ def benchmarks_cmd(
             )
             return
         results = service.list_results(
-            model_id=model, session_id=session, kind=kind, limit=20 if limit is None else limit,
+            model_id=model,
+            session_id=session,
+            kind=kind,
+            limit=20 if limit is None else limit,
         )
     if not results:
         console.print("[yellow]No benchmarks recorded yet.[/yellow]")
@@ -2403,6 +2416,7 @@ def settings_cmd(
     edit: Annotated[
         bool, typer.Option("--edit", help="Open the preset file in $VISUAL/$EDITOR.")
     ] = False,
+    json_out: _JSON_OPT = False,
 ) -> None:
     """Show the GPUs, context length and memory share NAME runs with, and where
     they are stored. Change them for one run with `llmctl run NAME --tp N
@@ -2413,6 +2427,19 @@ def settings_cmd(
 
     from llmctl.services.run_overrides import FIELDS, FLAGS, preset_source, profile_source
     from llmctl.services.serve import AmbiguousModel, find_model
+
+    if json_out:
+        from llmctl.presets.sources import field_provenance
+
+        info = field_provenance(name) if name is not None else None
+        if info is None:
+            typer.echo(
+                f"No preset named {name}." if name else "settings --json needs a preset NAME.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        _emit_json(info)
+        return
 
     if name is None or (name.isdecimal() and preset_source(name) is None):
         # Same list and numbering as `llmctl ls` / `llmctl run`, so the # a
@@ -2869,9 +2896,120 @@ def ls_cmd(json_out: _JSON_OPT = False) -> None:
     cli_swap.render_endpoints(state, console, aliases, settings.router)
 
 
-@app.command("presets", hidden=True)
-def presets_cmd(json_out: _JSON_OPT = False) -> None:
+presets_app = typer.Typer(
+    name="presets",
+    suggest_commands=False,
+    help="List preset aliases known to llmctl.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+app.add_typer(presets_app, name="presets", hidden=True)
+
+
+@presets_app.command("sources")
+def presets_sources_cmd(json_out: _JSON_OPT = False) -> None:
+    """Show which file each preset comes from, collisions and broken files (read-only)."""
+    from llmctl.presets.sources import scan_sources
+
+    scan = scan_sources()
+    bad = scan.has_collision() or bool(scan.problems)
+    if json_out:
+        _emit_json(scan.as_dict())
+        raise typer.Exit(1 if bad else 0)
+    table = Table(title="Preset sources")
+    table.add_column("alias", style="cyan", no_wrap=True)
+    table.add_column("dir")
+    table.add_column("file", overflow="fold")
+    table.add_column("status")
+    for alias in sorted(scan.files):
+        files = scan.files[alias]
+        collision = scan.collision(alias)
+        win = scan.effective(alias)
+        for f in files:
+            parts = []
+            if f is win:
+                parts.append("[green]effective[/green]")
+            elif f.real != win.real:
+                parts.append("[yellow]shadowed[/yellow]")
+            if collision:
+                parts.append("[red]COLLISION[/red]")
+            if f.target is not None:
+                parts.append(f"symlink -> {escape(str(f.target))}")
+            table.add_row(alias, f.dir, escape(str(f.path)), " ".join(parts))
+    for path, text in scan.problems:
+        table.add_row("-", "-", escape(str(path)), f"[red]PROBLEM[/red] {escape(text)}")
+    console.print(f"canonical: {escape(str(scan.canonical_dir))}")
+    console.print(f"legacy:    {escape(str(scan.legacy_dir))}")
+    console.print(table)
+    raise typer.Exit(1 if bad else 0)
+
+
+@presets_app.command("migrate")
+def presets_migrate_cmd(
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Perform the migration (default: dry run).")
+    ] = False,
+    rollback: Annotated[
+        Path | None,
+        typer.Option("--rollback", help="Undo the migration recorded in this manifest."),
+    ] = None,
+    json_out: _JSON_OPT = False,
+) -> None:
+    """Move legacy presets into the canonical dir, leaving relative symlinks behind."""
+    from llmctl.presets import migrate as pm
+
+    if rollback is not None:
+        try:
+            restored, skipped = pm.rollback(rollback)
+        except pm.ManifestError as exc:
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(2) from exc
+        if json_out:
+            _emit_json({"rolled_back": restored, "skipped": skipped})
+        else:
+            for name in restored:
+                console.print(f"restored {escape(name)}")
+            for text in skipped:
+                console.print(f"[yellow]skipped[/yellow] {escape(text)}")
+        raise typer.Exit(0)
+
+    if apply:
+        result = pm.apply()
+        actions, manifest = result.actions, result.manifest
+    else:
+        actions, manifest = pm.plan(), None
+    collision = any(a.action == "collision" for a in actions)
+    if json_out:
+        _emit_json(
+            {
+                "applied": apply,
+                "manifest": str(manifest) if manifest else None,
+                "actions": [a.as_dict() for a in actions],
+            }
+        )
+    else:
+        table = Table(title="Preset migration" + ("" if apply else " (dry run)"))
+        table.add_column("alias", style="cyan", no_wrap=True)
+        table.add_column("action")
+        table.add_column("from", overflow="fold")
+        table.add_column("to", overflow="fold")
+        for a in actions:
+            table.add_row(
+                escape(a.alias), escape(a.action), escape(str(a.legacy)), escape(str(a.canonical))
+            )
+        console.print(table)
+        if manifest:
+            console.print(f"manifest: {escape(str(manifest))}")
+        elif not apply:
+            console.print("Dry run: nothing changed. Use --apply to migrate.")
+    raise typer.Exit(1 if collision else 0)
+
+
+@presets_app.callback()
+def presets_cmd(ctx: typer.Context, json_out: _JSON_OPT = False) -> None:
     """List preset aliases known to llmctl."""
+    if ctx.invoked_subcommand is not None:
+        return
     views = load_preset_views()
     if json_out:
         import dataclasses
