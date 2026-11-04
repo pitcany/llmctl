@@ -116,6 +116,47 @@ def _read_holder(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _flock_owner_pid(path: Path, proc_locks: Path = Path("/proc/locks")) -> int | None:
+    """Pid holding the exclusive flock on ``path`` per ``/proc/locks`` (None if unknown)."""
+    try:
+        st = os.stat(path)
+        lines = proc_locks.read_text().splitlines()
+    except OSError:
+        return None
+    key = f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}"
+    for line in lines:
+        parts = line.split()  # blocked waiters have "->" in parts[1] and are skipped
+        if len(parts) < 6 or parts[1] != "FLOCK" or parts[3] != "WRITE" or parts[5] != key:
+            continue
+        try:
+            return int(parts[4])
+        except ValueError:
+            return None
+    return None
+
+
+def _current_holder(path: Path, proc_locks: Path = Path("/proc/locks")) -> dict[str, Any] | None:
+    """The holder record, checked against the process that really holds the flock.
+
+    The file keeps whatever the last cooperating holder wrote, so a refusal
+    could name an exited llmctl while a plain ``flock`` held the lock (live
+    acceptance 2026-11-04, finding 2). Same logic as llm-router's
+    ``op_lock.current_holder``.
+    """
+    recorded = _read_holder(path)
+    real = _flock_owner_pid(path, proc_locks)
+    if real is None or (recorded is not None and recorded.get("pid") == real):
+        return recorded
+    note = "not recorded"
+    if recorded is not None and recorded.get("pid") is not None:
+        note += f"; lock file names pid {recorded.get('pid')}, which does not hold it"
+    try:
+        comm = Path(f"/proc/{real}/comm").read_text().strip() or "?"
+    except OSError:
+        comm = "?"
+    return {"pid": real, "hostname": socket.gethostname(), "interface": comm, "purpose": note}
+
+
 @contextmanager
 def gpu_operation_lock(
     *,
@@ -171,7 +212,7 @@ def gpu_operation_lock(
                 if exc.errno not in (errno.EACCES, errno.EAGAIN):
                     raise
                 if time.monotonic() >= deadline:
-                    raise LockBusy(_read_holder(path), timeout) from exc
+                    raise LockBusy(_current_holder(path), timeout) from exc
                 time.sleep(0.05)
         holder = {
             "pid": os.getpid(),
@@ -277,7 +318,7 @@ def handed_off(*, timeout: float = 30.0, settings: Any = None) -> Iterator[None]
                         os.close(held.fd)
                     except OSError:
                         pass
-                    raise LockBusy(_read_holder(path), timeout) from exc
+                    raise LockBusy(_current_holder(path), timeout) from exc
                 time.sleep(0.05)
         held.holder = {**held.holder, "acquired_at": time.time()}
         os.lseek(held.fd, 0, os.SEEK_SET)

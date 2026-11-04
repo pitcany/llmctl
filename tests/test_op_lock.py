@@ -348,3 +348,36 @@ def test_handoff_without_a_hold_is_a_no_op(tmp_path, monkeypatch) -> None:
     with handed_off():
         assert not held_by_us()
     assert not held_by_us()
+
+
+_BARE_FLOCK = r"""
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+print("held", flush=True)
+time.sleep(30)
+"""
+
+
+@pytest.mark.skipif(not Path("/proc/locks").exists(), reason="needs /proc/locks")
+def test_busy_names_the_real_holder_not_a_stale_record(tmp_path, monkeypatch) -> None:
+    """Live acceptance 2026-11-04 finding 2: a plain flock held the lock while
+    the file still named an llmctl that had exited."""
+    lock = tmp_path / "operations.lock"
+    lock.write_text(json.dumps({"pid": 999_999_999, "hostname": "x", "interface": "cli",
+                                "purpose": "run qwen3.8-27b-awq", "acquired_at": 1.0}))
+    monkeypatch.setenv("LLMCTL_OP_LOCK", str(lock))
+    proc = subprocess.Popen([sys.executable, "-c", _BARE_FLOCK, str(lock)],
+                            stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout is not None and proc.stdout.readline().strip() == "held"
+        with pytest.raises(LockBusy) as info:
+            with gpu_operation_lock(purpose="t", interface="cli", timeout=0.1):
+                pass
+    finally:
+        proc.kill()
+        proc.communicate()
+    message = str(info.value)
+    assert f"pid {proc.pid} " in message
+    assert "run qwen3.8-27b-awq" not in message
+    assert "999999999, which does not hold it" in message
