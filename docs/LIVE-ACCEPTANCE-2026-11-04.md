@@ -173,6 +173,11 @@ environment (the value was not printed). Peer session ai-64 held its GPU embeddi
    Something run from `~/AI/packages/hf2local` started `vllm-engine` at 11:52:54. A request
    at 11:54:28 found nothing serving yet (vLLM `Type=simple` is `active` while it loads), so
    the router switched to `qwen27b`, the same model, and restarted the loading engine (stop
-   took 60 s and ended in SIGKILL). Cost: about 2.5 min of extra downtime. Not fixed. A fix
-   would treat an `active` unit whose env already names the target profile as loading, and
-   wait for it instead of restarting.
+   took 60 s and ended in SIGKILL). Cost: about 2.5 min of extra downtime. The active env
+   was byte-identical to the `qwen38` profile. **Fixed 2026-11-04 (router `329d803`):** when
+   the active env equals the target profile and the unit became active within the backend's
+   health timeout (`ActiveEnterTimestampMonotonic`), the switch waits for it
+   (`model.switch.join_loading`) instead of restarting. An older unit that serves nothing is
+   treated as wedged and restarted as before; a crash while waiting fails without touching
+   the env. 5 tests (mutation-checked); router suite 305 passed; router restarted ~12:06.
+   Not exercised live: hf2local held the GPUs (lease, `llama-imatrix`).
