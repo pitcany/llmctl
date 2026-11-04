@@ -166,3 +166,7 @@ request for another lane; long stream across an idle tick (temporarily set
 `idle_revert_s` low on a test lane only, then restore 3,600); TP=2 takeover;
 failed-start rollback; healer deferral during a real swap. Each restores the
 original serving model and respects leases.
+
+**Run 2026-11-04 09:21–09:46 PST:** competing request, long stream, TP=2
+takeover and failed-start rollback pass. Healer deferral was not exercised live.
+Record and findings: [LIVE-ACCEPTANCE-2026-11-04.md](LIVE-ACCEPTANCE-2026-11-04.md).

@@ -101,8 +101,10 @@ systemd start limits; repeated forced retries can exhaust the restart budget.
 llmctl `84ed67f` (R1, November 3), llm-router `e0377a0` (R2) and llm-heal
 `3993e2c8` (R3) are live; see the ledger in the
 [deployment plan](DEPLOYMENT-PLAN-2026-11-03.md) for verification and rollback.
-Live acceptance tests (real switches, long streams across a revert) have not
-been run yet. Where this section and the paragraphs above disagree, this
+Live acceptance ran on 2026-11-04: the competing request, long stream across
+an idle revert, TP=2 takeover and failed-start rollback pass; healer deferral
+was not exercised live. See [LIVE-ACCEPTANCE-2026-11-04.md](LIVE-ACCEPTANCE-2026-11-04.md)
+for evidence and findings. Where this section and the paragraphs above disagree, this
 section describes the running system.
 
 - **One GPU ownership boundary.** llm-router (optional `switch.op_lock_file`)
