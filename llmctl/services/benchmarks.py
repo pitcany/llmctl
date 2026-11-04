@@ -1,11 +1,17 @@
-"""Benchmark service: real (streaming) execution with a graceful-mock fallback.
+"""Benchmark service: real (streaming) execution with explicit synthetic mode.
 
-Streams prompts against a live OpenAI-compatible endpoint (vLLM, llama.cpp, LM
-Studio and Ollama all expose ``/v1/chat/completions``) and measures end-to-end
-latency, time-to-first-token (TTFT) and token throughput. When no endpoint is
-reachable -- e.g. on a host without the runtime installed, or for an explicit
-dry run -- it degrades gracefully to a deterministic synthetic benchmark so the
-control plane stays usable everywhere, including the no-GPU CI container.
+Streams the request workload against a live OpenAI-compatible endpoint (vLLM,
+llama.cpp, LM Studio and Ollama all expose ``/v1/chat/completions``) and
+measures end-to-end latency, time-to-first-token (TTFT) and token throughput.
+
+Execution-mode contract (FIXPLAN 2026-11-03 §1A): ordinary runs are
+strict-live. When no endpoint resolves, the run is persisted as a *failure*
+record -- never a fabricated synthetic measurement -- so benchmark history is
+trustworthy evidence. Synthetic execution is the explicit ``dry_run=True``
+path (``--synthetic`` on the CLI, 'mock' mode in the TUI): deterministic,
+labeled ``mode=mock`` in every surface, and intended for hosts without a
+runtime (e.g. CI). The historical silent fallback remains reachable only via
+the deprecated ``require_live=False`` escape hatch.
 
 Each prompt/response sample is persisted on the record so the TUI can show
 history and offer a one-key re-run.
@@ -14,6 +20,8 @@ history and offer a one-key re-run.
 from __future__ import annotations
 
 import json
+import math
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -32,6 +40,12 @@ from llmctl.db import (
     SessionStatus,
 )
 from llmctl.schemas import BenchmarkResult, BenchmarkRunRequest
+from llmctl.services.benchmark_manifest import (
+    build_manifest,
+    export_payload,
+    manifest_drift,
+)
+from llmctl.services.benchmark_parameters import DEFAULT_MAX_TOKENS, effective_parameters
 from llmctl.telemetry.gpu import get_gpu_info, nvml_available
 from llmctl.telemetry.gpu_sampler import GPUSampler, GPUSamplerSummary
 
@@ -41,8 +55,6 @@ DEFAULT_PROMPT = (
     "Explain the difference between maximum likelihood and Bayesian inference "
     "in one paragraph."
 )
-#: Default completion length requested per prompt.
-DEFAULT_MAX_TOKENS = 256
 #: Long-context smoke test prompt seed; we repeat this to fill the requested
 #: context_length so the model has to ingest a real load.
 LONG_CONTEXT_SEED = (
@@ -76,6 +88,9 @@ class _Target:
     base_url: str
     model_name: str
     backend: str | None = None
+    #: The session row the endpoint was resolved through, if any (used to
+    #: capture launch configuration for the run manifest).
+    session: SessionRecord | None = None
 
     @property
     def chat_url(self) -> str:
@@ -121,6 +136,7 @@ def record_to_benchmark(record: BenchmarkRecord) -> BenchmarkResult:
         gpu_snapshot=record.gpu_snapshot,
         parameters=record.parameters,
         samples=record.samples,
+        manifest=record.manifest or {},
         success=record.success,
         error=record.error,
         created_at=record.created_at,
@@ -128,8 +144,14 @@ def record_to_benchmark(record: BenchmarkRecord) -> BenchmarkResult:
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimate (~whitespace words) when a server omits usage data."""
-    return max(1, len(text.split()))
+    """Rough token estimate (~whitespace words) when a server omits usage data.
+
+    An empty response estimates to zero -- never a fabricated single token.
+    Every count produced here is labeled ``token_count_source="estimate"``
+    on the sample so downstream surfaces can distinguish it from server
+    usage counts.
+    """
+    return len(text.split())
 
 
 def _parse_sse_line(line: str) -> object | None:
@@ -146,7 +168,7 @@ def _parse_sse_line(line: str) -> object | None:
 
 
 def _extract_delta(payload: dict[str, object]) -> str:
-    """Pull incremental text out of an OpenAI-style streaming chunk."""
+    """Pull incremental *content* text out of an OpenAI-style streaming chunk."""
     try:
         choice = payload["choices"][0]  # type: ignore[index]
     except (KeyError, IndexError, TypeError):
@@ -158,6 +180,91 @@ def _extract_delta(payload: dict[str, object]) -> str:
         if choice.get("text"):
             return str(choice["text"])
     return ""
+
+
+def _extract_reasoning(payload: dict[str, object]) -> str:
+    """Pull incremental reasoning text (e.g. ``reasoning_content``) from a chunk.
+
+    vLLM/OpenRouter-style servers stream model reasoning separately from the
+    final answer. Reasoning is generated activity (it counts for
+    ``first_token_ms``) but is *not* answer content, so it does not start the
+    TTFT clock -- see :meth:`BenchmarkService._stream_one`.
+    """
+    try:
+        choice = payload["choices"][0]  # type: ignore[index]
+    except (KeyError, IndexError, TypeError):
+        return ""
+    if isinstance(choice, dict):
+        delta = choice.get("delta")
+        if isinstance(delta, dict) and delta.get("reasoning_content"):
+            return str(delta["reasoning_content"])
+    return ""
+
+
+def _has_tool_delta(payload: dict[str, object]) -> bool:
+    """Return True when a streaming chunk carries tool-call deltas.
+
+    Like reasoning chunks, tool activity is generated output (counted for
+    ``first_token_ms``) but not answer content, so it does not define TTFT.
+    """
+    try:
+        choice = payload["choices"][0]  # type: ignore[index]
+    except (KeyError, IndexError, TypeError):
+        return False
+    if not isinstance(choice, dict):
+        return False
+    delta = choice.get("delta")
+    return isinstance(delta, dict) and bool(delta.get("tool_calls"))
+
+
+#: Sample count below which a percentile is flagged as insufficient: with
+#: very few samples the p90/p99 spread says more about scheduling noise than
+#: about the endpoint.
+MIN_PERCENTILE_SAMPLES = 5
+
+
+def _percentiles(values: list[float]) -> dict[str, object] | None:
+    """Nearest-rank p50/p90/p99 with the sample count and a small-n flag.
+
+    ``insufficient_samples`` marks estimates computed from fewer than
+    :data:`MIN_PERCENTILE_SAMPLES` observations so surfaces can say
+    "p90 ≈ X ms (n=2, too few samples)" instead of implying precision.
+    """
+    n = len(values)
+    if n == 0:
+        return None
+    ordered = sorted(values)
+
+    def _rank(pct: float) -> float:
+        return ordered[max(0, min(n - 1, math.ceil(pct * n) - 1))]
+
+    return {
+        "n": n,
+        "p50": round(float(_rank(0.50)), 2),
+        "p90": round(float(_rank(0.90)), 2),
+        "p99": round(float(_rank(0.99)), 2),
+        "insufficient_samples": n < MIN_PERCENTILE_SAMPLES,
+    }
+
+
+def _aggregate_token_source(samples: list[dict[str, object]]) -> str | None:
+    """Summarize per-sample token provenance for the record.
+
+    ``server_usage`` when every counted token came from the server's usage
+    block; ``estimate`` when every count was estimated; ``mixed`` when both
+    are present. Returns ``None`` when there is nothing to summarize.
+    """
+    sources = {
+        str(sample.get("token_count_source"))
+        for sample in samples
+        if sample.get("token_count_source")
+    }
+    sources.discard("none")
+    if not sources:
+        return None
+    if len(sources) == 1:
+        return sources.pop()
+    return "mixed"
 
 
 def _gpu_snapshot() -> dict[str, object]:
@@ -237,22 +344,64 @@ class BenchmarkService:
         self.db.commit()
         return True
 
+    def export(
+        self,
+        *,
+        benchmark_id: str | None = None,
+        model_id: str | None = None,
+        limit: int | None = None,
+        session_id: str | None = None,
+        kind: BenchmarkKind | str | None = None,
+    ) -> list[dict[str, object]]:
+        """Return portable export payloads (result + manifest) for records.
+
+        A single ``benchmark_id`` exports that record; otherwise the filtered
+        history (same filters as :meth:`list_results`). Legacy rows without a
+        manifest export with ``manifest.provenance == "unknown"``.
+        """
+        if benchmark_id is not None:
+            result = self.get_result(benchmark_id)
+            return [export_payload(result)] if result is not None else []
+        results = self.list_results(
+            model_id=model_id, session_id=session_id, kind=kind, limit=limit,
+        )
+        return [export_payload(result) for result in results]
+
     def run(self, request: BenchmarkRunRequest) -> BenchmarkResult:
         """Execute a benchmark and persist its result.
 
-        Streams a real run against a live runtime endpoint. On ``--dry-run`` (or
-        when no endpoint can be resolved at all) it records a deterministic
-        synthetic result with ``parameters.mode == "mock"``. Live runs that
-        fail mid-flight are persisted with ``success=False`` and the error
-        message so failures are inspectable in the history.
+        Streams a real run against a live runtime endpoint. On an explicit
+        synthetic request (``dry_run=True``) it records a deterministic mock
+        result with ``parameters.mode == "mock"``. Live runs are strict: a
+        missing endpoint records a failure (``require_live=False`` opts back
+        into the deprecated mock fallback), and live runs that fail mid-flight
+        are persisted with ``success=False`` and the error message so failures
+        are inspectable in the history.
         """
-        prompts = self._resolve_prompts(request)
-        params = dict(request.parameters)
+        base_prompts = self._resolve_prompts(request)
+        workload = self._expand_workload(base_prompts, request.repetitions)
+        params = effective_parameters(request.parameters)
         params.setdefault("concurrency", max(1, request.concurrency))
+        params.setdefault("warmup", max(0, request.warmup))
+        params.update(self._workload_meta(base_prompts, request.repetitions))
         snapshot = _gpu_snapshot()
+        target = None if request.dry_run else self._resolve_target(request)
         with GPUSampler() as sampler:
-            metrics = self._measure(request, prompts, params)
+            metrics = self._measure(request, workload, params, target)
         gpu_summary = sampler.summary()
+        mode = str((metrics.get("parameters") or {}).get("mode", "live"))
+        manifest = build_manifest(
+            request,
+            model=self.db.get(ModelRecord, request.model_id)
+            if request.model_id
+            else None,
+            session=target.session if target is not None else None,
+            backend=(target.backend if target else None) or metrics.get("backend"),
+            endpoint_url=target.base_url if target is not None else None,
+            base_prompts=base_prompts,
+            gpu_snapshot=snapshot,
+            execution="synthetic" if mode == "mock" else "live",
+        )
         record = BenchmarkRecord(
             model_id=request.model_id,
             session_id=request.session_id,
@@ -273,6 +422,7 @@ class BenchmarkService:
             gpu_snapshot=self._merge_snapshot(snapshot, gpu_summary),
             parameters=metrics["parameters"],
             samples=metrics["samples"],
+            manifest=manifest,
             success=metrics["success"],
             error=metrics["error"],
         )
@@ -282,19 +432,40 @@ class BenchmarkService:
         return record_to_benchmark(record)
 
     def rerun(self, benchmark_id: str) -> BenchmarkResult | None:
-        """Re-execute a stored benchmark, reusing its prompts and parameters."""
+        """Re-execute a stored benchmark, reusing its prompts and parameters.
+
+        Reuses the stored *workload*: the base prompt list and repetition
+        count recorded on the source run, in their original order. A record
+        originally produced in synthetic mode re-runs synthetically (it was
+        an explicitly-mock experiment); anything else re-runs strict-live so
+        a missing endpoint surfaces as a failure instead of a silent mock.
+        """
         record = self.db.get(BenchmarkRecord, benchmark_id)
         if record is None:
             return None
-        prompts = [
+        stored: dict[str, object] = dict(record.parameters or {})
+        workload_prompts = [
             str(sample["prompt"])
             for sample in (record.samples or [])
             if sample.get("prompt")
         ]
+        repetitions = max(1, int(stored.get("repetitions", 1) or 1))
+        prompt_count = int(stored.get("prompt_count", 0) or 0)
+        # Samples are stored in workload order (base prompts repeated
+        # ``repetitions`` times), so the first ``prompt_count`` entries are
+        # the base list. Legacy rows without workload metadata replay their
+        # stored sample prompts once.
+        if "base_prompts" in stored:
+            base_prompts = list(stored["base_prompts"])
+        elif repetitions > 1 and prompt_count >= 1 and len(workload_prompts) >= prompt_count:
+            base_prompts = workload_prompts[:prompt_count]
+        else:
+            base_prompts = workload_prompts
+            repetitions = 1
         params = {
-            key: record.parameters[key]
-            for key in ("max_tokens", "temperature", "concurrency")
-            if key in record.parameters
+            key: stored[key]
+            for key in ("max_tokens", "temperature", "concurrency", "warmup")
+            if key in stored
         }
         kind = (
             BenchmarkKind(record.kind)
@@ -308,19 +479,44 @@ class BenchmarkService:
             profile_id=record.profile_id,
             kind=kind,
             context_length=record.context_length,
-            prompts=prompts,
+            prompts=base_prompts,
             parameters=params,
-            concurrency=int(record.parameters.get("concurrency", 1) or 1),
-            dry_run=False,
+            concurrency=int(stored.get("concurrency", 1) or 1),
+            repetitions=repetitions,
+            warmup=max(0, int(stored.get("warmup", 0) or 0)),
+            dry_run=str(stored.get("mode", "live")) == "mock",
+            require_live=True,
         )
-        return self.run(request)
+        result = self.run(request)
+        if result is None or result.id is None:
+            return result
+        # The re-run is a new experiment with its own identity, linked to
+        # its source. Configuration drift between the two manifests is
+        # recorded on the new row so "same benchmark, different number" is
+        # explainable instead of mysterious.
+        new_record = self.db.get(BenchmarkRecord, result.id)
+        if new_record is None:
+            return result
+        drift = manifest_drift(record.manifest, result.manifest)
+        updated = dict(new_record.parameters or {})
+        updated["rerun_of"] = benchmark_id
+        if drift:
+            updated["drift"] = drift
+        new_record.parameters = updated
+        self.db.add(new_record)
+        self.db.commit()
+        self.db.refresh(new_record)
+        return record_to_benchmark(new_record)
 
     def run_sweep(self, request: BenchmarkRunRequest) -> list[BenchmarkResult]:
         """Run the benchmark at several concurrency levels (a load sweep).
 
         Each level is persisted as its own record named ``"{name} (c=N)"`` with
         ``parameters.concurrency == N`` so throughput-under-load can be compared
-        directly in the Benchmarks screen.
+        directly in the Benchmarks screen. The total workload (prompts x
+        repetitions) stays fixed across levels -- only the concurrency ceiling
+        changes, so a level whose workload cannot fill its concurrency records
+        the shortfall instead of silently shrinking the experiment.
         """
         levels = request.sweep or [max(1, request.concurrency)]
         ordered = sorted({max(1, int(level)) for level in levels})
@@ -346,12 +542,16 @@ class BenchmarkService:
         request: BenchmarkRunRequest,
         prompts: list[str],
         params: dict[str, object],
+        target: _Target | None,
     ) -> dict[str, object]:
         """Return benchmark metrics for the requested ``kind``.
 
-        Behaviour:
+        ``target`` is the pre-resolved endpoint (``None`` means dry-run, or
+        strict-live with no endpoint). Behaviour:
           * Explicit ``dry_run`` -> deterministic mock result for the kind.
-          * No reachable endpoint -> mock result with reason
+          * No reachable endpoint -> failure record (strict live is the
+            default). Only an explicit ``require_live=False`` restores the
+            deprecated mock fallback with reason
             ``"no reachable runtime endpoint"``.
           * Endpoint reachable but the call fails -> *failure record*:
             ``success=False``, the exception in ``error``. Mock fallback is
@@ -359,7 +559,6 @@ class BenchmarkService:
         """
         if request.dry_run:
             return self._mock(request, prompts, params, "dry-run requested")
-        target = self._resolve_target(request)
         if target is None:
             if request.require_live:
                 return self._no_endpoint_failure(request, prompts, params)
@@ -384,32 +583,39 @@ class BenchmarkService:
         if request.kind == BenchmarkKind.COMPLETION:
             return self._run_live(target, prompts, params, endpoint="completion")
         if request.kind == BenchmarkKind.LONG_CONTEXT:
-            ctx_prompts = [self._build_long_context_prompt(request)]
-            return self._run_live(target, ctx_prompts, params, endpoint="chat")
+            ctx = [self._build_long_context_prompt(request)]
+            return self._run_live(
+                target, self._expand_workload(ctx, request.repetitions), params, endpoint="chat"
+            )
         return self._run_live(target, prompts, params, endpoint="chat")
 
     def _resolve_target(self, request: BenchmarkRunRequest) -> _Target | None:
         """Resolve the live OpenAI-compatible endpoint for the request, if any."""
-        endpoint, model_name, backend = self._resolve_endpoint(request)
+        endpoint, model_name, backend, session = self._resolve_endpoint(request)
         if not endpoint:
             return None
         return _Target(
             base_url=endpoint,
             model_name=model_name or "local-model",
             backend=backend,
+            session=session,
         )
 
     def _resolve_endpoint(
         self, request: BenchmarkRunRequest
-    ) -> tuple[str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, SessionRecord | None]:
         """Find a serving endpoint via an explicit session, a running session,
-        or the runtime's default server endpoint. Returns (url, model, backend).
+        or the runtime's default server endpoint.
+
+        Returns ``(url, model, backend, session)``; the session (when the
+        endpoint was resolved through one) carries launch configuration for
+        the run manifest.
         """
         if request.session_id:
             record = self.db.get(SessionRecord, request.session_id)
             if record and record.endpoint_url:
                 backend = record.runtime.value if record.runtime else None
-                return record.endpoint_url, self._model_name(record.model_id), backend
+                return record.endpoint_url, self._model_name(record.model_id), backend, record
         if request.model_id:
             model = self.db.get(ModelRecord, request.model_id)
             if model:
@@ -440,11 +646,11 @@ class BenchmarkService:
                         )
                     ).first()
                 if running and running.endpoint_url:
-                    return running.endpoint_url, name, backend
+                    return running.endpoint_url, name, backend, running
                 config = self.settings.runtime_config(model.runtime.value)
                 if config.endpoint:
-                    return config.endpoint, name, backend
-        return None, None, None
+                    return config.endpoint, name, backend, None
+        return None, None, None, None
 
     def _model_name(self, model_id: str | None) -> str | None:
         """Return a model's served name (source preferred) by id."""
@@ -460,6 +666,30 @@ class BenchmarkService:
         if request.prompts:
             return list(request.prompts)
         return [DEFAULT_PROMPT]
+
+    @staticmethod
+    def _expand_workload(prompts: list[str], repetitions: int) -> list[str]:
+        """Expand base prompts into the full request workload.
+
+        Repetition is cyclic (``a, b, a, b``), not blocked (``a, a, b, b``),
+        so concurrent workers spread across distinct prompts instead of
+        hammering the same one. The policy is recorded on the result via
+        :meth:`_workload_meta`; prompts are never duplicated implicitly.
+        """
+        if repetitions <= 1:
+            return list(prompts)
+        return [prompt for _ in range(repetitions) for prompt in prompts]
+
+    @staticmethod
+    def _workload_meta(base_prompts: list[str], repetitions: int) -> dict[str, object]:
+        """Return the workload-size metadata recorded on every benchmark."""
+        return {
+            "base_prompts": list(base_prompts),
+            "prompt_count": len(base_prompts),
+            "repetitions": repetitions,
+            "total_requests": len(base_prompts) * repetitions,
+            "repetition_policy": "cyclic" if repetitions > 1 else "none",
+        }
 
     @staticmethod
     def _build_long_context_prompt(request: BenchmarkRunRequest) -> str:
@@ -491,7 +721,14 @@ class BenchmarkService:
     def _run_health(
         self, target: _Target, params: dict[str, object]
     ) -> dict[str, object]:
-        """Time a GET against ``/v1/models``; record latency as ttft+total."""
+        """Time a GET against ``/v1/models``.
+
+        This is an endpoint health check, not generation: the measured
+        number is request latency only. ``ttft_ms`` stays ``None`` (no
+        tokens were generated) and the sample is marked
+        ``measurement="health_check"`` so surfaces never present health
+        latency as generation TTFT.
+        """
         client = (
             self._client_factory()
             if self._client_factory is not None
@@ -512,7 +749,7 @@ class BenchmarkService:
             "total_tokens": 0,
             "latency_ms": elapsed_ms,
             "tokens_per_second": None,
-            "ttft_ms": elapsed_ms,
+            "ttft_ms": None,
             "samples": [
                 {
                     "prompt": "GET /v1/models",
@@ -520,8 +757,10 @@ class BenchmarkService:
                     "status_code": status_code,
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
+                    "token_count_source": "none",
+                    "measurement": "health_check",
                     "latency_ms": elapsed_ms,
-                    "ttft_ms": elapsed_ms,
+                    "ttft_ms": None,
                 }
             ],
             "parameters": {
@@ -529,6 +768,7 @@ class BenchmarkService:
                 "mode": "live",
                 "endpoint": target.models_url,
                 "kind": BenchmarkKind.HEALTH.value,
+                "measurement": "health_check",
             },
             "backend": target.backend,
             "success": True,
@@ -543,18 +783,25 @@ class BenchmarkService:
         *,
         endpoint: str = "chat",
     ) -> dict[str, object]:
-        """Stream prompts against a live endpoint; aggregate latency/TTFT/tps.
+        """Stream the request workload against a live endpoint; aggregate.
 
-        With ``concurrency > 1`` requests are dispatched in parallel and
-        throughput is computed from wall-clock time, measuring sustained
-        tokens/sec under load. TTFT is averaged across requests. The
-        ``endpoint`` selector picks between ``"chat"`` (``/v1/chat/completions``)
-        and ``"completion"`` (``/v1/completions``) -- the same streaming
-        runner handles both, since both speak SSE with the same delta shape.
+        ``concurrency`` is the maximum number of simultaneous in-flight
+        requests. The pool never spins up more workers than there are
+        requests, and the record stores both the requested ceiling
+        (``requested_concurrency``) and the peak actually observed
+        (``achieved_concurrency``); an underfilled workload is flagged in
+        ``parameters.warnings`` instead of being reported as if it reached
+        the ceiling. Throughput is computed from wall-clock time; TTFT is
+        averaged across requests. The ``endpoint`` selector picks between
+        ``"chat"`` (``/v1/chat/completions``) and ``"completion"``
+        (``/v1/completions``) -- the same streaming runner handles both,
+        since both speak SSE with the same delta shape.
         """
-        max_tokens = int(params.get("max_tokens", DEFAULT_MAX_TOKENS))
-        temperature = float(params.get("temperature", 0.0))
-        concurrency = max(1, int(params.get("concurrency", 1)))
+        params = effective_parameters(params)
+        max_tokens = int(params["max_tokens"])
+        temperature = float(params["temperature"])
+        requested = max(1, int(params.get("concurrency", 1)))
+        workers = max(1, min(requested, len(prompts))) if prompts else 1
         client = (
             self._client_factory()
             if self._client_factory is not None
@@ -563,41 +810,88 @@ class BenchmarkService:
         endpoint_url = (
             target.completion_url if endpoint == "completion" else target.chat_url
         )
-        wall_start = time.perf_counter()
-        samples: list[dict[str, object]] = []
+        inflight_lock = threading.Lock()
+        inflight = {"now": 0, "peak": 0}
+
+        def _tracked(prompt: str) -> dict[str, object]:
+            with inflight_lock:
+                inflight["now"] += 1
+                inflight["peak"] = max(inflight["peak"], inflight["now"])
+            try:
+                return self._stream_one(
+                    client, target, prompt, max_tokens, temperature, endpoint
+                )
+            except Exception as exc:  # noqa: BLE001 - per-request outcome
+                return {
+                    "prompt": prompt,
+                    "response": "",
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "token_count_source": "none",
+                    "latency_ms": None,
+                    "ttft_ms": None,
+                    "first_token_ms": None,
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            finally:
+                with inflight_lock:
+                    inflight["now"] -= 1
+
+        warmup = max(0, int(params.get("warmup", 0) or 0))
+        warmup_errors: list[str] = []
         with client:
-            if concurrency == 1:
-                for prompt in prompts:
-                    samples.append(
+            if warmup and prompts:
+                for i in range(warmup):
+                    warm_prompt = prompts[i % len(prompts)]
+                    try:
                         self._stream_one(
-                            client, target, prompt, max_tokens, temperature, endpoint
+                            client, target, warm_prompt, max_tokens, temperature, endpoint
                         )
-                    )
+                    except Exception as exc:  # noqa: BLE001 - recorded as warning
+                        warmup_errors.append(f"{type(exc).__name__}: {exc}")
+            wall_start = time.perf_counter()
+            samples: list[dict[str, object]] = []
+            if workers == 1:
+                for prompt in prompts:
+                    samples.append(_tracked(prompt))
             else:
-                with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                    futures = [
-                        pool.submit(
-                            self._stream_one,
-                            client,
-                            target,
-                            prompt,
-                            max_tokens,
-                            temperature,
-                            endpoint,
-                        )
-                        for prompt in prompts
-                    ]
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [pool.submit(_tracked, prompt) for prompt in prompts]
                     samples = [future.result() for future in futures]
         wall_seconds = time.perf_counter() - wall_start
-        total_prompt = sum(int(sample["prompt_tokens"]) for sample in samples)
-        total_completion = sum(int(sample["completion_tokens"]) for sample in samples)
+        peak = inflight["peak"]
+        warnings: list[str] = []
+        if prompts and len(prompts) < requested:
+            warnings.append(
+                f"underfilled workload: {len(prompts)} request(s) cannot reach "
+                f"requested concurrency {requested}; achieved {peak}"
+            )
+        elif prompts and peak < requested:
+            warnings.append(
+                f"requested concurrency {requested} was not observed; achieved {peak}"
+            )
+        for warmup_error in warmup_errors[:3]:
+            warnings.append(f"warm-up request failed: {warmup_error}")
+        failed_samples = [s for s in samples if s.get("ok") is False]
+        ok_samples = [s for s in samples if s.get("ok") is not False]
+        total_prompt = sum(int(sample["prompt_tokens"]) for sample in ok_samples)
+        total_completion = sum(int(sample["completion_tokens"]) for sample in ok_samples)
         ttft_values = [
             float(sample["ttft_ms"])
-            for sample in samples
+            for sample in ok_samples
             if sample["ttft_ms"] is not None
         ]
         tps = round(total_completion / wall_seconds, 2) if wall_seconds > 0 else None
         avg_ttft = round(sum(ttft_values) / len(ttft_values), 2) if ttft_values else None
+        success = not failed_samples
+        error: str | None = None
+        if failed_samples:
+            error = (
+                f"{len(failed_samples)} of {len(samples)} request(s) failed; "
+                f"first: {failed_samples[0].get('error')}"
+            )
+        token_source = _aggregate_token_source(ok_samples)
         return {
             "prompt_tokens": total_prompt,
             "completion_tokens": total_completion,
@@ -611,12 +905,24 @@ class BenchmarkService:
                 "mode": "live",
                 "endpoint": endpoint_url,
                 "endpoint_kind": endpoint,
-                "prompt_count": len(prompts),
-                "concurrency": concurrency,
+                "requested_concurrency": requested,
+                "concurrency": requested,
+                "achieved_concurrency": peak,
+                "request_count": len(samples),
+                "failed_request_count": len(failed_samples),
+                "warmup_requests": warmup,
+                "warnings": warnings,
+                "percentiles": {
+                    "latency_ms": _percentiles(
+                        [s["latency_ms"] for s in ok_samples if s.get("latency_ms") is not None]
+                    ),
+                    "ttft_ms": _percentiles(ttft_values),
+                },
+                **({"token_count_source": token_source} if token_source else {}),
             },
             "backend": target.backend,
-            "success": True,
-            "error": None,
+            "success": success,
+            "error": error,
         }
 
     def _stream_one(
@@ -656,7 +962,9 @@ class BenchmarkService:
             }
         start = time.perf_counter()
         ttft: float | None = None
+        first_token: float | None = None
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         usage: dict[str, object] = {}
         with client.stream("POST", url, json=body) as response:
             response.raise_for_status()
@@ -670,25 +978,46 @@ class BenchmarkService:
                 if chunk_usage:
                     usage = chunk_usage  # type: ignore[assignment]
                 delta = _extract_delta(payload)  # type: ignore[arg-type]
+                reasoning = _extract_reasoning(payload)  # type: ignore[arg-type]
+                generated = bool(delta or reasoning or _has_tool_delta(payload))  # type: ignore[arg-type]
+                if generated and first_token is None:
+                    # First *any* generated output: content, reasoning or a
+                    # tool call. TTFT below stays content-only.
+                    first_token = time.perf_counter() - start
                 if delta:
                     if ttft is None:
                         ttft = time.perf_counter() - start
                     content_parts.append(delta)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
         elapsed = time.perf_counter() - start
         text = "".join(content_parts)
         completion = usage.get("completion_tokens")
-        completion = int(completion) if completion is not None else _estimate_tokens(text)
         prompt_tokens = usage.get("prompt_tokens")
+        have_completion = completion is not None
+        have_prompt = prompt_tokens is not None
+        completion = int(completion) if have_completion else _estimate_tokens(text)
         prompt_tokens = (
-            int(prompt_tokens) if prompt_tokens is not None else _estimate_tokens(prompt)
+            int(prompt_tokens) if have_prompt else _estimate_tokens(prompt)
         )
+        if have_completion and have_prompt:
+            token_source = "server_usage"
+        elif have_completion or have_prompt:
+            token_source = "mixed"
+        else:
+            token_source = "estimate"
         return {
             "prompt": prompt,
             "response": text[:SAMPLE_CHAR_LIMIT],
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion,
+            "token_count_source": token_source,
             "latency_ms": round(elapsed * 1000.0, 2),
             "ttft_ms": round(ttft * 1000.0, 2) if ttft is not None else None,
+            "first_token_ms": (
+                round(first_token * 1000.0, 2) if first_token is not None else None
+            ),
+            "reasoning_chars": len("".join(reasoning_parts)),
         }
 
     def _failure(
@@ -723,8 +1052,10 @@ class BenchmarkService:
                     "response": "",
                     "prompt_tokens": _estimate_tokens(prompt),
                     "completion_tokens": 0,
+                    "token_count_source": "none",
                     "latency_ms": None,
                     "ttft_ms": None,
+                    "ok": False,
                 }
                 for prompt in prompts
             ],
@@ -733,7 +1064,6 @@ class BenchmarkService:
                 "mode": "live",
                 "endpoint": endpoint_url,
                 "kind": request.kind.value,
-                "prompt_count": len(prompts),
                 "concurrency": max(1, int(params.get("concurrency", 1))),
             },
             "backend": target.backend,
@@ -772,7 +1102,6 @@ class BenchmarkService:
                 "mode": "live",
                 "reason": "no reachable runtime endpoint",
                 "kind": request.kind.value,
-                "prompt_count": len(prompts),
                 "concurrency": max(1, int(params.get("concurrency", 1))),
             },
             "backend": None,
@@ -803,8 +1132,10 @@ class BenchmarkService:
                     "status_code": None,
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
+                    "token_count_source": "synthetic",
+                    "measurement": "health_check",
                     "latency_ms": ttft_ms,
-                    "ttft_ms": ttft_ms,
+                    "ttft_ms": None,
                 }
             ]
             return {
@@ -813,13 +1144,15 @@ class BenchmarkService:
                 "total_tokens": 0,
                 "latency_ms": ttft_ms,
                 "tokens_per_second": None,
-                "ttft_ms": ttft_ms,
+                "ttft_ms": None,
                 "samples": samples,
                 "parameters": {
                     **params,
                     "mode": "mock",
                     "reason": reason,
                     "kind": request.kind.value,
+                    "measurement": "health_check",
+                    "token_count_source": "synthetic",
                     "concurrency": max(1, int(params.get("concurrency", 1))),
                 },
                 "backend": None,
@@ -832,6 +1165,7 @@ class BenchmarkService:
                 "response": f"[mock benchmark: {reason}]",
                 "prompt_tokens": _estimate_tokens(prompt),
                 "completion_tokens": max_tokens,
+                "token_count_source": "synthetic",
                 "latency_ms": per_prompt_latency_ms,
                 "ttft_ms": ttft_ms,
             }
@@ -852,7 +1186,7 @@ class BenchmarkService:
                 "mode": "mock",
                 "reason": reason,
                 "kind": request.kind.value,
-                "prompt_count": len(prompts),
+                "token_count_source": "synthetic",
                 "concurrency": max(1, int(params.get("concurrency", 1))),
             },
             "backend": None,

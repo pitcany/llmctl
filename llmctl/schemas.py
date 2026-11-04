@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from llmctl.db import BenchmarkKind, ModelStatus, RuntimeName, SessionKind, SessionStatus
 
@@ -283,13 +283,25 @@ class BenchmarkResult(BaseModel):
     gpu_snapshot: dict[str, Any] = Field(default_factory=dict)
     parameters: dict[str, Any] = Field(default_factory=dict)
     samples: list[dict[str, Any]] = Field(default_factory=list)
+    #: Immutable experiment manifest (empty dict on legacy rows -- unknown
+    #: provenance, not fabricated). See ``services/benchmark_manifest.py``.
+    manifest: dict[str, Any] = Field(default_factory=dict)
     success: bool = True
     error: str | None = None
     created_at: datetime | None = None
 
 
 class BenchmarkRunRequest(BaseModel):
-    """Payload to request a benchmark run."""
+    """Payload to request a benchmark run.
+
+    Execution-mode contract (FIXPLAN 2026-11-03 §1A): ordinary runs are
+    strict-live. A request that resolves no endpoint records a *failure*,
+    never a fabricated synthetic measurement. Synthetic execution is the
+    explicit ``dry_run=True`` path and is labeled ``mode=mock`` in the
+    record. ``require_live=False`` is a legacy escape hatch that restores
+    the old mock fallback for scripted callers; new callers should not
+    use it.
+    """
 
     model_id: str | None = None
     session_id: str | None = None
@@ -299,14 +311,33 @@ class BenchmarkRunRequest(BaseModel):
     context_length: int | None = None
     prompts: list[str] = Field(default_factory=list)
     parameters: dict[str, Any] = Field(default_factory=dict)
-    concurrency: int = 1
+    #: Maximum number of simultaneous in-flight requests (a ceiling, not a
+    #: guarantee: a workload smaller than ``concurrency`` cannot fill it and
+    #: the record flags the shortfall via ``achieved_concurrency``).
+    concurrency: int = Field(default=1, ge=1)
+    #: Workload repetition: each prompt is sent ``repetitions`` times, so
+    #: the total workload is ``len(prompts) * repetitions`` requests. This
+    #: is independent of ``concurrency`` on purpose -- a concurrency sweep
+    #: must not silently change the total workload.
+    repetitions: int = Field(default=1, ge=1)
+    #: Warm-up requests executed before measurement; excluded from samples,
+    #: timings and throughput. Warms caches/compilation so the recorded
+    #: measurements describe steady state.
+    warmup: int = Field(default=0, ge=0)
     sweep: list[int] = Field(default_factory=list)
     dry_run: bool = False
-    #: When True, refuse to silently mock-fallback if no endpoint resolves.
-    #: The TUI sets this whenever the operator explicitly picks "live" mode
-    #: so a misconfigured endpoint surfaces as a failure record instead of
-    #: a green-but-fake row in the history.
-    require_live: bool = False
+    #: Default True: refuse to mock-fallback when no endpoint resolves.
+    #: Explicit ``False`` restores the deprecated lenient behavior (mock
+    #: on endpoint miss) for compatibility with old scripted callers.
+    require_live: bool = True
+
+    @field_validator("sweep")
+    @classmethod
+    def _sweep_levels_positive(cls, value: list[int]) -> list[int]:
+        """Concurrency sweep levels must be >= 1."""
+        if any(level < 1 for level in value):
+            raise ValueError("sweep levels must be >= 1")
+        return value
 
 
 class AdapterStatus(BaseModel):

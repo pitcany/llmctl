@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Annotated, Any
@@ -43,6 +44,7 @@ from llmctl.services.lanes import (
     record_load,
     resolve,
 )
+from llmctl.services.op_lock import LockBusy, gpu_operation_lock
 from llmctl.services.preset_loader import load_preset_views
 from llmctl.services.registry import RegistryService
 from llmctl.services.sessions import AdoptError, SessionService
@@ -614,6 +616,9 @@ def _start_request(db: Session, request: SessionStartRequest) -> None:
         session = SessionService(db).start(request)
     except SchedulerError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    except LockBusy as exc:
+        console.print(f"[red]Cannot start:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
     if session.launch_plan is not None:
         _print_plan_warnings(session.launch_plan)
     # Exit 1 on a failed launch, like `restart`. It used to return 0 (kept for
@@ -796,6 +801,9 @@ def start_unit(
         except AdoptError as exc:
             console.print(f"[red]Start refused:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
+        except LockBusy as exc:
+            console.print(f"[red]Cannot start unit:[/red] {escape(str(exc))}")
+            raise typer.Exit(1) from exc
     if dry_run:
         flag = " --user" if scope == "user" else ""
         state = "already active — nothing would happen" if was_active else "inactive"
@@ -891,12 +899,19 @@ def stop(
         assume_yes=yes,
     )
     failed = False
-    for item, ok in stop_items(items, real_deps(settings)):
-        if ok:
-            console.print(f"[green]Stopped[/green] {escape(item.label)}")
-        else:
-            failed = True
-            console.print(f"[red]Could not stop[/red] {escape(item.label)}")
+    try:
+        for item, ok in stop_items(
+            items, real_deps(settings), settings=settings,
+            refresh=lambda: serving_now(gather_state(settings)),
+        ):
+            if ok:
+                console.print(f"[green]Stopped[/green] {escape(item.label)}")
+            else:
+                failed = True
+                console.print(f"[red]Could not stop[/red] {escape(item.label)}")
+    except LockBusy as exc:
+        console.print(f"[red]Cannot stop:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
     if failed:
         raise typer.Exit(1)
 
@@ -964,6 +979,9 @@ def _stop_session(
         except AdoptError as exc:
             console.print(f"[red]Stop refused:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
+        except LockBusy as exc:
+            console.print(f"[red]Cannot stop:[/red] {escape(str(exc))}")
+            raise typer.Exit(1) from exc
     if not session:
         raise typer.BadParameter(f"Session not found: {session_id}")
     if session.status.value != "stopped":
@@ -1015,6 +1033,9 @@ def restart(
             session = SessionService(db).restart(session_id, restart_unit=systemd)
         except AdoptError as exc:
             console.print(f"[red]Restart refused:[/red] {escape(str(exc))}")
+            raise typer.Exit(1) from exc
+        except LockBusy as exc:
+            console.print(f"[red]Cannot restart:[/red] {escape(str(exc))}")
             raise typer.Exit(1) from exc
     if not session:
         raise typer.BadParameter(f"Session not found: {session_id}")
@@ -1471,6 +1492,20 @@ def bench(
         typer.Option(help="Target context length in tokens (long_context kind)."),
     ] = None,
     concurrency: Annotated[int, typer.Option(help="Parallel in-flight requests (load level).")] = 1,
+    repetitions: Annotated[
+        int,
+        typer.Option(
+            help="Send the prompt workload this many times (total requests = prompts x N).",
+            min=1,
+        ),
+    ] = 1,
+    warmup: Annotated[
+        int,
+        typer.Option(
+            help="Warm-up requests before measurement (excluded from results).",
+            min=0,
+        ),
+    ] = 0,
     sweep: Annotated[
         str | None,
         typer.Option(help="Concurrency sweep, e.g. '1,2,4,8' (overrides --concurrency)."),
@@ -1529,6 +1564,8 @@ def bench(
         prompts=list(prompt) if prompt else [],
         parameters={"max_tokens": max_tokens},
         concurrency=concurrency,
+        repetitions=repetitions,
+        warmup=warmup,
         sweep=sweep_levels,
         dry_run=synthetic,
     )
@@ -1578,20 +1615,62 @@ def _print_benchmark_result(result: object) -> None:
         table.add_row("Backend", result.backend)
     if result.context_length:
         table.add_row("Context length", str(result.context_length))
-    table.add_row("Concurrency", str(result.parameters.get("concurrency", 1)))
+    requested = result.parameters.get("concurrency", 1)
+    achieved = result.parameters.get("achieved_concurrency")
+    if achieved is not None and int(achieved) != int(requested):
+        table.add_row("Concurrency", f"{requested} (achieved {achieved})")
+    else:
+        table.add_row("Concurrency", str(requested))
+    for warning in result.parameters.get("warnings", []) or []:
+        table.add_row("Warning", f"[yellow]{escape(str(warning))}[/yellow]")
+    rerun_of = result.parameters.get("rerun_of")
+    if rerun_of:
+        table.add_row("Re-run of", str(rerun_of))
+    for entry in result.parameters.get("drift", []) or []:
+        table.add_row("Config drift", f"[yellow]{escape(str(entry))}[/yellow]")
+    has_manifest = bool(getattr(result, "manifest", None))
+    table.add_row(
+        "Manifest",
+        "captured" if has_manifest else "[dim]unknown (pre-manifest record)[/dim]",
+    )
     table.add_row("Prompt tokens", str(result.prompt_tokens))
     table.add_row("Completion tokens", str(result.completion_tokens))
     table.add_row("Total tokens", str(result.total_tokens))
+    token_source = str(result.parameters.get("token_count_source", ""))
+    if token_source in {"estimate", "mixed", "synthetic"}:
+        label = {
+            "estimate": "estimated (no server usage data)",
+            "mixed": "mixed (server usage + estimates)",
+            "synthetic": "synthetic (mock run)",
+        }[token_source]
+        table.add_row("Token counts", f"[yellow]{label}[/yellow]")
     latency = "n/a" if result.latency_ms is None else f"{result.latency_ms:.1f} ms"
+    est_suffix = " (estimated tokens)" if token_source in {"estimate", "mixed"} else ""
     tps = "n/a" if result.tokens_per_second is None else f"{result.tokens_per_second:.1f} tok/s"
     table.add_row("Latency", latency)
-    table.add_row("Throughput", tps)
+    table.add_row("Throughput", f"{tps}{est_suffix}")
     ttft = (
         "n/a"
         if result.time_to_first_token_ms is None
         else f"{result.time_to_first_token_ms:.1f} ms"
     )
     table.add_row("Time to first token", ttft)
+    request_count = result.parameters.get("request_count")
+    if request_count is not None:
+        failed = int(result.parameters.get("failed_request_count", 0) or 0)
+        cell = str(request_count) if not failed else f"{request_count} ({failed} failed)"
+        table.add_row("Requests", cell)
+    percentiles = result.parameters.get("percentiles") or {}
+    for metric in ("latency_ms", "ttft_ms"):
+        stats = percentiles.get(metric) if isinstance(percentiles, dict) else None
+        if not stats:
+            continue
+        note = " (few samples)" if stats.get("insufficient_samples") else ""
+        table.add_row(
+            f"{metric} p50/p90/p99",
+            f"{stats.get('p50')} / {stats.get('p90')} / {stats.get('p99')} ms"
+            f" (n={stats.get('n')}){note}",
+        )
     if result.peak_vram_mb is not None:
         table.add_row("Peak VRAM", f"{result.peak_vram_mb} MB")
     if result.avg_gpu_util_pct is not None:
@@ -1619,7 +1698,14 @@ def benchmarks_cmd(
         BenchmarkKind | None,
         typer.Option(help="Filter by kind.", case_sensitive=False),
     ] = None,
-    limit: Annotated[int, typer.Option(help="Maximum rows to return.")] = 20,
+    limit: Annotated[int | None, typer.Option(help="Maximum rows to return.")] = None,
+    export: Annotated[
+        str | None,
+        typer.Option(
+            "--export",
+            help="Write the (filtered) history as JSON with manifests to this path.",
+        ),
+    ] = None,
 ) -> None:
     """List benchmark history (newest first) or show one in detail (run one: `llmctl bench`)."""
     with _session() as db:
@@ -1630,7 +1716,20 @@ def benchmarks_cmd(
                 raise typer.Exit(code=1)
             _print_benchmark_result(result)
             return
-        results = service.list_results(model_id=model, session_id=session, kind=kind, limit=limit)
+        if export:
+            from llmctl.services.benchmark_manifest import write_export
+
+            payloads = service.export(
+                model_id=model, session_id=session, kind=kind, limit=limit,
+            )
+            path = write_export(Path(export).expanduser(), payloads)
+            console.print(
+                f"[green]Exported {len(payloads)} result(s) to {escape(str(path))}[/green]"
+            )
+            return
+        results = service.list_results(
+            model_id=model, session_id=session, kind=kind, limit=20 if limit is None else limit,
+        )
     if not results:
         console.print("[yellow]No benchmarks recorded yet.[/yellow]")
         return
@@ -2134,124 +2233,156 @@ def vllm_cmd(
         if save and target.kind == "session":
             _save_run_settings(target, overrides, dry_run=True)
         return
-    if not dry_run:
-        _confirm_state_change(
-            f"Swap to {target.model} ({target.engine})",
-            required=settings.scheduler.require_confirmation_for_start,
-            assume_yes=yes,
-        )
-        if fit is not None:
-            # Free VRAM may have changed while the prompt waited: check again.
-            from llmctl.services.vram_fit import free_mib_now
+    # FIXPLAN 2026-11-03 §2A: hold the host-wide GPU operation lock from
+    # the first mutation until the swap -- including rollback -- is done.
+    # Reentrant, so helpers that take the lock nest instead of deadlocking.
+    from contextlib import ExitStack
 
-            state.free_mib = free_mib_now()
-            fit = state.fits_alongside(target)
-            if fit is None:
-                console.print(
-                    "[yellow]No longer fits beside what is running; "
-                    "stopping what shares its cards instead.[/yellow]"
+    with ExitStack() as _stack:
+        if not dry_run:
+            try:
+                _stack.enter_context(
+                    gpu_operation_lock(
+                        purpose=f"run {target.model}", interface="cli", settings=settings
+                    )
                 )
-    # One switch engine (2026-10-20): llm-router starts and stops the GPU lanes.
-    # Per-run vLLM tuning (--tp/--max-len/--gpu-mem/--tq/--force/--no-wait) needs
-    # llmctl's own env render, so those keep the direct path.
-    tuned = bool(overrides) or tq or no_tq or force or no_wait
-    # A lane that fits beside what runs starts directly: llm-router's lane
-    # scripts always run with --take-gpus, which would stop the rest.
-    # So does a placed one-card preset: llm-router's vLLM profiles take both cards.
-    placed = target.kind == "vllm" and target.cards is not None
-    if (
-        not direct
-        and not dry_run
-        and target.kind in ("lane", "vllm")
-        and not tuned
-        and fit is None
-        and not placed
-    ):
-        if cli_swap.run_router_swap(state, target, console, settings):
-            return
-    if target.kind == "session":
-        cli_swap.run_session_swap(state, target, console, parameters=session_parameters)
-        if save:
-            _save_run_settings(target, overrides, dry_run=False)
-        return
-    if target.kind == "lane":
-        cli_swap.run_lane_swap(state, target, console, fit)
-        return
-    preset = target.key
-    # Only a name from the list frees the GPUs up front: an unlisted one is
-    # almost always a typo, and start_vllm_tp rejects it before touching
-    # anything. Stopping FreeToken first would turn a typo into an outage.
-    # By key: a placed one-card preset is a copy of its row (cards set).
-    listed = any(row.key == target.key for row in state.catalog)
-    stopped_lanes = (
-        cli_swap.stop_lanes_for_vllm(state, console, target) if listed and not dry_run else []
-    )
-    started_at = time.monotonic()
-    options = _build_options(tq if tq else None, no_tq, dry_run, no_wait, force)
-    options.preset_overrides = overrides.fields()
-    options.gpus = vllm_slots.cuda_devices(target)
-    engine = vllm_slots.engine_config(settings, target)
-    try:
-        result = start_vllm_tp(
-            preset,
-            managed_unit=engine,
-            defaults=settings.vllm.defaults,
-            fleet=settings.managed_units.fleet,
-            options=options,
-        )
-    except UnknownPresetError as exc:
-        # The exception text is a sentence ("unknown preset 'x'. Available: ..."),
-        # not the name, so suggest from what was typed.
-        console.print(f"[red]No model named '{escape(str(preset))}'.[/red]")
-        close = close_matches(str(preset), state.catalog)
-        if close:
-            console.print(f"Did you mean: {escape(', '.join(close))}?")
-        console.print("Run `llmctl ls` to see what you can run.")
-        cli_swap.restore_lanes(stopped_lanes, console)
-        raise typer.Exit(2) from exc
-    except MissingModelPathError as exc:
-        console.print(f"[red]Refusing to start {escape(str(preset))}:[/red] {escape(str(exc))}")
-        cli_swap.restore_lanes(stopped_lanes, console)
-        raise typer.Exit(2) from exc
-    except LauncherEnvError as exc:
-        # Nothing was touched: the env file is rendered before any stop.
-        console.print(f"[red]Cannot render the launch env:[/red] {escape(str(exc))}")
-        cli_swap.restore_lanes(stopped_lanes, console)
-        raise typer.Exit(2) from exc
+            except LockBusy as exc:
+                console.print(f"[red]Cannot swap:[/red] {escape(str(exc))}")
+                raise typer.Exit(1) from exc
+            # §2B: persist the operation (adopting the record an API parent
+            # handed over) so a crash or restart leaves a recoverable trail.
+            from llmctl.services import operations as _operations
+            from llmctl.services.operations import cli_operation_guard
 
-    if result.dry_run:
-        if save:
-            _save_run_settings(target, overrides, dry_run=True)
-        return
-    if not result.ok:
-        console.print("[red]vLLM start did not complete cleanly.[/red]")
-        cli_swap.restore_lanes(stopped_lanes, console)
-        if result.fleet_failed:
-            console.print(f"  fleet preflight failed on: {escape(', '.join(result.fleet_failed))}")
-        if result.restart is not None and result.restart.error:
-            console.print(f"  restart: {escape(result.restart.error)}")
-        _print_rollback(result, engine.unit_name)
-        raise typer.Exit(1)
-    if result.restart is not None and result.restart.ready is None:
-        # --no-wait: the restart was issued and nobody probed /v1/models.
-        # Announcing "ready" here would be a claim no code checked.
+            _confirm_state_change(
+                f"Swap to {target.model} ({target.engine})",
+                required=settings.scheduler.require_confirmation_for_start,
+                assume_yes=yes,
+            )
+            _stack.enter_context(
+                cli_operation_guard(
+                    db_url=os.environ.get(_operations.OP_DB_ENV) or settings.database_url,
+                    kind="swap",
+                    target=target.key,
+                    model=target.model,
+                )
+            )
+            if fit is not None:
+                # Free VRAM may have changed while the prompt waited: check again.
+                from llmctl.services.vram_fit import free_mib_now
+
+                state.free_mib = free_mib_now()
+                fit = state.fits_alongside(target)
+                if fit is None:
+                    console.print(
+                        "[yellow]No longer fits beside what is running; "
+                        "stopping what shares its cards instead.[/yellow]"
+                    )
+        # One switch engine (2026-10-20): llm-router starts and stops the GPU lanes.
+        # Per-run vLLM tuning (--tp/--max-len/--gpu-mem/--tq/--force/--no-wait) needs
+        # llmctl's own env render, so those keep the direct path.
+        tuned = bool(overrides) or tq or no_tq or force or no_wait
+        # A lane that fits beside what runs starts directly: llm-router's lane
+        # scripts always run with --take-gpus, which would stop the rest.
+        # So does a placed one-card preset: llm-router's vLLM profiles take both cards.
+        placed = target.kind == "vllm" and target.cards is not None
+        if (
+            not direct
+            and not dry_run
+            and target.kind in ("lane", "vllm")
+            and not tuned
+            and fit is None
+            and not placed
+        ):
+            if cli_swap.run_router_swap(state, target, console, settings):
+                return
+        if target.kind == "session":
+            cli_swap.run_session_swap(state, target, console, parameters=session_parameters)
+            if save:
+                _save_run_settings(target, overrides, dry_run=False)
+            return
+        if target.kind == "lane":
+            cli_swap.run_lane_swap(state, target, console, fit)
+            return
+        preset = target.key
+        # Only a name from the list frees the GPUs up front: an unlisted one is
+        # almost always a typo, and start_vllm_tp rejects it before touching
+        # anything. Stopping FreeToken first would turn a typo into an outage.
+        # By key: a placed one-card preset is a copy of its row (cards set).
+        listed = any(row.key == target.key for row in state.catalog)
+        stopped_lanes = (
+            cli_swap.stop_lanes_for_vllm(state, console, target) if listed and not dry_run else []
+        )
+        started_at = time.monotonic()
+        from llmctl.services.operations import OperationPhase, mark_phase
+
+        mark_phase(OperationPhase.LOADING)
+        options = _build_options(tq if tq else None, no_tq, dry_run, no_wait, force)
+        options.preset_overrides = overrides.fields()
+        options.gpus = vllm_slots.cuda_devices(target)
+        engine = vllm_slots.engine_config(settings, target)
+        try:
+            result = start_vllm_tp(
+                preset,
+                managed_unit=engine,
+                defaults=settings.vllm.defaults,
+                fleet=settings.managed_units.fleet,
+                options=options,
+            )
+        except UnknownPresetError as exc:
+            # The exception text is a sentence ("unknown preset 'x'. Available: ..."),
+            # not the name, so suggest from what was typed.
+            console.print(f"[red]No model named '{escape(str(preset))}'.[/red]")
+            close = close_matches(str(preset), state.catalog)
+            if close:
+                console.print(f"Did you mean: {escape(', '.join(close))}?")
+            console.print("Run `llmctl ls` to see what you can run.")
+            cli_swap.restore_lanes(stopped_lanes, console)
+            raise typer.Exit(2) from exc
+        except MissingModelPathError as exc:
+            console.print(f"[red]Refusing to start {escape(str(preset))}:[/red] {escape(str(exc))}")
+            cli_swap.restore_lanes(stopped_lanes, console)
+            raise typer.Exit(2) from exc
+        except LauncherEnvError as exc:
+            # Nothing was touched: the env file is rendered before any stop.
+            console.print(f"[red]Cannot render the launch env:[/red] {escape(str(exc))}")
+            cli_swap.restore_lanes(stopped_lanes, console)
+            raise typer.Exit(2) from exc
+
+        if result.dry_run:
+            if save:
+                _save_run_settings(target, overrides, dry_run=True)
+            return
+        if not result.ok:
+            console.print("[red]vLLM start did not complete cleanly.[/red]")
+            cli_swap.restore_lanes(stopped_lanes, console)
+            if result.fleet_failed:
+                failed = escape(", ".join(result.fleet_failed))
+                console.print(f"  fleet preflight failed on: {failed}")
+            if result.restart is not None and result.restart.error:
+                console.print(f"  restart: {escape(result.restart.error)}")
+            _print_rollback(result, engine.unit_name)
+            raise typer.Exit(1)
+        if result.restart is not None and result.restart.ready is None:
+            # --no-wait: the restart was issued and nobody probed /v1/models.
+            # Announcing "ready" here would be a claim no code checked.
+            console.print(
+                f"[cyan]Restart issued[/cyan] for {escape(result.spec.served_name)} "
+                f"on port {result.spec.port}; readiness not checked (--no-wait). "
+                "Run `llmctl status` once it has loaded."
+            )
+            _print_companions(result)
+            if save:
+                _save_run_settings(target, overrides, dry_run=False)
+            return
+        record_load(preset, time.monotonic() - started_at)
         console.print(
-            f"[cyan]Restart issued[/cyan] for {escape(result.spec.served_name)} "
-            f"on port {result.spec.port}; readiness not checked (--no-wait). "
-            "Run `llmctl status` once it has loaded."
+            f"[green]vLLM ready[/green] — serving {escape(result.spec.served_name)} "
+            f"on port {result.spec.port}"
         )
         _print_companions(result)
         if save:
             _save_run_settings(target, overrides, dry_run=False)
-        return
-    record_load(preset, time.monotonic() - started_at)
-    console.print(
-        f"[green]vLLM ready[/green] — serving {escape(result.spec.served_name)} "
-        f"on port {result.spec.port}"
-    )
-    _print_companions(result)
-    if save:
-        _save_run_settings(target, overrides, dry_run=False)
 
 
 #: Engines whose launch settings llmctl owns (it starts their servers).

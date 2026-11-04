@@ -32,6 +32,7 @@ from llmctl.integrations.systemctl import SystemctlRunner
 from llmctl.schemas import AdapterStatus, LaunchPlan, Session, SessionStartRequest
 from llmctl.services.backends import probe_openai_v1_models
 from llmctl.services.events import log_event
+from llmctl.services.op_lock import gpu_operation_lock
 from llmctl.services.router import RuntimeRouter
 from llmctl.services.scheduler import SchedulerService
 from llmctl.services.unit_gpus import unit_gpu_ids
@@ -637,6 +638,15 @@ class SessionService:
 
     def start(self, request: SessionStartRequest) -> Session:
         """Plan and (when not dry-run) launch a runtime session."""
+        if request.dry_run:
+            return self._start_planned(request)
+        with gpu_operation_lock(
+            purpose="start session", interface="llmctl", settings=self.settings,
+        ):
+            return self._start_planned(request)
+
+    def _start_planned(self, request: SessionStartRequest) -> Session:
+        """Plan and launch while the caller holds mutation ownership."""
         plan = self.scheduler.create_launch_plan(request)
         self.scheduler.validate(plan, force=request.force, dry_run=request.dry_run)
         record = SessionRecord(
@@ -655,7 +665,13 @@ class SessionService:
         self.db.add(record)
         self.db.commit()
         self.db.refresh(record)
-        return self._launch_record(record, plan)
+        if request.dry_run:
+            # Planning only: no GPU mutation, so read paths stay available.
+            return self._launch_record(record, plan)
+        with gpu_operation_lock(
+            purpose=f"start session {record.id}", interface="llmctl", settings=self.settings
+        ):
+            return self._launch_record(record, plan)
 
     def stop(self, session_id: str, *, stop_unit: bool = False) -> Session | None:
         """Stop a session, terminating its process when applicable.
@@ -667,76 +683,79 @@ class SessionService:
         ``STOPPED`` (the row is kept; ``detach`` is the verb that deletes).
         An adopted session without a known unit still refuses.
         """
-        record = self._resolve_record(session_id)
-        if not record:
-            return None
-        if record.kind == SessionKind.ADOPTED:
-            where = record.systemd_unit or record.endpoint_url
-            if not (stop_unit and record.systemd_unit):
-                raise AdoptError(
-                    f"Session {record.id} is adopted ({where}); llmctl does not manage its "
-                    "lifecycle. Use `systemctl stop <unit>` or "
-                    f"`llmctl stop {record.id} --systemd` to stop the backing unit, or "
-                    "`llmctl detach <session_id>` to remove it from tracking."
+        with gpu_operation_lock(
+            purpose=f"stop session {session_id}", interface="llmctl", settings=self.settings,
+        ):
+            record = self._resolve_record(session_id)
+            if not record:
+                return None
+            if record.kind == SessionKind.ADOPTED:
+                where = record.systemd_unit or record.endpoint_url
+                if not (stop_unit and record.systemd_unit):
+                    raise AdoptError(
+                        f"Session {record.id} is adopted ({where}); llmctl does not manage its "
+                        "lifecycle. Use `systemctl stop <unit>` or "
+                        f"`llmctl stop {record.id} --systemd` to stop the backing unit, or "
+                        "`llmctl detach <session_id>` to remove it from tracking."
+                    )
+                # Adopted units are not all system-scope: the llama.cpp servers
+                # (deepseek-v4-flash-0731, gpt-oss-120b) are user units. Stopping
+                # those as `sudo systemctl stop` looks for a system unit of that
+                # name and fails, so pick the scope the unit actually lives in.
+                user_scope = self._systemctl.is_user_unit(record.systemd_unit)
+                result = self._systemctl.stop(record.systemd_unit, user=user_scope)
+                if not result.ok:
+                    scope = " --user" if user_scope else ""
+                    raise AdoptError(
+                        f"`systemctl{scope} stop {record.systemd_unit}` failed "
+                        f"(exit {result.returncode}): {result.stderr.strip()}"
+                    )
+                # Keep the row — the next reconcile probes the now-down endpoint
+                # and keeps it STOPPED (or revives it if the unit is restarted).
+                # Unless the unit's own ExecStopPost detached it first, which
+                # _persist_unit_transition treats as success rather than a crash.
+                record.status = SessionStatus.STOPPED
+                record.stopped_at = utcnow()
+                record.pid = None
+                record.updated_at = utcnow()
+                session = self._persist_unit_transition(record)
+                # Read from the snapshot, not the record: if the unit's hook
+                # detached the row, the ORM instance is dead and every attribute
+                # access re-raises.
+                log_event(
+                    self.db,
+                    EventLevel.INFO,
+                    "session",
+                    f"Adopted session {session.id} stopped via systemctl "
+                    f"({session.systemd_unit}).",
+                    session_id=session.id,
+                    model_id=session.model_id,
                 )
-            # Adopted units are not all system-scope: the llama.cpp servers
-            # (deepseek-v4-flash-0731, gpt-oss-120b) are user units. Stopping
-            # those as `sudo systemctl stop` looks for a system unit of that
-            # name and fails, so pick the scope the unit actually lives in.
-            user_scope = self._systemctl.is_user_unit(record.systemd_unit)
-            result = self._systemctl.stop(record.systemd_unit, user=user_scope)
-            if not result.ok:
-                scope = " --user" if user_scope else ""
-                raise AdoptError(
-                    f"`systemctl{scope} stop {record.systemd_unit}` failed "
-                    f"(exit {result.returncode}): {result.stderr.strip()}"
-                )
-            # Keep the row — the next reconcile probes the now-down endpoint
-            # and keeps it STOPPED (or revives it if the unit is restarted).
-            # Unless the unit's own ExecStopPost detached it first, which
-            # _persist_unit_transition treats as success rather than a crash.
+                return session
+            status = self._terminate_record(record)
+            if _process_survived(status):
+                # Recording STOPPED here would erase the pid and lose the process.
+                assert status is not None  # narrowed by _process_survived
+                return self._mark_survivor(record, status)
             record.status = SessionStatus.STOPPED
             record.stopped_at = utcnow()
             record.pid = None
+            record.error = None
+            # The process is really gone, so an earlier failed attempt is history.
+            record.terminate_failed_at = None
             record.updated_at = utcnow()
-            session = self._persist_unit_transition(record)
-            # Read from the snapshot, not the record: if the unit's hook
-            # detached the row, the ORM instance is dead and every attribute
-            # access re-raises.
+            self.db.add(record)
+            self.db.commit()
+            self.db.refresh(record)
             log_event(
                 self.db,
                 EventLevel.INFO,
                 "session",
-                f"Adopted session {session.id} stopped via systemctl "
-                f"({session.systemd_unit}).",
-                session_id=session.id,
-                model_id=session.model_id,
+                f"Session {record.id} stopped.",
+                session_id=record.id,
+                model_id=record.model_id,
             )
-            return session
-        status = self._terminate_record(record)
-        if _process_survived(status):
-            # Recording STOPPED here would erase the pid and lose the process.
-            assert status is not None  # narrowed by _process_survived
-            return self._mark_survivor(record, status)
-        record.status = SessionStatus.STOPPED
-        record.stopped_at = utcnow()
-        record.pid = None
-        record.error = None
-        # The process is really gone, so an earlier failed attempt is history.
-        record.terminate_failed_at = None
-        record.updated_at = utcnow()
-        self.db.add(record)
-        self.db.commit()
-        self.db.refresh(record)
-        log_event(
-            self.db,
-            EventLevel.INFO,
-            "session",
-            f"Session {record.id} stopped.",
-            session_id=record.id,
-            model_id=record.model_id,
-        )
-        return record_to_session(record)
+            return record_to_session(record)
 
     def restart(self, session_id: str, *, restart_unit: bool = False) -> Session | None:
         """Stop and relaunch a session, reusing its stored launch plan.
@@ -749,46 +768,49 @@ class SessionService:
         that a previous ``stop --systemd`` took down. An adopted session
         without a known unit still refuses.
         """
-        record = self._resolve_record(session_id)
-        if not record:
-            return None
-        if record.kind == SessionKind.ADOPTED:
-            where = record.systemd_unit or record.endpoint_url
-            if not (restart_unit and record.systemd_unit):
-                raise AdoptError(
-                    f"Session {record.id} is adopted ({where}); llmctl does not manage its "
-                    "lifecycle. Use `systemctl restart <unit>` or "
-                    f"`llmctl restart {record.id} --systemd` to restart the backing unit; "
-                    "either way the row is revived on the next reconcile."
-                )
-            return self._restart_adopted_unit(record)
-        status = self._terminate_record(record)
-        if _process_survived(status):
-            # Relaunching now would put a second server on the same port and
-            # the same GPUs as the one that would not die.
-            assert status is not None  # narrowed by _process_survived
-            return self._mark_survivor(record, status)
-        plan = (
-            LaunchPlan.model_validate(record.launch_plan)
-            if record.launch_plan
-            else None
-        )
-        record.status = SessionStatus.PLANNED
-        record.error = None
-        record.pid = None
-        # The termination succeeded this time (a survivor returned above), so
-        # any earlier failed attempt is history. Cleared here rather than only
-        # in _launch_record because a dry-run plan returns before that point.
-        record.terminate_failed_at = None
-        record.stopped_at = None
-        record.started_at = None
-        record.updated_at = utcnow()
-        self.db.add(record)
-        self.db.commit()
-        self.db.refresh(record)
-        if plan is None:
-            return record_to_session(record)
-        return self._launch_record(record, plan)
+        with gpu_operation_lock(
+            purpose=f"restart session {session_id}", interface="llmctl", settings=self.settings,
+        ):
+            record = self._resolve_record(session_id)
+            if not record:
+                return None
+            if record.kind == SessionKind.ADOPTED:
+                where = record.systemd_unit or record.endpoint_url
+                if not (restart_unit and record.systemd_unit):
+                    raise AdoptError(
+                        f"Session {record.id} is adopted ({where}); llmctl does not manage its "
+                        "lifecycle. Use `systemctl restart <unit>` or "
+                        f"`llmctl restart {record.id} --systemd` to restart the backing unit; "
+                        "either way the row is revived on the next reconcile."
+                    )
+                return self._restart_adopted_unit(record)
+            status = self._terminate_record(record)
+            if _process_survived(status):
+                # Relaunching now would put a second server on the same port and
+                # the same GPUs as the one that would not die.
+                assert status is not None  # narrowed by _process_survived
+                return self._mark_survivor(record, status)
+            plan = (
+                LaunchPlan.model_validate(record.launch_plan)
+                if record.launch_plan
+                else None
+            )
+            record.status = SessionStatus.PLANNED
+            record.error = None
+            record.pid = None
+            # The termination succeeded this time (a survivor returned above), so
+            # any earlier failed attempt is history. Cleared here rather than only
+            # in _launch_record because a dry-run plan returns before that point.
+            record.terminate_failed_at = None
+            record.stopped_at = None
+            record.started_at = None
+            record.updated_at = utcnow()
+            self.db.add(record)
+            self.db.commit()
+            self.db.refresh(record)
+            if plan is None:
+                return record_to_session(record)
+            return self._launch_record(record, plan)
 
     def _persist_unit_transition(self, record: SessionRecord) -> Session:
         """Save a row we just drove through systemctl, tolerating its own hooks.
@@ -1004,39 +1026,42 @@ class SessionService:
         from their own ``ExecStartPost``; inventing a row here would race
         that hook and could leave two rows for one endpoint.
         """
-        if not unit_name:
-            raise AdoptError("A unit name is required.")
+        with gpu_operation_lock(
+            purpose=f"start unit {unit_name}", interface="llmctl", settings=self.settings,
+        ):
+            if not unit_name:
+                raise AdoptError("A unit name is required.")
 
-        user_scope = self._systemctl.is_user_unit(unit_name)
-        # is_user_unit() answers "which manager", not "does it exist" — it
-        # returns False for a name neither knows. Check before starting so an
-        # unknown unit is a clear refusal rather than a systemd error string.
-        if not user_scope and self._systemctl.load_state(unit_name) in ("", "not-found"):
-            raise AdoptError(
-                f"No systemd unit named {unit_name!r} in either scope. "
-                "Check `systemctl list-unit-files` and `systemctl --user list-unit-files`."
+            user_scope = self._systemctl.is_user_unit(unit_name)
+            # is_user_unit() answers "which manager", not "does it exist" — it
+            # returns False for a name neither knows. Check before starting so an
+            # unknown unit is a clear refusal rather than a systemd error string.
+            if not user_scope and self._systemctl.load_state(unit_name) in ("", "not-found"):
+                raise AdoptError(
+                    f"No systemd unit named {unit_name!r} in either scope. "
+                    "Check `systemctl list-unit-files` and `systemctl --user list-unit-files`."
+                )
+
+            scope = "user" if user_scope else "system"
+            active = self._systemctl.is_active(unit_name, user=user_scope)
+            if dry_run or active:
+                return scope, active
+
+            result = self._systemctl.start(unit_name, user=user_scope)
+            if not result.ok:
+                flag = " --user" if user_scope else ""
+                raise AdoptError(
+                    f"`systemctl{flag} start {unit_name}` failed "
+                    f"(exit {result.returncode}): {result.stderr.strip()}"
+                )
+            log_event(
+                self.db,
+                EventLevel.INFO,
+                "session",
+                f"Started systemd unit {unit_name} ({scope} scope).",
+                data={"systemd_unit": unit_name, "scope": scope},
             )
-
-        scope = "user" if user_scope else "system"
-        active = self._systemctl.is_active(unit_name, user=user_scope)
-        if dry_run or active:
-            return scope, active
-
-        result = self._systemctl.start(unit_name, user=user_scope)
-        if not result.ok:
-            flag = " --user" if user_scope else ""
-            raise AdoptError(
-                f"`systemctl{flag} start {unit_name}` failed "
-                f"(exit {result.returncode}): {result.stderr.strip()}"
-            )
-        log_event(
-            self.db,
-            EventLevel.INFO,
-            "session",
-            f"Started systemd unit {unit_name} ({scope} scope).",
-            data={"systemd_unit": unit_name, "scope": scope},
-        )
-        return scope, False
+            return scope, False
 
     def detach(self, session_id: str) -> Session | None:
         """Remove an ``ADOPTED`` session from tracking.

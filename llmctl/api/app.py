@@ -22,8 +22,9 @@ from llmctl.api import (
 )
 from llmctl.api.deps import get_db_session, get_settings, get_swap_jobs
 from llmctl.config import Settings, load_settings, resolve_api_auth_token
-from llmctl.db import SQLModel, apply_migrations, get_engine
+from llmctl.db import ensure_tables, get_engine
 from llmctl.services.health import HealthService
+from llmctl.services.op_lock import lock_path
 from llmctl.services.swap_jobs import SwapJobs
 
 #: Paths that stay reachable without a bearer token when
@@ -42,8 +43,9 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
     effective_settings = settings or load_settings()
     effective_database_url = database_url or effective_settings.database_url
     engine = get_engine(effective_database_url)
-    SQLModel.metadata.create_all(engine)
-    apply_migrations(engine)
+    # Populate THIS engine (thread-guarded per URL; in-memory engines are
+    # always distinct so they are always populated).
+    ensure_tables(engine, effective_database_url)
     app = FastAPI(
         title="LLM Mission Control",
         version=__version__,
@@ -99,7 +101,11 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
 
     app.dependency_overrides[get_db_session] = session_dependency
 
-    swap_jobs = SwapJobs()
+    # §2B: the job registry persists operations to the same database so a
+    # restart can reconcile unfinished swaps instead of forgetting them.
+    swap_jobs = SwapJobs(
+        database_url=effective_database_url, lock_path=str(lock_path(effective_settings)),
+    )
     app.dependency_overrides[get_settings] = lambda: effective_settings
     app.dependency_overrides[get_swap_jobs] = lambda: swap_jobs
 

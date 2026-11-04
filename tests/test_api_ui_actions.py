@@ -33,7 +33,7 @@ def test_app_js_has_action_literals() -> None:
 
 
 def test_app_js_line_cap() -> None:
-    assert len(_js().splitlines()) <= 450
+    assert len(_js().splitlines()) <= 470  # raised 2026-11-03: §3B filter + §3C phase
 
 
 def test_app_js_polls_jobs_every_second() -> None:

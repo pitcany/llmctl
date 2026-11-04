@@ -63,6 +63,31 @@ def test_default_prompt_is_spec_mle_bayes() -> None:
     assert "Bayesian" in DEFAULT_PROMPT
 
 
+# -- execution mode + workload validation (FIXPLAN 2026-11-03 §1A) ----------
+
+
+def test_request_defaults_are_strict_live_single_pass() -> None:
+    """Ordinary requests default to strict live, one pass, no sweep."""
+    request = BenchmarkRunRequest(name="x")
+    assert request.require_live is True
+    assert request.dry_run is False
+    assert request.repetitions == 1
+    assert request.concurrency == 1
+    assert request.sweep == []
+
+
+def test_request_rejects_invalid_workload_numbers() -> None:
+    """repetitions/concurrency/sweep are validated at the schema boundary."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        BenchmarkRunRequest(repetitions=0)
+    with pytest.raises(ValidationError):
+        BenchmarkRunRequest(concurrency=0)
+    with pytest.raises(ValidationError):
+        BenchmarkRunRequest(sweep=[0, 2])
+
+
 # -- kind dispatch ----------------------------------------------------------
 
 
@@ -136,7 +161,11 @@ def test_kind_health_targets_models_endpoint(db: Session) -> None:
     # health benchmarks have no completion tokens but still time the request.
     assert result.completion_tokens == 0
     assert result.latency_ms is not None and result.latency_ms >= 0
-    assert result.time_to_first_token_ms == result.latency_ms
+    # FIXPLAN §1B: a health check is not generation -- latency must not be
+    # presented as TTFT.
+    assert result.time_to_first_token_ms is None
+    assert result.parameters["measurement"] == "health_check"
+    assert result.samples[0]["measurement"] == "health_check"
 
 
 def test_kind_long_context_builds_padded_prompt(db: Session) -> None:
@@ -163,6 +192,145 @@ def test_kind_long_context_builds_padded_prompt(db: Session) -> None:
     assert seen_bodies and len(seen_bodies[0]) >= 2048 * 4
     # JSON-encodes \n -> \\n in the body, so check for the question text alone.
     assert b"what was the topic of the preamble" in seen_bodies[0]
+
+
+# -- measurement provenance (FIXPLAN 2026-11-03 §1B) ------------------------
+
+
+def test_token_counts_record_server_usage_source(db: Session) -> None:
+    """Samples with server usage carry token_count_source=server_usage."""
+    model_id = _ollama_model(db)
+    result = BenchmarkService(db, client_factory=_client_factory(
+        lambda _r: httpx.Response(200, content=SSE_CHUNK.encode("utf-8"))
+    )).run(BenchmarkRunRequest(name="src", model_id=model_id, prompts=["hi"]))
+    assert result.success is True
+    assert result.samples[0]["token_count_source"] == "server_usage"
+    assert result.parameters["token_count_source"] == "server_usage"
+
+
+def test_token_counts_estimate_source_and_no_invented_token(db: Session) -> None:
+    """Without usage data the counts are labeled estimates, and an empty
+    response never becomes one fabricated token."""
+    model_id = _ollama_model(db)
+    sse_no_usage = (
+        'data: {"choices":[{"delta":{"content":""}}]}\n\n' "data: [DONE]\n\n"
+    )
+    result = BenchmarkService(db, client_factory=_client_factory(
+        lambda _r: httpx.Response(200, content=sse_no_usage.encode("utf-8"))
+    )).run(BenchmarkRunRequest(name="est", model_id=model_id, prompts=["hi"]))
+    assert result.success is True
+    sample = result.samples[0]
+    assert sample["completion_tokens"] == 0
+    assert sample["token_count_source"] == "estimate"
+    assert result.parameters["token_count_source"] == "estimate"
+
+
+def test_reasoning_chunks_set_first_token_but_not_ttft(db: Session) -> None:
+    """TTFT is the first answer *content*; reasoning/tool activity counts
+    only toward first_token_ms."""
+    model_id = _ollama_model(db)
+    sse = (
+        'data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    result = BenchmarkService(db, client_factory=_client_factory(
+        lambda _r: httpx.Response(200, content=sse.encode("utf-8"))
+    )).run(BenchmarkRunRequest(name="reason", model_id=model_id, prompts=["hi"]))
+    assert result.success is True
+    sample = result.samples[0]
+    assert sample["response"] == "answer"
+    assert sample["ttft_ms"] is not None
+    assert sample["first_token_ms"] is not None
+    assert sample["first_token_ms"] <= sample["ttft_ms"]
+    assert sample["reasoning_chars"] == len("thinking...")
+
+
+def test_partial_failure_keeps_successful_samples(db: Session) -> None:
+    """§1B acceptance: one failed request in a batch fails the record but
+    preserves (and reports) the successful samples."""
+    model_id = _ollama_model(db)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        body = _json.loads(request.read())
+        content = body["messages"][0]["content"]
+        if "bad" in content:
+            return httpx.Response(500, content=b"boom")
+        return httpx.Response(200, content=SSE_CHUNK.encode("utf-8"))
+
+    result = BenchmarkService(db, client_factory=_client_factory(handler)).run(
+        BenchmarkRunRequest(
+            name="mixed",
+            model_id=model_id,
+            prompts=["good1", "bad", "good2"],
+            dry_run=False,
+        )
+    )
+    assert result.success is False
+    assert "1 of 3" in (result.error or "")
+    assert result.parameters["request_count"] == 3
+    assert result.parameters["failed_request_count"] == 1
+    ok_samples = [s for s in result.samples if s.get("ok") is not False]
+    assert len(ok_samples) == 2
+    assert all(s["completion_tokens"] == 2 for s in ok_samples)
+    failed = [s for s in result.samples if s.get("ok") is False]
+    assert failed and "HTTPStatusError" in str(failed[0]["error"])
+    # Successful tokens still aggregate (2 per good sample).
+    assert result.completion_tokens == 4
+
+
+def test_percentiles_include_sample_count_and_small_n_flag(db: Session) -> None:
+    """§1B: latency/TTFT percentiles carry n and flag insufficient samples."""
+    from llmctl.services.benchmarks import MIN_PERCENTILE_SAMPLES
+
+    model_id = _ollama_model(db)
+    result = BenchmarkService(db, client_factory=_client_factory(
+        lambda _r: httpx.Response(200, content=SSE_CHUNK.encode("utf-8"))
+    )).run(
+        BenchmarkRunRequest(
+            name="pct",
+            model_id=model_id,
+            prompts=[f"p{i}" for i in range(MIN_PERCENTILE_SAMPLES)],
+            dry_run=False,
+        )
+    )
+    stats = result.parameters["percentiles"]["latency_ms"]
+    assert stats["n"] == MIN_PERCENTILE_SAMPLES
+    assert stats["insufficient_samples"] is False
+    assert stats["p50"] is not None and stats["p90"] is not None
+
+    small = BenchmarkService(db, client_factory=_client_factory(
+        lambda _r: httpx.Response(200, content=SSE_CHUNK.encode("utf-8"))
+    )).run(BenchmarkRunRequest(name="pct2", model_id=model_id, prompts=["one"]))
+    small_stats = small.parameters["percentiles"]["latency_ms"]
+    assert small_stats["n"] == 1
+    assert small_stats["insufficient_samples"] is True
+
+
+def test_warmup_requests_excluded_from_measurements(db: Session) -> None:
+    """§1B: warm-up requests hit the server but never the samples."""
+    model_id = _ollama_model(db)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        body = _json.loads(request.read())
+        seen.append(body["messages"][0]["content"])
+        return httpx.Response(200, content=SSE_CHUNK.encode("utf-8"))
+
+    result = BenchmarkService(db, client_factory=_client_factory(handler)).run(
+        BenchmarkRunRequest(
+            name="warm", model_id=model_id, prompts=["q"], warmup=2, dry_run=False
+        )
+    )
+    assert result.success is True
+    assert len(seen) == 3  # 2 warm-ups + 1 measured
+    assert len(result.samples) == 1
+    assert result.parameters["warmup_requests"] == 2
+    assert result.parameters["request_count"] == 1
 
 
 # -- failure persistence ----------------------------------------------------

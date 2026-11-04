@@ -630,7 +630,8 @@ def test_enter_action_is_the_screens_not_the_tables(tmp_path, monkeypatch) -> No
                 found[key] = (active.binding.description, active.binding.show) if active else None
 
     asyncio.run(_run())
-    assert found == {"p": ("Launch", True), "m": ("Serve", True), "b": ("Re-run", True)}
+    # §3D (2026-11-03): enter inspects; re-run is the labeled "r" action.
+    assert found == {"p": ("Launch", True), "m": ("Serve", True), "b": ("Inspect", True)}
 
 
 # --- P2 #20: Models confirms mutations -----------------------------------------

@@ -10,7 +10,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from llmctl.api.deps import get_settings, get_swap_jobs
 from llmctl.config import Settings
 from llmctl.services import stop_serving, swap_jobs, swap_view
-from llmctl.services.swap_jobs import JobBusy, StopInProgress, SwapJobs
+from llmctl.services.op_lock import LockBusy
+from llmctl.services.operations import IdempotencyConflict, OperationPhase
+from llmctl.services.swap_jobs import (
+    JobBusy,
+    OperationConflict,
+    StopInProgress,
+    SwapJobs,
+)
 
 router = APIRouter(prefix="/swap", tags=["swap"])
 
@@ -33,6 +40,8 @@ class SwapJobSummary(BaseModel):
     name: str
     status: str
     started_at: str
+    operation_id: str | None = None
+    phase: str | None = None
 
 
 class SwapJobDetail(BaseModel):
@@ -44,6 +53,9 @@ class SwapJobDetail(BaseModel):
     output: list[str]
     started_at: str
     finished_at: str | None = None
+    operation_id: str | None = None
+    phase: str | None = None
+    recovery: dict[str, Any] = Field(default_factory=dict)
 
 
 class SwapList(BaseModel):
@@ -62,25 +74,39 @@ def list_swap(
 
     state = lanes.gather_state(settings)
     running = jobs.running()
+    summary = running.summary() if running else None
+    if running is not None and summary is not None:
+        record = jobs.operation_for(running)
+        if record is not None:
+            summary["phase"] = record.phase
     return {
         "rows": swap_view.rows_json(state, swap_view.gateway_aliases(settings)),
         "gateway_url": swap_view.gateway_url(settings.router),
-        "job": running.summary() if running else None,
+        "job": summary,
     }
 
 
 @router.get("/jobs/{job_id}", response_model=SwapJobDetail)
 def get_swap_job(job_id: str, jobs: SwapJobs = Depends(get_swap_jobs)) -> dict[str, Any]:
-    """One swap job with its captured output."""
+    """One swap job with its captured output and operation phase."""
     job = jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Swap job not found")
-    return job.to_dict()
+    detail = job.to_dict()
+    record = jobs.operation_for(job)
+    if record is not None:
+        detail["phase"] = record.phase
+        detail["recovery"] = record.recovery or {}
+    return detail
 
 
 class RunRequest(BaseModel):
     name: str
     dry_run: bool = False
+    #: Optional idempotency key: repeating it with the same request returns
+    #: the existing operation instead of starting a second switch; reusing
+    #: it for a different request is refused (FIXPLAN §2B).
+    idempotency_key: str | None = None
 
 
 @router.post("/run")
@@ -124,7 +150,19 @@ def run_swap(
     if body.dry_run or (preview.already_serving and target.kind in ("lane", "session")):
         return {**info, "already_serving": preview.already_serving}
     try:
-        job = jobs.start(target.key, target.model, swap_jobs.build_run_argv(target.key))
+        outcome = jobs.start_with_operation(
+            target.key,
+            target.model,
+            swap_jobs.build_run_argv(target.key),
+            idempotency_key=body.idempotency_key,
+            previous_state={
+                "serving": [
+                    {"kind": row.kind, "key": row.key, "model": row.model}
+                    for row in catalog
+                    if row.key in state.serving
+                ]
+            },
+        )
     except JobBusy as busy:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -132,8 +170,31 @@ def run_swap(
         ) from busy
     except StopInProgress as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except IdempotencyConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except OperationConflict as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{exc}. It survived this API process; wait for it or "
+            "check `llmctl status` before retrying.",
+        ) from exc
+    if outcome.replayed and outcome.operation is not None:
+        # Same key, same request: the existing operation is the answer.
+        return {
+            **info,
+            "job_id": outcome.operation.job_id,
+            "operation_id": outcome.operation.id,
+            "phase": outcome.operation.phase,
+            "status": "already-started",
+        }
     response.status_code = status.HTTP_202_ACCEPTED
-    return {**info, "job_id": job.job_id, "status": "running"}
+    return {
+        **info,
+        "job_id": outcome.job.job_id if outcome.job else None,
+        "operation_id": outcome.operation.id if outcome.operation else None,
+        "phase": outcome.operation.phase if outcome.operation else None,
+        "status": "running",
+    }
 
 
 class StopRequest(BaseModel):
@@ -180,13 +241,56 @@ def stop_swap(
     ]
     if body.dry_run:
         return {"items": shown, "results": [], "ok": True}
+    store = jobs.store
+    record = None
+    if store is not None:
+        # §2B: persist the stop intent before the first side effect.
+        record, _ = store.begin(
+            kind="stop",
+            target=", ".join(item.label for item in items),
+            interface="api",
+            purpose="stop serving",
+            request={"items": [{"kind": i.kind, "ref": i.ref} for i in items]},
+        )
     try:
         with jobs.stopping():
-            outcome = stop_serving.stop_items(items, stop_serving.real_deps(settings))
+            outcome = stop_serving.stop_items(
+                items, stop_serving.real_deps(settings), settings=settings,
+                refresh=lambda: stop_serving.serving_now(lanes.gather_state(settings)),
+            )
     except JobBusy as busy:
+        if record is not None:
+            store.finish(record.id, OperationPhase.FAILED, error="a swap job was running")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Swap job {busy.job.job_id} is running",
         ) from busy
+    except LockBusy as exc:
+        # Another process (CLI swap, TUI action) holds the GPU operation
+        # lock; the stop cannot run concurrently with it.
+        if record is not None:
+            store.finish(record.id, OperationPhase.FAILED, error=str(exc))
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except BaseException as exc:
+        if record is not None:
+            store.finish(
+                record.id, OperationPhase.INTERRUPTED, error=f"{type(exc).__name__}: {exc}",
+            )
+        raise
     results = [{"label": i.label, "ref": i.ref, "stopped": ok} for i, ok in outcome]
-    return {"items": shown, "results": results, "ok": all(r["stopped"] for r in results)}
+    ok = all(r["stopped"] for r in results)
+    if record is not None:
+        if ok:
+            store.finish(record.id, OperationPhase.COMPLETED)
+        else:
+            # Half-stopped: the world differs from where we started.
+            store.finish(
+                record.id,
+                OperationPhase.NEEDS_ATTENTION,
+                error="some items did not stop",
+                recovery={
+                    "not_stopped": [r["label"] for r in results if not r["stopped"]],
+                    "guidance": "check `llmctl status`; something may still hold the GPUs.",
+                },
+            )
+    return {"items": shown, "results": results, "ok": ok}

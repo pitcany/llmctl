@@ -16,6 +16,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from textual.coordinate import Coordinate
+from textual.widgets import DataTable, Static
 
 from llmctl._testing import isolate_tui
 from llmctl.config import Settings
@@ -141,6 +143,219 @@ def test_launch_modal_dispatches_run_with_chosen_kind(temp_db) -> None:
     assert captured["name"] == "probe"
     assert captured["dry_run"] is False
     assert captured["require_live"] is True
+
+
+def test_estimated_token_counts_are_labeled(temp_db) -> None:
+    """FIXPLAN §1B: throughput from estimated tokens is marked '~' and the
+    hint explains the marker; precise (server usage) rows are unmarked."""
+
+    estimated = _fake_result(name="est")
+    estimated.parameters = {"mode": "live", "token_count_source": "estimate"}
+    precise = _fake_result(name="exact")
+    precise.parameters = {"mode": "live", "token_count_source": "server_usage"}
+
+    async def _run() -> tuple[list[str], str]:
+        with patch(
+            "llmctl.tui._data.get_benchmarks", return_value=[estimated, precise]
+        ):
+            app = MissionControlApp()
+            async with app.run_test() as pilot:
+                await pilot.press("b")
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, BenchmarksScreen):
+                        break
+                screen = app.screen
+                assert isinstance(screen, BenchmarksScreen)
+                table = screen.query_one("#benchmarks-table", DataTable)
+                tps_cells = [
+                    str(table.get_cell_at(Coordinate(row, 5)))
+                    for row in range(table.row_count)
+                ]
+                hint = screen.query_one("#benchmarks-hint", Static).content
+                return tps_cells, hint
+
+    tps_cells, hint = asyncio.run(_run())
+    assert any(cell.endswith("~") for cell in tps_cells), tps_cells
+    assert any(not cell.endswith("~") for cell in tps_cells), tps_cells
+    assert "estimated" in hint.lower()
+
+
+def test_incomparable_rows_render_nc_not_green(temp_db) -> None:
+    """FIXPLAN §1D: a synthetic row never gets a green/red delta against a
+    live baseline, and the explanation line says why."""
+
+    baseline = _fake_result(name="base")
+    baseline.id = "bench-base"
+    baseline.parameters = {"mode": "live"}
+    synthetic = _fake_result(name="synth")
+    synthetic.id = "bench-synth"
+    synthetic.parameters = {"mode": "mock"}
+    synthetic.tokens_per_second = 999.0
+
+    async def _run() -> tuple[list[str], str, str]:
+        with patch(
+            "llmctl.tui._data.get_benchmarks",
+            return_value=[baseline, synthetic],
+        ):
+            app = MissionControlApp()
+            async with app.run_test() as pilot:
+                await pilot.press("b")
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, BenchmarksScreen):
+                        break
+                screen = app.screen
+                assert isinstance(screen, BenchmarksScreen)
+                screen._baseline_id = "bench-base"
+                screen.refresh_data()
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if screen.query_one("#benchmarks-table", DataTable).row_count:
+                        break
+                table = screen.query_one("#benchmarks-table", DataTable)
+                table.move_cursor(row=0)  # newest row first: the synthetic one
+                await pilot.pause(0.05)
+                delta_cells = [
+                    str(table.get_cell_at(Coordinate(row, 6)))
+                    for row in range(table.row_count)
+                ]
+                compare_line = screen.query_one("#benchmarks-compare", Static).content
+                hint = screen.query_one("#benchmarks-hint", Static).content
+                return delta_cells, str(compare_line), str(hint)
+
+    delta_cells, compare_line, _hint = asyncio.run(_run())
+    assert any("n/c" in cell for cell in delta_cells), delta_cells
+    assert not any("999" in cell or "+8" in cell for cell in delta_cells), delta_cells
+    assert "not comparable" in compare_line.lower(), compare_line
+
+
+def test_enter_inspects_without_rerunning(temp_db) -> None:
+    """§3D: Enter opens the inspection view; it must not launch a workload.
+    Re-run is the separate, labeled 'r' action."""
+    rerun_calls: list[str] = []
+
+    async def _run() -> bool:
+        with patch(
+            "llmctl.tui._data.get_benchmarks", return_value=[_fake_result()]
+        ), patch(
+            "llmctl.tui._data.rerun_benchmark",
+            side_effect=lambda bench_id: rerun_calls.append(bench_id),
+        ):
+            app = MissionControlApp()
+            async with app.run_test() as pilot:
+                await pilot.press("b")
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, BenchmarksScreen):
+                        break
+                screen = app.screen
+                assert isinstance(screen, BenchmarksScreen)
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if screen.query_one("#benchmarks-table", DataTable).row_count:
+                        break
+                await pilot.press("enter")
+                for _ in range(20):
+                    await pilot.pause(0.05)
+                    from llmctl.tui._modals_benchmarks import BenchmarkInspectModal
+
+                    if isinstance(app.screen, BenchmarkInspectModal):
+                        break
+                opened = isinstance(app.screen, BenchmarkInspectModal)
+                if opened:
+                    await pilot.press("escape")
+                    for _ in range(20):
+                        await pilot.pause(0.05)
+                        if isinstance(app.screen, BenchmarksScreen):
+                            break
+                return opened
+
+    assert asyncio.run(_run()) is True
+    assert rerun_calls == []  # Enter never re-ran anything
+
+
+def test_inspect_lines_show_provenance_samples_and_drift() -> None:
+    """§3D: the inspection text carries counts, provenance, drift and the
+    comparison verdict."""
+    result = _fake_result(name="deep")
+    result.parameters = {
+        "mode": "live",
+        "request_count": 6,
+        "failed_request_count": 1,
+        "concurrency": 4,
+        "achieved_concurrency": 4,
+        "token_count_source": "estimate",
+        "percentiles": {
+            "latency_ms": {"n": 5, "p50": 100.0, "p90": 200.0, "p99": 300.0},
+            "ttft_ms": {
+                "n": 2,
+                "p50": 10.0,
+                "p90": 20.0,
+                "p99": 25.0,
+                "insufficient_samples": True,
+            },
+        },
+        "warnings": ["underfilled workload: 4 request(s) cannot reach 8"],
+        "rerun_of": "source-run",
+        "drift": ["served.endpoint_url: http://a -> http://b"],
+    }
+    result.manifest = {
+        "execution": "live",
+        "workload": {"hash": "abcdef1234567890"},
+        "served": {"endpoint_url": "http://b"},
+        "serving_host": {"gpu_identity": ["RTX 5090"]},
+    }
+    baseline = _fake_result(name="base")
+    baseline.id = "base-id"
+    baseline.parameters = {"mode": "mock"}
+
+    lines = BenchmarksScreen._inspect_lines(result, baseline)
+    text = "\n".join(lines)
+    assert "6 request(s), 1 failed" in text
+    assert "estimated (no server usage)" in text
+    assert "~" in text  # estimated throughput marker
+    assert "n=5" in text and "few samples" in text  # ttft n=2 flagged
+    assert "underfilled" in text
+    assert "abcdef123456" in text
+    assert "RTX 5090" in text
+    assert "source-run" in text
+    assert "drift" in text
+    assert "not comparable" in text
+
+
+def test_r_key_reruns_selected(temp_db) -> None:
+    rerun_calls: list[str] = []
+
+    async def _run() -> list[str]:
+        with patch(
+            "llmctl.tui._data.get_benchmarks", return_value=[_fake_result()]
+        ), patch(
+            "llmctl.tui._data.rerun_benchmark",
+            side_effect=lambda bench_id: rerun_calls.append(bench_id)
+            or _fake_result(name="again"),
+        ):
+            app = MissionControlApp()
+            async with app.run_test() as pilot:
+                await pilot.press("b")
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if isinstance(app.screen, BenchmarksScreen):
+                        break
+                screen = app.screen
+                assert isinstance(screen, BenchmarksScreen)
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if screen.query_one("#benchmarks-table", DataTable).row_count:
+                        break
+                await pilot.press("r")
+                for _ in range(100):
+                    await pilot.pause(0.05)
+                    if rerun_calls:
+                        break
+        return rerun_calls
+
+    assert asyncio.run(_run()) == ["bench-1"]
 
 
 def test_delete_action_invokes_data_layer(temp_db) -> None:

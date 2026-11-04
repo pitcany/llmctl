@@ -11,4 +11,4 @@ def test_job_id_cleared_when_polling_stops():
 
 
 def test_line_cap():
-    assert len(APP.read_text().splitlines()) <= 450
+    assert len(APP.read_text().splitlines()) <= 470  # raised 2026-11-03: §3B filter + §3C phase

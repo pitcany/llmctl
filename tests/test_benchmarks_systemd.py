@@ -99,13 +99,33 @@ def test_benchmark_unreachable_persists_failure(db: Session) -> None:
     assert "ConnectError" in (result.error or "")
 
 
-def test_benchmark_no_endpoint_falls_back_to_mock(db: Session) -> None:
+def test_benchmark_no_endpoint_fails_by_default(db: Session) -> None:
+    """FIXPLAN 2026-11-03 §1A: ordinary (live) runs never fabricate a mock
+    result when no endpoint resolves -- the miss is recorded as a failure."""
     model_id = RegistryService(db).add_model(
         ModelCreate(name="v", runtime="vllm", source="org/model")
     ).id
     result = BenchmarkService(db).run(
         BenchmarkRunRequest(name="x", model_id=model_id, dry_run=False)
     )
+    assert result.success is False
+    assert result.parameters["mode"] == "live"
+    assert result.parameters["reason"] == "no reachable runtime endpoint"
+    assert "endpoint" in (result.error or "").lower()
+
+
+def test_benchmark_no_endpoint_legacy_allow_mock(db: Session) -> None:
+    """``require_live=False`` keeps the deprecated lenient fallback for old
+    scripted callers, still labeled ``mode=mock`` with its reason."""
+    model_id = RegistryService(db).add_model(
+        ModelCreate(name="v", runtime="vllm", source="org/model")
+    ).id
+    result = BenchmarkService(db).run(
+        BenchmarkRunRequest(
+            name="x", model_id=model_id, dry_run=False, require_live=False
+        )
+    )
+    assert result.success is True
     assert result.parameters["mode"] == "mock"
     assert result.parameters["reason"] == "no reachable runtime endpoint"
 
@@ -205,6 +225,161 @@ def test_benchmark_concurrency_live(db: Session) -> None:
     assert result.tokens_per_second is not None
 
 
+def test_benchmark_concurrency_overlaps_requests(db: Session) -> None:
+    """§1A acceptance: with a workload that supports concurrency=8, eight
+    requests are genuinely in flight at once (the server observes it via a
+    barrier) and the record reports achieved_concurrency=8."""
+    import threading
+
+    model_id = _ollama_model(db)
+    sse = (
+        'data: {"choices":[{"delta":{"content":"x"}}],'
+        '"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    barrier = threading.Barrier(8, timeout=15)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        barrier.wait()  # only returns when all 8 requests overlap
+        return httpx.Response(200, content=sse.encode("utf-8"))
+
+    factory = lambda: httpx.Client(transport=httpx.MockTransport(handler))  # noqa: E731
+    result = BenchmarkService(db, client_factory=factory).run(
+        BenchmarkRunRequest(
+            name="overlap",
+            model_id=model_id,
+            prompts=[f"p{i}" for i in range(8)],
+            concurrency=8,
+            dry_run=False,
+        )
+    )
+    assert result.success is True
+    assert result.parameters["mode"] == "live"
+    assert result.parameters["requested_concurrency"] == 8
+    assert result.parameters["achieved_concurrency"] == 8
+    assert not result.parameters.get("warnings")
+    assert len(result.samples) == 8
+
+
+def test_benchmark_underfilled_workload_warns(db: Session) -> None:
+    """§1A acceptance: a workload smaller than the requested concurrency
+    cannot reach it; the record says so instead of claiming c=8."""
+    import threading
+
+    model_id = _ollama_model(db)
+    sse = (
+        'data: {"choices":[{"delta":{"content":"x"}}],'
+        '"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    # Both requests overlap (so the pool genuinely runs 2 in flight), yet
+    # the record must still report that 8 was requested and unreachable.
+    barrier = threading.Barrier(2, timeout=15)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        barrier.wait()
+        return httpx.Response(200, content=sse.encode("utf-8"))
+
+    factory = lambda: httpx.Client(transport=httpx.MockTransport(handler))  # noqa: E731
+    result = BenchmarkService(db, client_factory=factory).run(
+        BenchmarkRunRequest(
+            name="under",
+            model_id=model_id,
+            prompts=["a", "b"],
+            concurrency=8,
+            dry_run=False,
+        )
+    )
+    assert result.success is True
+    assert result.parameters["requested_concurrency"] == 8
+    assert result.parameters["achieved_concurrency"] == 2
+    assert any("underfilled" in str(w) for w in result.parameters["warnings"])
+
+
+def test_benchmark_repetitions_expand_workload(db: Session) -> None:
+    """§1A acceptance: repetitions is a recorded workload-size setting,
+    separate from concurrency; prompts are never duplicated silently."""
+    model_id = _ollama_model(db)
+    seen_prompts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        body = _json.loads(request.read())
+        seen_prompts.append(body["messages"][0]["content"])
+        sse = (
+            'data: {"choices":[{"delta":{"content":"x"}}],'
+            '"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n'
+            "data: [DONE]\n\n"
+        )
+        return httpx.Response(200, content=sse.encode("utf-8"))
+
+    factory = lambda: httpx.Client(transport=httpx.MockTransport(handler))  # noqa: E731
+    result = BenchmarkService(db, client_factory=factory).run(
+        BenchmarkRunRequest(
+            name="rep",
+            model_id=model_id,
+            prompts=["a", "b"],
+            repetitions=3,
+            concurrency=2,
+            dry_run=False,
+        )
+    )
+    assert result.success is True
+    assert result.parameters["repetitions"] == 3
+    assert result.parameters["prompt_count"] == 2
+    assert result.parameters["total_requests"] == 6
+    assert result.parameters["repetition_policy"] == "cyclic"
+    assert len(result.samples) == 6
+    assert sorted(seen_prompts) == ["a", "a", "a", "b", "b", "b"]
+
+
+def test_benchmark_sweep_keeps_workload_fixed(db: Session) -> None:
+    """§1A acceptance: changing concurrency across a sweep must not change
+    the total workload; each level records the same total_requests."""
+    model_id = _ollama_model(db)
+    results = BenchmarkService(db).run_sweep(
+        BenchmarkRunRequest(
+            name="fixed",
+            model_id=model_id,
+            prompts=["a", "b"],
+            repetitions=2,
+            sweep=[1, 4],
+            dry_run=True,
+        )
+    )
+    assert len(results) == 2
+    totals = {r.parameters["total_requests"] for r in results}
+    assert totals == {4}
+    counts = {r.parameters["prompt_count"] for r in results}
+    assert counts == {2}
+
+
+def test_benchmark_rerun_preserves_mode(db: Session) -> None:
+    """§1A acceptance: rerunning a synthetic record stays synthetic; rerunning
+    a live record whose endpoint no longer resolves fails, never mocks."""
+    model_id = RegistryService(db).add_model(
+        ModelCreate(name="v", runtime="vllm", source="org/model")
+    ).id
+    service = BenchmarkService(db)
+    mock_first = service.run(
+        BenchmarkRunRequest(name="m", model_id=model_id, dry_run=True)
+    )
+    mock_again = service.rerun(mock_first.id or "")
+    assert mock_again is not None
+    assert mock_again.parameters["mode"] == "mock"
+
+    # A live record (failing here: no endpoint for this model) re-runs live.
+    live_failed = service.run(
+        BenchmarkRunRequest(name="l", model_id=model_id, dry_run=False)
+    )
+    assert live_failed.success is False
+    live_again = service.rerun(live_failed.id or "")
+    assert live_again is not None
+    assert live_again.parameters["mode"] == "live"
+    assert live_again.success is False
+
+
 def test_benchmark_run_sweep(db: Session) -> None:
     model_id = _ollama_model(db)
     results = BenchmarkService(db).run_sweep(
@@ -224,16 +399,33 @@ def test_benchmark_delta_helpers() -> None:
 
     from llmctl.tui.screens_benchmarks import BenchmarksScreen
 
-    base = SimpleNamespace(
-        id="b", tokens_per_second=100.0, time_to_first_token_ms=50.0
-    )
-    faster = SimpleNamespace(
-        id="f", tokens_per_second=120.0, time_to_first_token_ms=40.0
-    )
+    def row(rid: str, tps: float, ttft: float, **param_overrides: object):
+        params: dict[str, object] = {"mode": "live"}
+        params.update(param_overrides)
+        return SimpleNamespace(
+            id=rid,
+            tokens_per_second=tps,
+            time_to_first_token_ms=ttft,
+            success=True,
+            kind=None,
+            parameters=params,
+            manifest={},
+        )
+
+    base = row("b", 100.0, 50.0)
+    faster = row("f", 120.0, 40.0)
     assert "+20.0" in BenchmarksScreen._delta_tps(faster, base, False)
     assert "-10 ms" in BenchmarksScreen._delta_ttft(faster, base, False)
     assert "baseline" in BenchmarksScreen._delta_tps(base, base, True)
     assert BenchmarksScreen._delta_tps(faster, None, False) == "-"
+
+    # FIXPLAN §1D: never a green delta for incomparable runs.
+    synthetic = row("s", 999.0, 1.0, mode="mock")
+    assert "n/c" in BenchmarksScreen._delta_tps(synthetic, base, False)
+    assert "n/c" in BenchmarksScreen._delta_ttft(synthetic, base, False)
+    failed = row("x", 999.0, 1.0)
+    failed.success = False
+    assert "n/c" in BenchmarksScreen._delta_tps(failed, base, False)
 
 
 def test_benchmark_mock_has_samples_and_ttft(db: Session) -> None:

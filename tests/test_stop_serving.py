@@ -288,3 +288,19 @@ def test_preview_lines_are_never_hard_wrapped(monkeypatch, spies) -> None:
     assert res.exit_code == 0, res.output
     lines = [ln for ln in res.output.splitlines() if ln.startswith("  ")]
     assert lines and all("frees cards" in ln for ln in lines), res.output
+
+
+def test_changed_target_is_not_stopped(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from llmctl.services import stop_serving
+
+    old = stop_serving.Serving("vllm", "old", frozenset({"old"}), "shared-unit")
+    replacement = stop_serving.Serving("vllm", "new", frozenset({"new"}), "shared-unit")
+    monkeypatch.setattr("llmctl.services.lanes.gather_state", lambda settings: object())
+    monkeypatch.setattr(stop_serving, "serving_now", lambda state: [replacement])
+    stop = Mock(return_value=True)
+    deps = SimpleNamespace(stop_vllm=stop, stop_lane=stop, stop_session=stop)
+    assert stop_serving.stop_items([old], deps, settings=object()) == [(old, False)]
+    stop.assert_not_called()

@@ -323,36 +323,50 @@ def stop_managed_unit(unit_name: str) -> str:
     """Stop a managed systemd unit in whichever scope owns it.
 
     Unit-level, not session-level: the Units screen is showing units, and a
-    unit may have no session row at all. Returns the scope used.
+    unit may have no session row at all. Returns the scope used. Holds the
+    host-wide GPU operation lock (FIXPLAN §2A) so a TUI stop cannot race a
+    CLI swap or an API request on the same cards.
     """
     from llmctl.integrations.systemctl import SystemctlRunner
+    from llmctl.services.op_lock import gpu_operation_lock
 
-    sysctl = SystemctlRunner()
-    user_scope = sysctl.is_user_unit(unit_name)
-    result = sysctl.stop(unit_name, user=user_scope)
-    if not result.ok:
-        flag = " --user" if user_scope else ""
-        raise RuntimeError(
-            f"`systemctl{flag} stop {unit_name}` failed "
-            f"(exit {result.returncode}): {result.stderr.strip()}"
-        )
-    return "user" if user_scope else "system"
+    with gpu_operation_lock(
+        purpose=f"stop unit {unit_name}", interface="tui"
+    ):
+        sysctl = SystemctlRunner()
+        user_scope = sysctl.is_user_unit(unit_name)
+        result = sysctl.stop(unit_name, user=user_scope)
+        if not result.ok:
+            flag = " --user" if user_scope else ""
+            raise RuntimeError(
+                f"`systemctl{flag} stop {unit_name}` failed "
+                f"(exit {result.returncode}): {result.stderr.strip()}"
+            )
+        return "user" if user_scope else "system"
 
 
 def restart_managed_unit(unit_name: str) -> str:
-    """Restart a managed systemd unit in whichever scope owns it; returns scope."""
-    from llmctl.integrations.systemctl import SystemctlRunner
+    """Restart a managed systemd unit in whichever scope owns it; returns scope.
 
-    sysctl = SystemctlRunner()
-    user_scope = sysctl.is_user_unit(unit_name)
-    result = sysctl.restart(unit_name, user=user_scope)
-    if not result.ok:
-        flag = " --user" if user_scope else ""
-        raise RuntimeError(
-            f"`systemctl{flag} restart {unit_name}` failed "
-            f"(exit {result.returncode}): {result.stderr.strip()}"
-        )
-    return "user" if user_scope else "system"
+    Takes the host-wide GPU operation lock for the same reason as
+    :func:`stop_managed_unit`.
+    """
+    from llmctl.integrations.systemctl import SystemctlRunner
+    from llmctl.services.op_lock import gpu_operation_lock
+
+    with gpu_operation_lock(
+        purpose=f"restart unit {unit_name}", interface="tui"
+    ):
+        sysctl = SystemctlRunner()
+        user_scope = sysctl.is_user_unit(unit_name)
+        result = sysctl.restart(unit_name, user=user_scope)
+        if not result.ok:
+            flag = " --user" if user_scope else ""
+            raise RuntimeError(
+                f"`systemctl{flag} restart {unit_name}` failed "
+                f"(exit {result.returncode}): {result.stderr.strip()}"
+            )
+        return "user" if user_scope else "system"
 
 
 def get_preset_views_with_links() -> list[Any]:
@@ -734,16 +748,16 @@ def run_benchmark(
     context_length: int | None = None,
     profile_id: str | None = None,
     max_tokens: int | None = None,
+    repetitions: int = 1,
     dry_run: bool = False,
-    require_live: bool = False,
+    require_live: bool = True,
 ) -> BenchmarkResult:
     """Run a new benchmark for a model.
 
-    Live failures persist as ``success=False`` records; the caller can
-    surface ``result.error`` in the UI to point at what broke. Set
-    ``require_live=True`` to also turn a missing endpoint into a failure
-    record rather than letting it silently degrade to a synthetic mock —
-    the TUI uses this when the operator explicitly picked "live" mode.
+    Live is the default: failures (including a missing endpoint) persist
+    as ``success=False`` records and the caller surfaces ``result.error``
+    in the UI. ``dry_run=True`` is the explicit synthetic mode; it stays
+    deterministic and labeled ``mode=mock`` in the history.
     """
     parameters: dict[str, object] = {}
     if max_tokens is not None:
@@ -757,10 +771,136 @@ def run_benchmark(
                 kind=kind,
                 context_length=context_length,
                 parameters=parameters,
+                repetitions=repetitions,
                 dry_run=dry_run,
                 require_live=require_live,
             )
         )
+
+
+def get_current_operation() -> dict[str, Any] | None:
+    """The current GPU operation for TUI surfaces (§2D/§3C).
+
+    Reads the same persistent records the API and CLI write, so the TUI
+    shows an operation started anywhere -- including one adopted by a CLI
+    child that outlived the API. Returns the unfinished operation if any,
+    else the most recent terminal one (so a failed restoration stays
+    visible), else ``None``.
+    """
+    from llmctl.services.operations import OperationStore
+    from llmctl.services.operations import utcnow as _op_now
+
+    settings = load_settings()
+    store = OperationStore(settings.database_url)
+    unfinished = store.unfinished()
+    if unfinished:
+        record = sorted(unfinished, key=lambda r: r.created_at)[-1]
+        created_at = record.created_at
+        if created_at.tzinfo is None:
+            from datetime import UTC
+
+            created_at = created_at.replace(tzinfo=UTC)
+        elapsed = (_op_now() - created_at).total_seconds()
+        return {
+            "id": record.id,
+            "kind": record.kind,
+            "target": record.target,
+            "phase": record.phase,
+            "elapsed_s": round(elapsed, 1),
+            "interface": (record.owner or {}).get("interface"),
+            "pid": (record.owner or {}).get("pid"),
+            "terminal": False,
+            "recovery": record.recovery or {},
+            "output_tail": list(record.output or [])[-5:],
+            "store_url": store.database_url,
+        }
+    # Most recent terminal record (recovery history after restarts).
+    from sqlmodel import select as _select
+
+    from llmctl.db import OperationRecord
+
+    with db_session() as db:
+        latest = db.exec(
+            _select(OperationRecord).order_by(OperationRecord.created_at.desc()).limit(1)
+        ).first()
+    if latest is None:
+        return None
+    return {
+        "id": latest.id,
+        "kind": latest.kind,
+        "target": latest.target,
+        "phase": latest.phase,
+        "elapsed_s": None,
+        "interface": (latest.owner or {}).get("interface"),
+        "pid": (latest.owner or {}).get("pid"),
+        "terminal": True,
+        "recovery": latest.recovery or {},
+        "output_tail": list(latest.output or [])[-5:],
+        "store_url": settings.database_url,
+    }
+
+
+def get_landing() -> dict[str, Any]:
+    """The research-workflow landing snapshot (FIXPLAN §3A).
+
+    Answers, in one view: what is serving (identity, endpoint, readiness,
+    observation time), what operation is running (phase, elapsed, recovery),
+    and the recent experiments. Inventory totals ride along as secondary
+    detail.
+    """
+    from llmctl.services import lanes, swap_view
+    from llmctl.services.operations import utcnow as _op_now
+
+    settings = load_settings()
+    state = lanes.gather_state(settings)
+    serving_rows: list[dict[str, Any]] = []
+    for row in state.catalog:
+        lane_state = state.state_of(row)
+        if lane_state not in ("serving", "loading"):
+            continue
+        serving_rows.append(
+            {
+                "key": row.key,
+                "model": row.model,
+                "engine": row.engine,
+                "state": lane_state,
+                "endpoint": swap_view.endpoint_for(state, row),
+                "last_load_s": lanes.last_load_s(row.key),
+            }
+        )
+    recent = [
+        {
+            "name": r.name,
+            "kind": r.kind.value if r.kind else "-",
+            "mode": str(r.parameters.get("mode", "?")),
+            "tokens_per_second": r.tokens_per_second,
+            "token_count_source": str(r.parameters.get("token_count_source", "")),
+            "success": r.success,
+            "created_at": r.created_at.isoformat(timespec="seconds")
+            if r.created_at
+            else None,
+            "model_id": r.model_id,
+        }
+        for r in list(reversed(get_benchmarks()))[:3]
+    ]
+    overview = get_overview()
+    return {
+        "fetched_at": _op_now().isoformat(timespec="seconds"),
+        "serving": serving_rows,
+        "operation": get_current_operation(),
+        "recent_experiments": recent,
+        "inventory": {
+            "models": overview["models"],
+            "sessions_running": overview["sessions_running"],
+            "profiles": overview["profiles"],
+            "gpus": overview["gpu_count"],
+        },
+        "safe_mode": overview["safe_mode"],
+        "runtimes": overview.get("runtimes", {}),
+        "scheduler_warnings": overview.get("scheduler_warnings", []),
+        "router": overview.get("router"),
+        "nvml_available": overview["nvml_available"],
+    }
 
 
 def get_overview() -> dict[str, Any]:

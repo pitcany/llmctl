@@ -6,6 +6,7 @@ so tests and future services can create isolated databases easily.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Generator
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -247,9 +248,46 @@ class BenchmarkRecord(SQLModel, table=True):
     gpu_snapshot: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     parameters: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     samples: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    #: Immutable experiment manifest (FIXPLAN 2026-11-03 §1C): a versioned,
+    #: allowlisted snapshot of the resolved model/engine/launch/hardware/
+    #: workload identity at run time. ``NULL`` on legacy rows -- readers
+    #: treat that as "unknown provenance", never fabricate one.
+    manifest: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     success: bool = Field(default=True, index=True)
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class OperationRecord(SQLModel, table=True):
+    """A managed GPU lifecycle operation (swap/stop/start), persisted for
+    coordination and recovery across processes and restarts (FIXPLAN §2B).
+
+    Intent is written before side effects; phases and the final outcome are
+    updated as the executor progresses. See ``services/operations.py``.
+    """
+
+    __tablename__ = "operations"
+
+    id: str = Field(default_factory=new_id, primary_key=True)
+    kind: str = Field(index=True)
+    target: str
+    phase: str = Field(index=True)
+    #: Optional caller-supplied idempotency key; repeating it with the same
+    #: request returns the same operation, a different request is refused.
+    idempotency_key: str | None = Field(default=None, index=True)
+    #: Browser polling identity and child outcome, retained across API restarts.
+    job_id: str | None = Field(default=None, index=True)
+    job_exit_code: int | None = None
+    request_fingerprint: str
+    request: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    previous_state: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    owner: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    recovery: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    output: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    error: str | None = None
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+    updated_at: datetime = Field(default_factory=utcnow)
+    finished_at: datetime | None = None
 
 
 class EventRecord(SQLModel, table=True):
@@ -322,11 +360,38 @@ def apply_migrations(engine) -> None:
                 )
 
 
+#: Table creation is not atomic across threads (create_all inspects then
+#: creates, and SQLite DDL is not concurrent). Every init path — create_app,
+#: the TUI's db_session, OperationStore — funnels through this one guard so
+#: two threads cannot race "CREATE TABLE" against each other.
+_init_lock = threading.Lock()
+_initialised_urls: set[str] = set()
+
+
+def ensure_tables(engine: Any, database_url: str | None = None) -> None:
+    """Create all tables on ``engine`` and apply migrations.
+
+    Idempotent per file-backed URL within the process: a second call
+    returns immediately (nothing drops tables in-process, so this cannot
+    skip needed work). In-memory URLs are always (re)created: every
+    ``get_engine(":memory:")`` is a distinct database, so caching by URL
+    string would leave later engines tableless.
+    """
+    url = database_url or load_settings().database_url
+    in_memory = url == "sqlite://" or ":memory:" in url
+    with _init_lock:
+        if not in_memory and url in _initialised_urls:
+            return
+        SQLModel.metadata.create_all(engine)
+        apply_migrations(engine)
+        if not in_memory:
+            _initialised_urls.add(url)
+
+
 def init_db(database_url: str | None = None) -> None:
     """Create all tables for the configured database and apply migrations."""
-    engine = get_engine(database_url)
-    SQLModel.metadata.create_all(engine)
-    apply_migrations(engine)
+    url = database_url or load_settings().database_url
+    ensure_tables(get_engine(url), url)
 
 
 def get_session(database_url: str | None = None) -> Generator[Session, None, None]:

@@ -219,9 +219,17 @@
     return td;
   }
 
+  var allRows = [];
+
   // Redraws the table body from the /swap payload. Endpoints and aliases live
   // in the Serving box only: repeating them here made serving rows four lines tall.
   function renderRows(rows) {
+    var q = ($("rows-filter").value || "").trim().toLowerCase();
+    if (q) {
+      rows = rows.filter(function (row) {
+        return (row.model + " " + row.engine + " " + row.name).toLowerCase().indexOf(q) >= 0;
+      });
+    }
     var body = $("rows-body");
     clear(body);
     rows.forEach(function (row) {
@@ -347,11 +355,14 @@
     $("stop-all-btn").disabled = flag || !servingCount;
   }
 
-  // Draws one job snapshot; returns true once the job has finished.
+  // Draws one job snapshot; returns true once the job has finished. The
+  // operation phase (§3C) says what the swap is doing, not just "running".
   function renderJob(job) {
     var running = job.status === "running";
     var text = job.exit_code === 0 ? "Ready" : "Failed (exit " + job.exit_code + ")";
-    $("job-status").textContent = job.name + ": " + (running ? job.status : text);
+    var status = running ? job.status : text;
+    if (running && job.phase) { status += " · " + job.phase; }
+    $("job-status").textContent = job.name + ": " + status;
     var log = $("job-log");
     log.textContent = (job.output || []).slice(-200).join("\n");
     log.scrollTop = log.scrollHeight;
@@ -404,7 +415,8 @@
     return apiWithAuth("GET", "/swap").then(
       function (data) {
         pollInFlight = false;
-        renderRows(data.rows || []);
+        allRows = data.rows || [];
+        renderRows(allRows);
         renderServing(data.rows || [], data.gateway_url);
         clearError("list");
         if (data.job && jobId === null && data.job.job_id !== lastDoneId) {
@@ -437,6 +449,7 @@
     $("token-forget").hidden = !getToken();
     $("token-forget").addEventListener("click", function () { setToken(""); refresh(); });
     $("refresh-btn").addEventListener("click", refresh);
+    $("rows-filter").addEventListener("input", function () { renderRows(allRows); });
     $("stop-all-btn").addEventListener("click", function () { startStop({ all: true }); });
     $("confirm-run-btn").addEventListener("click", onConfirm);
     $("confirm-cancel-btn").addEventListener("click", closeConfirm);

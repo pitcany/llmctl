@@ -92,10 +92,17 @@ def test_to_dict_shape(monkeypatch):
         "output",
         "started_at",
         "finished_at",
+        "operation_id",
     }
     for k in ("started_at", "finished_at"):
         assert datetime.fromisoformat(d[k]).utcoffset() == UTC.utcoffset(None)
-    assert set(job.summary()) == {"job_id", "name", "status", "started_at"}
+    assert set(job.summary()) == {
+        "job_id",
+        "name",
+        "status",
+        "started_at",
+        "operation_id",
+    }
 
 
 def test_build_run_argv():

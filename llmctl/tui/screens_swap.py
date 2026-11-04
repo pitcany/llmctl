@@ -28,6 +28,7 @@ from llmctl.services.lanes import (
     last_load_s,
     record_load,
 )
+from llmctl.services.op_lock import gpu_operation_lock
 from llmctl.services.session_swap import (
     pause_for_swap,
     resume_after_failed_swap,
@@ -35,16 +36,63 @@ from llmctl.services.session_swap import (
 )
 from llmctl.services.vllm_orchestrator import OrchestratorOptions, start_vllm_tp
 from llmctl.services.vllm_slots import cuda_devices, engine_config, place
+from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 from llmctl.tui._modals import ConfirmActionModal
+
+#: Icon+text state markers: color is never the only signal (§3A).
+_STATE_ICONS = {
+    "serving": ("●", C_OK),
+    "loading": ("◐", C_WARN),
+    "stopped": ("○", C_MUTED),
+}
+
+
+def _state_cell(status: str) -> str:
+    icon, color = _STATE_ICONS.get(status, ("·", C_MUTED))
+    return f"[{color}]{icon} {esc(status)}[/]"
 
 
 def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
     """Perform the swap with terminal-silent deps. Returns ``(ok, message)``.
 
     Shared by the Swap screen and the Presets screen's launch so both free
-    the lanes before vLLM takes the GPUs.
+    the lanes before vLLM takes the GPUs. The swap is recorded as a
+    persistent operation (§2B): phases marked by the swap services land on
+    the record, and the outcome — including a rollback that could not
+    restore — survives a TUI restart.
     """
+    from llmctl.services import operations
+    from llmctl.services.operations import OperationPhase
+
+    settings = load_settings()
+    db_url = getattr(settings, "database_url", None) or "sqlite:///:memory:"
+    with gpu_operation_lock(purpose=f"run {target.model}", interface="tui"):
+        store = operations.OperationStore(db_url)
+        record, _ = store.begin(
+            kind="swap",
+            target=target.key,
+            interface="tui",
+            purpose=f"run {target.model}",
+            request={"key": target.key, "model": target.model},
+        )
+        operations.bind_current(store, record.id or "")
+        try:
+            ok, message = _do_swap(state, target)
+            if ok:
+                operations.finish_current(OperationPhase.COMPLETED)
+            else:
+                operations.finish_current(OperationPhase.FAILED, error=message)
+            return ok, message
+        except BaseException as exc:  # record interruption, then let the worker report it
+            operations.interrupt_current(f"{type(exc).__name__}: {exc}")
+            raise
+        finally:
+            operations.clear_current()
+
+
+def _do_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
+    """The swap itself; called with the operation record already bound."""
     deps = quiet_deps()
     settings = load_settings()
     if target.kind == "session":
@@ -126,16 +174,23 @@ def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
 
 
 def _failure(reason: str | None, lanes: Any) -> str:
+    from llmctl.services.operations import note_restore_failure
+
     text = esc(reason or "unknown error")
     if lanes.restored:
         text += f"\nStarted again: {esc(', '.join(lanes.restored))}"
     if lanes.restore_failed:
+        note_restore_failure(lanes.restore_failed)
         text += f"\nStill stopped: {esc(', '.join(lanes.restore_failed))} — start it by hand."
     return text
 
 
 class SwapScreen(DataScreen):
-    """Every swap target with its engine, state and last load time."""
+    """Every swap target with its engine, state and last load time.
+
+    Above the list: the current operation (phase, elapsed, recovery), so a
+    long swap explains itself instead of showing a frozen table (§3C).
+    """
 
     BINDINGS = [
         Binding("enter", "swap_selected", "Swap", show=True, priority=True),
@@ -145,6 +200,9 @@ class SwapScreen(DataScreen):
     def __init__(self) -> None:
         super().__init__()
         self._state: SwapState | None = None
+        #: The key of the row under the cursor, kept across refreshes so a
+        #: refresh or list change cannot retarget Enter to another model.
+        self._anchor_key: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -154,6 +212,7 @@ class SwapScreen(DataScreen):
             classes="panel safe",
             id="swap-title",
         )
+        yield Static(f"[{C_MUTED}]no operation[/]", classes="panel", id="swap-operation")
         table: DataTable[str] = DataTable(id="swap-table", cursor_type="row")
         table.add_columns("Model", "Engine", "Name", "Cards", "State", "Last load")
         yield table
@@ -165,25 +224,78 @@ class SwapScreen(DataScreen):
 
     def render_data(self, data: Any) -> None:
         self._state = data
+        self._render_operation()
         table = self.query_one("#swap-table", DataTable)
-        cursor = table.cursor_row
         table.clear()
         if data is None:
             return
-        for row in data.catalog:
+        anchored_row: int | None = None
+        for index, row in enumerate(data.catalog):
             status = data.state_of(row)
-            color = {"serving": C_OK, "loading": C_WARN}.get(status)
+            if row.key == self._anchor_key:
+                anchored_row = index
             seconds = last_load_s(row.key)
             table.add_row(
                 esc(row.model),
                 row.engine,
                 esc(row.key),
                 cards_label(row),
-                f"[{color}]{status}[/]" if color else f"[{C_MUTED}]—[/]",
+                _state_cell(status),
                 format_duration(seconds) if seconds else f"[{C_MUTED}]—[/]",
             )
         if data.catalog:
-            table.move_cursor(row=min(cursor, len(data.catalog) - 1))
+            # Re-locate the anchored row (not the old row number) so a
+            # refresh or a changed list keeps the same target selected.
+            target_row = anchored_row if anchored_row is not None else 0
+            table.move_cursor(row=min(target_row, len(data.catalog) - 1))
+            self._anchor_key = data.catalog[table.cursor_row].key
+
+    def _render_operation(self) -> None:
+        """Show the current operation above the list (§3C)."""
+        op = self.query_data(_data.get_current_operation, what="Operation lookup")
+        panel = self.query_one("#swap-operation", Static)
+        if op is None:
+            panel.update(f"[{C_MUTED}]no operation[/]")
+            return
+        phase = str(op.get("phase", "?"))
+        if op.get("terminal"):
+            icon, color = ("!", C_ERR) if phase in ("needs_attention", "interrupted") else (
+                ("✓", C_OK) if phase == "completed" else ("×", C_ERR)
+            )
+            text = (
+                f"[{color}]{icon} last operation: {esc(phase)} — "
+                f"{esc(op.get('kind', '?'))} {esc(op.get('target', '?'))}[/]"
+            )
+        else:
+            elapsed = op.get("elapsed_s")
+            elapsed_label = (
+                f", {elapsed:.0f}s elapsed" if isinstance(elapsed, (int, float)) else ""
+            )
+            text = (
+                f"[{C_WARN}]◐ {esc(phase)}{elapsed_label}[/] — "
+                f"{esc(op.get('kind', '?'))} {esc(op.get('target', '?'))} "
+                f"[{C_MUTED}]via {esc(op.get('interface') or '?')}[/]"
+            )
+        recovery = op.get("recovery") or {}
+        guidance = recovery.get("guidance")
+        if guidance:
+            text += f"\n  [{C_ERR}]! {esc(guidance)}[/]"
+        not_restored = recovery.get("not_restored") or []
+        if not_restored:
+            text += (
+                f"\n  [{C_ERR}]! not restored: "
+                f"{esc(', '.join(map(str, not_restored)))}[/]"
+            )
+        panel.update(text)
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Track the highlighted row by its stable key, not row number."""
+        state = self._state
+        if state is None:
+            return
+        row = event.cursor_row
+        if 0 <= row < len(state.catalog):
+            self._anchor_key = state.catalog[row].key
 
     def action_refresh_now(self) -> None:
         self.refresh_data()
