@@ -138,8 +138,10 @@ environment (the value was not printed). Peer session ai-64 held its GPU embeddi
 1. **`qwen3coder30b` lane cannot start (pre-existing).** `start_cmd` is
    `~/bin/qwen3coder1-start --take-gpus`, and the script takes its lane name from its own filename
    (`qwen3coder1`). Commit `58ea349` (one naming grammar, hard cutover) renamed the backend to
-   `qwen3coder30b`. Fix: add a `qwen3coder30b-start` symlink and point `start_cmd` at it, or
-   rename the script.
+   `qwen3coder30b`. **Fixed 2026-11-04 ~09:55:** link `qwen3coder30b-start` added (`~/AI`
+   `8557b8f6`, `~/bin`), `start_cmd` pointed at it (router `9373e71`, router restarted),
+   RUNBOOK note `72afa21e`. Verified: `qwen3coder30b-start --show-model` resolves
+   `qwen3-coder:30b` from router.yaml. A live switch to the lane was not re-run.
 2. **The op-lock holder text can be stale.** In T1b the 503 named `pid 3950843 … run
    qwen3.8-27b-awq, 311s ago`, an llmctl that had already exited. The real holder was a plain
    `flock` (pid 67651). The router reads metadata left in the lock file by the last writer
