@@ -2403,6 +2403,7 @@ def settings_cmd(
     edit: Annotated[
         bool, typer.Option("--edit", help="Open the preset file in $VISUAL/$EDITOR.")
     ] = False,
+    json_out: _JSON_OPT = False,
 ) -> None:
     """Show the GPUs, context length and memory share NAME runs with, and where
     they are stored. Change them for one run with `llmctl run NAME --tp N
@@ -2413,6 +2414,19 @@ def settings_cmd(
 
     from llmctl.services.run_overrides import FIELDS, FLAGS, preset_source, profile_source
     from llmctl.services.serve import AmbiguousModel, find_model
+
+    if json_out:
+        from llmctl.presets.sources import field_provenance
+
+        info = field_provenance(name) if name is not None else None
+        if info is None:
+            typer.echo(
+                f"No preset named {name}." if name else "settings --json needs a preset NAME.",
+                err=True,
+            )
+            raise typer.Exit(2)
+        _emit_json(info)
+        return
 
     if name is None or (name.isdecimal() and preset_source(name) is None):
         # Same list and numbering as `llmctl ls` / `llmctl run`, so the # a
@@ -2869,9 +2883,59 @@ def ls_cmd(json_out: _JSON_OPT = False) -> None:
     cli_swap.render_endpoints(state, console, aliases, settings.router)
 
 
-@app.command("presets", hidden=True)
-def presets_cmd(json_out: _JSON_OPT = False) -> None:
+presets_app = typer.Typer(
+    name="presets",
+    suggest_commands=False,
+    help="List preset aliases known to llmctl.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+app.add_typer(presets_app, name="presets", hidden=True)
+
+
+@presets_app.command("sources")
+def presets_sources_cmd(json_out: _JSON_OPT = False) -> None:
+    """Show which file each preset comes from, collisions and broken files (read-only)."""
+    from llmctl.presets.sources import scan_sources
+
+    scan = scan_sources()
+    bad = scan.has_collision() or bool(scan.problems)
+    if json_out:
+        _emit_json(scan.as_dict())
+        raise typer.Exit(1 if bad else 0)
+    table = Table(title="Preset sources")
+    table.add_column("alias", style="cyan", no_wrap=True)
+    table.add_column("dir")
+    table.add_column("file", overflow="fold")
+    table.add_column("status")
+    for alias in sorted(scan.files):
+        files = scan.files[alias]
+        collision = scan.collision(alias)
+        win = scan.effective(alias)
+        for f in files:
+            parts = []
+            if f is win:
+                parts.append("[green]effective[/green]")
+            elif f.real != win.real:
+                parts.append("[yellow]shadowed[/yellow]")
+            if collision:
+                parts.append("[red]COLLISION[/red]")
+            if f.target is not None:
+                parts.append(f"symlink -> {escape(str(f.target))}")
+            table.add_row(alias, f.dir, escape(str(f.path)), " ".join(parts))
+    for path, text in scan.problems:
+        table.add_row("-", "-", escape(str(path)), f"[red]PROBLEM[/red] {escape(text)}")
+    console.print(f"canonical: {escape(str(scan.canonical_dir))}")
+    console.print(f"legacy:    {escape(str(scan.legacy_dir))}")
+    console.print(table)
+    raise typer.Exit(1 if bad else 0)
+
+
+@presets_app.callback()
+def presets_cmd(ctx: typer.Context, json_out: _JSON_OPT = False) -> None:
     """List preset aliases known to llmctl."""
+    if ctx.invoked_subcommand is not None:
+        return
     views = load_preset_views()
     if json_out:
         import dataclasses
