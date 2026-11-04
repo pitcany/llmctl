@@ -7,11 +7,12 @@ machine. It does not serve models itself — it manages the programs that do
 (Ollama, vLLM, LM Studio, llama.cpp) and gives you one consistent way to drive
 all of them, from the CLI or a full-screen dashboard (`llmctl tui`).
 
-One fact explains most of the design: **the GPUs run one big model at a time.**
-vLLM is a single systemd unit spanning every card, so "switching models" means
-reconfiguring and restarting that unit — a 1–3 minute operation that also stops
-Ollama first to free VRAM. Ollama is the opposite: many smaller models, loaded
-on demand. Much of `llmctl` exists to manage that split safely.
+GPU ownership determines what can run together. A large vLLM preset can span
+both cards; one-card presets can coexist when the optional second engine is
+configured. `llmctl run` plans placement and stops conflicting workloads before
+loading the requested model. On installations with llm-router, it delegates
+normal lane switches to that existing service. Ollama manages its own on-demand
+loading. Much of `llmctl` exists to coordinate these different lifecycles safely.
 
 ## What it does
 
@@ -64,6 +65,10 @@ required.
   command in 5 minutes
 - **[User guide](docs/USER-GUIDE.md)** — full CLI/TUI
   reference, configuration schema, integrations, troubleshooting
+- **[Workstation audit](docs/CONTROL-PLANE-AUDIT-2026-11-03.md)** — dated capability
+  inventory, deployed-versus-checkout differences, architecture and priorities
+- **[Operational workflow](docs/OPERATIONS.md)** — use the existing control paths,
+  distinguish inventory from readiness, and validate a controlled rollout
 - **Workstation runbook** — the author's stack around llmctl (Hermes
   routing, Harbor services, Tailscale) lives in `pitcany/AI`,
   `docs/RUNBOOK.md`
