@@ -96,11 +96,14 @@ Inspect `llm-heal status` and existing incident evidence when recovery is held.
 An intentionally stopped engine should stay stopped. Preserve cooldowns and
 systemd start limits; repeated forced retries can exhaust the restart budget.
 
-### Coordination changes staged on November 3 (not deployed)
+### Coordination changes (deployed November 4)
 
-These exist in source and isolated tests only; the running router, healer and
-installed llmctl still behave as described above until the
-[deployment plan](DEPLOYMENT-PLAN-2026-11-03.md) is approved and executed.
+llmctl `84ed67f` (R1, November 3), llm-router `e0377a0` (R2) and llm-heal
+`3993e2c8` (R3) are live; see the ledger in the
+[deployment plan](DEPLOYMENT-PLAN-2026-11-03.md) for verification and rollback.
+Live acceptance tests (real switches, long streams across a revert) have not
+been run yet. Where this section and the paragraphs above disagree, this
+section describes the running system.
 
 - **One GPU ownership boundary.** llm-router (optional `switch.op_lock_file`)
   and llm-heal (optional `op_lock_file`) join llmctl's existing flock,
@@ -120,14 +123,28 @@ installed llmctl still behave as described above until the
   the flock while it restarts an engine itself, and releases it for
   `llmctl ...` repairs, which take it on their own. `llmctl run` now matches
   its busy-process patterns too.
-- **Idle revert.** Activity is counted per upstream from acceptance (switch
-  wait and KV hold included) until the response body finishes, fails, is
-  cancelled or is dropped; the revert never runs over in-flight work, and the
-  clock restarts at completion. The check is repeated under switch ownership
-  with no await before the restart. vLLM `num_requests_running/waiting` vetoes
-  for traffic outside the router; engines without those gauges are "unknown"
-  and do not veto (use a lane lease for direct work on them). `GET /running`
-  gains `idle_revert.in_flight` and `idle_revert.deferred`. The 3,600 s
+- **Idle revert (revised November 4, P1).** Activity is counted per serving
+  instance from acceptance (switch wait and KV hold included) until the
+  response body finishes, fails, is cancelled or is dropped. It moves with the
+  request when engine 2 serves it, and is released exactly once. The revert
+  protects its whole footprint: the restarted unit, `vllm-engine2`, every
+  `stop_first` lane or lane on an overlapping card, and evicted Ollama, plus
+  the watched lane. Ordering: a veto under switch ownership, then the
+  footprint is *draining*: new requests wait for the switch instead of going
+  to an engine about to stop. This applies to every switch and to the
+  `current` model name. A synchronous guard then runs right before the
+  *first* stop, eviction or restart. Work that has arrived by then aborts the
+  revert with nothing changed and no failure cooldown. After that step the
+  switch is committed and finishes, so the GPUs are never left half-switched.
+  Engine gauges (vLLM running/waiting, llama.cpp processing/deferred) veto
+  direct traffic. An engine that is down, or an Ollama with nothing in VRAM,
+  has no work to cut. Switches no longer evict CPU-only Ollama models. Any other unreadable
+  engine is *unknown* and **blocks the revert by default**
+  (`routing.idle_revert_unknown_load: defer`); `router_only` is the explicit
+  opt-in. `GET /running` gains `idle_revert.{in_flight,deferred}` and
+  `last_rollback`. A rollback is complete when the previous env is restored
+  and its restart was issued (rc 0) or skipped for a lease. Readiness is not
+  awaited, and the entry stays until the next successful switch. The 3,600 s
   default is unchanged; do not shorten it until this is deployed.
 - **Still outside coordination:** a raw `systemctl` by an administrator,
   systemd's own `Restart=on-failure`, Mac-side services, and start scripts run
