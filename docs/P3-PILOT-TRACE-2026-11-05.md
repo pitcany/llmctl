@@ -77,7 +77,25 @@ Fix: the scheduler refuses a llama.cpp model a lane serves and names the lane
 (`llmctl run <lane>`); `start`/`plan` fall back to the default profile. Tests:
 `tests/test_scheduler_lane_owned.py`.
 
-## 5. Proposed migrations (need approval; none done)
+## 5. Migrations (approved 2026-11-05)
+
+Status: **G1 done**; **M1 marker done, hourly check not installed.**
+
+- M1: `router-profiles --write` marks each profile env (`~/AI` `efa20545`);
+  applied to the 4 live files (`78f418a1`; 4 comment lines, 0 value lines;
+  check still exit 0). The hourly `router-profiles-check` user timer was
+  refused by the session's permission classifier (new persistent unit); it
+  is left for the owner. Note: the router's "join a loading engine" check
+  compares the active env with the profile byte for byte, so until the next
+  router switch rewrites `vllm-engine.env`, a request during a load of the
+  same profile restarts instead of joining.
+- G1: SQLite backup `llmctl.sqlite3.bak-p3-g1-20261105` (integrity ok); DB
+  row exported and deleted; YAML moved to `services/.attic-20261105/`;
+  RUNBOOK updated (`~/AI` `591cc5ea`, `980e3517`). No session, model or
+  benchmark referenced the profile. `llmctl run gpt-oss-120b-mxfp4 --dry-run`
+  still goes to the lane.
+
+Proposed (before approval):
 
 | # | Change | Effect on live values | Rollback |
 | --- | --- | --- | --- |
