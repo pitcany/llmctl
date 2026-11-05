@@ -105,3 +105,33 @@ Proposed (before approval):
 Counts after M1 + G1: editable launch definitions for live workloads **13 → 7**
 (the 4 profile envs become generated; gptoss 4 → 2). Unit copies, GPU
 hand-over implementations and restart paths are unchanged by this pilot.
+
+## 6. Round 2: unit files (inventory disposition #5), 2026-11-05
+
+**User units, done.** 11 installed unit files were byte-identical copies of repo
+files, none with drop-ins. 10 were replaced by symlinks to the repo file
+(`vllm-engine2`, `ollama-gpu1`, the 4 Strata lanes, `glm-5.3-flash`,
+`gpt-oss-120b` → `~/AI/services/`; `llm-router`, `litellm` →
+`~/AI/llm-router/systemd/`); `llm-mesh-forwarder` was already a symlink since
+2026-09-09 (the inventory had it as a copy). Backups:
+`~/.local/state/unit-copies-bak-20261105/`. After `daemon-reload`:
+`litellm` and `llm-router` still enabled + active, no reload pending; the
+disabled lane units now report `is-enabled` = `linked` (llm-heal records
+`UnitFileState` but decides nothing on it); `llm-heal run --dry-run` shows the
+front doors and Mac routes `ok`, lanes `stopped` as before. Undo: copy the
+backup file over the symlink, `systemctl --user daemon-reload`.
+
+Not linked: `llmctl-api`, `llmctl-gateway` (no repo copy; the gateway is a
+retirement candidate, disposition #4).
+
+**System units, owner action.**
+
+| Unit | State | Proposal |
+| --- | --- | --- |
+| `vllm-engine` (+ `vllm-tp` alias → it) | identical to `~/AI/services/vllm-engine.service` | link it (needs sudo; command in the session log) |
+| `ollama` | **not a copy**: an ollama upgrade on 2026-08-27 rewrote `/etc/systemd/system/ollama.service` to the stock unit (`User=ollama`, `Restart=always` 3 s). The repo copy is the earlier design (`User=yannik`, `OLLAMA_FLASH_ATTENTION=1`, `CUDA_VISIBLE_DEVICES=0,1`, `Restart=on-failure` 15 s). The `coexist.conf` drop-in matches its repo copy except comments. | Owner decision: adopt the live unit into the repo, or reinstall the repo design (a behaviour change: owner, flash attention, restart policy). Do not symlink: the installer rewrites the file as root. |
+| `llama-server` | differs; disabled | Retire (disposition #4), not link. |
+
+Counts: duplicated unit-file copies **10 → 0 user-scope**; 1 system unit
+(`vllm-engine`) still a copy until linked; `ollama` reclassified from "copy
+that drifted" to "two designs".
