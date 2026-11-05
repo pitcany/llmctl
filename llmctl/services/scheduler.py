@@ -17,7 +17,9 @@ import re
 import shutil
 import socket
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from sqlmodel import Session as DBSession
 from sqlmodel import select
@@ -128,9 +130,33 @@ def python_script_refusal(script: str) -> str | None:
 class SchedulerService:
     """Builds safe, explainable launch plans and GPU placement decisions."""
 
-    def __init__(self, db: DBSession | None = None, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        db: DBSession | None = None,
+        settings: Settings | None = None,
+        *,
+        lane_catalog: Callable[[], list[Any]] | None = None,
+    ) -> None:
         self.db = db
         self.settings = settings or load_settings()
+        #: The lane rows to check a llama.cpp model against (tests inject one).
+        self._lane_catalog = lane_catalog
+
+    def _serving_lane(self, model: Any) -> Any:
+        """The lane row that already serves ``model``, or None (advisory)."""
+        from llmctl.services import lanes as lanes_mod
+
+        try:
+            if self._lane_catalog is not None:
+                catalog = self._lane_catalog()
+            else:
+                lanes = lanes_mod.load_lanes(managed_units=self.settings.managed_units)
+                catalog = lanes_mod.build_catalog({}, lanes, vllm_port=0)
+            return lanes_mod.lane_for_model(
+                model.name, model.path, catalog, unit_text=lanes_mod.user_unit_text
+            )
+        except Exception:  # noqa: BLE001 - a broken lane source must not block planning
+            return None
 
     # -- public API ---------------------------------------------------------
 
@@ -168,6 +194,25 @@ class SchedulerService:
             refusals.append(
                 f"Profile '{profile.name}' targets {profile.runtime.value}, "
                 f"incompatible with backend {runtime.value}."
+            )
+
+        lane = (
+            self._serving_lane(model)
+            if model is not None and runtime == RuntimeName.LLAMA_CPP
+            else None
+        )
+        if lane is not None:
+            # `llmctl run` already routes these to the lane (services/serve.py).
+            # `start`, `plan` and POST /sessions did not, and launched a second
+            # llama-server on the lane's weights with llmctl defaults: gpt-oss
+            # planned on :8000 (the DeepSeek port), one card, none of the unit's
+            # flags (P3 trace, 2026-11-05).
+            unit = lane.lane.unit if lane.lane is not None else None
+            where = f" ({unit})" if unit else ""
+            refusals.append(
+                f"{model.name} is served by the `{lane.key}` lane{where}; a second "
+                f"llama-server on the same weights would fight it for the GPUs. "
+                f"Use `llmctl run {lane.key}`."
             )
 
         mode = self._effective_mode(request)

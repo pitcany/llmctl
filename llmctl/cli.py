@@ -522,6 +522,11 @@ def _build_start_request(
         if resolved is None:
             raise typer.BadParameter(f"Profile not found: {profile}")
         profile_id = resolved.id
+    else:
+        # The model's default profile, as `llmctl model plan` and the run path
+        # already apply it. Without it gpt-oss-120b-mxfp4 lost its :8005 pin and
+        # planned on :8000, the DeepSeek lane's port (P3 trace, 2026-11-05).
+        profile_id = model.default_profile_id or None
     return SessionStartRequest(
         model_id=model_id,
         profile_id=profile_id,
