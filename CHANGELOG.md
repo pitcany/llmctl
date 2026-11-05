@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- `llmctl run` hands the host GPU operation lock to llm-router for the
+  duration of its `POST /admin/switch` (`op_lock.handed_off()`) and takes it
+  back for restoring paused lanes; if another owner kept it, the command stops
+  with the holder named instead of continuing unowned. Required before
+  llm-router's optional `switch.op_lock_file` is enabled: otherwise the CLI
+  would hold the lock the router waits for.
+- Configured second vLLM engines now appear in shared managed-unit inventory,
+  status/adoption, and vLLM health/discovery. Port validation and generated units
+  preserve user scope. API session planning and related session routes use the
+  application's settings consistently with session start. Includes a dated
+  workstation capability audit and operational workflow; no live configuration
+  migration is required.
 - Research-workflow follow-up: TUI swaps hold the operation lock through
   the whole swap and finalize interrupted records. Failed lane/session
   restoration retains the unrestored model names and `needs_attention`.

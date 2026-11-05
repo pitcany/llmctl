@@ -192,15 +192,11 @@ def test_save_preset_writes_yaml_to_default_dir(
     assert load_one("x") is not None
 
 
-def test_save_preset_replaces_symlink_to_legacy(
+def test_save_preset_writes_through_symlink_to_legacy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Editing a legacy-symlinked preset writes a real file and drops the legacy copy.
-
-    Without dropping the legacy copy, ``load_all`` (which lets user_dir
-    override default_dir) would keep returning the stale value.
-    """
+    """Editing a legacy-symlinked preset writes the legacy file; nothing is deleted."""
     from llmctl.presets import save_preset
     from llmctl.presets.store import migrate_legacy_presets
 
@@ -214,8 +210,9 @@ def test_save_preset_replaces_symlink_to_legacy(
     path = save_preset(updated)
 
     assert path == symlinked
-    assert not symlinked.is_symlink()
-    assert not legacy.exists()
+    assert symlinked.is_symlink()
+    assert legacy.exists() and not legacy.is_symlink()
+    assert "org/updated" in legacy.read_text()
     assert load_one("x").model_id == "org/updated"
 
 

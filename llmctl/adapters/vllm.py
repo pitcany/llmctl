@@ -99,13 +99,9 @@ class VLLMAdapter(ProcessRuntimeAdapter):
         return self._last_discovery_ok
 
     def _candidate_units(self) -> list[ManagedUnitConfig]:
-        """Return all configured managed units to probe.
-
-        Currently fixed to (vllm_engine,) — the only role we model in
-        config.
-        """
+        """Return configured vLLM units, including the optional second engine."""
         return [
-            self.managed_units.vllm_engine,
+            unit for unit in self.managed_units.roles().values() if unit.runtime == "vllm"
         ]
 
     def _probe_unit(self, unit: ManagedUnitConfig) -> list[ServedModel] | None:

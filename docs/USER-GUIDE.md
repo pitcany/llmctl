@@ -35,30 +35,35 @@ A preset is data — it doesn't say where to run, just what.
 
 ### Managed unit
 
-An externally-installed systemd `.service` file that llmctl owns the
-**how** for. The default config (as of 2026-06-14) knows about one:
-
-- `vllm-engine` (port 8003, dual-GPU TP=2, active)
+An externally-installed systemd `.service` file that llmctl manages. The default
+role is `vllm-engine` on port 8003; its preset determines the GPU footprint, and
+configuration alone does not mean it is active. Optional `managed_units.vllm_engine2`
+adds a second engine in user scope, with a distinct unit name and port, so two
+one-card presets can coexist. Both engines appear in status, adoption, load
+metrics and vLLM discovery; port validation respects each unit's scope.
 
 Since 2026-08-05 you can register **additional roles of any runtime**
 under `managed_units.units` (see the schema below). Those roles then
 appear in `llmctl status`, are adoptable via `llmctl adopt-managed
 <role>`, show on the TUI Units screen, and are covered by the
 port-drift check in `llmctl validate` / `llmctl doctor`. The names
-`vllm-engine`, `vllm_engine`, the old names `vllm-tp`/`vllm_tp`, and `fleet` are reserved and rejected inside
+`vllm-engine`, `vllm_engine`, `vllm-engine2`, `vllm_engine2`, the old names
+`vllm-tp`/`vllm_tp`, and `fleet` are reserved and rejected inside
 `units`. Set `runtime:` explicitly for anything that is not vLLM, or
 `adopt-managed` mislabels the session.
 
-llmctl never installs these units itself — they already exist on
-your box (look in `~/AI/services/`). It just writes their
-`EnvironmentFile`, calls `sudo systemctl restart <unit>`, and polls
-`/v1/models` for readiness.
+Existing units can remain in place. For a new vLLM installation,
+`llmctl install-vllm-unit --role ROLE` previews the generated unit; explicit
+`--no-dry-run` installs it in the configured system or user scope. During a
+managed launch llmctl writes the `EnvironmentFile`, requests a restart in that
+scope, and polls `/v1/models` for readiness.
 
 ### Slot
 
-> **Deprecated (2026-06-14):** The per-GPU slot system (`vllm-coder`, `vllm-reasoner`)
-> was decommissioned. Only `vllm-engine` (TP=2 across both GPUs) is now active.
-> This section is retained for reference.
+The old named slot units (`vllm-coder`, `vllm-reasoner`) were decommissioned.
+The current two-engine placement support uses `vllm-engine` and optional
+`vllm_engine2` configuration; it does not require restoring those legacy units.
+See [Operational workflow](OPERATIONS.md) for the current workstation boundaries.
 
 ### Launch spec / orchestrator
 
@@ -728,9 +733,11 @@ parity is locked in by 12 fixture files at
 
 ## Slots
 
-> **Deprecated (2026-06-14):** The per-GPU slot system was decommissioned.
-> Only `vllm-engine` (TP=2 across both GPUs) is now active. This section is
-> retained for reference.
+The legacy named slot units were decommissioned in June 2026. Current placement
+uses the main engine and optional `managed_units.vllm_engine2` user unit. A
+one-card preset can run alongside a model on the other card; a two-card preset
+requires both. Use `llmctl run NAME --dry-run` to inspect actual conflicts and
+placement. See [Managed unit](#managed-unit) and [Operational workflow](OPERATIONS.md).
 
 ---
 

@@ -48,7 +48,7 @@ class _FakeSystemctl:
     def available(self) -> bool:
         return self._available
 
-    def is_active(self, unit: str) -> bool:
+    def is_active(self, unit: str, *, user: bool = False) -> bool:
         return unit in self._active
 
 

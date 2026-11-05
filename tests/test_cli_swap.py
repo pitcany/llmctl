@@ -344,3 +344,48 @@ def test_placed_one_card_preset_still_frees_its_card(monkeypatch, calls):
     assert res.exit_code == 0, res.output
     assert len(seen_targets) == 1 and seen_targets[0].cards == frozenset({1})
     assert started["options"].gpus == "1"
+
+
+def test_router_switch_runs_without_llmctl_holding_the_gpu_lock(monkeypatch, calls):
+    """NEXT-AGENT-PLAN 2026-11-03 §6: llm-router takes the same flock, so the CLI
+    must hand it over for the HTTP call; otherwise they wait on each other."""
+    import subprocess
+    import sys
+
+    from llmctl.services.op_lock import held_by_us, lock_path
+
+    probe = (
+        "import fcntl, os, sys\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "try:\n    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except OSError:\n    sys.exit(3)\n"
+    )
+    taken: list[int] = []
+
+    def router_takes_lock(model, *, url, key, force, timeout_s):
+        # Stand-in for llm-router: another process that needs the same lock.
+        taken.append(subprocess.run([sys.executable, "-c", probe, str(lock_path())]).returncode)
+        return RouterSwitch("flash", "ft-model", "http://127.0.0.1:1919", True, False, None)
+
+    _router(monkeypatch, None)
+    monkeypatch.setattr(cli_swap, "switch_via_router", router_takes_lock)
+    res = _run(monkeypatch, _state({"qwen3.8-27b"}, set()), "flash")
+    assert res.exit_code == 0, res.output
+    assert taken == [0], "llm-router could not take the GPU lock during the delegated switch"
+    assert not held_by_us()
+
+
+def test_router_fallback_takes_the_lock_back_before_the_direct_swap(monkeypatch, calls):
+    from llmctl.services.op_lock import held_by_us
+
+    held_during_direct: list[bool] = []
+    _router(monkeypatch, None)  # router does not know it: llmctl swaps directly
+    monkeypatch.setattr(
+        cli_swap,
+        "swap_to_lane",
+        lambda lane, **k: held_during_direct.append(held_by_us())
+        or LaneSwapResult(ok=True, seconds=1),
+    )
+    res = _run(monkeypatch, _state({"qwen3.8-27b"}, set()), "flash")
+    assert res.exit_code == 0, res.output
+    assert held_during_direct == [True]

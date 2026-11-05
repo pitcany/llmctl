@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ import yaml
 from llmctl._fsutil import atomic_write_text
 from llmctl.presets.paths import default_preset_dir, user_config_dir
 from llmctl.presets.schema import Model, PresetSchemaError
+from llmctl.presets.yaml_edit import dump_mapping, edit_preset_text
 
 log = logging.getLogger(__name__)
 
@@ -130,57 +132,57 @@ def save_preset(
     unconditionally. With no override the resolver respects whatever
     directory the alias currently lives in:
 
-    * If the canonical ``default_preset_dir()`` already holds a real
-      file for the alias, overwrite it.
+    * If the canonical ``default_preset_dir()`` already holds a file or
+      symlink for the alias, write through it (links stay links).
     * If only the legacy ``user_config_dir()`` holds the alias, write
-      back to that file (matching :func:`load_all` precedence — user
-      dir wins).
-    * If the canonical dir holds a symlink (typically a legacy-migrated
-      preset), replace the symlink with a real file in the canonical
-      dir AND drop the legacy copy so loaders converge on the new YAML.
+      back to that file.
     * Otherwise (new alias) write a fresh file under the canonical dir.
 
-    The function trusts the model — schema validation already ran when
-    the form built the ``Model``.
+    Only ``model.model_fields_set`` is written; an existing file is edited
+    line by line so comments survive. Nothing is ever deleted.
     """
     if config_dir is not None:
         target_dir = Path(config_dir)
-        target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"{model.alias}.yaml"
-        if target.is_symlink():
-            target.unlink()
-        _write_yaml(target, model)
-        return target
-
-    canonical_dir = default_preset_dir()
-    legacy_dir = user_config_dir()
-    canonical = canonical_dir / f"{model.alias}.yaml"
-    legacy = legacy_dir / f"{model.alias}.yaml"
-
-    if canonical.is_symlink():
-        canonical.unlink()
-        canonical_dir.mkdir(parents=True, exist_ok=True)
-        _write_yaml(canonical, model)
-        if legacy.is_symlink() or legacy.exists():
-            legacy.unlink()
-        return canonical
-
-    if canonical.exists():
-        _write_yaml(canonical, model)
-        return canonical
-
-    if legacy.exists():
-        _write_yaml(legacy, model)
-        return legacy
-
-    canonical_dir.mkdir(parents=True, exist_ok=True)
-    _write_yaml(canonical, model)
-    return canonical
+    else:
+        canonical_dir = default_preset_dir()
+        canonical = canonical_dir / f"{model.alias}.yaml"
+        legacy = user_config_dir() / f"{model.alias}.yaml"
+        if canonical.is_symlink() or canonical.exists():
+            target = canonical
+        elif legacy.is_symlink() or legacy.exists():
+            target = legacy
+        else:
+            target = canonical
+    _write_yaml(target, model)
+    return target
 
 
 def _write_yaml(path: Path, model: Model) -> None:
-    payload = model.model_dump(mode="json")
-    atomic_write_text(path, yaml.safe_dump(payload, sort_keys=False, default_flow_style=False))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        dumped = model.model_dump(mode="json")
+    desired = {k: v for k, v in dumped.items() if k in model.model_fields_set}
+    text: str | None = None
+    if path.exists():
+        try:
+            text = edit_preset_text(path.read_text(), desired)
+        except (ValueError, yaml.YAMLError, OSError):
+            text = None
+    if text is None:
+        if path.exists():
+            log.warning(
+                "%s: could not edit the preset line by line; rewriting the whole file "
+                "(its comments are not kept)", path,
+            )
+        text = dump_mapping(desired)
+    try:
+        reloaded = Model.model_validate(yaml.safe_load(text) or {})
+    except (PresetSchemaError, yaml.YAMLError, TypeError) as exc:
+        raise PresetSchemaError(f"{path}: not saved, preset would be invalid: {exc}") from exc
+    if reloaded != model:
+        raise PresetSchemaError(f"{path}: not saved, text does not reload to the given model")
+    atomic_write_text(path, text)
 
 
 def delete_preset(

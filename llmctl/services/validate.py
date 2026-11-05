@@ -159,7 +159,7 @@ def check_managed_unit_ports(
     get = http_get or _default_http_get
     findings: list[Finding] = []
     for unit in units:
-        if not runner.is_active(unit.unit_name):
+        if not runner.is_active(unit.unit_name, user=unit.user_scope):
             continue
         if _serves_models(get, unit.default_port, probe_timeout_s):
             continue

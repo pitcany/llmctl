@@ -78,11 +78,7 @@ def endpoints(settings: Settings, lanes: list[Lane] | None = None) -> list[Engin
         seen.add(key)
         rows.append(EngineLoadRow(name, runtime, upstream, source, None))
 
-    roles = dict(settings.managed_units.roles())
-    two = settings.managed_units.vllm_engine2
-    if two is not None:
-        roles.setdefault("vllm-engine2", two)
-    for role, unit in roles.items():
+    for role, unit in settings.managed_units.roles().items():
         runtime = getattr(unit, "runtime", None) or "vllm"
         add(role, runtime, f"http://127.0.0.1:{unit.default_port}", "unit")
     # Server runtimes llmctl talks to but does not manage (Ollama on :11434).
