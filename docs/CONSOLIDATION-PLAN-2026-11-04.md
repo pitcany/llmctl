@@ -249,6 +249,9 @@ legacy data with the packages.
 
 ## 7. P3/P4 — consolidate scripts, services and live definitions
 
+Status 2026-11-05: step 1 traced for `qwen27b-awq` and `gptoss`
+(`P3-PILOT-TRACE-2026-11-05.md`); migrations M1/G1 proposed, not done.
+
 Choose one representative vLLM preset and one command-backed workload from the
 verified inventory. The command-backed pilot tests the existing plugin boundary;
 do not choose an active workload solely because it is convenient.

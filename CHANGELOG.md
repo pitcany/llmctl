@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `llmctl start`, `plan`, POST `/sessions` and the TUI start refuse a llama.cpp
+  model that a lane already serves (gpt-oss → `gptoss`) and name the lane to
+  use with `llmctl run`; before, they planned a second llama-server on the
+  lane's weights with llmctl defaults. `start`/`plan` without `--profile` now
+  apply the model's default profile, as `run` already did. Found by the P3
+  pilot trace (`docs/P3-PILOT-TRACE-2026-11-05.md`).
 - `llmctl run` hands the host GPU operation lock to llm-router for the
   duration of its `POST /admin/switch` (`op_lock.handed_off()`) and takes it
   back for restoring paused lanes; if another owner kept it, the command stops
