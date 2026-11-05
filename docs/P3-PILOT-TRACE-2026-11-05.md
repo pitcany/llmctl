@@ -129,7 +129,7 @@ retirement candidate, disposition #4).
 | Unit | State | Proposal |
 | --- | --- | --- |
 | `vllm-engine` (+ `vllm-tp` alias → it) | identical to `~/AI/services/vllm-engine.service` | link it (needs sudo; command in the session log) |
-| `ollama` | **not a copy**: an ollama upgrade on 2026-08-27 rewrote `/etc/systemd/system/ollama.service` to the stock unit (`User=ollama`, `Restart=always` 3 s). The repo copy is the earlier design (`User=yannik`, `OLLAMA_FLASH_ATTENTION=1`, `CUDA_VISIBLE_DEVICES=0,1`, `Restart=on-failure` 15 s). The `coexist.conf` drop-in matches its repo copy except comments. | Owner decision: adopt the live unit into the repo, or reinstall the repo design (a behaviour change: owner, flash attention, restart policy). Do not symlink: the installer rewrites the file as root. |
+| `ollama` | **not a copy**: an ollama upgrade on 2026-08-27 rewrote `/etc/systemd/system/ollama.service` to the stock unit (`User=ollama`, `Restart=always` 3 s). The repo copy is the earlier design (`User=yannik`, `OLLAMA_FLASH_ATTENTION=1`, `CUDA_VISIBLE_DEVICES=0,1`, `Restart=on-failure` 15 s). The `coexist.conf` drop-in matches its repo copy except comments. | **Decided 2026-11-05: adopt live.** `~/AI/services/ollama.service` now mirrors the live file, marked record-only (`~/AI` `628bc9ba`); RUNBOOK points local settings at the drop-in. Not symlinked: the installer rewrites the file as root. |
 | `llama-server` | differs; disabled | Retire (disposition #4), not link. |
 
 Counts: duplicated unit-file copies **10 → 0 user-scope**; 1 system unit
