@@ -71,3 +71,27 @@ ownership 5 → 2 (`router.yaml` + `Conflicts=` backstop).
 - Live, one window: `llmctl run gptoss` from the tutor, then back
   (`llmctl run qwen27b`), comparing journal lines and timings with the
   2026-11-04 acceptance run. Costs ~10 min of GPU time with the tutor down.
+
+## 5. Live pilot (2026-11-07)
+
+`gptoss-start` now calls `llmctl take-gpus gptoss [--take-gpus|--share-gpus]`
+in place of its inline stop/evict/wait block (`~/AI` `60a947cb`). Run as the
+longjob job `p4-pilot-2`, 12:09:42 → 12:17:25.
+
+| Step | Result | Baseline |
+| --- | --- | --- |
+| `llmctl run gptoss -y` (tutor → gptoss) | rc 0, 330 s; `vllm-engine` stopped by `sudo systemctl stop` from the router's tree (the script's only stop path is now take-gpus); gpt-oss on :8005 answered "OK"; GPUs 29.3 / 28.2 GB | 4 m 54 s (last load) |
+| `llmctl run qwen27b -y` (gptoss → tutor) | rc 0, 99 s; `gpt-oss-120b.service` stopped, `vllm-engine` started; the tutor on :8003 answered "OK"; GPUs 26.6 / 26.0 GB | 97 s (2026-11-04) |
+
+Observations:
+
+- vLLM logged `EngineDeadError` during its drain stop at 12:09:54. The unit still
+  stopped cleanly in 11 s ("Deactivated successfully"). The same error appears
+  in 9 of 92 `vllm-engine` stops since 2026-10-20, so the change did not cause it.
+- The first attempt (`p4-pilot`) ran under `longjob --gpu all`. The router
+  refused at once: the job's own lane lease blocks every swap, and llmctl
+  `run` for a lane goes through the router. Nothing was stopped. **Run swap
+  tests as `longjob start NAME --router`, which claims the router but holds no lease.**
+
+Pilot passed. Next: roll out to `glm53-start`, `strata-start` and `coder1-start`,
+then Step B.
