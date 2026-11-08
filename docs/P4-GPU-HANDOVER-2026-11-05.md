@@ -95,3 +95,42 @@ Observations:
 
 Pilot passed. Next: roll out to `glm53-start`, `strata-start` and `coder1-start`,
 then Step B.
+
+## 6. Rollout (2026-11-07/08)
+
+`glm53-start`, `strata-start` and `coder1-start` now call `llmctl take-gpus`
+the way `gptoss-start` does (`~/AI` `e4a48131`; 132 lines of copied
+detect/stop/drain code removed). Two helper changes came with it (`e6ffe914`):
+a lane resolves by its unit too (`strata-start` serves four lanes and knows
+only its unit), and the raw VRAM check is skipped when the lane's own unit is
+already up (no pointless 30 s wait when `ollama-gpu1` holds GPU 1). 133 package
+tests pass. `strata-start` no longer reads `STRATA_GPUS`; its cards come from
+`router.yaml` (all four Strata lanes say `0 1`).
+
+Live runs, all through `llmctl run LANE -y` (router `/admin/switch`):
+
+| Step | take-gpus hand-over | Load | Answer |
+| --- | --- | --- | --- |
+| tutor → glm53 (`p4-rollout`, 14:51) | `vllm-engine` stopped, cards free in 13 s | 17 m 21 s (last: 1 m 00 s) | "OK" |
+| glm53 → flash | `glm-5.3-flash` stopped in 16 s | **failed**: Strata's 900 s READY timeout | — |
+| flash (down) → qwen3coder30b | nothing to stop | 22 s | "OK" |
+| qwen3coder30b → tutor | `ollama-gpu1` stopped (`Conflicts=`/router) | 92 s | "OK" |
+| tutor → flash (`p4-flash-retest-2`, 01:32) | `vllm-engine` stopped, unit started in 11 s | 12 m 11 s (last: 1 m 29 s) | "OK" |
+| flash → tutor | flash stopped | 113 s | "OK" |
+
+Observations:
+
+- Every hand-over took 11–16 s. The slow loads were the Strata engines reading
+  their weights from disk (~20 MB/s) with swap full (14.9 / 14.9 GB) and the
+  page cache cold: the 1–1.5 min baselines were warm-cache loads. The flash
+  failure was its own load timeout, not take-gpus; the removed `strata-start`
+  block held no RAM or cache logic.
+- A *queued* `longjob queue NAME --router` job still takes the lane lease when
+  the runner starts it, so the 22:00 retest (`p4-flash-retest`) was refused
+  after 1 s with nothing stopped. Start router swap tests directly
+  (`longjob start NAME --router`).
+- Open: the full swap slows every Strata cold load; with the 900 s READY
+  timeout, a cold flash start can fail. Worth its own look.
+
+Rollout passed. Next: Step B (generate the router's `stop_first` from the
+`router.yaml` lanes).
