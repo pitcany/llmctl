@@ -7,7 +7,7 @@ from sqlmodel import Session as DBSession
 
 from llmctl.api.deps import get_db_session, get_settings
 from llmctl.config import Settings
-from llmctl.schemas import LaunchPlan, Session, SessionStartRequest
+from llmctl.schemas import LaunchPlan, Session, SessionStartRequest, StatusChange
 from llmctl.services.op_lock import LockBusy
 from llmctl.services.scheduler import SchedulerError
 from llmctl.services.sessions import AdoptError, SessionService
@@ -95,6 +95,24 @@ def restart_session(
     if result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
     return result
+
+
+@router.get("/{session_id}/history", response_model=list[StatusChange])
+def session_history(
+    session_id: str, db: DBSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+) -> list[StatusChange]:
+    """The session's status trail, oldest first (``docs/STATE-MACHINES.md`` §1).
+
+    Returns 409 Conflict when the id is a prefix that matches several sessions.
+    """
+    try:
+        session = SessionService(db, settings=settings).get_session(session_id)
+    except AdoptError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    return session.status_history
 
 
 @router.get("/{session_id}/systemd-unit")

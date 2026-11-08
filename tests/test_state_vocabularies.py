@@ -66,6 +66,24 @@ def test_set_status_returns_old_and_logs_only_off_table_moves(
         assert len(caplog.records) == 1
         assert "running -> failed" in caplog.records[0].getMessage()
 
+    # Both moves are on the trail, in order, with the stored strings.
+    assert [(e["old"], e["new"], e["why"]) for e in record.status_history] == [
+        ("starting", "running", "test"),
+        ("running", "failed", "test"),
+    ]
+    assert all("at" in e for e in record.status_history)
+
+
+def test_status_history_is_capped() -> None:
+    from llmctl.db import STATUS_HISTORY_LIMIT
+
+    record = SimpleNamespace(id="s2", status=SessionStatus.RUNNING, status_history=None)
+    for _ in range(STATUS_HISTORY_LIMIT + 7):
+        set_status(record, SessionStatus.DEGRADED, why="flap")
+        set_status(record, SessionStatus.RUNNING, why="flap")
+    assert len(record.status_history) == STATUS_HISTORY_LIMIT
+    assert record.status_history[-1]["new"] == "running"
+
 
 def test_every_operation_phase_has_a_view_that_agrees_with_it() -> None:
     from llmctl.services.operations import PHASE_VIEWS, Tone, describe_phase

@@ -1071,6 +1071,47 @@ def pull(
     _add_from_source(source, None, None, yes=True)
 
 
+@app.command("history")
+def history_cmd(
+    session_id: Annotated[str, typer.Argument(help="Session ID (or a unique prefix).")],
+    json_out: _JSON_OPT = False,
+) -> None:
+    """Show a session's status trail: every move, when it happened, and why.
+
+    The moves are the lifecycle in ``docs/STATE-MACHINES.md``; ``why`` is the
+    reason the service recorded (``stop requested``, ``owned endpoint probe``,
+    ``process survived stop`` ...). The last 50 moves are kept.
+    """
+    from llmctl.services.sessions import AmbiguousSessionError
+
+    with _session() as db:
+        try:
+            session = SessionService(db).get_session(session_id)
+        except AmbiguousSessionError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    if session is None:
+        raise typer.BadParameter(f"Session not found: {session_id}")
+    if json_out:
+        _emit_json([change.model_dump(mode="json") for change in session.status_history])
+        return
+    if not session.status_history:
+        console.print(f"[yellow]No status changes recorded for {session.id} yet.[/yellow]")
+        return
+    table = Table(title=f"Status trail for {session.id}")
+    table.add_column("Time")
+    table.add_column("From")
+    table.add_column("To")
+    table.add_column("Why")
+    for change in session.status_history:
+        table.add_row(
+            change.at.isoformat(timespec="seconds"),
+            change.old.value,
+            change.new.value,
+            escape(change.why),
+        )
+    console.print(table)
+
+
 @app.command()
 def logs(
     session_id: Annotated[str | None, typer.Argument(help="Session ID to tail logs for.")] = None,

@@ -90,6 +90,11 @@ def test_stop_marks_the_row_stopping_while_the_adapter_works(tmp_path: Path) -> 
 
         assert adapter.seen == [SessionStatus.STOPPING]
         assert session is not None and session.status is SessionStatus.STOPPED
+        # The trail records both moves with their reasons.
+        assert [(c.old, c.new, c.why) for c in session.status_history] == [
+            (SessionStatus.RUNNING, SessionStatus.STOPPING, "stop requested"),
+            (SessionStatus.STOPPING, SessionStatus.STOPPED, "stop"),
+        ]
     finally:
         db.close()
 

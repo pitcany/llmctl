@@ -48,6 +48,20 @@ Surfaces: `cli.py::_print_session_outcome`, TUI `screens_sessions._STATUS_COLOR`
 and `_BAD_STATUSES`, `screens_models._after_start`, `_data` running count,
 `stop_serving`.
 
+### The trail
+
+`set_status` appends every move to `SessionRecord.status_history` as
+`{"at", "old", "new", "why"}`, capped at `STATUS_HISTORY_LIMIT` (50). It is
+the answer to "why did this row flip?":
+
+- `llmctl history <session>` (`--json` for the raw list);
+- `GET /sessions/{id}/history` (`StatusChange` objects, oldest first);
+- the TUI sessions screen shows the newest move above the log tail.
+
+`why` strings are the ones in the table above (`stop requested`, `owned
+endpoint probe`, `process survived stop`, `restart re-plans`, ...). Rows
+created before the column exists have no trail until their next move.
+
 ## 2. Mutating operation — `OperationPhase` (`llmctl/services/operations.py`)
 
 Stored in `operations.phase`. Set by `OperationStore.set_phase` and the

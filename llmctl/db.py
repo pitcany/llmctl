@@ -72,6 +72,9 @@ class SessionStatus(StrEnum):
         return self in SESSION_TERMINAL_STATES
 
 
+#: How many status moves a session row keeps (oldest dropped first).
+STATUS_HISTORY_LIMIT = 50
+
 #: Statuses with a live process or endpoint: probed by reconcile, routed by the gateway.
 SESSION_ACTIVE_STATES: frozenset[SessionStatus] = frozenset(
     {SessionStatus.STARTING, SessionStatus.RUNNING, SessionStatus.DEGRADED}
@@ -303,6 +306,10 @@ class SessionRecord(SQLModel, table=True):
     #: *operation* did not take, which reconcile has no business clearing.
     #: Cleared by a stop that succeeds, or by a fresh launch.
     terminate_failed_at: datetime | None = None
+    #: The lifecycle trail: the last ``STATUS_HISTORY_LIMIT`` moves as
+    #: ``{"at", "old", "new", "why"}``, appended by ``services.sessions.set_status``.
+    #: ``NULL`` on rows older than the column; read it as ``or []``.
+    status_history: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utcnow, index=True)
     started_at: datetime | None = None
     stopped_at: datetime | None = None

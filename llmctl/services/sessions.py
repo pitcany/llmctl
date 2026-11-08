@@ -24,6 +24,7 @@ from llmctl.db import (
     SESSION_ACTIVE_STATES,
     SESSION_TERMINAL_STATES,
     SESSION_TRANSITIONS,
+    STATUS_HISTORY_LIMIT,
     EventLevel,
     RuntimeName,
     SessionKind,
@@ -33,7 +34,13 @@ from llmctl.db import (
 )
 from llmctl.integrations.journalctl import JournalctlRunner
 from llmctl.integrations.systemctl import SystemctlRunner
-from llmctl.schemas import AdapterStatus, LaunchPlan, Session, SessionStartRequest
+from llmctl.schemas import (
+    AdapterStatus,
+    LaunchPlan,
+    Session,
+    SessionStartRequest,
+    StatusChange,
+)
 from llmctl.services.backends import probe_openai_v1_models
 from llmctl.services.events import log_event
 from llmctl.services.op_lock import gpu_operation_lock
@@ -57,6 +64,10 @@ def set_status(record: SessionRecord, new: SessionStatus, *, why: str) -> Sessio
     one chokepoint. A move outside :data:`~llmctl.db.SESSION_TRANSITIONS` is
     logged at DEBUG, not refused: the table documents the machine, the code
     still defines it, and a surprise shows up in the log instead of a crash.
+
+    Each move is also appended to ``record.status_history`` (the trail that
+    ``llmctl history`` shows), capped at :data:`~llmctl.db.STATUS_HISTORY_LIMIT`.
+    The list is reassigned, not mutated, so SQLAlchemy sees the JSON change.
     """
     old = record.status
     if new != old and new not in SESSION_TRANSITIONS.get(old, frozenset()):
@@ -65,6 +76,10 @@ def set_status(record: SessionRecord, new: SessionStatus, *, why: str) -> Sessio
             record.id, old, new, why,
         )
     record.status = new
+    entry = {"at": utcnow().isoformat(), "old": str(old), "new": str(new), "why": why}
+    history = list(getattr(record, "status_history", None) or [])
+    history.append(entry)
+    record.status_history = history[-STATUS_HISTORY_LIMIT:]
     return old
 
 
@@ -172,6 +187,9 @@ def record_to_session(record: SessionRecord) -> Session:
         served_name=record.served_name,
         adopted_at=record.adopted_at,
         terminate_failed_at=record.terminate_failed_at,
+        status_history=[
+            StatusChange.model_validate(entry) for entry in (record.status_history or [])
+        ],
         created_at=record.created_at,
         started_at=record.started_at,
         stopped_at=record.stopped_at,

@@ -29,6 +29,27 @@ _STATUS_COLOR = {
 _BAD_STATUSES = frozenset({SessionStatus.STOPPED, SessionStatus.FAILED, SessionStatus.DEGRADED})
 
 
+def _last_change_line(sessions: list[Any], session_id: str) -> str:
+    """One muted line above the log tail: the newest status move and why.
+
+    Empty when the session has no recorded trail, so panes for rows older
+    than the trail column look exactly as before.
+    """
+    for session in sessions:
+        if (session.id or "") != session_id:
+            continue
+        history = getattr(session, "status_history", None) or []
+        if not history:
+            return ""
+        last = history[-1]
+        when = last.at.isoformat(timespec="seconds")
+        return (
+            f"[{C_MUTED}]last change: {esc(last.old.value)} -> {esc(last.new.value)} "
+            f"({esc(last.why)}) at {esc(when)}[/]\n"
+        )
+    return ""
+
+
 class SessionsScreen(DataScreen):
     """Runtime sessions screen: lists sessions, controls lifecycle, tails logs."""
 
@@ -114,11 +135,14 @@ class SessionsScreen(DataScreen):
         if not self._tail_id:
             log.update(f"[{C_MUTED}]Highlight a session to view its log tail.[/]")
         elif not data["tail"]:
-            log.update(f"[{C_MUTED}]No log output for this session yet.[/]")
+            log.update(
+                _last_change_line(sessions, self._tail_id)
+                + f"[{C_MUTED}]No log output for this session yet.[/]"
+            )
         else:
             # Process output is not markup: '[/INST]' templates and '[rank0]:'
             # torch prefixes appear routinely and would crash or vanish.
-            log.update(esc(data["tail"]))
+            log.update(_last_change_line(sessions, self._tail_id) + esc(data["tail"]))
 
     def _announce_transitions(self, sessions: list[Any]) -> None:
         """Toast rows whose status changed since the last render.
