@@ -15,9 +15,18 @@ from textual.containers import Grid
 from textual.widgets import Footer, Header, Static
 
 from llmctl.schemas import HealthState
-from llmctl.services.operations import OperationPhase
+from llmctl.services.operations import describe_phase
 from llmctl.tui import _data
-from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
+from llmctl.tui._base import (
+    C_ACCENT,
+    C_ERR,
+    C_MUTED,
+    C_OK,
+    C_WARN,
+    DataScreen,
+    esc,
+    tone_color,
+)
 
 
 class StatCard(Static):
@@ -158,18 +167,15 @@ class DashboardScreen(DataScreen):
         if op is None:
             lines.append(f"[{C_MUTED}]none[/]")
         else:
-            phase = str(op.get("phase", "?"))
+            view = describe_phase(op.get("phase"))
+            color = tone_color(view.tone)
             if op.get("terminal"):
-                if phase == OperationPhase.COMPLETED:
-                    icon, color = "✓", C_OK
-                elif phase in (OperationPhase.NEEDS_ATTENTION, OperationPhase.INTERRUPTED):
-                    icon, color = "!", C_ERR
-                else:
-                    icon, color = "×", C_ERR
                 lines.append(
-                    f"  [{color}]{icon} last: {esc(phase)} — "
+                    f"  [{color}]{view.icon} last: {esc(view.label)} — "
                     f"{esc(op.get('kind', '?'))} {esc(op.get('target', '?'))}[/]"
                 )
+                if view.hint:
+                    lines.append(f"  [{color}]{view.icon} {esc(view.hint)}[/]")
             else:
                 elapsed = op.get("elapsed_s")
                 elapsed_label = (
@@ -178,7 +184,7 @@ class DashboardScreen(DataScreen):
                     else ""
                 )
                 lines.append(
-                    f"  [{C_WARN}]◐ {esc(phase)}{elapsed_label}[/] — "
+                    f"  [{color}]{view.icon} {esc(view.label)}{elapsed_label}[/] — "
                     f"{esc(op.get('kind', '?'))} {esc(op.get('target', '?'))} "
                     f"[{C_MUTED}]via {esc(op.get('interface') or '?')} "
                     f"(pid {op.get('pid')})[/]"

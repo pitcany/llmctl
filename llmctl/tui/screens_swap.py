@@ -29,7 +29,7 @@ from llmctl.services.lanes import (
     record_load,
 )
 from llmctl.services.op_lock import gpu_operation_lock
-from llmctl.services.operations import OperationPhase
+from llmctl.services.operations import describe_phase
 from llmctl.services.session_swap import (
     pause_for_swap,
     resume_after_failed_swap,
@@ -38,7 +38,7 @@ from llmctl.services.session_swap import (
 from llmctl.services.vllm_orchestrator import OrchestratorOptions, start_vllm_tp
 from llmctl.services.vllm_slots import cuda_devices, engine_config, place
 from llmctl.tui import _data
-from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
+from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc, tone_color
 from llmctl.tui._modals import ConfirmActionModal
 
 #: Icon+text state markers: color is never the only signal (§3A).
@@ -258,24 +258,22 @@ class SwapScreen(DataScreen):
         if op is None:
             panel.update(f"[{C_MUTED}]no operation[/]")
             return
-        phase = str(op.get("phase", "?"))
+        view = describe_phase(op.get("phase"))
+        color = tone_color(view.tone)
         if op.get("terminal"):
-            icon, color = (
-                ("!", C_ERR)
-                if phase in (OperationPhase.NEEDS_ATTENTION, OperationPhase.INTERRUPTED)
-                else ("✓", C_OK) if phase == OperationPhase.COMPLETED else ("×", C_ERR)
-            )
             text = (
-                f"[{color}]{icon} last operation: {esc(phase)} — "
+                f"[{color}]{view.icon} last operation: {esc(view.label)} — "
                 f"{esc(op.get('kind', '?'))} {esc(op.get('target', '?'))}[/]"
             )
+            if view.hint:
+                text += f"\n  [{color}]{view.icon} {esc(view.hint)}[/]"
         else:
             elapsed = op.get("elapsed_s")
             elapsed_label = (
                 f", {elapsed:.0f}s elapsed" if isinstance(elapsed, (int, float)) else ""
             )
             text = (
-                f"[{C_WARN}]◐ {esc(phase)}{elapsed_label}[/] — "
+                f"[{color}]{view.icon} {esc(view.label)}{elapsed_label}[/] — "
                 f"{esc(op.get('kind', '?'))} {esc(op.get('target', '?'))} "
                 f"[{C_MUTED}]via {esc(op.get('interface') or '?')}[/]"
             )

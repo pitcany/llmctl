@@ -356,12 +356,15 @@
   }
 
   // Draws one job snapshot; returns true once the job has finished. The
-  // operation phase (§3C) says what the swap is doing, not just "running".
+  // operation phase (§3C) says what the swap is doing, not just "running";
+  // phase_label/phase_hint are the TUI's words for it (describe_phase), so
+  // the browser and the terminal say the same thing.
   function renderJob(job) {
     var running = job.status === "running";
     var text = job.exit_code === 0 ? "Ready" : "Failed (exit " + job.exit_code + ")";
     var status = running ? job.status : text;
-    if (running && job.phase) { status += " · " + job.phase; }
+    if (running && job.phase) { status += " · " + (job.phase_label || job.phase); }
+    if (!running && job.exit_code !== 0 && job.phase_hint) { status += " — " + job.phase_hint; }
     $("job-status").textContent = job.name + ": " + status;
     var log = $("job-log");
     log.textContent = (job.output || []).slice(-200).join("\n");

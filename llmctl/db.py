@@ -72,6 +72,9 @@ class SessionStatus(StrEnum):
         return self in SESSION_TERMINAL_STATES
 
 
+#: How many status moves a session row keeps (oldest dropped first).
+STATUS_HISTORY_LIMIT = 50
+
 #: Statuses with a live process or endpoint: probed by reconcile, routed by the gateway.
 SESSION_ACTIVE_STATES: frozenset[SessionStatus] = frozenset(
     {SessionStatus.STARTING, SessionStatus.RUNNING, SessionStatus.DEGRADED}
@@ -88,17 +91,24 @@ SESSION_TERMINAL_STATES: frozenset[SessionStatus] = frozenset(
 #: refuses) a move outside this table, so a new path shows up in the debug log
 #: instead of silently widening the machine. ``docs/STATE-MACHINES.md`` renders it.
 #:
-#: ``STOPPING`` is part of the public vocabulary but no code path enters it today:
-#: ``stop`` goes straight to ``STOPPED`` (or ``DEGRADED`` when the process survives).
-#: ``UNKNOWN`` is the escape hatch for rows reconcile cannot classify.
+#: ``STOPPING`` is the window between a stop (or restart) being requested and
+#: the process or unit actually going away; a stop that cannot run puts the
+#: row back where it was. ``UNKNOWN`` is the escape hatch for rows reconcile
+#: cannot classify.
 SESSION_TRANSITIONS: dict[SessionStatus, frozenset[SessionStatus]] = {
     SessionStatus.PLANNED: frozenset(
-        {SessionStatus.STARTING, SessionStatus.STOPPED, SessionStatus.FAILED}
+        {
+            SessionStatus.STARTING,
+            SessionStatus.STOPPING,
+            SessionStatus.STOPPED,
+            SessionStatus.FAILED,
+        }
     ),
     SessionStatus.STARTING: frozenset(
         {
             SessionStatus.RUNNING,
             SessionStatus.DEGRADED,
+            SessionStatus.STOPPING,
             SessionStatus.STOPPED,
             SessionStatus.FAILED,
             SessionStatus.PLANNED,
@@ -107,6 +117,7 @@ SESSION_TRANSITIONS: dict[SessionStatus, frozenset[SessionStatus]] = {
     SessionStatus.RUNNING: frozenset(
         {
             SessionStatus.DEGRADED,
+            SessionStatus.STOPPING,
             SessionStatus.STOPPED,
             SessionStatus.STARTING,
             SessionStatus.PLANNED,
@@ -115,12 +126,23 @@ SESSION_TRANSITIONS: dict[SessionStatus, frozenset[SessionStatus]] = {
     SessionStatus.DEGRADED: frozenset(
         {
             SessionStatus.RUNNING,
+            SessionStatus.STOPPING,
             SessionStatus.STOPPED,
             SessionStatus.STARTING,
             SessionStatus.PLANNED,
         }
     ),
-    SessionStatus.STOPPING: frozenset({SessionStatus.STOPPED, SessionStatus.FAILED}),
+    SessionStatus.STOPPING: frozenset(
+        {
+            SessionStatus.STOPPED,
+            SessionStatus.FAILED,
+            SessionStatus.DEGRADED,
+            SessionStatus.PLANNED,
+            # A stop that could not run restores the status it found.
+            SessionStatus.RUNNING,
+            SessionStatus.STARTING,
+        }
+    ),
     SessionStatus.STOPPED: frozenset(
         {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.PLANNED}
     ),
@@ -284,6 +306,10 @@ class SessionRecord(SQLModel, table=True):
     #: *operation* did not take, which reconcile has no business clearing.
     #: Cleared by a stop that succeeds, or by a fresh launch.
     terminate_failed_at: datetime | None = None
+    #: The lifecycle trail: the last ``STATUS_HISTORY_LIMIT`` moves as
+    #: ``{"at", "old", "new", "why"}``, appended by ``services.sessions.set_status``.
+    #: ``NULL`` on rows older than the column; read it as ``or []``.
+    status_history: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utcnow, index=True)
     started_at: datetime | None = None
     stopped_at: datetime | None = None

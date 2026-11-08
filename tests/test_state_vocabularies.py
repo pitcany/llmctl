@@ -66,6 +66,44 @@ def test_set_status_returns_old_and_logs_only_off_table_moves(
         assert len(caplog.records) == 1
         assert "running -> failed" in caplog.records[0].getMessage()
 
+    # Both moves are on the trail, in order, with the stored strings.
+    assert [(e["old"], e["new"], e["why"]) for e in record.status_history] == [
+        ("starting", "running", "test"),
+        ("running", "failed", "test"),
+    ]
+    assert all("at" in e for e in record.status_history)
+
+
+def test_status_history_is_capped() -> None:
+    from llmctl.db import STATUS_HISTORY_LIMIT
+
+    record = SimpleNamespace(id="s2", status=SessionStatus.RUNNING, status_history=None)
+    for _ in range(STATUS_HISTORY_LIMIT + 7):
+        set_status(record, SessionStatus.DEGRADED, why="flap")
+        set_status(record, SessionStatus.RUNNING, why="flap")
+    assert len(record.status_history) == STATUS_HISTORY_LIMIT
+    assert record.status_history[-1]["new"] == "running"
+
+
+def test_every_operation_phase_has_a_view_that_agrees_with_it() -> None:
+    from llmctl.services.operations import PHASE_VIEWS, Tone, describe_phase
+
+    assert set(PHASE_VIEWS) == set(OperationPhase)
+    for phase in OperationPhase:
+        view = describe_phase(phase.value)
+        assert view is PHASE_VIEWS[phase]
+        assert view.phase == phase.value
+        assert view.terminal == phase.is_terminal
+        assert view.label and view.icon
+        if phase.is_terminal and phase is not OperationPhase.COMPLETED:
+            assert view.hint and view.tone is Tone.ERROR, "a bad ending needs a next step"
+        if not phase.is_terminal:
+            assert view.tone is Tone.ACTIVE
+    assert describe_phase(OperationPhase.COMPLETED).hint == ""
+    assert describe_phase("no-such-phase").tone is Tone.MUTED
+    assert describe_phase(None).label == "unknown"
+    assert describe_phase(OperationPhase.LOADING).as_dict()["tone"] == "active"
+
 
 def test_operation_phase_terminal_predicate_matches_sets() -> None:
     for phase in OperationPhase:
@@ -91,6 +129,16 @@ def test_swap_job_status_from_exit_code() -> None:
     assert SwapJobStatus.SUCCEEDED == "succeeded"
 
 
+def test_gpu_mode_parse_results_are_members_equal_to_their_strings() -> None:
+    from llmctl.gpu_arg import GPU_MODES, RANKING_MODES, GpuMode, parse_gpus
+
+    assert GPU_MODES == RANKING_MODES
+    assert set(RANKING_MODES) == set(GpuMode) - {GpuMode.EXPLICIT, GpuMode.CPU}
+    assert parse_gpus("cpu") == ([], GpuMode.CPU, True)
+    assert parse_gpus("0,1")[1] is GpuMode.EXPLICIT
+    assert parse_gpus("least-used") == ([], "least-used", False)
+
+
 def test_lane_state_idle_is_blank() -> None:
     assert LaneState.IDLE == ""
     assert not LaneState.IDLE
@@ -99,7 +147,9 @@ def test_lane_state_idle_is_blank() -> None:
 
 def test_doc_names_every_lifecycle_member() -> None:
     text = DOC.read_text(encoding="utf-8")
-    for enum in (SessionStatus, OperationPhase, SwapJobStatus, LaneState):
+    from llmctl.gpu_arg import GpuMode
+
+    for enum in (SessionStatus, OperationPhase, SwapJobStatus, LaneState, GpuMode):
         for member in enum:
             needle = f"`{member.value}`" if member.value else "idle"
             assert needle in text, f"{enum.__name__}.{member.name} missing from {DOC.name}"

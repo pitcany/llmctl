@@ -25,12 +25,15 @@ machine without being able to break it.
 | `planned` | `stopped`, `failed` | `stop` on a planned row; launch without an adapter |
 | `starting` | `running` | owned/adopted endpoint answers (`reconcile`, `_on_spawn`) |
 | `starting` | `failed` | owned process exits before READY |
-| `starting` | `stopped` | `stop`; adopted unit stopped |
-| `starting` | `degraded` | process survived a stop attempt (`_mark_survivor`) |
+| `starting` | `stopped` | owned process gone before anyone asked |
+| `planned`, `starting`, `running`, `degraded` | `stopping` | `stop` or `restart` requested (`_enter_stopping`), including `--systemd` on an adopted unit |
+| `stopping` | `stopped` | the process or unit is gone |
+| `stopping` | `degraded` | the process survived SIGTERM and SIGKILL (`_mark_survivor`) |
+| `stopping` | `planned` | `restart` re-plans after the old process died |
+| `stopping` | `running`, `starting` | the stop could not run (adapter error, `systemctl` failed or raised); the row goes back where it was |
+| `stopping` | `stopped` / `running` | `reconcile`: the stop's own process died mid-way; a dead pid or endpoint settles the row to `stopped` (no error), a live answering one returns it to `running` |
 | `running` | `degraded` | endpoint stops answering while the pid lives |
-| `running` | `stopped` | `stop`; process gone |
 | `degraded` | `running` | endpoint answers again |
-| `degraded` | `stopped` | `stop`; process gone |
 | `stopped` | `running` | adopted unit came back on its own (`_reconcile_adopted`) |
 | `stopped`, `failed`, `running`, `degraded`, `starting` | `planned` | `restart` re-plans an owned session |
 | `stopped`, `failed`, `running`, `degraded` | `starting` | `restart` of an adopted unit |
@@ -40,11 +43,25 @@ Sets, in `llmctl/db.py`:
 
 - `SESSION_ACTIVE_STATES` = `starting`, `running`, `degraded` — probed by reconcile, routed by the gateway (`SessionStatus.is_active`).
 - `SESSION_TERMINAL_STATES` = `stopped`, `failed` — `cleanup` may purge them (`SessionStatus.is_terminal`).
-- `stopping` is declared for API clients but no code path enters it; `stop` goes straight to `stopped` or `degraded`.
+- `stopping` is not in the active set (nothing routes to it) but reconcile does load it: a dead process or endpoint settles it to `stopped`, a live answering one returns it to `running`, so a stop whose own process died never leaves a row stuck.
 
 Surfaces: `cli.py::_print_session_outcome`, TUI `screens_sessions._STATUS_COLOR`
 and `_BAD_STATUSES`, `screens_models._after_start`, `_data` running count,
 `stop_serving`.
+
+### The trail
+
+`set_status` appends every move to `SessionRecord.status_history` as
+`{"at", "old", "new", "why"}`, capped at `STATUS_HISTORY_LIMIT` (50). It is
+the answer to "why did this row flip?":
+
+- `llmctl history <session>` (`--json` for the raw list);
+- `GET /sessions/{id}/history` (`StatusChange` objects, oldest first);
+- the TUI sessions screen shows the newest move above the log tail.
+
+`why` strings are the ones in the table above (`stop requested`, `owned
+endpoint probe`, `process survived stop`, `restart re-plans`, ...). Rows
+created before the column exists have no trail until their next move.
 
 ## 2. Mutating operation — `OperationPhase` (`llmctl/services/operations.py`)
 
@@ -59,8 +76,23 @@ one of the terminal phases `completed`, `failed`, `interrupted`,
 - `needs_attention` is `failed` plus a restore that also failed: a human has to put the lanes back.
 - `interrupted` is a record whose owner process died; `reconcile` finalizes it.
 
-Surfaces: TUI `screens_swap` and `screens_dashboard` operation panels, web UI
-job status line.
+Every surface renders a phase through `describe_phase(phase) -> PhaseView`
+(`PHASE_VIEWS` in `operations.py`): the same icon, label, tone and hint on
+the TUI dashboard and swap panel (`tone_color` maps the tone to the palette),
+and as `phase_label` / `phase_hint` / `phase_tone` on the swap job API, which
+the web UI shows.
+
+| Phase | Icon | Tone | Label | Hint |
+| --- | --- | --- | --- | --- |
+| `preparing` | ◐ | active | preparing | taking the GPU operation lock and reading the catalog |
+| `stopping` | ◐ | active | stopping lanes | stopping the lanes that hold the GPUs |
+| `loading` | ◐ | active | loading weights | loading the model; a large one takes minutes |
+| `checking_readiness` | ◐ | active | checking readiness | waiting for the endpoint to answer |
+| `restoring` | ◐ | active | restoring lanes | putting the paused lanes back |
+| `completed` | ✓ | ok | completed | — |
+| `failed` | × | error | failed | `llmctl status` shows what is serving now |
+| `interrupted` | ! | error | interrupted | check `llmctl status`, then run the swap again |
+| `needs_attention` | ! | error | needs attention | start each unrestored lane with `llmctl run <lane>` |
 
 ## 3. Swap job — `SwapJobStatus` (`llmctl/services/swap_jobs.py`)
 
@@ -86,6 +118,17 @@ Derived on every read by `SwapState.state_of`, never stored.
 - `weights gone` — the catalog row's weights were removed; `llmctl run` refuses it.
 - idle — the empty string, so the State column stays blank (`LaneState.IDLE`).
 
+## Machine-readable
+
+`llmctl schema` and `GET /schema` return one JSON document built from the
+enums at run time (`llmctl/schema_export.py`): every vocabulary above under
+`enums`, the session sets and transition table under `sessions`, the phase
+views under `operations.phase_views`, the GPU ranking modes, and the JSON
+Schema of `Session`, `StatusChange`, `SessionStartRequest`, `LaunchPlan`,
+`Model`, `SwapJobSummary`, `SwapJobDetail` and `SwapList` under `models`.
+The read commands `sessions`, `status`, `ls`, `logs` and `history` all take
+`--json`, and their keys are the model fields in that document.
+
 ## Classification vocabularies (not lifecycles)
 
 These label a thing at one moment; nothing moves between the values.
@@ -93,6 +136,6 @@ These label a thing at one moment; nothing moves between the values.
 - `HealthState` (`schemas.py`): `ok`, `degraded`, `unavailable`, `unknown`, `not_used` — runtime health on the dashboard.
 - `LinkageState` (`services/preset_loader.py`): `explicit`, `auto`, `missing`, `unlinked` — how a preset found its registry model.
 - `ModelStatus` (`db.py`): `discovered`, `registered`, `missing`, `deleted`.
-- GPU placement modes (`scheduler.VALID_GPU_MODES`, `gpu_arg.GPU_MODES`): `auto`, `balanced`, `most-free`, `least-used`, plus `explicit` and `cpu` as parse results.
+- `GpuMode` (`gpu_arg.py`): `auto`, `balanced`, `most-free`, `least-used` rank the cards (`RANKING_MODES`, what `--gpus` accepts); `explicit` and `cpu` are parse results. `scheduler.VALID_GPU_MODES` is the same ranking set.
 - Benchmark execution: `live` / `mock` (`services/benchmarks.py`).
 - systemd `ActiveState` strings (`integrations/systemctl.py`, `adapters/vllm_systemd.py`): external vocabulary, read as-is.

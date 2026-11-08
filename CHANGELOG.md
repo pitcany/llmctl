@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- `llmctl schema` and `GET /schema` return one JSON document with every state
+  vocabulary, the session transition table, how each operation phase renders,
+  and the JSON Schema of the API models, built from the enums at run time.
+  `llmctl logs --json` lists events as objects.
+- Sessions keep a lifecycle trail (`status_history`, last 50 moves with
+  `at`/`old`/`new`/`why`). `llmctl history SESSION` (`--json`),
+  `GET /sessions/{id}/history`, and the TUI sessions screen show it. Existing
+  databases gain the column on first use.
+- One renderer for operation phases: `describe_phase` gives the dashboard, the
+  swap panel, the swap job API (`phase_label`/`phase_hint`/`phase_tone`) and
+  the web UI the same icon, words and tone, plus a next step after a bad
+  ending (`needs attention` → `llmctl run <lane>` for each unrestored lane).
+- `stop`/`restart` mark the session `stopping` while the process is being
+  terminated (also an adopted unit during `systemctl stop`); a stop that
+  cannot run restores the previous status. `GpuMode` names the `--gpus`
+  values (`auto`, `balanced`, `most-free`, `least-used`, `explicit`, `cpu`).
 - Named the state machines (`docs/STATE-MACHINES.md`): `SwapJobStatus`
   (running/succeeded/failed, projected from `OperationPhase`), `LaneState`
   (serving/loading/weights gone/idle), `OperationPhase.is_terminal`,

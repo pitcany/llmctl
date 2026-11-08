@@ -16,6 +16,7 @@ from llmctl.api import (
     routes_gpu,
     routes_models,
     routes_profiles,
+    routes_schema,
     routes_sessions,
     routes_swap,
     routes_ui,
@@ -149,6 +150,7 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
     app.include_router(routes_gpu.router)
     app.include_router(routes_benchmarks.router)
     app.include_router(routes_swap.router)
+    app.include_router(routes_schema.router)
     app.include_router(routes_ui.router)
     return app
 

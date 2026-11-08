@@ -1071,12 +1071,73 @@ def pull(
     _add_from_source(source, None, None, yes=True)
 
 
+@app.command("history")
+def history_cmd(
+    session_id: Annotated[str, typer.Argument(help="Session ID (or a unique prefix).")],
+    json_out: _JSON_OPT = False,
+) -> None:
+    """Show a session's status trail: every move, when it happened, and why.
+
+    The moves are the lifecycle in ``docs/STATE-MACHINES.md``; ``why`` is the
+    reason the service recorded (``stop requested``, ``owned endpoint probe``,
+    ``process survived stop`` ...). The last 50 moves are kept.
+    """
+    from llmctl.services.sessions import AmbiguousSessionError
+
+    with _session() as db:
+        try:
+            session = SessionService(db).get_session(session_id)
+        except AmbiguousSessionError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    if session is None:
+        raise typer.BadParameter(f"Session not found: {session_id}")
+    if json_out:
+        _emit_json([change.model_dump(mode="json") for change in session.status_history])
+        return
+    if not session.status_history:
+        console.print(f"[yellow]No status changes recorded for {session.id} yet.[/yellow]")
+        return
+    table = Table(title=f"Status trail for {session.id}")
+    table.add_column("Time")
+    table.add_column("From")
+    table.add_column("To")
+    table.add_column("Why")
+    for change in session.status_history:
+        table.add_row(
+            change.at.isoformat(timespec="seconds"),
+            change.old.value,
+            change.new.value,
+            escape(change.why),
+        )
+    console.print(table)
+
+
+@app.command("schema")
+def schema_cmd() -> None:
+    """Print llmctl's vocabularies and API models as JSON, for scripts and agents.
+
+    Every state name (sessions, operations, swap jobs, lanes, GPU modes), the
+    session transition table, how each operation phase renders, and the JSON
+    Schema of the API models, read from the running version. Same document as
+    ``GET /schema``; prose in ``docs/STATE-MACHINES.md``.
+    """
+    from llmctl.schema_export import build_schema
+
+    _emit_json(build_schema())
+
+
 @app.command()
 def logs(
     session_id: Annotated[str | None, typer.Argument(help="Session ID to tail logs for.")] = None,
     lines: Annotated[int, typer.Option(help="Number of log lines / events to show.")] = 50,
+    json_out: _JSON_OPT = False,
 ) -> None:
-    """Tail a session's log file, or show recent events when no ID is given."""
+    """Tail a session's log file, or show recent events when no ID is given.
+
+    ``--json`` applies to the events listing: one object per event with
+    ``created_at``, ``level``, ``category``, ``message``, ``session_id``,
+    ``model_id`` and ``data``. A log tail is plain text either way.
+    """
     from llmctl.services.events import list_events
 
     if session_id:
@@ -1095,6 +1156,9 @@ def logs(
 
     with _session() as db:
         events = list_events(db, limit=lines)
+    if json_out:
+        _emit_json([event.model_dump(mode="json") for event in events])
+        return
     if not events:
         console.print("[yellow]No events recorded yet.[/yellow]")
         return

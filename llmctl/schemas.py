@@ -218,6 +218,15 @@ class LaunchPlan(BaseModel):
         return " ".join(self.command) if self.command else "(server-managed; no command)"
 
 
+class StatusChange(BaseModel):
+    """One move in a session's lifecycle trail: when, from what, to what, and why."""
+
+    at: datetime
+    old: SessionStatus
+    new: SessionStatus
+    why: str
+
+
 class Session(BaseModel):
     """Runtime session schema."""
 
@@ -240,6 +249,9 @@ class Session(BaseModel):
     #: Set when a stop/restart attempt left the process alive. Separate from
     #: ``status`` on purpose — see ``db.SessionRecord.terminate_failed_at``.
     terminate_failed_at: datetime | None = None
+    #: The lifecycle trail, oldest first; ``llmctl history`` and
+    #: ``GET /sessions/{id}/history`` show it.
+    status_history: list[StatusChange] = Field(default_factory=list)
     created_at: datetime | None = None
     started_at: datetime | None = None
     stopped_at: datetime | None = None

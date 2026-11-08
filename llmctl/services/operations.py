@@ -91,6 +91,93 @@ TERMINAL_PHASES = frozenset(
 TERMINAL_PHASE_VALUES: frozenset[str] = frozenset(p.value for p in TERMINAL_PHASES)
 
 
+class Tone(StrEnum):
+    """How a surface should colour a phase; each surface maps a tone to its palette."""
+
+    OK = "ok"
+    ACTIVE = "active"
+    ERROR = "error"
+    MUTED = "muted"
+
+
+@dataclass(frozen=True)
+class PhaseView:
+    """One phase as every surface shows it: the same icon, words and tone
+    on the TUI dashboard, the swap panel, the web UI and the API.
+
+    ``hint`` says what is happening (while running) or what to do (when it
+    went wrong); it is empty for ``completed``.
+    """
+
+    phase: str
+    icon: str
+    tone: Tone
+    label: str
+    hint: str
+    terminal: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "phase": self.phase,
+            "icon": self.icon,
+            "tone": self.tone.value,
+            "label": self.label,
+            "hint": self.hint,
+            "terminal": self.terminal,
+        }
+
+
+def _view(phase: OperationPhase, icon: str, tone: Tone, label: str, hint: str) -> PhaseView:
+    return PhaseView(phase.value, icon, tone, label, hint, phase.is_terminal)
+
+
+#: The one table behind every rendering of an operation phase.
+PHASE_VIEWS: dict[OperationPhase, PhaseView] = {
+    OperationPhase.PREPARING: _view(
+        OperationPhase.PREPARING, "◐", Tone.ACTIVE, "preparing",
+        "taking the GPU operation lock and reading the catalog",
+    ),
+    OperationPhase.STOPPING: _view(
+        OperationPhase.STOPPING, "◐", Tone.ACTIVE, "stopping lanes",
+        "stopping the lanes that hold the GPUs",
+    ),
+    OperationPhase.LOADING: _view(
+        OperationPhase.LOADING, "◐", Tone.ACTIVE, "loading weights",
+        "loading the model; a large one takes minutes",
+    ),
+    OperationPhase.CHECKING_READINESS: _view(
+        OperationPhase.CHECKING_READINESS, "◐", Tone.ACTIVE, "checking readiness",
+        "waiting for the endpoint to answer",
+    ),
+    OperationPhase.RESTORING: _view(
+        OperationPhase.RESTORING, "◐", Tone.ACTIVE, "restoring lanes",
+        "putting the paused lanes back",
+    ),
+    OperationPhase.COMPLETED: _view(OperationPhase.COMPLETED, "✓", Tone.OK, "completed", ""),
+    OperationPhase.FAILED: _view(
+        OperationPhase.FAILED, "×", Tone.ERROR, "failed",
+        "the swap failed; `llmctl status` shows what is serving now",
+    ),
+    OperationPhase.INTERRUPTED: _view(
+        OperationPhase.INTERRUPTED, "!", Tone.ERROR, "interrupted",
+        "the process driving the swap died; check `llmctl status`, then run the swap again",
+    ),
+    OperationPhase.NEEDS_ATTENTION: _view(
+        OperationPhase.NEEDS_ATTENTION, "!", Tone.ERROR, "needs attention",
+        "the swap failed and not every paused lane came back; start each one with "
+        "`llmctl run <lane>`",
+    ),
+}
+
+
+def describe_phase(phase: str | OperationPhase | None) -> PhaseView:
+    """The :class:`PhaseView` for ``phase``; an unknown or missing phase renders muted."""
+    try:
+        return PHASE_VIEWS[OperationPhase(phase)]
+    except ValueError:
+        return PhaseView(str(phase or "?"), "?", Tone.MUTED, str(phase or "unknown"), "", False)
+
+
 class IdempotencyConflict(Exception):
     """An idempotency key was reused for a different request."""
 

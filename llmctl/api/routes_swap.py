@@ -11,7 +11,7 @@ from llmctl.api.deps import get_settings, get_swap_jobs
 from llmctl.config import Settings
 from llmctl.services import stop_serving, swap_jobs, swap_view
 from llmctl.services.op_lock import LockBusy
-from llmctl.services.operations import IdempotencyConflict, OperationPhase
+from llmctl.services.operations import IdempotencyConflict, OperationPhase, describe_phase
 from llmctl.services.swap_jobs import (
     JobBusy,
     OperationConflict,
@@ -43,6 +43,10 @@ class SwapJobSummary(BaseModel):
     started_at: str
     operation_id: str | None = None
     phase: str | None = None
+    #: The phase as the TUI shows it (``describe_phase``): same words everywhere.
+    phase_label: str | None = None
+    phase_hint: str | None = None
+    phase_tone: str | None = None
 
 
 class SwapJobDetail(BaseModel):
@@ -56,7 +60,20 @@ class SwapJobDetail(BaseModel):
     finished_at: str | None = None
     operation_id: str | None = None
     phase: str | None = None
+    phase_label: str | None = None
+    phase_hint: str | None = None
+    phase_tone: str | None = None
     recovery: dict[str, Any] = Field(default_factory=dict)
+
+
+def _with_phase_view(payload: dict[str, Any], phase: str) -> dict[str, Any]:
+    """Attach the shared phase rendering so the web UI shows the TUI's words."""
+    view = describe_phase(phase)
+    payload["phase"] = phase
+    payload["phase_label"] = view.label
+    payload["phase_hint"] = view.hint
+    payload["phase_tone"] = view.tone.value
+    return payload
 
 
 class SwapList(BaseModel):
@@ -79,7 +96,7 @@ def list_swap(
     if running is not None and summary is not None:
         record = jobs.operation_for(running)
         if record is not None:
-            summary["phase"] = record.phase
+            _with_phase_view(summary, record.phase)
     return {
         "rows": swap_view.rows_json(state, swap_view.gateway_aliases(settings)),
         "gateway_url": swap_view.gateway_url(settings.router),
@@ -96,7 +113,7 @@ def get_swap_job(job_id: str, jobs: SwapJobs = Depends(get_swap_jobs)) -> dict[s
     detail = job.to_dict()
     record = jobs.operation_for(job)
     if record is not None:
-        detail["phase"] = record.phase
+        _with_phase_view(detail, record.phase)
         detail["recovery"] = record.recovery or {}
     return detail
 
