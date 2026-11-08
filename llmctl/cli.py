@@ -1112,12 +1112,32 @@ def history_cmd(
     console.print(table)
 
 
+@app.command("schema")
+def schema_cmd() -> None:
+    """Print llmctl's vocabularies and API models as JSON, for scripts and agents.
+
+    Every state name (sessions, operations, swap jobs, lanes, GPU modes), the
+    session transition table, how each operation phase renders, and the JSON
+    Schema of the API models, read from the running version. Same document as
+    ``GET /schema``; prose in ``docs/STATE-MACHINES.md``.
+    """
+    from llmctl.schema_export import build_schema
+
+    _emit_json(build_schema())
+
+
 @app.command()
 def logs(
     session_id: Annotated[str | None, typer.Argument(help="Session ID to tail logs for.")] = None,
     lines: Annotated[int, typer.Option(help="Number of log lines / events to show.")] = 50,
+    json_out: _JSON_OPT = False,
 ) -> None:
-    """Tail a session's log file, or show recent events when no ID is given."""
+    """Tail a session's log file, or show recent events when no ID is given.
+
+    ``--json`` applies to the events listing: one object per event with
+    ``created_at``, ``level``, ``category``, ``message``, ``session_id``,
+    ``model_id`` and ``data``. A log tail is plain text either way.
+    """
     from llmctl.services.events import list_events
 
     if session_id:
@@ -1136,6 +1156,9 @@ def logs(
 
     with _session() as db:
         events = list_events(db, limit=lines)
+    if json_out:
+        _emit_json([event.model_dump(mode="json") for event in events])
+        return
     if not events:
         console.print("[yellow]No events recorded yet.[/yellow]")
         return

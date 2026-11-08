@@ -151,7 +151,9 @@ Used by `vllm` only (slots deprecated as of 2026-06-14).
 | `llmctl config path\|show\|validate` | Show the settings file, the resolved settings (secrets redacted), or validate them |
 | `llmctl models` | Registered model rows (Ollama tags + filesystem scans + live vLLM probe) |
 | `llmctl validate` | Find drift between the records and the disk/network (exits 1 on findings) |
-| `llmctl logs [SESSION_ID]` | Tail a session log, or show recent events |
+| `llmctl logs [SESSION_ID]` | Tail a session log, or show recent events (`--json` for the events) |
+| `llmctl history SESSION` | A session's status trail: every move, when, and why (`--json`) |
+| `llmctl schema` | Every state vocabulary, the session transition table, phase renderings and the API models as JSON (same as `GET /schema`) |
 
 `llmctl logs` reads the log file that llmctl wrote for the session. An
 adopted session has no such file. For an adopted session that records a

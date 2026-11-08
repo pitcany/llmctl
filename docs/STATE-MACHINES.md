@@ -117,6 +117,17 @@ Derived on every read by `SwapState.state_of`, never stored.
 - `weights gone` — the catalog row's weights were removed; `llmctl run` refuses it.
 - idle — the empty string, so the State column stays blank (`LaneState.IDLE`).
 
+## Machine-readable
+
+`llmctl schema` and `GET /schema` return one JSON document built from the
+enums at run time (`llmctl/schema_export.py`): every vocabulary above under
+`enums`, the session sets and transition table under `sessions`, the phase
+views under `operations.phase_views`, the GPU ranking modes, and the JSON
+Schema of `Session`, `StatusChange`, `SessionStartRequest`, `LaunchPlan`,
+`Model`, `SwapJobSummary`, `SwapJobDetail` and `SwapList` under `models`.
+The read commands `sessions`, `status`, `ls`, `logs` and `history` all take
+`--json`, and their keys are the model fields in that document.
+
 ## Classification vocabularies (not lifecycles)
 
 These label a thing at one moment; nothing moves between the values.
