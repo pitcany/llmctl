@@ -131,6 +131,9 @@ Observations:
   (`longjob start NAME --router`).
 - Open: the full swap slows every Strata cold load; with the 900 s READY
   timeout, a cold flash start can fail. Worth its own look.
+  Closed 2026-11-08: `STRATA_ENGINE_READY_S=1500` on the flash units
+  (`~/AI` `aca3d232`). The next flash start (10:15:50) reached READY in
+  674 s on the first try with swap at 13/14 GiB.
 
 Rollout passed. Next: Step B (generate the router's `stop_first` from the
 `router.yaml` lanes).
