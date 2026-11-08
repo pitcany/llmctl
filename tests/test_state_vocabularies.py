@@ -67,6 +67,26 @@ def test_set_status_returns_old_and_logs_only_off_table_moves(
         assert "running -> failed" in caplog.records[0].getMessage()
 
 
+def test_every_operation_phase_has_a_view_that_agrees_with_it() -> None:
+    from llmctl.services.operations import PHASE_VIEWS, Tone, describe_phase
+
+    assert set(PHASE_VIEWS) == set(OperationPhase)
+    for phase in OperationPhase:
+        view = describe_phase(phase.value)
+        assert view is PHASE_VIEWS[phase]
+        assert view.phase == phase.value
+        assert view.terminal == phase.is_terminal
+        assert view.label and view.icon
+        if phase.is_terminal and phase is not OperationPhase.COMPLETED:
+            assert view.hint and view.tone is Tone.ERROR, "a bad ending needs a next step"
+        if not phase.is_terminal:
+            assert view.tone is Tone.ACTIVE
+    assert describe_phase(OperationPhase.COMPLETED).hint == ""
+    assert describe_phase("no-such-phase").tone is Tone.MUTED
+    assert describe_phase(None).label == "unknown"
+    assert describe_phase(OperationPhase.LOADING).as_dict()["tone"] == "active"
+
+
 def test_operation_phase_terminal_predicate_matches_sets() -> None:
     for phase in OperationPhase:
         assert phase.is_terminal == (phase in TERMINAL_PHASES)

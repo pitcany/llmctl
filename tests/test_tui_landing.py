@@ -160,7 +160,9 @@ def test_needs_attention_operation_shows_guidance() -> None:
         )
     )
     text = panels["operation"]
-    assert "needs_attention" in text
+    # describe_phase renders the human label and the shared hint, not the token.
+    assert "needs attention" in text
+    assert "llmctl run <lane>" in text
     assert "verify what is serving" in text
     assert "not restored" in text and "lane-a" in text
 

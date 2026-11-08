@@ -23,6 +23,14 @@ C_WARN = "#fbbf24"
 C_ERR = "#fb7185"
 C_MUTED = "#8aa6a3"
 
+#: A :class:`~llmctl.services.operations.Tone` value -> the palette colour above.
+_TONE_COLORS = {"ok": C_OK, "active": C_WARN, "error": C_ERR, "muted": C_MUTED}
+
+
+def tone_color(tone: object) -> str:
+    """The markup colour for a phase tone; unknown tones render muted."""
+    return _TONE_COLORS.get(str(tone), C_MUTED)
+
 
 def esc(value: object) -> str:
     """Render ``value`` as literal text inside a Rich-markup string.

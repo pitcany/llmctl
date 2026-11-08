@@ -61,8 +61,23 @@ one of the terminal phases `completed`, `failed`, `interrupted`,
 - `needs_attention` is `failed` plus a restore that also failed: a human has to put the lanes back.
 - `interrupted` is a record whose owner process died; `reconcile` finalizes it.
 
-Surfaces: TUI `screens_swap` and `screens_dashboard` operation panels, web UI
-job status line.
+Every surface renders a phase through `describe_phase(phase) -> PhaseView`
+(`PHASE_VIEWS` in `operations.py`): the same icon, label, tone and hint on
+the TUI dashboard and swap panel (`tone_color` maps the tone to the palette),
+and as `phase_label` / `phase_hint` / `phase_tone` on the swap job API, which
+the web UI shows.
+
+| Phase | Icon | Tone | Label | Hint |
+| --- | --- | --- | --- | --- |
+| `preparing` | ◐ | active | preparing | taking the GPU operation lock and reading the catalog |
+| `stopping` | ◐ | active | stopping lanes | stopping the lanes that hold the GPUs |
+| `loading` | ◐ | active | loading weights | loading the model; a large one takes minutes |
+| `checking_readiness` | ◐ | active | checking readiness | waiting for the endpoint to answer |
+| `restoring` | ◐ | active | restoring lanes | putting the paused lanes back |
+| `completed` | ✓ | ok | completed | — |
+| `failed` | × | error | failed | `llmctl status` shows what is serving now |
+| `interrupted` | ! | error | interrupted | check `llmctl status`, then run the swap again |
+| `needs_attention` | ! | error | needs attention | start each unrestored lane with `llmctl run <lane>` |
 
 ## 3. Swap job — `SwapJobStatus` (`llmctl/services/swap_jobs.py`)
 
