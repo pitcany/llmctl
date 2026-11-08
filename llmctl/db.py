@@ -61,6 +61,73 @@ class SessionStatus(StrEnum):
     FAILED = "failed"
     UNKNOWN = "unknown"
 
+    @property
+    def is_active(self) -> bool:
+        """A process or endpoint llmctl still expects to answer (reconcile probes it)."""
+        return self in SESSION_ACTIVE_STATES
+
+    @property
+    def is_terminal(self) -> bool:
+        """Nothing further happens to the row unless ``restart`` re-plans it."""
+        return self in SESSION_TERMINAL_STATES
+
+
+#: Statuses with a live process or endpoint: probed by reconcile, routed by the gateway.
+SESSION_ACTIVE_STATES: frozenset[SessionStatus] = frozenset(
+    {SessionStatus.STARTING, SessionStatus.RUNNING, SessionStatus.DEGRADED}
+)
+
+#: Statuses ``cleanup`` may purge; only ``restart`` leaves them.
+SESSION_TERMINAL_STATES: frozenset[SessionStatus] = frozenset(
+    {SessionStatus.STOPPED, SessionStatus.FAILED}
+)
+
+#: The session lifecycle as data: status -> the statuses the code moves it to.
+#:
+#: ``SessionService`` writes every status through ``set_status``, which logs (never
+#: refuses) a move outside this table, so a new path shows up in the debug log
+#: instead of silently widening the machine. ``docs/STATE-MACHINES.md`` renders it.
+#:
+#: ``STOPPING`` is part of the public vocabulary but no code path enters it today:
+#: ``stop`` goes straight to ``STOPPED`` (or ``DEGRADED`` when the process survives).
+#: ``UNKNOWN`` is the escape hatch for rows reconcile cannot classify.
+SESSION_TRANSITIONS: dict[SessionStatus, frozenset[SessionStatus]] = {
+    SessionStatus.PLANNED: frozenset(
+        {SessionStatus.STARTING, SessionStatus.STOPPED, SessionStatus.FAILED}
+    ),
+    SessionStatus.STARTING: frozenset(
+        {
+            SessionStatus.RUNNING,
+            SessionStatus.DEGRADED,
+            SessionStatus.STOPPED,
+            SessionStatus.FAILED,
+            SessionStatus.PLANNED,
+        }
+    ),
+    SessionStatus.RUNNING: frozenset(
+        {
+            SessionStatus.DEGRADED,
+            SessionStatus.STOPPED,
+            SessionStatus.STARTING,
+            SessionStatus.PLANNED,
+        }
+    ),
+    SessionStatus.DEGRADED: frozenset(
+        {
+            SessionStatus.RUNNING,
+            SessionStatus.STOPPED,
+            SessionStatus.STARTING,
+            SessionStatus.PLANNED,
+        }
+    ),
+    SessionStatus.STOPPING: frozenset({SessionStatus.STOPPED, SessionStatus.FAILED}),
+    SessionStatus.STOPPED: frozenset(
+        {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.PLANNED}
+    ),
+    SessionStatus.FAILED: frozenset({SessionStatus.STARTING, SessionStatus.PLANNED}),
+    SessionStatus.UNKNOWN: frozenset(SessionStatus),
+}
+
 
 class BenchmarkKind(StrEnum):
     """Benchmark workload kind.

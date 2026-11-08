@@ -29,6 +29,7 @@ from llmctl.services.lanes import (
     record_load,
 )
 from llmctl.services.op_lock import gpu_operation_lock
+from llmctl.services.operations import OperationPhase
 from llmctl.services.session_swap import (
     pause_for_swap,
     resume_after_failed_swap,
@@ -259,8 +260,10 @@ class SwapScreen(DataScreen):
             return
         phase = str(op.get("phase", "?"))
         if op.get("terminal"):
-            icon, color = ("!", C_ERR) if phase in ("needs_attention", "interrupted") else (
-                ("✓", C_OK) if phase == "completed" else ("×", C_ERR)
+            icon, color = (
+                ("!", C_ERR)
+                if phase in (OperationPhase.NEEDS_ATTENTION, OperationPhase.INTERRUPTED)
+                else ("✓", C_OK) if phase == OperationPhase.COMPLETED else ("×", C_ERR)
             )
             text = (
                 f"[{color}]{icon} last operation: {esc(phase)} — "

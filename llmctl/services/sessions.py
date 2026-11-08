@@ -8,6 +8,7 @@ and never launches a process; a real start performs genuine process control.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
@@ -20,6 +21,9 @@ from sqlmodel import select
 from llmctl._asyncutil import run_sync
 from llmctl.config import Settings, load_settings
 from llmctl.db import (
+    SESSION_ACTIVE_STATES,
+    SESSION_TERMINAL_STATES,
+    SESSION_TRANSITIONS,
     EventLevel,
     RuntimeName,
     SessionKind,
@@ -37,7 +41,27 @@ from llmctl.services.router import RuntimeRouter
 from llmctl.services.scheduler import SchedulerService
 from llmctl.services.unit_gpus import unit_gpu_ids
 
-_ACTIVE_STATES = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
+log = logging.getLogger(__name__)
+
+_ACTIVE_STATES = SESSION_ACTIVE_STATES
+
+
+def set_status(record: SessionRecord, new: SessionStatus, *, why: str) -> SessionStatus:
+    """Move ``record`` to ``new`` and return the status it had.
+
+    Every status write in this module goes through here so the lifecycle has
+    one chokepoint. A move outside :data:`~llmctl.db.SESSION_TRANSITIONS` is
+    logged at DEBUG, not refused: the table documents the machine, the code
+    still defines it, and a surprise shows up in the log instead of a crash.
+    """
+    old = record.status
+    if new != old and new not in SESSION_TRANSITIONS.get(old, frozenset()):
+        log.debug(
+            "session %s: %s -> %s (%s) is not in SESSION_TRANSITIONS",
+            record.id, old, new, why,
+        )
+    record.status = new
+    return old
 
 
 def _process_survived(status: AdapterStatus | None) -> bool:
@@ -334,7 +358,11 @@ class SessionService:
         now = utcnow()
         if record.pid and not self.router.supervisor.is_running(record.pid):
             died_starting = record.status == SessionStatus.STARTING
-            record.status = SessionStatus.FAILED if died_starting else SessionStatus.STOPPED
+            set_status(
+                record,
+                SessionStatus.FAILED if died_starting else SessionStatus.STOPPED,
+                why="owned process exited",
+            )
             record.stopped_at = now
             record.error = (
                 "Process exited before becoming ready."
@@ -363,7 +391,7 @@ class SessionService:
             new_status = SessionStatus.DEGRADED
         if new_status is None:
             return 0
-        record.status = new_status
+        set_status(record, new_status, why="owned endpoint probe")
         record.error = (
             None
             if new_status == SessionStatus.RUNNING
@@ -400,7 +428,7 @@ class SessionService:
         if record.status == SessionStatus.STARTING and not alive:
             return 0
         if record.status in _ACTIVE_STATES and not alive:
-            record.status = SessionStatus.STOPPED
+            set_status(record, SessionStatus.STOPPED, why="adopted endpoint down")
             record.stopped_at = now
             record.error = "Adopted endpoint failed to respond on /v1/models."
             record.updated_at = now
@@ -419,7 +447,7 @@ class SessionService:
         changed = False
         if record.status in (SessionStatus.STOPPED, SessionStatus.STARTING) and alive:
             was_starting = record.status == SessionStatus.STARTING
-            record.status = SessionStatus.RUNNING
+            set_status(record, SessionStatus.RUNNING, why="adopted endpoint answered")
             record.stopped_at = None
             record.error = None
             changed = True
@@ -541,7 +569,7 @@ class SessionService:
         number of still-active sessions remaining.
         """
         dead_marked = self.reconcile()
-        terminal = {SessionStatus.STOPPED, SessionStatus.FAILED}
+        terminal = list(SESSION_TERMINAL_STATES)
 
         stale_records = list(
             self.db.exec(
@@ -714,7 +742,7 @@ class SessionService:
                 # and keeps it STOPPED (or revives it if the unit is restarted).
                 # Unless the unit's own ExecStopPost detached it first, which
                 # _persist_unit_transition treats as success rather than a crash.
-                record.status = SessionStatus.STOPPED
+                set_status(record, SessionStatus.STOPPED, why="adopted unit stopped")
                 record.stopped_at = utcnow()
                 record.pid = None
                 record.updated_at = utcnow()
@@ -737,7 +765,7 @@ class SessionService:
                 # Recording STOPPED here would erase the pid and lose the process.
                 assert status is not None  # narrowed by _process_survived
                 return self._mark_survivor(record, status)
-            record.status = SessionStatus.STOPPED
+            set_status(record, SessionStatus.STOPPED, why="stop")
             record.stopped_at = utcnow()
             record.pid = None
             record.error = None
@@ -795,7 +823,7 @@ class SessionService:
                 if record.launch_plan
                 else None
             )
-            record.status = SessionStatus.PLANNED
+            set_status(record, SessionStatus.PLANNED, why="restart re-plans")
             record.error = None
             record.pid = None
             # The termination succeeded this time (a survivor returned above), so
@@ -861,7 +889,7 @@ class SessionService:
         # large local model is minutes. reconcile() promotes it on a
         # successful probe, exactly as it does for an adopted row revived
         # out-of-band.
-        record.status = SessionStatus.STARTING
+        set_status(record, SessionStatus.STARTING, why="adopted unit restarted")
         record.error = None
         record.pid = None
         record.stopped_at = None
@@ -1154,7 +1182,7 @@ class SessionService:
             )
             return record_to_session(record)
 
-        record.status = SessionStatus.STARTING
+        set_status(record, SessionStatus.STARTING, why="launch")
         # A fresh process supersedes any earlier failed termination: whatever
         # this row now tracks, it is not the one that would not die.
         record.terminate_failed_at = None
@@ -1167,7 +1195,7 @@ class SessionService:
             # Adapterless runtime (e.g. adopt-only 'openai') reached launch —
             # possible via --force past the scheduler refusal. Fail the
             # session cleanly instead of crashing with a raw KeyError.
-            record.status = SessionStatus.FAILED
+            set_status(record, SessionStatus.FAILED, why="no launch adapter")
             record.error = (
                 f"Runtime '{record.runtime.value}' has no launch adapter; "
                 "it cannot be started by llmctl."
@@ -1207,7 +1235,7 @@ class SessionService:
             if record.status == SessionStatus.RUNNING:
                 result.status = SessionStatus.RUNNING
 
-        record.status = result.status
+        set_status(record, result.status, why="adapter spawned")
         record.pid = result.pid
         record.endpoint_url = result.endpoint_url or record.endpoint_url
         record.log_path = result.log_path
@@ -1292,7 +1320,7 @@ class SessionService:
         therefore recorded out of band, in ``terminate_failed_at``, which
         reconcile never touches.
         """
-        record.status = SessionStatus.DEGRADED
+        set_status(record, SessionStatus.DEGRADED, why="process survived stop")
         record.error = status.message
         record.terminate_failed_at = utcnow()
         record.updated_at = utcnow()

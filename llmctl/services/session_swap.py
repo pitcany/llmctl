@@ -29,6 +29,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from llmctl.db import SessionStatus
 from llmctl.services.lane_swap import (
     LaneSwapDeps,
     LaneSwapResult,
@@ -252,7 +253,7 @@ def swap_to_session(
                     break
                 result.session = session
                 status = getattr(getattr(session, "status", None), "value", "")
-                if status == "running":
+                if status == SessionStatus.RUNNING:
                     result.ok = True
                 else:
                     detail = getattr(session, "error", None) or f"status {status or 'unknown'}"

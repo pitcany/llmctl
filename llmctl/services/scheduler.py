@@ -26,6 +26,7 @@ from sqlmodel import select
 
 from llmctl.config import RuntimeConfig, Settings, load_settings
 from llmctl.db import (
+    SESSION_ACTIVE_STATES,
     ModelRecord,
     ProfileRecord,
     RuntimeName,
@@ -46,7 +47,7 @@ GPU_REQUIRED_RUNTIMES = {
 SINGLE_GPU_RUNTIMES = {RuntimeName.FREETOKEN, RuntimeName.STRATA}
 LOCAL_FILE_RUNTIMES = {RuntimeName.LLAMA_CPP, RuntimeName.PYTHON_SCRIPT, RuntimeName.STRATA}
 VALID_GPU_MODES = {"auto", "balanced", "most-free", "least-used"}
-_ACTIVE_STATES = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
+_ACTIVE_STATES = SESSION_ACTIVE_STATES
 
 #: llama.cpp split-GGUF naming: ``<name>-00001-of-00004.gguf``. Only the first
 #: shard is passed to the server; the rest are opened implicitly deep into

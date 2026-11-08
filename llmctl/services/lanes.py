@@ -26,6 +26,7 @@ import os
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -34,6 +35,20 @@ from llmctl.config import ManagedUnitConfig, ManagedUnitsConfig
 
 #: Health wait when a lane source gives none.
 DEFAULT_LANE_TIMEOUT_S = 300.0
+
+
+class LaneState(StrEnum):
+    """A lane row's state in the swap picker (:meth:`SwapState.state_of`).
+
+    Derived on every read from the live units and sessions, never stored.
+    ``IDLE`` is the empty string so the State column stays blank for a lane
+    that is simply not loaded.
+    """
+
+    SERVING = "serving"
+    LOADING = "loading"
+    WEIGHTS_GONE = "weights gone"
+    IDLE = ""
 
 #: Runtime ids of the engines llmctl starts itself for a registered model
 #: (as a tracked session), as opposed to a unit or lane something else runs.
@@ -680,17 +695,17 @@ class SwapState:
     #: Such a row is listed, marked, and refused by ``run``.
     gone: dict[str, str] = field(default_factory=dict)
 
-    def state_of(self, row: SwapTarget) -> str:
-        """``serving`` / ``loading`` / ``weights gone`` / ``""`` for the picker's State column."""
+    def state_of(self, row: SwapTarget) -> LaneState:
+        """The picker's State column; see :class:`LaneState`."""
         if row.key in self.serving:
-            return "serving"
+            return LaneState.SERVING
         if session_is_running(row, self.active_units, self.gpu_sessions):
-            return "serving"
+            return LaneState.SERVING
         if self._holds_unit(row):
-            return "loading"
+            return LaneState.LOADING
         if row.key in self.gone:
-            return "weights gone"
-        return ""
+            return LaneState.WEIGHTS_GONE
+        return LaneState.IDLE
 
     def _holds_unit(self, row: SwapTarget) -> bool:
         return lane_holds_unit(row, self.catalog, self.serving, self.active_units)

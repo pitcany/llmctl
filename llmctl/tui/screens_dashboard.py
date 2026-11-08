@@ -14,6 +14,8 @@ from textual.app import ComposeResult
 from textual.containers import Grid
 from textual.widgets import Footer, Header, Static
 
+from llmctl.schemas import HealthState
+from llmctl.services.operations import OperationPhase
 from llmctl.tui import _data
 from llmctl.tui._base import C_ACCENT, C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 
@@ -158,9 +160,9 @@ class DashboardScreen(DataScreen):
         else:
             phase = str(op.get("phase", "?"))
             if op.get("terminal"):
-                if phase == "completed":
+                if phase == OperationPhase.COMPLETED:
                     icon, color = "✓", C_OK
-                elif phase in ("needs_attention", "interrupted"):
+                elif phase in (OperationPhase.NEEDS_ATTENTION, OperationPhase.INTERRUPTED):
                     icon, color = "!", C_ERR
                 else:
                     icon, color = "×", C_ERR
@@ -253,7 +255,11 @@ class DashboardScreen(DataScreen):
             lines.append(f"[{C_MUTED}]No runtime adapters reported.[/]")
         for name, info in runtimes.items():
             state = info.get("state", "unknown")
-            color = C_OK if state == "ok" else C_MUTED if state == "not_used" else C_WARN
+            color = (
+                C_OK
+                if state == HealthState.OK
+                else C_MUTED if state == HealthState.NOT_USED else C_WARN
+            )
             message = info.get("message", "")
             lines.append(
                 f"  [{color}]*[/] {esc(name):<14} {state:<12} "
