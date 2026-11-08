@@ -30,7 +30,8 @@ machine without being able to break it.
 | `stopping` | `stopped` | the process or unit is gone |
 | `stopping` | `degraded` | the process survived SIGTERM and SIGKILL (`_mark_survivor`) |
 | `stopping` | `planned` | `restart` re-plans after the old process died |
-| `stopping` | `running`, `starting` | the stop could not run (adapter error, `systemctl stop` failed); the row goes back where it was |
+| `stopping` | `running`, `starting` | the stop could not run (adapter error, `systemctl` failed or raised); the row goes back where it was |
+| `stopping` | `stopped` / `running` | `reconcile`: the stop's own process died mid-way; a dead pid or endpoint settles the row to `stopped` (no error), a live answering one returns it to `running` |
 | `running` | `degraded` | endpoint stops answering while the pid lives |
 | `degraded` | `running` | endpoint answers again |
 | `stopped` | `running` | adopted unit came back on its own (`_reconcile_adopted`) |
@@ -42,7 +43,7 @@ Sets, in `llmctl/db.py`:
 
 - `SESSION_ACTIVE_STATES` = `starting`, `running`, `degraded` — probed by reconcile, routed by the gateway (`SessionStatus.is_active`).
 - `SESSION_TERMINAL_STATES` = `stopped`, `failed` — `cleanup` may purge them (`SessionStatus.is_terminal`).
-- `stopping` is not in the active set: reconcile leaves a stopping row alone until its process is gone, then settles it to `stopped`.
+- `stopping` is not in the active set (nothing routes to it) but reconcile does load it: a dead process or endpoint settles it to `stopped`, a live answering one returns it to `running`, so a stop whose own process died never leaves a row stuck.
 
 Surfaces: `cli.py::_print_session_outcome`, TUI `screens_sessions._STATUS_COLOR`
 and `_BAD_STATUSES`, `screens_models._after_start`, `_data` running count,

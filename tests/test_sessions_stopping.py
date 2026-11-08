@@ -46,24 +46,49 @@ class _WatchingAdapter:
 
 
 class _Supervisor:
+    def __init__(self, *, alive: bool = False) -> None:
+        self.alive = alive
+
     def is_running(self, pid: int | None) -> bool:
-        return False
+        return self.alive
 
 
 class _Router:
-    def __init__(self, adapter: _WatchingAdapter) -> None:
+    def __init__(self, adapter: _WatchingAdapter, *, pid_alive: bool = False) -> None:
         self.adapter = adapter
-        self.supervisor = _Supervisor()
+        self.supervisor = _Supervisor(alive=pid_alive)
 
     def get_adapter(self, runtime: RuntimeName) -> _WatchingAdapter:
         return self.adapter
 
 
-def _service(tmp_path: Path, adapter: _WatchingAdapter) -> tuple[Session, SessionService]:
+class _Systemctl:
+    """A systemctl whose ``stop`` raises, as a timeout or a missing binary would."""
+
+    def is_user_unit(self, unit: str | None) -> bool:
+        return True
+
+    def stop(self, unit: str, *, user: bool = False):
+        raise OSError("systemctl: command not found")
+
+
+def _service(
+    tmp_path: Path,
+    adapter: _WatchingAdapter,
+    *,
+    pid_alive: bool = False,
+    endpoint_alive: bool = False,
+    systemctl=None,
+) -> tuple[Session, SessionService]:
     url = f"sqlite:///{tmp_path / 'stopping.sqlite3'}"
     init_db(url)
     db = Session(get_engine(url))
-    service = SessionService(db, router=_Router(adapter), probe=lambda u, t: None)
+    service = SessionService(
+        db,
+        router=_Router(adapter, pid_alive=pid_alive),
+        probe=lambda u, t: ["m"] if endpoint_alive else None,
+        systemctl=systemctl,
+    )
     return db, service
 
 
@@ -129,6 +154,65 @@ def test_stop_that_cannot_run_restores_the_previous_status(tmp_path: Path) -> No
 
         db.refresh(row)
         assert row.status is SessionStatus.RUNNING, "a failed stop must not leave a row stopping"
+    finally:
+        db.close()
+
+
+def test_reconcile_settles_a_stopping_row_whose_process_died(tmp_path: Path) -> None:
+    """The stop's own process died after committing STOPPING; the pid is gone."""
+    db, service = _service(tmp_path, _WatchingAdapter())
+    try:
+        row = _running_row()
+        row.status = SessionStatus.STOPPING
+        db.add(row)
+        db.commit()
+
+        assert service.reconcile() == 1
+        db.refresh(row)
+        assert row.status is SessionStatus.STOPPED
+        assert row.error is None, "a stop landing is not an unexpected exit"
+        assert row.status_history[-1]["why"] == "stop finished"
+    finally:
+        db.close()
+
+
+def test_reconcile_returns_a_stopping_row_that_still_answers_to_running(tmp_path: Path) -> None:
+    db, service = _service(tmp_path, _WatchingAdapter(), pid_alive=True, endpoint_alive=True)
+    try:
+        row = _running_row()
+        row.status = SessionStatus.STOPPING
+        db.add(row)
+        db.commit()
+
+        assert service.reconcile() == 1
+        db.refresh(row)
+        assert row.status is SessionStatus.RUNNING
+    finally:
+        db.close()
+
+
+def test_adopted_stop_restores_status_when_systemctl_raises(tmp_path: Path) -> None:
+    db, service = _service(tmp_path, _WatchingAdapter(), systemctl=_Systemctl())
+    try:
+        row = SessionRecord(
+            runtime=RuntimeName.VLLM,
+            status=SessionStatus.RUNNING,
+            kind=SessionKind.ADOPTED,
+            endpoint_url="http://127.0.0.1:8003",
+            systemd_unit="vllm-tp.service",
+        )
+        db.add(row)
+        db.commit()
+
+        with pytest.raises(OSError, match="systemctl"):
+            service.stop(row.id, stop_unit=True)
+
+        db.refresh(row)
+        assert row.status is SessionStatus.RUNNING
+        assert [e["why"] for e in row.status_history] == [
+            "systemctl stop requested",
+            "systemctl stop could not run",
+        ]
     finally:
         db.close()
 
