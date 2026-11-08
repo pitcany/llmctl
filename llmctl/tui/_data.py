@@ -21,7 +21,7 @@ import yaml
 from sqlmodel import Session
 
 from llmctl.config import load_settings
-from llmctl.db import BenchmarkKind, RuntimeName, get_engine, init_db
+from llmctl.db import BenchmarkKind, RuntimeName, SessionStatus, get_engine, init_db
 from llmctl.presets import (
     Model as PresetModel,
 )
@@ -856,7 +856,7 @@ def get_landing() -> dict[str, Any]:
     serving_rows: list[dict[str, Any]] = []
     for row in state.catalog:
         lane_state = state.state_of(row)
-        if lane_state not in ("serving", "loading"):
+        if lane_state not in (lanes.LaneState.SERVING, lanes.LaneState.LOADING):
             continue
         serving_rows.append(
             {
@@ -917,8 +917,8 @@ def get_overview() -> dict[str, Any]:
         aliases = GatewayService(db, settings).alias_view()
     gpus = get_gpu_info()
     health = HealthService().get_health()
-    running = sum(1 for s in sessions if s.status.value == "running")
-    planned = sum(1 for s in sessions if s.status.value == "planned")
+    running = sum(1 for s in sessions if s.status == SessionStatus.RUNNING)
+    planned = sum(1 for s in sessions if s.status == SessionStatus.PLANNED)
     missing = missing_backends()
     warnings: list[str] = []
     for backend in missing:

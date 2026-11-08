@@ -13,6 +13,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from llmctl.db import SessionStatus
 from llmctl.services.lanes import Gpus, format_gpus
 from llmctl.services.op_lock import gpu_operation_lock
 
@@ -185,7 +186,7 @@ def real_deps(settings: Any) -> StopDeps:
         init_db(settings.database_url)
         with Session(get_engine(settings.database_url)) as db:
             session = SessionService(db, settings).stop(session_id)
-        return session is not None and session.status.value == "stopped"
+        return session is not None and session.status == SessionStatus.STOPPED
 
     return StopDeps(
         stop_vllm=stop_vllm,

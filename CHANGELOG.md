@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Named the state machines (`docs/STATE-MACHINES.md`): `SwapJobStatus`
+  (running/succeeded/failed, projected from `OperationPhase`), `LaneState`
+  (serving/loading/weights gone/idle), `OperationPhase.is_terminal`,
+  `SessionStatus.is_active`/`is_terminal`, and a session transition table
+  (`SESSION_TRANSITIONS`) that `set_status` checks and logs against. The CLI,
+  TUI and API compare against enum members instead of string literals; the
+  swap job API models type `status` with the enum. Stored values, JSON and
+  rendered text are unchanged.
 - `llmctl start`, `plan`, POST `/sessions` and the TUI start refuse a llama.cpp
   model that a lane already serves (gpt-oss → `gptoss`) and name the lane to
   use with `llmctl run`; before, they planned a second llama-server on the

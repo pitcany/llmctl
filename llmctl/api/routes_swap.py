@@ -17,6 +17,7 @@ from llmctl.services.swap_jobs import (
     OperationConflict,
     StopInProgress,
     SwapJobs,
+    SwapJobStatus,
 )
 
 router = APIRouter(prefix="/swap", tags=["swap"])
@@ -38,7 +39,7 @@ class SwapRow(BaseModel):
 class SwapJobSummary(BaseModel):
     job_id: str
     name: str
-    status: str
+    status: SwapJobStatus
     started_at: str
     operation_id: str | None = None
     phase: str | None = None
@@ -48,7 +49,7 @@ class SwapJobDetail(BaseModel):
     job_id: str
     name: str
     model: str
-    status: str
+    status: SwapJobStatus
     exit_code: int | None = None
     output: list[str]
     started_at: str
@@ -193,7 +194,7 @@ def run_swap(
         "job_id": outcome.job.job_id if outcome.job else None,
         "operation_id": outcome.operation.id if outcome.operation else None,
         "phase": outcome.operation.phase if outcome.operation else None,
-        "status": "running",
+        "status": SwapJobStatus.RUNNING,
     }
 
 

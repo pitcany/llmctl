@@ -71,6 +71,11 @@ class OperationPhase(StrEnum):
     INTERRUPTED = "interrupted"
     NEEDS_ATTENTION = "needs_attention"
 
+    @property
+    def is_terminal(self) -> bool:
+        """The operation is over: completed, failed, interrupted, or waiting on a human."""
+        return self in TERMINAL_PHASES
+
 
 #: Phases that mean the operation is over (successfully or not).
 TERMINAL_PHASES = frozenset(
@@ -81,6 +86,9 @@ TERMINAL_PHASES = frozenset(
         OperationPhase.NEEDS_ATTENTION,
     }
 )
+
+#: The same set as stored strings, for SQL filters and records read back raw.
+TERMINAL_PHASE_VALUES: frozenset[str] = frozenset(p.value for p in TERMINAL_PHASES)
 
 
 class IdempotencyConflict(Exception):
@@ -236,7 +244,7 @@ class OperationStore:
         """Take ownership of an unfinished record (parent handed it to us)."""
         with self._session() as db:
             record = db.get(OperationRecord, operation_id)
-            if record is None or OperationPhase(record.phase) in TERMINAL_PHASES:
+            if record is None or OperationPhase(record.phase).is_terminal:
                 return None
             record.owner = owner_identity(interface, purpose)
             record.updated_at = utcnow()
@@ -282,7 +290,7 @@ class OperationStore:
                 update(OperationRecord)
                 .where(
                     OperationRecord.id == operation_id,
-                    OperationRecord.phase.notin_([p.value for p in TERMINAL_PHASES]),
+                    OperationRecord.phase.notin_(sorted(TERMINAL_PHASE_VALUES)),
                 )
                 .values(
                     phase=phase.value, error=error, recovery=recovery or {},
@@ -325,7 +333,7 @@ class OperationStore:
             return [
                 r
                 for r in records
-                if r.phase not in {p.value for p in TERMINAL_PHASES}
+                if r.phase not in TERMINAL_PHASE_VALUES
             ]
 
     def reconcile(self) -> list[ReconciledOperation]:

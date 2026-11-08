@@ -25,13 +25,14 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 import llmctl.services.swap_jobs as swap_jobs  # self-reference so patches apply
 from llmctl.services.operations import (
     OP_DB_ENV,
     OP_ID_ENV,
-    TERMINAL_PHASES,
+    TERMINAL_PHASE_VALUES,
     IdempotencyConflict,  # noqa: F401 - re-exported for route handlers
     OperationPhase,
     OperationRecord,
@@ -77,12 +78,38 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+class SwapJobStatus(StrEnum):
+    """What the browser, CLI and TUI see of a swap job: a 3-state view of
+    :class:`~llmctl.services.operations.OperationPhase`.
+
+    ``RUNNING`` covers every non-terminal phase (the phase says which step);
+    ``SUCCEEDED`` is ``OperationPhase.COMPLETED``; ``FAILED`` is any other
+    terminal phase, ``needs_attention`` and ``interrupted`` included.
+    """
+
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+    @classmethod
+    def from_phase(cls, phase: str) -> SwapJobStatus:
+        """Project a stored operation phase onto the job vocabulary."""
+        if phase not in TERMINAL_PHASE_VALUES:
+            return cls.RUNNING
+        return cls.SUCCEEDED if phase == OperationPhase.COMPLETED else cls.FAILED
+
+    @classmethod
+    def from_exit_code(cls, code: int | None) -> SwapJobStatus:
+        """``0`` succeeded; any other code, or none (signal, lost child), failed."""
+        return cls.SUCCEEDED if code == 0 else cls.FAILED
+
+
 @dataclass
 class SwapJob:
     name: str
     model: str
     job_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    status: str = "running"
+    status: SwapJobStatus = SwapJobStatus.RUNNING
     exit_code: int | None = None
     # The tail, not the head: a swap's error and rollback lines come last.
     output: deque[str] = field(default_factory=lambda: deque(maxlen=MAX_OUTPUT_LINES))
@@ -97,8 +124,8 @@ class SwapJob:
         """Rebuild the browser's job snapshot from durable operation state."""
         if record.job_id is None:
             raise ValueError("operation has no persisted browser job ID")
-        terminal = record.phase in {phase.value for phase in TERMINAL_PHASES}
-        succeeded = record.phase == OperationPhase.COMPLETED.value
+        job_status = SwapJobStatus.from_phase(record.phase)
+        succeeded = job_status is SwapJobStatus.SUCCEEDED
         output = list(record.output or [])
         if record.error:
             output.append(record.error)
@@ -106,7 +133,7 @@ class SwapJob:
             name=record.target,
             model=str((record.request or {}).get("model", record.target)),
             job_id=record.job_id,
-            status=("succeeded" if succeeded else "failed") if terminal else "running",
+            status=job_status,
             exit_code=(record.job_exit_code if record.job_exit_code is not None
                        else 0 if succeeded else None),
             output=deque(output, maxlen=MAX_OUTPUT_LINES),
@@ -239,7 +266,7 @@ class SwapJobs:
         try:
             with self._lock:
                 for existing in self._jobs.values():
-                    if existing.status == "running":
+                    if existing.status == SwapJobStatus.RUNNING:
                         raise JobBusy(existing)
                 if self._stopping:
                     raise StopInProgress("a stop is in progress")
@@ -289,7 +316,9 @@ class SwapJobs:
         """An unfinished operation not owned by one of our live jobs."""
         assert self._store is not None
         own = {
-            job.operation_id for job in self._jobs.values() if job.status == "running"
+            job.operation_id
+            for job in self._jobs.values()
+            if job.status == SwapJobStatus.RUNNING
         }
         for record in self._store.unfinished():
             if record.id in own or record.id == exclude_id:
@@ -306,7 +335,7 @@ class SwapJobs:
         """
         with self._lock:
             for existing in self._jobs.values():
-                if existing.status == "running":
+                if existing.status == SwapJobStatus.RUNNING:
                     raise JobBusy(existing)
             self._stopping += 1
         try:
@@ -351,9 +380,7 @@ class SwapJobs:
             try:
                 if self._store is not None and job.operation_id:
                     record = self._store.get(job.operation_id)
-                    if record is None or record.phase not in {
-                        phase.value for phase in TERMINAL_PHASES
-                    }:
+                    if record is None or record.phase not in TERMINAL_PHASE_VALUES:
                         # Preserve the child's richer outcome when it recorded one.
                         self._store.finish(
                             job.operation_id,
@@ -371,7 +398,7 @@ class SwapJobs:
             job.exit_code = code
             job.finished_at = _now()
             # Last, so a reader that sees a final status also sees finished_at.
-            job.status = "succeeded" if code == 0 else "failed"
+            job.status = SwapJobStatus.from_exit_code(code)
 
     def get(self, job_id: str) -> SwapJob | None:
         with self._lock:
@@ -388,7 +415,7 @@ class SwapJobs:
     def running(self) -> SwapJob | None:
         with self._lock:
             for job in self._jobs.values():
-                if job.status == "running":
+                if job.status == SwapJobStatus.RUNNING:
                     return job
         if self._store is not None:
             self._store.reconcile()

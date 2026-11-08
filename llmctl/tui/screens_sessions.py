@@ -9,19 +9,24 @@ from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.widgets import DataTable, Footer, Header, Static
 
+from llmctl.db import SessionStatus
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc
 from llmctl.tui._modals import ConfirmActionModal
 
+#: Row colour per lifecycle status; ``UNKNOWN`` falls through to muted.
 _STATUS_COLOR = {
-    "running": C_OK,
-    "planned": C_WARN,
-    "starting": C_WARN,
-    "degraded": C_ERR,
-    "stopping": C_WARN,
-    "stopped": C_MUTED,
-    "failed": C_ERR,
+    SessionStatus.RUNNING: C_OK,
+    SessionStatus.PLANNED: C_WARN,
+    SessionStatus.STARTING: C_WARN,
+    SessionStatus.DEGRADED: C_ERR,
+    SessionStatus.STOPPING: C_WARN,
+    SessionStatus.STOPPED: C_MUTED,
+    SessionStatus.FAILED: C_ERR,
 }
+
+#: Transitions worth a warning toast rather than an information one.
+_BAD_STATUSES = frozenset({SessionStatus.STOPPED, SessionStatus.FAILED, SessionStatus.DEGRADED})
 
 
 class SessionsScreen(DataScreen):
@@ -87,7 +92,7 @@ class SessionsScreen(DataScreen):
             self._ids.append(sid)
             kind = session.kind.value
             self._kinds.append((kind, session.systemd_unit))
-            color = _STATUS_COLOR.get(session.status.value, C_MUTED)
+            color = _STATUS_COLOR.get(session.status, C_MUTED)
             gpus = ",".join(str(g) for g in session.gpu_ids) or "cpu"
             table.add_row(
                 sid[:8],
@@ -130,7 +135,7 @@ class SessionsScreen(DataScreen):
         for sid, status in current.items():
             before = previous.get(sid)
             if before is not None and before != status:
-                bad = status in {"stopped", "failed", "degraded"}
+                bad = status in _BAD_STATUSES
                 self.app.notify(
                     f"Session {sid[:8]}: {before} -> {status}",
                     title="Session changed",

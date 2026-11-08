@@ -18,7 +18,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Header, Input, Select, Static
 
-from llmctl.db import ModelStatus
+from llmctl.db import ModelStatus, SessionStatus
 from llmctl.schemas import ModelCreate, ModelUpdate
 from llmctl.services.registry import is_missing
 from llmctl.tui import _data
@@ -462,13 +462,13 @@ class ModelsScreen(DataScreen):
     def _after_start(self, session: Any) -> None:
         """Notify with the real outcome (planned / started / failed) and refresh."""
         short_id = (session.id or "")[:8]
-        status = session.status.value
-        if status == "planned":
+        status = session.status
+        if status == SessionStatus.PLANNED:
             self.app.notify(
                 f"Planned session {short_id} ({session.runtime.value}); no process launched.",
                 title="Session planned",
             )
-        elif status in ("running", "starting"):
+        elif status in (SessionStatus.RUNNING, SessionStatus.STARTING):
             detail = f" at {esc(session.endpoint_url)}" if session.endpoint_url else ""
             self.app.notify(
                 f"Session {short_id} {status}{detail}.",

@@ -21,10 +21,12 @@ from llmctl.api.app import create_app
 from llmctl.cli_tables import whole_id_table
 from llmctl.config import VLLM_ROLE, ManagedUnitConfig, Settings, load_settings, resolve_role
 from llmctl.db import (
+    SESSION_ACTIVE_STATES,
     BenchmarkKind,
     ModelRecord,
     RuntimeName,
     SessionRecord,
+    SessionStatus,
     get_engine,
     init_db,
 )
@@ -551,20 +553,20 @@ def _print_session_state(session: object, *, verb: str) -> bool:
     -- so the one surface an operator checks after a restart reported the
     opposite of what happened.
     """
-    status = session.status.value
-    if status == "running":
+    status = session.status
+    if status == SessionStatus.RUNNING:
         console.print(
             f"[green]{verb} session[/green] {session.id} "
             f"pid={session.pid} -> {escape(str(session.endpoint_url))}"
         )
         return True
-    if status == "planned":
+    if status == SessionStatus.PLANNED:
         console.print(
             f"[cyan]Planned session[/cyan] {session.id} "
             f"({session.runtime.value}); no process launched."
         )
         return True
-    if status == "starting":
+    if status == SessionStatus.STARTING:
         # An adopted unit restarted via systemctl has no pid llmctl owns,
         # so print one only when there is one rather than "pid=None".
         pid_part = f" pid={session.pid}" if session.pid is not None else ""
@@ -964,7 +966,7 @@ def _is_live_session(selector: str) -> bool:
             session = SessionService(db).get_session(selector)
         except AmbiguousSessionError:
             return True  # let the session path report the ambiguity
-    return session is not None and session.status.value != "stopped"
+    return session is not None and session.status != SessionStatus.STOPPED
 
 
 def _stop_session(
@@ -991,7 +993,7 @@ def _stop_session(
             raise typer.Exit(1) from exc
     if not session:
         raise typer.BadParameter(f"Session not found: {session_id}")
-    if session.status.value != "stopped":
+    if session.status != SessionStatus.STOPPED:
         # The process outlived SIGTERM and SIGKILL. It still holds its GPU
         # memory and its port, and the row keeps its pid so reconcile can
         # settle it later -- but this is not a successful stop.
@@ -1977,10 +1979,10 @@ def install_systemd(
             console.print(f"  [cyan]{escape(str(message))}[/cyan]")
 
     if all_sessions:
-        active_states = {"running", "starting", "degraded", "planned"}
+        active_states = SESSION_ACTIVE_STATES | {SessionStatus.PLANNED}
         with _session() as db:
             sessions = SessionService(db).list_sessions()
-        active = [s for s in sessions if s.status.value in active_states]
+        active = [s for s in sessions if s.status in active_states]
         # ADOPTED sessions don't have an llmctl-issued launch command;
         # their lifecycle belongs to the upstream systemd unit. Skip them
         # rather than abort the whole --all batch.
