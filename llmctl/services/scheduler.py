@@ -33,6 +33,7 @@ from llmctl.db import (
     SessionRecord,
     SessionStatus,
 )
+from llmctl.gpu_arg import RANKING_MODES, GpuMode
 from llmctl.schemas import GPUInfo, LaunchPlan, SessionStartRequest
 from llmctl.telemetry.gpu import get_gpu_info
 
@@ -46,7 +47,7 @@ GPU_REQUIRED_RUNTIMES = {
 #: Engines that serve from one GPU only.
 SINGLE_GPU_RUNTIMES = {RuntimeName.FREETOKEN, RuntimeName.STRATA}
 LOCAL_FILE_RUNTIMES = {RuntimeName.LLAMA_CPP, RuntimeName.PYTHON_SCRIPT, RuntimeName.STRATA}
-VALID_GPU_MODES = {"auto", "balanced", "most-free", "least-used"}
+VALID_GPU_MODES = frozenset(RANKING_MODES)
 _ACTIVE_STATES = SESSION_ACTIVE_STATES
 
 #: llama.cpp split-GGUF naming: ``<name>-00001-of-00004.gguf``. Only the first
@@ -374,17 +375,22 @@ class SchedulerService:
     # -- GPU placement ------------------------------------------------------
 
     def _effective_mode(self, request: SessionStartRequest) -> str:
-        """Resolve the effective GPU selection mode for a request."""
+        """Resolve the effective GPU selection mode for a request.
+
+        Returns a :class:`GpuMode` except when the configured
+        ``scheduler.gpu_policy`` is a string this version does not know; that
+        falls through :meth:`_rank_gpus` to the most-free ranking.
+        """
         if request.allow_cpu:
-            return "cpu"
+            return GpuMode.CPU
         if request.gpu_ids:
-            return "explicit"
+            return GpuMode.EXPLICIT
         mode = (request.gpu_mode or "").strip().lower()
         if mode in VALID_GPU_MODES:
-            return mode
+            return GpuMode(mode)
         if request.gpus_auto:
-            return "auto"
-        return self.settings.scheduler.gpu_policy or "most-free"
+            return GpuMode.AUTO
+        return self.settings.scheduler.gpu_policy or GpuMode.MOST_FREE
 
     def _select_gpus(
         self,
@@ -396,7 +402,7 @@ class SchedulerService:
         refusals: list[str],
     ) -> list[int]:
         """Select GPU indices honoring explicit ids, cpu, and ranking modes."""
-        if mode == "cpu" or request.allow_cpu:
+        if mode == GpuMode.CPU or request.allow_cpu:
             return []
         if request.gpu_ids:
             return list(request.gpu_ids)
@@ -414,12 +420,12 @@ class SchedulerService:
 
     def _rank_gpus(self, mode: str, gpus_info: list[GPUInfo]) -> list[GPUInfo]:
         """Rank GPUs according to the selection ``mode``."""
-        if mode == "least-used":
+        if mode == GpuMode.LEAST_USED:
             return sorted(
                 gpus_info,
                 key=lambda g: (g.utilization_gpu_percent or 0, -(g.memory_free_mb or 0)),
             )
-        if mode == "balanced":
+        if mode == GpuMode.BALANCED:
             counts = self._gpu_session_counts()
             return sorted(
                 gpus_info,

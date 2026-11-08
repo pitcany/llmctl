@@ -91,6 +91,16 @@ def test_swap_job_status_from_exit_code() -> None:
     assert SwapJobStatus.SUCCEEDED == "succeeded"
 
 
+def test_gpu_mode_parse_results_are_members_equal_to_their_strings() -> None:
+    from llmctl.gpu_arg import GPU_MODES, RANKING_MODES, GpuMode, parse_gpus
+
+    assert GPU_MODES == RANKING_MODES
+    assert set(RANKING_MODES) == set(GpuMode) - {GpuMode.EXPLICIT, GpuMode.CPU}
+    assert parse_gpus("cpu") == ([], GpuMode.CPU, True)
+    assert parse_gpus("0,1")[1] is GpuMode.EXPLICIT
+    assert parse_gpus("least-used") == ([], "least-used", False)
+
+
 def test_lane_state_idle_is_blank() -> None:
     assert LaneState.IDLE == ""
     assert not LaneState.IDLE
@@ -99,7 +109,9 @@ def test_lane_state_idle_is_blank() -> None:
 
 def test_doc_names_every_lifecycle_member() -> None:
     text = DOC.read_text(encoding="utf-8")
-    for enum in (SessionStatus, OperationPhase, SwapJobStatus, LaneState):
+    from llmctl.gpu_arg import GpuMode
+
+    for enum in (SessionStatus, OperationPhase, SwapJobStatus, LaneState, GpuMode):
         for member in enum:
             needle = f"`{member.value}`" if member.value else "idle"
             assert needle in text, f"{enum.__name__}.{member.name} missing from {DOC.name}"

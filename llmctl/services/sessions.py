@@ -45,6 +45,10 @@ log = logging.getLogger(__name__)
 
 _ACTIVE_STATES = SESSION_ACTIVE_STATES
 
+#: Rows that may still own a process worth terminating: the active ones, plus a
+#: row already marked STOPPING by the stop or restart that is now terminating it.
+_TERMINATABLE_STATES = SESSION_ACTIVE_STATES | {SessionStatus.STOPPING}
+
 
 def set_status(record: SessionRecord, new: SessionStatus, *, why: str) -> SessionStatus:
     """Move ``record`` to ``new`` and return the status it had.
@@ -731,8 +735,10 @@ class SessionService:
                 # those as `sudo systemctl stop` looks for a system unit of that
                 # name and fails, so pick the scope the unit actually lives in.
                 user_scope = self._systemctl.is_user_unit(record.systemd_unit)
+                previous = self._enter_stopping(record, why="systemctl stop requested")
                 result = self._systemctl.stop(record.systemd_unit, user=user_scope)
                 if not result.ok:
+                    self._leave_stopping(record, previous, why="systemctl stop failed")
                     scope = " --user" if user_scope else ""
                     raise AdoptError(
                         f"`systemctl{scope} stop {record.systemd_unit}` failed "
@@ -760,7 +766,7 @@ class SessionService:
                     model_id=session.model_id,
                 )
                 return session
-            status = self._terminate_record(record)
+            status = self._terminate_stopping(record, why="stop requested")
             if _process_survived(status):
                 # Recording STOPPED here would erase the pid and lose the process.
                 assert status is not None  # narrowed by _process_survived
@@ -812,7 +818,7 @@ class SessionService:
                         "either way the row is revived on the next reconcile."
                     )
                 return self._restart_adopted_unit(record)
-            status = self._terminate_record(record)
+            status = self._terminate_stopping(record, why="restart requested")
             if _process_survived(status):
                 # Relaunching now would put a second server on the same port and
                 # the same GPUs as the one that would not die.
@@ -1286,7 +1292,7 @@ class SessionService:
         a process that outlived SIGTERM *and* SIGKILL. ``None`` means there
         was nothing to terminate.
         """
-        if not record.pid and record.status not in _ACTIVE_STATES:
+        if not record.pid and record.status not in _TERMINATABLE_STATES:
             return None
         adapter = self.router.get_adapter(record.runtime)
         status = run_sync(adapter.stop(record_to_session(record)))
@@ -1301,6 +1307,39 @@ class SessionService:
             data=status.details,
         )
         return status
+
+    def _enter_stopping(self, record: SessionRecord, *, why: str) -> SessionStatus:
+        """Mark ``record`` STOPPING and commit, so every reader sees the stop in flight.
+
+        Returns the status it replaced so a stop that cannot run can put it back.
+        """
+        previous = set_status(record, SessionStatus.STOPPING, why=why)
+        record.updated_at = utcnow()
+        self.db.add(record)
+        self.db.commit()
+        return previous
+
+    def _leave_stopping(self, record: SessionRecord, previous: SessionStatus, *, why: str) -> None:
+        """Undo :meth:`_enter_stopping` after a stop that never reached the process."""
+        set_status(record, previous, why=why)
+        record.updated_at = utcnow()
+        self.db.add(record)
+        self.db.commit()
+
+    def _terminate_stopping(self, record: SessionRecord, *, why: str) -> AdapterStatus | None:
+        """:meth:`_terminate_record` with the row marked STOPPING for the duration.
+
+        A large model can take a while to die; meanwhile ``llmctl sessions``
+        and the TUI show ``stopping`` instead of a ``running`` row that no
+        longer answers. If the adapter cannot even be asked, the row goes
+        back to the status it had.
+        """
+        previous = self._enter_stopping(record, why=why)
+        try:
+            return self._terminate_record(record)
+        except Exception:
+            self._leave_stopping(record, previous, why="stop could not run")
+            raise
 
     def _mark_survivor(self, record: SessionRecord, status: AdapterStatus) -> Session:
         """Record a process that refused to die, without losing track of it.

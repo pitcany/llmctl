@@ -25,12 +25,14 @@ machine without being able to break it.
 | `planned` | `stopped`, `failed` | `stop` on a planned row; launch without an adapter |
 | `starting` | `running` | owned/adopted endpoint answers (`reconcile`, `_on_spawn`) |
 | `starting` | `failed` | owned process exits before READY |
-| `starting` | `stopped` | `stop`; adopted unit stopped |
-| `starting` | `degraded` | process survived a stop attempt (`_mark_survivor`) |
+| `starting` | `stopped` | owned process gone before anyone asked |
+| `planned`, `starting`, `running`, `degraded` | `stopping` | `stop` or `restart` requested (`_enter_stopping`), including `--systemd` on an adopted unit |
+| `stopping` | `stopped` | the process or unit is gone |
+| `stopping` | `degraded` | the process survived SIGTERM and SIGKILL (`_mark_survivor`) |
+| `stopping` | `planned` | `restart` re-plans after the old process died |
+| `stopping` | `running`, `starting` | the stop could not run (adapter error, `systemctl stop` failed); the row goes back where it was |
 | `running` | `degraded` | endpoint stops answering while the pid lives |
-| `running` | `stopped` | `stop`; process gone |
 | `degraded` | `running` | endpoint answers again |
-| `degraded` | `stopped` | `stop`; process gone |
 | `stopped` | `running` | adopted unit came back on its own (`_reconcile_adopted`) |
 | `stopped`, `failed`, `running`, `degraded`, `starting` | `planned` | `restart` re-plans an owned session |
 | `stopped`, `failed`, `running`, `degraded` | `starting` | `restart` of an adopted unit |
@@ -40,7 +42,7 @@ Sets, in `llmctl/db.py`:
 
 - `SESSION_ACTIVE_STATES` = `starting`, `running`, `degraded` — probed by reconcile, routed by the gateway (`SessionStatus.is_active`).
 - `SESSION_TERMINAL_STATES` = `stopped`, `failed` — `cleanup` may purge them (`SessionStatus.is_terminal`).
-- `stopping` is declared for API clients but no code path enters it; `stop` goes straight to `stopped` or `degraded`.
+- `stopping` is not in the active set: reconcile leaves a stopping row alone until its process is gone, then settles it to `stopped`.
 
 Surfaces: `cli.py::_print_session_outcome`, TUI `screens_sessions._STATUS_COLOR`
 and `_BAD_STATUSES`, `screens_models._after_start`, `_data` running count,
@@ -93,6 +95,6 @@ These label a thing at one moment; nothing moves between the values.
 - `HealthState` (`schemas.py`): `ok`, `degraded`, `unavailable`, `unknown`, `not_used` — runtime health on the dashboard.
 - `LinkageState` (`services/preset_loader.py`): `explicit`, `auto`, `missing`, `unlinked` — how a preset found its registry model.
 - `ModelStatus` (`db.py`): `discovered`, `registered`, `missing`, `deleted`.
-- GPU placement modes (`scheduler.VALID_GPU_MODES`, `gpu_arg.GPU_MODES`): `auto`, `balanced`, `most-free`, `least-used`, plus `explicit` and `cpu` as parse results.
+- `GpuMode` (`gpu_arg.py`): `auto`, `balanced`, `most-free`, `least-used` rank the cards (`RANKING_MODES`, what `--gpus` accepts); `explicit` and `cpu` are parse results. `scheduler.VALID_GPU_MODES` is the same ranking set.
 - Benchmark execution: `live` / `mock` (`services/benchmarks.py`).
 - systemd `ActiveState` strings (`integrations/systemctl.py`, `adapters/vllm_systemd.py`): external vocabulary, read as-is.

@@ -22,6 +22,7 @@ from sqlmodel import Session
 
 from llmctl.config import load_settings
 from llmctl.db import BenchmarkKind, RuntimeName, SessionStatus, get_engine, init_db
+from llmctl.gpu_arg import RANKING_MODES, GpuMode
 from llmctl.presets import (
     Model as PresetModel,
 )
@@ -589,8 +590,8 @@ def _build_request(
         profile_id=profile_id,
         runtime=model.runtime,
         gpu_mode=mode,
-        gpus_auto=mode in {"auto", "balanced", "most-free", "least-used"},
-        allow_cpu=mode == "cpu",
+        gpus_auto=mode in RANKING_MODES,
+        allow_cpu=mode == GpuMode.CPU,
         force=force,
         dry_run=dry_run,
     )
