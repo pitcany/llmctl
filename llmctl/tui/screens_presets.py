@@ -10,6 +10,7 @@ Bound to ``p`` from any screen — see :class:`MissionControlApp`.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from textual.app import ComposeResult
@@ -19,7 +20,7 @@ from textual.widgets import DataTable, Footer, Header, Static
 from llmctl.config import load_settings
 from llmctl.presets import Model as PresetModel
 from llmctl.presets import PresetSchemaError
-from llmctl.services.lane_swap import quiet_deps, swap_to_vllm
+from llmctl.services.lane_swap import LaneSwapResult, quiet_deps, swap_to_vllm
 from llmctl.services.lanes import gather_state
 from llmctl.services.preset_loader import PresetView
 from llmctl.services.vllm_orchestrator import (
@@ -61,6 +62,100 @@ def _format_link_cell(view: PresetView) -> str:
     color = C_OK if state == "explicit" else C_ACCENT
     label = view.linked_model_name or (view.linked_model_id or "")
     return f"[{color}]{glyph}[/] {esc(label)}"
+
+
+@dataclass
+class PresetLaunch:
+    """Outcome of :func:`launch_preset`.
+
+    ``result`` is None when a lane refused to stop, so vLLM was never started,
+    or when the launch raised (``error`` then holds why).
+    """
+
+    result: OrchestratorResult | None
+    lanes: LaneSwapResult | None = None
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.result is not None and bool(self.result.ok)
+
+    @property
+    def reason(self) -> str:
+        """Why the launch failed ("" when it did not)."""
+        result = self.result
+        if result is None:
+            if self.error:
+                return self.error
+            error = self.lanes.error if self.lanes is not None else None
+            return f"{error or 'a lane could not be stopped'}; vLLM not started"
+        if result.ok:
+            return ""
+        if result.fleet_failed:
+            return f"fleet preflight failed: {', '.join(result.fleet_failed)}"
+        if result.restart is not None and result.restart.error:
+            return result.restart.error
+        return "vLLM did not become ready"
+
+    @property
+    def not_restored(self) -> list[str]:
+        """Everything this launch stopped or changed and could not put back."""
+        result = self.result
+        left: list[str] = []
+        if result is not None and result.ok:
+            left += getattr(result, "companions_failed", [])
+        elif result is not None and result.rollback is not None:
+            left += result.rollback.restart_failed
+            if result.rollback.env_restored is False:
+                path = result.rollback.env_path
+                left.append(f"env file {path}" if path else "env file")
+        if self.lanes is not None:
+            left += self.lanes.restore_failed
+        return left
+
+
+def launch_preset(alias: str, settings: Any, options: OrchestratorOptions) -> PresetLaunch:
+    """Start ``alias`` on the vLLM unit; blocking, for a worker thread."""
+    from llmctl.services.operations import OperationPhase, mark_phase, note_restore_failure
+
+    raised: list[str] = []
+
+    def _launch_vllm() -> OrchestratorResult | None:
+        mark_phase(OperationPhase.LOADING)
+        try:
+            return start_vllm_tp(
+                alias,
+                managed_unit=settings.managed_units.vllm_engine,
+                defaults=settings.vllm.defaults,
+                fleet=settings.managed_units.fleet,
+                options=options,
+            )
+        except Exception as exc:
+            # A preset whose weights are gone raises after the lanes were
+            # stopped. Report it as a failed start so swap_to_vllm restarts
+            # them and the record names the error and what stayed down.
+            raised.append(f"{type(exc).__name__}: {exc}")
+            return None
+
+    def _start() -> PresetLaunch:
+        # Lanes (FreeToken, llama.cpp) hold GPUs vLLM needs: stop them
+        # first and restart them if the launch fails, like `llmctl run`.
+        active = gather_state(settings).active_lanes()
+        if active:
+            mark_phase(OperationPhase.STOPPING)
+        result, lanes = swap_to_vllm(active, _launch_vllm, deps=quiet_deps())
+        return PresetLaunch(result, lanes, "".join(raised))  # type: ignore[arg-type]
+
+    def _outcome(launch: PresetLaunch) -> tuple[bool, str]:
+        # Before the record is closed: a failure with something left down is
+        # "needs attention", and a ready launch still names what stayed stopped.
+        note_restore_failure(launch.not_restored)
+        return launch.ok, launch.reason
+
+    # Same GPU lock and operation record as the Swap screen and `llmctl run`.
+    from llmctl.tui.screens_swap import run_recorded
+
+    return run_recorded(alias, alias, _start, _outcome)
 
 
 class PresetsScreen(DataScreen):
@@ -210,27 +305,11 @@ class PresetsScreen(DataScreen):
         options = OrchestratorOptions(dry_run=False)
         label = f"vLLM TP: {alias}"
 
-        def _run() -> OrchestratorResult:
-            # Lanes (FreeToken, llama.cpp) hold GPUs vLLM needs: stop them
-            # first and restart them if the launch fails, like `llmctl run`.
-            active = gather_state(settings).active_lanes()
-            result, lanes = swap_to_vllm(
-                active,
-                lambda: start_vllm_tp(
-                    alias,
-                    managed_unit=settings.managed_units.vllm_engine,
-                    defaults=settings.vllm.defaults,
-                    fleet=settings.managed_units.fleet,
-                    options=options,
-                ),
-                deps=quiet_deps(),
-            )
-            if result is None:
-                raise RuntimeError(f"{lanes.error}; vLLM not started")
-            return result  # type: ignore[return-value]
-
         self.app.notify(f"Starting {label}...", title="Launch")
-        self.run_action_worker(_run, lambda res: self._after_launch(label, res))
+        self.run_action_worker(
+            lambda: launch_preset(alias, settings, options),
+            lambda res: self._after_launch(label, res),
+        )
 
     def action_add_preset(self) -> None:
         """Open the add-preset form and persist on submit."""
@@ -371,29 +450,40 @@ class PresetsScreen(DataScreen):
             )
         self.refresh_data()
 
-    def _after_launch(self, label: str, result: OrchestratorResult) -> None:
+    def _after_launch(self, label: str, launch: PresetLaunch) -> None:
         """Surface success/failure as a notification."""
-        if result.ok:
-            self.app.notify(
-                f"[{C_OK}]{label} ready[/] on port {result.spec.port}",
-                title="Launch succeeded",
-            )
+        result = launch.result
+        if launch.ok and result is not None:
+            message = f"[{C_OK}]{label} ready[/] on port {result.spec.port}"
+            if launch.not_restored:
+                # Ready, but a service the launch stopped did not come back.
+                self.app.notify(
+                    f"{message}\nNot started again: "
+                    f"{esc(', '.join(launch.not_restored))} — start by hand.",
+                    severity="warning",
+                    title="Launch succeeded",
+                )
+            else:
+                self.app.notify(message, title="Launch succeeded")
         else:
-            reason = "unknown"
-            if result.fleet_failed:
-                reason = f"fleet preflight failed: {', '.join(result.fleet_failed)}"
-            elif result.restart is not None and result.restart.error:
-                reason = result.restart.error
-            # Preflight stops ollama and the companions before the restart is tried.
-            # The orchestrator rolls that back; say what it could not undo so
-            # the operator does not believe the box is as they left it.
+            # Preflight stops ollama and the companions before the restart is tried,
+            # and the lanes are stopped before that. Both are rolled back; say what
+            # could not be undone so the operator does not believe the box is as
+            # they left it.
             aftermath = ""
-            rollback = result.rollback
-            still_down = (
-                rollback.restart_failed if rollback is not None else result.fleet_stopped
+            rollback = result.rollback if result is not None else None
+            lanes = launch.lanes
+            restarted = list(rollback.restarted) if rollback is not None else []
+            still_down = list(
+                rollback.restart_failed
+                if rollback is not None
+                else (result.fleet_stopped if result is not None else [])
             )
-            if rollback is not None and rollback.restarted:
-                aftermath += f"\nStarted again: {esc(', '.join(rollback.restarted))}"
+            if lanes is not None:
+                restarted += lanes.restored
+                still_down += lanes.restore_failed
+            if restarted:
+                aftermath += f"\nStarted again: {esc(', '.join(restarted))}"
             if still_down:
                 aftermath += (
                     f"\nStill stopped: {esc(', '.join(still_down))}"
@@ -402,7 +492,7 @@ class PresetsScreen(DataScreen):
             if rollback is not None and rollback.env_restored is False:
                 aftermath += "\nPrevious env NOT restored — relaunch a known-good preset."
             self.app.notify(
-                f"[{C_ERR}]{label} failed[/]: {esc(reason)}{aftermath}",
+                f"[{C_ERR}]{label} failed[/]: {esc(launch.reason)}{aftermath}",
                 severity="error",
                 title="Launch failed",
             )

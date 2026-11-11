@@ -159,6 +159,7 @@ def test_failed_launch_reports_what_was_left_stopped(monkeypatch) -> None:
     from llmctl.services.vllm_orchestrator import OrchestratorResult
     from llmctl.tui import _data
     from llmctl.tui.app import MissionControlApp
+    from llmctl.tui.screens_presets import PresetLaunch
 
     monkeypatch.setattr(_data, "get_preset_views_with_links", lambda: [])
     notes: list[str] = []
@@ -182,7 +183,7 @@ def test_failed_launch_reports_what_was_left_stopped(monkeypatch) -> None:
             monkeypatch.setattr(
                 app, "notify", lambda msg, *a, **k: notes.append(str(msg))
             )
-            app.screen._after_launch("vLLM TP: x", result)
+            app.screen._after_launch("vLLM TP: x", PresetLaunch(result))
             await pilot.pause()
 
     asyncio.run(_run())
