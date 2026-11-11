@@ -369,11 +369,18 @@ unknown id.
 
 Job records are stored in the llmctl database and survive a restart of
 `llmctl serve`: the same job id keeps answering, with the output captured so
-far. The new server does not resume the swap. If the swap's own process outlived
-`llmctl serve`, the job is still running and is reported as running. If that
-process is gone, the job is reported as `interrupted`, or as `needs_attention`
-when it died during a rollback; check `llmctl status` and the serving endpoint
-before you retry. Only one run
+far. The new server does not resume the swap. The job's record names the
+process that owns it: `llmctl serve` at first, then the swap's own process once
+that process has started and taken the record over. If the swap's process took
+the record over and outlived `llmctl serve`, the job is still running and its
+`status` stays `running`. If the owning process of an unfinished job is gone,
+the job's `status` becomes `failed`, and its operation record gets the phase
+`interrupted`, or `needs_attention` when the process died during a rollback.
+A job that had already finished keeps its outcome. The owner-gone case
+includes a server that stopped in the moment between launching the swap and
+the handover: the job then reads `failed` although the swap's process may
+still be running under a record of its own. In every case check
+`llmctl status` and the serving endpoint before you retry. Only one run
 job runs at a time. Output is not streamed: clients poll `GET /swap/jobs/{id}`
 until the job finishes.
 

@@ -242,3 +242,119 @@ def test_child_that_can_be_neither_recorded_nor_stopped_is_named(
         assert str(2**22 + 1) in (row.error or "")
     finally:
         db.close()
+
+
+def _promote_like_reconcile(url: str) -> None:
+    """A reconcile pass saw the endpoint answer and promoted the pid-less row."""
+    with DBSession(get_engine(url)) as other:
+        row = other.exec(select(SessionRecord)).one()
+        row.status = SessionStatus.RUNNING
+        other.add(row)
+        other.commit()
+
+
+def test_child_is_recorded_on_a_row_reconcile_already_promoted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pid commit failed, then reconcile promoted the row: it still needs the pid."""
+    url = f"sqlite:///{tmp_path / 'start.sqlite3'}"
+    armed = [0]
+    stopped: list[int | None] = []
+
+    async def _spawn(self, plan, on_spawn=None):  # noqa: ANN001, ANN202
+        armed[0] = 1  # the commit inside on_spawn fails once
+        try:
+            on_spawn(2**22 + 1, "/tmp/child.log")
+        finally:
+            _promote_like_reconcile(url)
+
+    def _terminate(self, pid, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        stopped.append(pid)
+        return True
+
+    monkeypatch.setattr(PythonScriptAdapter, "start", _spawn)
+    monkeypatch.setattr(ProcessSupervisor, "terminate", _terminate)
+    service, db, request = _service(tmp_path)
+    _fail_commits(db, armed)
+    try:
+        with pytest.raises(RuntimeError, match="database is locked"):
+            service.start(request)
+        assert stopped == []  # the running child was recorded, not killed
+        db.rollback()
+        row = db.exec(select(SessionRecord)).one()
+        db.refresh(row)
+        assert row.pid == 2**22 + 1
+        assert row.log_path == "/tmp/child.log"
+        assert row.status == SessionStatus.RUNNING
+    finally:
+        db.close()
+
+
+def test_promoted_row_is_failed_once_its_unrecorded_child_is_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A RUNNING row with no pid and no process would never be reconciled away."""
+    url = f"sqlite:///{tmp_path / 'start.sqlite3'}"
+    armed = [0]
+    stopped: list[int | None] = []
+
+    async def _spawn(self, plan, on_spawn=None):  # noqa: ANN001, ANN202
+        armed[0] = 2  # the commit in on_spawn and the retry both fail
+        try:
+            on_spawn(2**22 + 1, None)
+        finally:
+            _promote_like_reconcile(url)
+
+    def _terminate(self, pid, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        stopped.append(pid)
+        return True
+
+    monkeypatch.setattr(PythonScriptAdapter, "start", _spawn)
+    monkeypatch.setattr(ProcessSupervisor, "terminate", _terminate)
+    service, db, request = _service(tmp_path)
+    _fail_commits(db, armed)
+    try:
+        with pytest.raises(RuntimeError, match="database is locked"):
+            service.start(request)
+        assert stopped == [2**22 + 1]
+        db.rollback()
+        row = db.exec(select(SessionRecord)).one()
+        db.refresh(row)
+        assert row.pid is None
+        assert row.status == SessionStatus.FAILED
+        assert "database is locked" in (row.error or "")
+    finally:
+        db.close()
+
+
+def test_interrupt_while_stopping_the_child_still_names_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C during terminate is not an Exception; the row must not stay STARTING."""
+    armed = [0]
+
+    async def _spawn(self, plan, on_spawn=None):  # noqa: ANN001, ANN202
+        armed[0] = 2  # the commit in on_spawn and the retry both fail
+        on_spawn(2**22 + 1, None)
+
+    def _terminate(self, pid, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(PythonScriptAdapter, "start", _spawn)
+    monkeypatch.setattr(ProcessSupervisor, "terminate", _terminate)
+    service, db, request = _service(tmp_path)
+    _fail_commits(db, armed)
+    try:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            service.start(request)
+        # The interrupt wins, and the launch error it cut short is kept.
+        assert "database is locked" in str(caught.value.__cause__)
+        assert str(2**22 + 1) in "\n".join(getattr(caught.value, "__notes__", []))
+        db.rollback()
+        row = db.exec(select(SessionRecord)).one()
+        assert row.pid is None
+        assert row.status == SessionStatus.FAILED
+        assert "database is locked" in (row.error or "")
+        assert str(2**22 + 1) in (row.error or "")
+    finally:
+        db.close()

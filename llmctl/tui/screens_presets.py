@@ -26,6 +26,8 @@ from llmctl.services.preset_loader import PresetView
 from llmctl.services.vllm_orchestrator import (
     OrchestratorOptions,
     OrchestratorResult,
+    RollbackReport,
+    rollback_of,
     start_vllm_tp,
 )
 from llmctl.tui import _data
@@ -75,6 +77,8 @@ class PresetLaunch:
     result: OrchestratorResult | None
     lanes: LaneSwapResult | None = None
     error: str = ""
+    #: What the orchestrator rolled back before it raised (no ``result`` then).
+    rollback: RollbackReport | None = None
 
     @property
     def ok(self) -> bool:
@@ -104,11 +108,13 @@ class PresetLaunch:
         left: list[str] = []
         if result is not None and result.ok:
             left += getattr(result, "companions_failed", [])
-        elif result is not None and result.rollback is not None:
-            left += result.rollback.restart_failed
-            if result.rollback.env_restored is False:
-                path = result.rollback.env_path
-                left.append(f"env file {path}" if path else "env file")
+        else:
+            rollback = result.rollback if result is not None else self.rollback
+            if rollback is not None:
+                left += rollback.restart_failed
+                if rollback.env_restored is False:
+                    path = rollback.env_path
+                    left.append(f"env file {path}" if path else "env file")
         if self.lanes is not None:
             left += self.lanes.restore_failed
         return left
@@ -119,6 +125,7 @@ def launch_preset(alias: str, settings: Any, options: OrchestratorOptions) -> Pr
     from llmctl.services.operations import OperationPhase, mark_phase, note_restore_failure
 
     raised: list[str] = []
+    rolled_back: list[RollbackReport] = []
 
     def _launch_vllm() -> OrchestratorResult | None:
         mark_phase(OperationPhase.LOADING)
@@ -135,6 +142,9 @@ def launch_preset(alias: str, settings: Any, options: OrchestratorOptions) -> Pr
             # stopped. Report it as a failed start so swap_to_vllm restarts
             # them and the record names the error and what stayed down.
             raised.append(f"{type(exc).__name__}: {exc}")
+            report = rollback_of(exc)
+            if report is not None:
+                rolled_back.append(report)
             return None
 
     def _start() -> PresetLaunch:
@@ -144,7 +154,8 @@ def launch_preset(alias: str, settings: Any, options: OrchestratorOptions) -> Pr
         if active:
             mark_phase(OperationPhase.STOPPING)
         result, lanes = swap_to_vllm(active, _launch_vllm, deps=quiet_deps())
-        return PresetLaunch(result, lanes, "".join(raised))  # type: ignore[arg-type]
+        rollback = rolled_back[0] if rolled_back else None
+        return PresetLaunch(result, lanes, "".join(raised), rollback)  # type: ignore[arg-type]
 
     def _outcome(launch: PresetLaunch) -> tuple[bool, str]:
         # Before the record is closed: a failure with something left down is

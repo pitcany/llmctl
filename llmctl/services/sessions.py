@@ -1298,6 +1298,15 @@ class SessionService:
             self.db.refresh(record)
             child_possible = record.pid is not None
             orphan: int | None = None
+            interrupted: BaseException | None = None
+            # Still this launch's row. A reconcile pass can promote the
+            # pid-less row to RUNNING (or on to DEGRADED) when the endpoint
+            # answers; it is then as unfinished as a STARTING one.
+            unsettled = {
+                SessionStatus.STARTING,
+                SessionStatus.RUNNING,
+                SessionStatus.DEGRADED,
+            }
             if spawned and not child_possible and spawned[-1][0] not in saved:
                 # The pid commit in _on_spawn failed and the rollback dropped
                 # it, but the child runs. Record it again; if that fails too,
@@ -1305,9 +1314,10 @@ class SessionService:
                 # was saved and is gone now was cleared by reconcile: the
                 # child is dead and its pid may belong to another process.)
                 pid, log_path = spawned[-1]
-                if record.status == SessionStatus.STARTING:
+                if record.status in unsettled:
                     try:
                         record.pid = pid
+                        record.pid_start_time = pid_start_time(pid)
                         record.log_path = log_path
                         record.updated_at = utcnow()
                         self.db.add(record)
@@ -1320,6 +1330,12 @@ class SessionService:
                         stopped = self.router.supervisor.terminate(pid)
                     except Exception:
                         stopped = False
+                    except BaseException as stop_exc:
+                        # Ctrl-C while stopping: the child may be alive, so
+                        # name it and settle the row before the interrupt
+                        # goes on.
+                        stopped = False
+                        interrupted = stop_exc
                     if not stopped:
                         # Nothing tracks this child now: the error is the
                         # only place left that can name it.
@@ -1329,11 +1345,13 @@ class SessionService:
                             f"stop it by hand: kill {pid}"
                         )
                         exc.add_note(note)
+                        if interrupted is not None:
+                            interrupted.add_note(note)
                         log.error("session %s: %s", record.id, note)
             if not child_possible:
                 try:
                     self.db.refresh(record)
-                    if record.status == SessionStatus.STARTING:
+                    if record.pid is None and record.status in unsettled:
                         set_status(record, SessionStatus.FAILED, why="launch raised")
                         record.error = f"{type(exc).__name__}: {exc}".rstrip(": ")
                         if orphan is not None:
@@ -1356,6 +1374,8 @@ class SessionService:
                 except Exception:
                     # The launch error is the one to report, not this one.
                     self.db.rollback()
+            if interrupted is not None:
+                raise interrupted from exc
             raise
 
         # The readiness wait can take up to readiness_timeout_s, during which

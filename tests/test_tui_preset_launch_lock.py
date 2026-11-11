@@ -15,7 +15,11 @@ import pytest
 from llmctl.config import load_settings
 from llmctl.services import op_lock, operations
 from llmctl.services.lane_swap import LaneSwapResult
-from llmctl.services.vllm_orchestrator import OrchestratorOptions, RollbackReport
+from llmctl.services.vllm_orchestrator import (
+    OrchestratorOptions,
+    RollbackReport,
+    attach_rollback,
+)
 from llmctl.tui import screens_presets
 
 
@@ -197,7 +201,9 @@ def test_refused_lane_stop_notification_says_vllm_was_not_started() -> None:
 # --- A launch that raises (a preset whose weights are gone) ----------------
 
 
-def _launch_that_raises(monkeypatch, seen: dict, lanes: LaneSwapResult):
+def _launch_that_raises(
+    monkeypatch, seen: dict, lanes: LaneSwapResult, rollback: RollbackReport | None = None
+):
     """Run the real ``swap_to_vllm`` contract: a failed start restores the lanes."""
 
     def _swap(active, start, deps):
@@ -207,7 +213,10 @@ def _launch_that_raises(monkeypatch, seen: dict, lanes: LaneSwapResult):
         return result, lanes
 
     def _start(alias, **kwargs):
-        raise FileNotFoundError("preset model path /models/gone is missing")
+        exc = FileNotFoundError("preset model path /models/gone is missing")
+        if rollback is not None:
+            attach_rollback(exc, rollback)
+        raise exc
 
     monkeypatch.setattr(screens_presets, "swap_to_vllm", _swap)
     monkeypatch.setattr(screens_presets, "start_vllm_tp", _start)
@@ -235,6 +244,22 @@ def test_launch_that_raises_records_the_lane_that_stayed_down(monkeypatch, seen)
     assert launch.not_restored == ["freetoken.service"]
     assert record.phase == operations.OperationPhase.NEEDS_ATTENTION.value
     assert record.recovery["not_restored"] == ["freetoken.service"]
+    assert "/models/gone is missing" in record.error
+
+
+def test_launch_that_raises_records_what_its_rollback_could_not_restore(
+    monkeypatch, seen
+) -> None:
+    """The restart raised after the fleet was stopped; no result carries the report."""
+    rollback = RollbackReport(
+        env_restored=False, env_path=Path("/etc/vllm-tp.env"), restart_failed=["ollama"]
+    )
+    lanes = LaneSwapResult(ok=False, restore_failed=["freetoken.service"])
+    launch, record = _launch_that_raises(monkeypatch, seen, lanes, rollback)
+    expected = ["ollama", "env file /etc/vllm-tp.env", "freetoken.service"]
+    assert launch.not_restored == expected
+    assert record.phase == operations.OperationPhase.NEEDS_ATTENTION.value
+    assert record.recovery["not_restored"] == expected
     assert "/models/gone is missing" in record.error
 
 
