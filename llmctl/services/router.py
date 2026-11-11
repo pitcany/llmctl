@@ -46,7 +46,6 @@ class RuntimeRouter:
             RuntimeName.SGLANG: SGLangAdapter(runtime_config("sglang"), self.supervisor),
             RuntimeName.FREETOKEN: FreeTokenAdapter(runtime_config("freetoken"), self.supervisor),
             RuntimeName.STRATA: StrataAdapter(runtime_config("strata"), self.supervisor),
-            RuntimeName.STRATA: StrataAdapter(runtime_config("strata"), self.supervisor),
             RuntimeName.PYTHON_SCRIPT: PythonScriptAdapter(
                 runtime_config("python_script"), self.supervisor
             ),

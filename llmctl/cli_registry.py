@@ -90,6 +90,16 @@ profile_app = typer.Typer(
 _RUNTIME_CHOICES = [r.value for r in RuntimeName]
 
 
+def _parse_runtime(value: str) -> RuntimeName:
+    """Turn an ``--engine``/``--backend`` value into a runtime, or a usage error."""
+    try:
+        return RuntimeName(value)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"Unknown runtime {value!r}. Choices: {', '.join(_RUNTIME_CHOICES)}"
+        ) from exc
+
+
 def _session() -> Session:
     settings = load_settings()
     init_db(settings.database_url)
@@ -278,7 +288,7 @@ def model_add(
             raise typer.BadParameter(
                 "--name and --backend are required in --non-interactive mode"
             )
-        runtime = RuntimeName(backend)
+        runtime = _parse_runtime(backend)
         resolved_path = str(path) if path else None
         resolved_tags = [t.strip() for t in (tags or "").split(",") if t.strip()]
         payload = ModelCreate(
@@ -295,7 +305,7 @@ def model_add(
     else:
         name_val = name or Prompt.ask("model name")
         runtime_val = (
-            RuntimeName(backend) if backend else _prompt_runtime()
+            _parse_runtime(backend) if backend else _prompt_runtime()
         )
         path_val = str(path) if path else _prompt_optional("path")
         quant_val = quantization or _prompt_optional("quantization")
@@ -499,12 +509,7 @@ def model_prune(
     """Soft-delete every model a scan flagged MISSING or whose file was deleted."""
     rt: RuntimeName | None = None
     if runtime is not None:
-        try:
-            rt = RuntimeName(runtime)
-        except ValueError as exc:
-            raise typer.BadParameter(
-                f"Unknown runtime {runtime!r}. Choices: {', '.join(_RUNTIME_CHOICES)}"
-            ) from exc
+        rt = _parse_runtime(runtime)
     with _session() as db:
         service = RegistryService(db)
         missing = [
@@ -644,7 +649,7 @@ def profile_create(
             raise typer.BadParameter(
                 "--name and --backend are required in --non-interactive mode"
             )
-        runtime = RuntimeName(backend)
+        runtime = _parse_runtime(backend)
         payload = ProfileCreate(
             name=name,
             runtime=runtime,
@@ -657,7 +662,7 @@ def profile_create(
         )
     else:
         name_val = name or Prompt.ask("profile name")
-        runtime_val = RuntimeName(backend) if backend else _prompt_runtime()
+        runtime_val = _parse_runtime(backend) if backend else _prompt_runtime()
         desc_val = description or _prompt_optional("description")
         tp_val = (
             tensor_parallel
@@ -924,7 +929,7 @@ def preview_cmd(
 def export_registry_cmd(
     out_path: Annotated[Path, typer.Argument(help="Output JSON file.")],
 ) -> None:
-    """Write models + profiles + settings to a JSON bundle."""
+    """Write models + profiles to a JSON bundle."""
     with _session() as db:
         models = RegistryService(db).list_models(include_inactive=True)
         profiles = ProfileService(db).list_profiles()

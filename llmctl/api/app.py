@@ -77,8 +77,10 @@ def create_app(settings: Settings | None = None, database_url: str | None = None
                 )
             header = request.headers.get("authorization", "")
             scheme, _, provided = header.partition(" ")
+            # Bytes, not str: compare_digest raises TypeError on a non-ASCII
+            # str, which turned a garbage header into a 500 instead of a 401.
             if scheme.lower() != "bearer" or not secrets.compare_digest(
-                provided.strip(), expected_token
+                provided.strip().encode("utf-8"), expected_token.encode("utf-8")
             ):
                 return JSONResponse(
                     status_code=401,

@@ -80,7 +80,7 @@ def render_table(state: SwapState, console: Console, *, command: str = "run") ->
             row.key,
             cards_label(row),
             state.state_of(row),
-            format_duration(last_load_s(row.key)) if last_load_s(row.key) else "—",
+            format_duration(load_s) if (load_s := last_load_s(row.key)) else "—",
         )
         for index, row in enumerate(state.catalog, start=1)
     ]

@@ -147,10 +147,12 @@ def restore_previous(
             deps.log(f"  rollback: restarting {lane.name} ({' '.join(lane.start_cmd)})")
             rc = deps.run_script(lane.start_cmd, lane.health_timeout_s + _SCRIPT_GRACE_S)
             label = lane.unit or lane.name
-            ready = wait_ready(
+            # A failed start script cannot become ready: do not sit out the
+            # whole health timeout before reporting it.
+            ready = rc == 0 and wait_ready(
                 lane.upstream, lane.served_model, lane.health_timeout_s, deps, restoring=True,
             )
-            if rc == 0 and ready:
+            if ready:
                 result.restored.append(label)
             else:
                 result.restore_failed.append(label)

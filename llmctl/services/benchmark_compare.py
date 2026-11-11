@@ -65,8 +65,7 @@ def _compare_recorded(
     if left is None and right is None:
         return  # symmetric unknown: no evidence of a difference
     if left is None or right is None:
-        known = label if left is not None else label
-        reasons.append(f"{known} recorded on only one run")
+        reasons.append(f"{label} recorded on only one run")
 
 
 def comparison_verdict(candidate: Any, baseline: Any) -> ComparisonVerdict:

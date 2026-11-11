@@ -244,8 +244,6 @@ def _plan_local(source: str, engine: RuntimeName | None, name: str | None) -> Ad
 
 def _is_strata_config(path: Path) -> bool:
     """A Strata server config: a JSON object with ``exe`` and ``args``."""
-    import json
-
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -254,8 +252,6 @@ def _is_strata_config(path: Path) -> bool:
 
 
 def _strata_model_name(path: Path) -> str | None:
-    import json
-
     try:
         name = json.loads(path.read_text()).get("model_name")
     except (OSError, ValueError, AttributeError):

@@ -1791,6 +1791,7 @@ def benchmarks_cmd(
         if benchmark_id:
             result = service.get_result(benchmark_id)
             if result is None:
+                console.print(f"[red]No benchmark with id {escape(str(benchmark_id))}.[/]")
                 raise typer.Exit(code=1)
             _print_benchmark_result(result)
             return
@@ -2824,7 +2825,7 @@ def _print_rollback(result: object, tp_unit: str) -> None:
                 f"  [yellow]rollback: previous env NOT restored[/yellow] "
                 f"({escape(str(rollback.env_path))} holds the failed preset)"
             )
-            todo.append("llmctl vllm <previous-preset>  # rewrite a known-good env")
+            todo.append("llmctl run <previous-preset>  # rewrite a known-good env")
         if rollback.tp_stopped:
             console.print(f"  rollback: stopped half-started {escape(tp_unit)}")
         if rollback.restarted:
@@ -3239,7 +3240,9 @@ def validate_cmd(json_out: _JSON_OPT = False) -> None:
 def _router_url(settings: object) -> str:
     """Compose the local URL the CLI uses to talk to the gateway."""
     router = settings.router  # type: ignore[attr-defined]
-    host = router.host if router.host not in ("0.0.0.0", "") else "127.0.0.1"
+    host = router.host if router.host not in ("0.0.0.0", "::", "") else "127.0.0.1"
+    if ":" in host:
+        host = f"[{host}]"
     return f"http://{host}:{router.port}"
 
 
@@ -3259,7 +3262,7 @@ def gateway_cmd(
     bind_host = host or settings.router.host
     bind_port = port or settings.router.port
 
-    if bind_host not in ("127.0.0.1", "localhost") and not settings.router.allow_public_bind:
+    if bind_host not in ("127.0.0.1", "localhost", "::1") and not settings.router.allow_public_bind:
         raise typer.BadParameter(
             f"Refusing to bind gateway to {bind_host}: set router.allow_public_bind=true "
             "in settings.yaml to override. The recommended way to expose the gateway is "

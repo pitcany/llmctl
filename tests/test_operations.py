@@ -121,6 +121,25 @@ def test_sanitize_line_redacts_common_secret_shapes() -> None:
     assert "hunter2" not in sanitize_line("password: hunter2")
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Authorization: Bearer sk-abc12345",
+        '{"Authorization": "Bearer sk-abc12345"}',
+        "curl -H 'authorization: bearer sk-abc12345' http://x",
+        "vllm serve m --api-key sk-abc12345 --port 8003",
+        "download --hf-token sk-abc12345",
+    ],
+)
+def test_sanitize_line_redacts_spaced_credentials(line: str) -> None:
+    assert "sk-abc12345" not in sanitize_line(line)
+
+
+def test_sanitize_line_keeps_ordinary_flags() -> None:
+    line = "vllm serve m --max-tokens 512 --tokenizer foo --port 8003"
+    assert sanitize_line(line) == line
+
+
 # -- executor-side finalization ---------------------------------------------
 
 

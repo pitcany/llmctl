@@ -137,3 +137,10 @@ def test_serve_refuses_auth_required_without_token(
     no_ansi = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     plain = " ".join(no_ansi.replace("│", " ").split())
     assert "no token is configured" in plain
+
+
+def test_non_ascii_token_is_401_not_500(tmp_path: Path) -> None:
+    """A header with bytes outside ASCII is a wrong token, not a server error."""
+    client = _client(tmp_path, require=True, token="tok-123")
+    response = client.get("/models", headers={"Authorization": b"Bearer t\xc3\xb6k"})
+    assert response.status_code == 401

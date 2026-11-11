@@ -53,7 +53,13 @@ OP_DB_ENV = "LLMCTL_OPERATION_DB_URL"
 MAX_OUTPUT_LINES = 200
 MAX_LINE_CHARS = 400
 
+# Most specific first: the general ``name=value`` rule stops at the first
+# space, so on its own it kept the credential in ``Authorization: Bearer <t>``
+# and never saw ``--api-key <value>``.
 _SECRET_PATTERNS = (
+    re.compile(r"""(?i)(authorization)["']?\s*[=:]\s*["']?(?:bearer|basic|token)\s+\S+"""),
+    re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}"),
+    re.compile(r"(?i)(--[\w-]*(?:api[_-]?key|token|password|secret))\s+\S+"),
     re.compile(r"(?i)(api[_-]?key|authorization|bearer|token|password|secret)\s*[=:]\s*\S+"),
 )
 

@@ -49,22 +49,6 @@ def get_process_snapshot(pid: int) -> dict[str, Any] | None:
         return None
 
 
-def find_candidate_runtime_processes() -> list[dict[str, Any]]:
-    """Return candidate local LLM runtime processes using command heuristics."""
-    keywords = ("vllm", "llama", "ollama", "lmstudio", "lms ", "python")
-    results: list[dict[str, Any]] = []
-    for proc in psutil.process_iter(["pid", "name", "cmdline", "status"]):
-        try:
-            cmdline = " ".join(proc.info.get("cmdline") or [])
-            name = proc.info.get("name") or ""
-            haystack = f"{name} {cmdline}".lower()
-            if any(keyword in haystack for keyword in keywords):
-                results.append(dict(proc.info))
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-    return results
-
-
 def is_pid_running(pid: int | None) -> bool:
     """Return True when ``pid`` refers to a live, non-zombie process."""
     if not pid:

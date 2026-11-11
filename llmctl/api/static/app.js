@@ -361,7 +361,9 @@
   // the browser and the terminal say the same thing.
   function renderJob(job) {
     var running = job.status === "running";
-    var text = job.exit_code === 0 ? "Ready" : "Failed (exit " + job.exit_code + ")";
+    // No exit code = killed by a signal, or the server restarted mid-swap.
+    var text = job.exit_code === 0 ? "Ready"
+      : job.exit_code == null ? "Failed" : "Failed (exit " + job.exit_code + ")";
     var status = running ? job.status : text;
     if (running && job.phase) { status += " · " + (job.phase_label || job.phase); }
     if (!running && job.exit_code !== 0 && job.phase_hint) { status += " — " + job.phase_hint; }

@@ -76,3 +76,20 @@ def _isolated_op_lock(monkeypatch, tmp_path) -> None:
     could block on) the developer's real lock at
     ``~/.local/share/llmctl/operations.lock``."""
     monkeypatch.setenv("LLMCTL_OP_LOCK", str(tmp_path / "operations.lock"))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_router(monkeypatch) -> None:
+    """Never reach the live llm-router, or read its key file, from the suite.
+
+    ``llmctl run``/``vllm`` ask llm-router to swap (``POST /admin/switch``)
+    when it answers and a key is found. Only ``test_cli_swap`` stubbed that,
+    so any other test that ran those commands on a machine with the router up
+    read the real key and could send a real, forced model switch (2026-10-20:
+    20 such calls; 2026-11-11: found again in ``test_cli_vllm_readiness``).
+    Router-path tests re-enable both names explicitly."""
+    from llmctl import cli_swap
+
+    monkeypatch.delenv("ROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(cli_swap, "router_key", lambda env_file: None)
+    monkeypatch.setattr(cli_swap, "router_up", lambda url: False)
