@@ -931,7 +931,7 @@ def gather_state(
         card_count=len(free_mib) if free_mib else None,
         active_units=active_units,
         vllm_unit=vllm.unit_name,
-        vllm_active=is_active(vllm.unit_name, False),
+        vllm_active=is_active(vllm.unit_name, getattr(vllm, "user_scope", False)),
         gpu_sessions=gpu_sessions,
         free_mib=free_mib,
         vram_need=vram_need,
