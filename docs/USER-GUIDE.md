@@ -505,7 +505,7 @@ Studio rows say they load on the first request. See the README section
 - **GPUs (`g`)** — live NVML
 - **Logs (`l`)** — event audit trail with severity color
 - **Doctor (`o`)** — backend binary table; `c` copies install command for missing backends
-- **Benchmarks (`b`)** — history with delta columns; baseline support; enter to rerun
+- **Benchmarks (`b`)** — history with delta columns; baseline support; `enter` inspects, `r` re-runs
 
 ---
 
@@ -812,10 +812,10 @@ common cause: the unit is in a failed state and needs
 
 ### Cold start times out
 
-The default readiness timeout is 300s. Qwen3-Next-80B with
-CUDA-graph capture reliably needs ~3 min on 2x5090; if you're
-loading anything bigger or doing more compilation work, bump the
-timeout in code via `OrchestratorOptions(timeout_s=600)`. CLI flag
+The default readiness timeout is 900s (it was 300s), and the wait ends
+early when the unit crashes. Qwen3-Next-80B with CUDA-graph capture
+needs ~3 min on 2x5090 and a DFlash load ~5.5 min; for anything slower,
+raise it in code via `OrchestratorOptions(timeout_s=...)`. CLI flag
 support for this is pending.
 
 ### Open WebUI says "model not found"

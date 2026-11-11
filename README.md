@@ -484,9 +484,9 @@ auto-refreshes every 3s and never blocks the UI on probes.
 | Screen | Keys |
 |--------|------|
 | Models (`m`) | `/` filter (text + engine; detail panel below shows fit info, backend state and the latest benchmark), `a` add (one source box, any engine, live preview; *Manual entry* for the field form), `del` remove (engine-specific "also remove it" box), `enter` serve (same routing as `llmctl run NAME`: vLLM → swap confirm for its preset, or write one first; llama.cpp → swap confirm that frees the GPUs; scripts → launch plan; Ollama/LM Studio → says it loads on demand), `ctrl+s` scan, `e` edit, `c` clone, `x` prune missing |
-| Profiles (`f`) | `a` create, `e` edit, `c` clone, `d` delete |
+| Profiles (`f`) | `a` create, `e` edit, `c` clone, `del` delete |
 | Swap (`w`) | `enter` preview (what stops/starts, last load time) → confirm swaps; same list as `llmctl run` |
-| Presets (`p`) | `enter`/`t` launch preset (restarts the managed unit after confirm), `a` add, `e` edit in `$EDITOR`, `c` clone, `d` delete |
+| Presets (`p`) | `enter`/`t` launch preset (restarts the managed unit after confirm), `a` add, `e` edit in `$EDITOR`, `c` clone, `del` delete |
 | Sessions (`s`) | `x` stop, `ctrl+r` restart, `c` cleanup; row-highlight tails the log. Failures (e.g. stopping an adopted session) surface as notifications |
 | Benchmarks (`b`) | `n` new, `enter` inspect (samples, percentiles, provenance, drift, baseline verdict), `r` re-run, `c` set baseline, `x` clear baseline, `del` delete. `n/c` in delta columns = not comparable |
 | Doctor (`o`) | `c` copy install command |
