@@ -7,7 +7,6 @@ so tests and future services can create isolated databases easily.
 from __future__ import annotations
 
 import threading
-from collections.abc import Generator
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -16,7 +15,7 @@ from uuid import uuid4
 
 from sqlalchemy import JSON, Column, inspect, text
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Field, Session, SQLModel, create_engine
+from sqlmodel import Field, SQLModel, create_engine
 
 from llmctl.config import load_settings
 
@@ -487,8 +486,3 @@ def init_db(database_url: str | None = None) -> None:
     ensure_tables(get_engine(url), url)
 
 
-def get_session(database_url: str | None = None) -> Generator[Session, None, None]:
-    """Yield a database session suitable for FastAPI dependencies."""
-    engine = get_engine(database_url)
-    with Session(engine) as session:
-        yield session

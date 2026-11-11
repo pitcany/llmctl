@@ -15,7 +15,7 @@ answers) come from plugins — see :mod:`llmctl.plugins`. With none
 installed the lifecycle is: fleet preflight, restart, wait.
 
 The CLI commands in ``llmctl/cli.py`` are thin wrappers around this
-function plus :func:`preset_choices` for tab-completion.
+function.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from llmctl.integrations.vllm_env import (
 )
 from llmctl.plugins import Companion, PostStartCheck
 from llmctl.presets import load_all, load_one
-from llmctl.services.preset_loader import load_presets, model_to_launch_spec
+from llmctl.services.preset_loader import model_to_launch_spec
 
 
 class UnknownPresetError(KeyError):
@@ -249,15 +249,6 @@ def start_vllm_tp(
         deps=deps,
         renderer=render_vllm_env,
     )
-
-
-def preset_choices(
-    *,
-    defaults: VLLMDefaultsConfig | None = None,
-    config_dir: Path | None = None,
-) -> list[str]:
-    """Return sorted preset aliases (for CLI tab-completion)."""
-    return sorted(load_presets(defaults=defaults, config_dir=config_dir).keys())
 
 
 def render_preset_env(

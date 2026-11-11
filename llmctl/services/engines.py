@@ -125,13 +125,6 @@ def record_engine(engine: str, info: dict[str, Any], path: Path | None = None) -
     return target
 
 
-def forget_engine(engine: str, path: Path | None = None) -> None:
-    target = path or engines_file()
-    data = load_engines(target)
-    if data.pop(engine, None) is not None:
-        target.write_text(yaml.safe_dump(data, sort_keys=True))
-
-
 # --- host facts and side effects, injectable --------------------------------------
 
 
@@ -672,11 +665,6 @@ def _install_strata(plan: SetupPlan, deps: SetupDeps) -> None:
         plan.record["config"] = str(configs[-1])
 
 
-def strata_configs(install_dir: Path) -> list[Path]:
-    """The server configs (one per installed model) in a Strata checkout."""
-    return sorted(p for p in install_dir.glob("strata-*.json") if p.is_file())
-
-
 def _install_ollama(plan: SetupPlan, deps: SetupDeps) -> None:
     if deps.which("ollama"):
         return
@@ -859,13 +847,6 @@ def _default_binary(engine: str) -> str:
     )
 
 
-def recorded_binary(engine: str, engines_path: Path | None = None) -> str | None:
-    """The binary ``llmctl setup`` recorded for ``engine``, if it still exists."""
-    info = load_engines(engines_path).get(engine) or {}
-    binary = info.get("binary")
-    return str(binary) if binary and Path(str(binary)).exists() else None
-
-
 def recorded_python_root(engine: str, engines_path: Path | None = None) -> str | None:
     info = load_engines(engines_path).get(engine) or {}
     root = info.get("python_root")
@@ -883,8 +864,6 @@ __all__ = [
     "engines_file",
     "load_engines",
     "plan_setup",
-    "recorded_binary",
     "recorded_python_root",
     "run_setup",
-    "strata_configs",
 ]
