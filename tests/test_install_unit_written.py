@@ -70,3 +70,39 @@ def test_failed_reload_after_a_good_write_keeps_written(
     report = install_unit(SystemdUnit(name="x.service", content=_UNIT, user=True))
     assert report.written is True
     assert "systemctl failed: Failed to connect to bus" in " ".join(report.messages)
+
+
+def test_user_unit_write_error_is_not_blamed_on_sudo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "units" / "x.service"
+    monkeypatch.setattr(systemd, "unit_install_path", lambda _unit: target)
+
+    def _write_text(self: Path, *_args: object, **_kwargs: object) -> int:
+        raise FileNotFoundError(2, "No such file or directory", str(self))
+
+    monkeypatch.setattr(Path, "write_text", _write_text)
+    monkeypatch.setattr(
+        systemd.subprocess, "run", lambda *a, **k: pytest.fail("systemctl must not run")
+    )
+    report = install_unit(SystemdUnit(name="x.service", content=_UNIT, user=True))
+    message = " ".join(report.messages)
+    assert report.written is False
+    assert "sudo" not in message
+    assert f"could not write {target}" in message
+    assert "No such file or directory" in message
+
+
+def test_user_unit_directory_that_cannot_be_created_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blocker = tmp_path / "units"
+    blocker.write_text("a file where the unit directory should be")
+    target = blocker / "x.service"
+    monkeypatch.setattr(systemd, "unit_install_path", lambda _unit: target)
+    monkeypatch.setattr(
+        systemd.subprocess, "run", lambda *a, **k: pytest.fail("systemctl must not run")
+    )
+    report = install_unit(SystemdUnit(name="x.service", content=_UNIT, user=True))
+    assert report.written is False
+    assert f"could not write {target}" in " ".join(report.messages)

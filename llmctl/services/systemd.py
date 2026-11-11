@@ -351,8 +351,19 @@ def install_unit(
     written = False
     try:
         if unit.user:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(unit.content, encoding="utf-8")
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(unit.content, encoding="utf-8")
+            except OSError as exc:
+                # Not the `sudo`/`systemctl` lookups handled below.
+                return InstallReport(
+                    unit_path=str(path),
+                    actions=actions,
+                    written=False,
+                    enabled=False,
+                    dry_run=False,
+                    messages=[f"could not write {path}: {exc}"],
+                )
         else:
             # /etc/systemd/system is root's; write through sudo like the
             # start/stop/restart calls the unit will later get.
