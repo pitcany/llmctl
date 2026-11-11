@@ -155,6 +155,7 @@ def test_busy_tui_swap_does_not_create_an_unfinished_record(
 
 def _vllm_swap_with_a_stopped_lane(
     settings: Settings, monkeypatch: pytest.MonkeyPatch, start: object,
+    resume_fails: tuple[str, ...] = (),
 ) -> tuple[SimpleNamespace, SimpleNamespace, list[str]]:
     """A vLLM target with one lane in the way; the real ``swap_to_vllm`` runs."""
     from llmctl.services import lane_swap
@@ -167,7 +168,7 @@ def _vllm_swap_with_a_stopped_lane(
 
     def resume(paused, **kwargs):  # type: ignore[no-untyped-def]
         resumed.extend(paused)
-        return SimpleNamespace(restored=list(paused), restore_failed=[])
+        return SimpleNamespace(restored=list(paused), restore_failed=list(resume_fails))
 
     settings.managed_units.fleet = None
     monkeypatch.setattr(lane_swap, "stop_user_unit", lambda unit, deps: True)
@@ -199,15 +200,22 @@ def test_tui_launch_that_raises_restores_lanes_and_sessions(
         )
         raise exc
 
-    state, target, resumed = _vllm_swap_with_a_stopped_lane(settings, monkeypatch, start)
+    state, target, resumed = _vllm_swap_with_a_stopped_lane(
+        settings, monkeypatch, start, resume_fails=("llama-8081",)
+    )
     ok, message = screens_swap.run_swap(state, target)
 
     assert not ok
     assert "FileNotFoundError: weights are gone" in message
     assert "Started again: flash.service, llama-8080" in message
-    assert "Still stopped: ollama, env file /etc/vllm-tp.env" in message
+    assert "Still stopped: llama-8081, ollama — start it by hand." in message
+    assert "env file" not in message
+    assert "Previous env NOT restored — relaunch a known-good preset." in message
     assert resumed == ["llama-8080"]
-    assert _only_operation(settings).phase == "needs_attention"
+    record = _only_operation(settings)
+    assert record.phase == "needs_attention"
+    recorded = str(record.model_dump())
+    assert all(label in recorded for label in ("llama-8081", "ollama", "env file /etc/vllm-tp.env"))
 
 
 def test_tui_failed_launch_names_what_its_rollback_left_down(
