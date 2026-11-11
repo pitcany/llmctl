@@ -676,6 +676,24 @@ def plan_remove(
         else:
             targets = (repo_dir,) if repo_dir is not None else (candidate,)
 
+    # A row whose path is a model root (or the whole HF cache), or a folder
+    # that holds one, would take every other model with it; purge only ever
+    # deletes something strictly below every root.
+    containers = {*roots, hub.resolve()}
+    whole = [
+        t
+        for t in targets
+        if not t.is_symlink()
+        and any(c == t.resolve() or c.is_relative_to(t.resolve()) for c in containers)
+    ]
+    if whole:
+        return RemovePlan(
+            model=model,
+            can_purge=False,
+            purge_summary=f"{whole[0]} is or contains a whole model root, not one "
+            "model, so llmctl will not delete it. It can only hide the row.",
+            purge_label="",
+        )
     outside = [t for t in targets if not _inside(t, roots)]
     if outside:
         real = outside[0].resolve()
@@ -745,11 +763,15 @@ def _blob_aware_sizes(target: Path) -> tuple[int, int]:
 
 
 def _unlink_target(target: Path) -> None:
-    """Delete one target. An HF snapshot link takes its blob with it."""
+    """Delete one target. An HF snapshot link takes its blob with it.
+
+    Any other link (a catalog link) is removed alone, as the plan promises.
+    """
     if target.is_symlink():
         blob = target.resolve()
+        in_snapshot = "snapshots" in target.parts
         target.unlink()
-        if blob.exists() and "blobs" in blob.parts:
+        if in_snapshot and blob.is_file() and "blobs" in blob.parts:
             blob.unlink()
         return
     if target.is_dir():
