@@ -148,7 +148,11 @@ def _resolve_model_id(query_or_id: str) -> str:
     parsed = parse_query(query_or_id)
     if parsed.is_model_id():
         return parsed.raw
-    top = best_match(query_or_id)
+    try:
+        top = best_match(query_or_id)
+    except RuntimeError as exc:  # best_match raises this when nothing matched
+        console.print(f"[red]{escape(str(exc))}[/]")
+        raise typer.Exit(1) from exc
     console.print(
         f"[dim]selected:[/] {escape(top.model_id)} (score {top.score:.1f}: "
         f"{escape(', '.join(top.reasons[:2]))})"
