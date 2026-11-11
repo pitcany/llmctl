@@ -178,3 +178,67 @@ def test_child_that_cannot_be_recorded_is_stopped(
         assert row.status == SessionStatus.FAILED
     finally:
         db.close()
+
+
+def test_pid_cleared_by_reconcile_is_not_put_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reconcile failed the row and dropped the dead pid; that pid may be reused."""
+    url = f"sqlite:///{tmp_path / 'start.sqlite3'}"
+
+    async def _spawn(self, plan, on_spawn=None):  # noqa: ANN001, ANN202
+        on_spawn(2**22 + 1, None)
+        with DBSession(get_engine(url)) as other:  # what a reconcile pass does
+            row = other.exec(select(SessionRecord)).one()
+            row.status = SessionStatus.FAILED
+            row.pid = None
+            other.add(row)
+            other.commit()
+        raise RuntimeError("readiness probe crashed")
+
+    monkeypatch.setattr(PythonScriptAdapter, "start", _spawn)
+    service, db, request = _service(tmp_path)
+    try:
+        with pytest.raises(RuntimeError, match="readiness probe crashed"):
+            service.start(request)
+        db.rollback()
+        row = db.exec(select(SessionRecord)).one()
+        db.refresh(row)
+        assert row.status == SessionStatus.FAILED
+        assert row.pid is None
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("outcome", ["refused", "raised"])
+def test_child_that_can_be_neither_recorded_nor_stopped_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    """The row cannot hold the pid, so the error has to: nothing else tracks the child."""
+    armed = [0]
+
+    async def _spawn(self, plan, on_spawn=None):  # noqa: ANN001, ANN202
+        armed[0] = 2  # the commit in on_spawn and the retry both fail
+        on_spawn(2**22 + 1, None)
+
+    def _terminate(self, pid, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        if outcome == "raised":
+            raise PermissionError("operation not permitted")
+        return False
+
+    monkeypatch.setattr(PythonScriptAdapter, "start", _spawn)
+    monkeypatch.setattr(ProcessSupervisor, "terminate", _terminate)
+    service, db, request = _service(tmp_path)
+    _fail_commits(db, armed)
+    try:
+        with pytest.raises(RuntimeError, match="database is locked") as caught:
+            service.start(request)
+        assert str(2**22 + 1) in "\n".join(getattr(caught.value, "__notes__", []))
+        db.rollback()
+        row = db.exec(select(SessionRecord)).one()
+        assert row.pid is None
+        assert row.status == SessionStatus.FAILED
+        assert "database is locked" in (row.error or "")
+        assert str(2**22 + 1) in (row.error or "")
+    finally:
+        db.close()

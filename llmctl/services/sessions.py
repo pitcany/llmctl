@@ -1263,6 +1263,7 @@ class SessionService:
 
         # What the adapter reported it spawned, whether or not the row has it.
         spawned: list[tuple[int, str | None]] = []
+        saved: set[int] = set()  # pids whose commit went through
 
         def _on_spawn(pid: int, log_path: str | None) -> None:
             # Persist the pid BEFORE any readiness wait: if this process is
@@ -1274,6 +1275,7 @@ class SessionService:
             record.updated_at = utcnow()
             self.db.add(record)
             self.db.commit()
+            saved.add(pid)
 
         try:
             result = run_sync(adapter.start(plan, on_spawn=_on_spawn))
@@ -1286,27 +1288,50 @@ class SessionService:
             self.db.rollback()
             self.db.refresh(record)
             child_possible = record.pid is not None
-            if spawned and not child_possible:
+            orphan: int | None = None
+            if spawned and not child_possible and spawned[-1][0] not in saved:
                 # The pid commit in _on_spawn failed and the rollback dropped
                 # it, but the child runs. Record it again; if that fails too,
-                # stop the child rather than orphan it on a GPU.
+                # stop the child rather than orphan it on a GPU. (A pid that
+                # was saved and is gone now was cleared by reconcile: the
+                # child is dead and its pid may belong to another process.)
                 pid, log_path = spawned[-1]
-                try:
-                    record.pid = pid
-                    record.log_path = log_path
-                    record.updated_at = utcnow()
-                    self.db.add(record)
-                    self.db.commit()
-                    child_possible = True
-                except Exception:
-                    self.db.rollback()
-                    child_possible = not self.router.supervisor.terminate(pid)
+                if record.status == SessionStatus.STARTING:
+                    try:
+                        record.pid = pid
+                        record.log_path = log_path
+                        record.updated_at = utcnow()
+                        self.db.add(record)
+                        self.db.commit()
+                        child_possible = True
+                    except Exception:
+                        self.db.rollback()
+                if not child_possible:
+                    try:
+                        stopped = self.router.supervisor.terminate(pid)
+                    except Exception:
+                        stopped = False
+                    if not stopped:
+                        # Nothing tracks this child now: the error is the
+                        # only place left that can name it.
+                        orphan = pid
+                        note = (
+                            f"child pid {pid} could not be recorded or stopped; "
+                            f"stop it by hand: kill {pid}"
+                        )
+                        exc.add_note(note)
+                        log.error("session %s: %s", record.id, note)
             if not child_possible:
                 try:
                     self.db.refresh(record)
                     if record.status == SessionStatus.STARTING:
                         set_status(record, SessionStatus.FAILED, why="launch raised")
                         record.error = f"{type(exc).__name__}: {exc}".rstrip(": ")
+                        if orphan is not None:
+                            record.error += (
+                                f" (child pid {orphan} could not be recorded or "
+                                f"stopped; stop it by hand: kill {orphan})"
+                            )
                         record.updated_at = utcnow()
                         self.db.add(record)
                         self.db.commit()
