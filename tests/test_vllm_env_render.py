@@ -255,6 +255,16 @@ def test_leading_quote_is_escaped_for_systemd() -> None:
     assert _line(body, "VLLM_EXTRA") == '\\"--a" --b'
 
 
+def test_quote_after_leading_whitespace_is_escaped_for_systemd() -> None:
+    """systemd drops leading whitespace first, so the quote still starts the value."""
+    body = render_vllm_env(
+        VLLMLaunchSpec(
+            model="m", served_name="s", extra_args=" '--chat-template /tmp/a\\b'"
+        )
+    )
+    assert _line(body, "VLLM_EXTRA") == "\\'--chat-template /tmp/a\\\\b'"
+
+
 def test_plain_json_and_flags_are_unchanged() -> None:
     body = render_vllm_env(
         VLLMLaunchSpec(

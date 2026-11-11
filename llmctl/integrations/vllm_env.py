@@ -81,9 +81,11 @@ def _env_value(value: str) -> str:
     ``d`` and ``"--a" --b`` as ``--a--b``. Doubling each backslash and
     escaping a leading quote makes the launcher see the text unchanged.
     Quotes inside the value (plain JSON) are left alone: systemd keeps
-    them. A value is one line, so line breaks become spaces.
+    them. A value is one line, so line breaks become spaces. systemd also
+    drops whitespace before the value, so it is removed here first;
+    otherwise a quote after it would still open a quoted section.
     """
-    text = " ".join(value.splitlines()).replace("\\", "\\\\")
+    text = " ".join(value.splitlines()).lstrip().replace("\\", "\\\\")
     if text[:1] in ("'", '"'):
         text = "\\" + text
     return text
