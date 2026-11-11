@@ -115,6 +115,20 @@ class RollbackReport:
         return self.env_restored is not False and not self.restart_failed
 
 
+def attach_rollback(exc: BaseException, report: RollbackReport) -> None:
+    """Carry ``report`` on ``exc``: a launch that raises returns no result."""
+    try:
+        exc.llmctl_rollback = report  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        pass  # an exception type with __slots__: the original error still wins
+
+
+def rollback_of(exc: BaseException) -> RollbackReport | None:
+    """The rollback report :func:`start_vllm_tp` attached to ``exc``, if any."""
+    report = getattr(exc, "llmctl_rollback", None)
+    return report if isinstance(report, RollbackReport) else None
+
+
 @dataclass
 class OrchestratorResult:
     """Aggregated outcome of one start operation."""
@@ -426,7 +440,7 @@ def _run_lifecycle(
             wait_for_ready=options.wait_for_ready,
             timeout_s=options.timeout_s,
         )
-    except Exception:
+    except Exception as exc:
         if options.rollback_on_failure:
             result.rollback = _rollback(
                 result,
@@ -439,6 +453,9 @@ def _run_lifecycle(
                 prior_env=prior_env,
                 unit_systemctl=unit_systemctl,
             )
+            # The result dies with this frame; callers that catch the error
+            # still have to say what the rollback could not put back.
+            attach_rollback(exc, result.rollback)
         raise
 
     if options.rollback_on_failure and not result.ok:

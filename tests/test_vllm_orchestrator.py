@@ -27,6 +27,7 @@ from llmctl.services.vllm_orchestrator import (
     OrchestratorOptions,
     OrchestratorResult,
     UnknownPresetError,
+    rollback_of,
     start_vllm_tp,
 )
 
@@ -516,6 +517,27 @@ def test_adapter_exception_still_rolls_back(tmp_path: Path) -> None:
         )
 
     assert env.read_text() == "OLD-PRESET\n"
+
+
+def test_adapter_exception_carries_the_rollback_report(tmp_path: Path) -> None:
+    """The result is lost when the restart raises; the report must not be."""
+    deps, _, _, _, _ = _rollback_setup(tmp_path, raises=True, fail_start={"ollama"})
+
+    with pytest.raises(RuntimeError, match="blew up") as caught:
+        start_vllm_tp(
+            "llama-3.3-70b",
+            managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+            deps=deps,
+        )
+
+    report = rollback_of(caught.value)
+    assert report is not None
+    assert report.restart_failed == ["ollama"]
+    assert report.env_restored is True
+
+
+def test_exception_without_a_rollback_has_no_report() -> None:
+    assert rollback_of(RuntimeError("unrelated")) is None
 
 
 def test_rollback_reports_units_it_could_not_start(tmp_path: Path) -> None:
