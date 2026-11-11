@@ -549,3 +549,37 @@ def test_lmstudio_view_of_the_ollama_library_is_not_purged(tmp_path) -> None:
     model = Model(id="x", name="llama3.2", runtime=RuntimeName.LMSTUDIO, source="llama3.2")
     plan = plan_remove(model, roots=[tmp_path], hub_cache=tmp_path, runner=runner)
     assert not plan.can_purge and "Ollama" in plan.purge_summary
+
+
+def test_purge_refuses_a_target_that_is_a_model_root_itself(db, tmp_path) -> None:
+    """A row whose path IS a model root must not make purge delete the root."""
+    root = tmp_path / "models"
+    (root / "other-model").mkdir(parents=True)
+    (root / "other-model" / "weights.safetensors").write_bytes(b"x")
+    model = _file_model(db, root, RuntimeName.VLLM)
+    plan = plan_remove(model, roots=[root], hub_cache=tmp_path / "hub")
+    assert not plan.can_purge
+    assert "model root" in plan.purge_summary
+
+
+def test_purge_of_a_catalog_link_into_the_hf_cache_keeps_the_blob(db, tmp_path) -> None:
+    """The plan says the link's target stays; the delete must do the same."""
+    hub = tmp_path / "hub"
+    repo = hub / "models--org--repo"
+    blob = repo / "blobs" / "abc123"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"weights")
+    snap = repo / "snapshots" / "rev"
+    snap.mkdir(parents=True)
+    (snap / "m.gguf").symlink_to(blob)
+    store = tmp_path / "store"
+    store.mkdir()
+    link = store / "m.gguf"
+    link.symlink_to(snap / "m.gguf")
+    model = _file_model(db, link)
+    plan = plan_remove(model, roots=[store], hub_cache=hub)
+    assert plan.can_purge and "stay" in plan.purge_summary
+    for target in plan.targets:
+        model_ops._unlink_target(target)
+    assert not link.is_symlink()
+    assert blob.exists()
