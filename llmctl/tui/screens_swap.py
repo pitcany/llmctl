@@ -36,7 +36,12 @@ from llmctl.services.session_swap import (
     resume_after_failed_swap,
     run_session_swap,
 )
-from llmctl.services.vllm_orchestrator import OrchestratorOptions, start_vllm_tp
+from llmctl.services.vllm_orchestrator import (
+    OrchestratorOptions,
+    RollbackReport,
+    rollback_of,
+    start_vllm_tp,
+)
 from llmctl.services.vllm_slots import cuda_devices, engine_config, place
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc, tone_color
@@ -161,14 +166,27 @@ def _do_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
 
     started = time.monotonic()
 
+    raised: list[str] = []
+    rolled_back: list[RollbackReport] = []
+
     def _start() -> Any:
-        return start_vllm_tp(
-            target.key,
-            managed_unit=engine_config(settings, target),
-            defaults=settings.vllm.defaults,
-            fleet=settings.managed_units.fleet,
-            options=OrchestratorOptions(dry_run=False, gpus=cuda_devices(target)),
-        )
+        try:
+            return start_vllm_tp(
+                target.key,
+                managed_unit=engine_config(settings, target),
+                defaults=settings.vllm.defaults,
+                fleet=settings.managed_units.fleet,
+                options=OrchestratorOptions(dry_run=False, gpus=cuda_devices(target)),
+            )
+        except Exception as exc:
+            # A launch that raises has already stopped the lanes. Report it as
+            # a failed start so swap_to_vllm restarts them, the paused sessions
+            # are resumed below, and the message names the error.
+            raised.append(f"{type(exc).__name__}: {exc}")
+            report = rollback_of(exc)
+            if report is not None:
+                rolled_back.append(report)
+            return None
 
     # Every lane for a preset that takes every card; only those on its card otherwise.
     vllm, lanes = swap_to_vllm(state.lanes_in_the_way(target), _start, deps=deps)
@@ -176,7 +194,9 @@ def _do_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
         again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
         lanes.restored += again.restored
         lanes.restore_failed += again.restore_failed
-        return False, _failure(lanes.error, lanes)
+        if rolled_back:
+            lanes.restore_failed += rolled_back[0].not_restored
+        return False, _failure(raised[0] if raised else lanes.error, lanes)
     if getattr(vllm, "ok", False):
         record_load(target.key, time.monotonic() - started)
         message = f"{target.model} ready on vLLM"
@@ -189,6 +209,9 @@ def _do_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
     again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
     lanes.restored += again.restored
     lanes.restore_failed += again.restore_failed
+    rollback = getattr(vllm, "rollback", None)
+    if isinstance(rollback, RollbackReport):
+        lanes.restore_failed += rollback.not_restored
     return False, _failure(reason, lanes)
 
 
