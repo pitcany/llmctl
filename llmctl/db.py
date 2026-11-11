@@ -298,6 +298,10 @@ class SessionRecord(SQLModel, table=True):
     systemd_unit: str | None = Field(default=None, index=True)
     served_name: str | None = Field(default=None, index=True)
     adopted_at: datetime | None = None
+    #: ``/proc`` start time of ``pid`` when it was recorded. A later process
+    #: that is handed the same number has a different one, so a stale row is
+    #: never mistaken for a live session. ``NULL`` on rows older than the column.
+    pid_start_time: str | None = None
     #: When a termination attempt was made and the process outlived it
     #: (SIGTERM *and* SIGKILL). Deliberately separate from ``status``: status
     #: describes the world right now, and a survivor that keeps serving really

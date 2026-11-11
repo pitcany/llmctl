@@ -246,6 +246,8 @@ class Session(BaseModel):
     systemd_unit: str | None = None
     served_name: str | None = None
     adopted_at: datetime | None = None
+    #: ``/proc`` start time of ``pid`` when it was recorded: the PID-reuse guard.
+    pid_start_time: str | None = None
     #: Set when a stop/restart attempt left the process alive. Separate from
     #: ``status`` on purpose — see ``db.SessionRecord.terminate_failed_at``.
     terminate_failed_at: datetime | None = None

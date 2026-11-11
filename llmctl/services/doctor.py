@@ -27,7 +27,7 @@ from llmctl.db import (
     utcnow,
 )
 from llmctl.services.preset_loader import load_preset_views
-from llmctl.telemetry.process import is_pid_running
+from llmctl.telemetry.process import is_pid_running, is_same_process
 
 _ACTIVE = {SessionStatus.RUNNING, SessionStatus.STARTING, SessionStatus.DEGRADED}
 _VERDICTS = ("pass", "warn", "fail")
@@ -377,7 +377,11 @@ def _check_sessions(cfg: Settings) -> list[DoctorCheck]:
             ).all()
     except Exception:
         return checks  # storage check already reported the failure
-    dead = [r.id for r in records if r.pid and not is_pid_running(r.pid)]
+    dead = [
+        r.id
+        for r in records
+        if r.pid and not (is_pid_running(r.pid) and is_same_process(r.pid, r.pid_start_time))
+    ]
     if dead:
         checks.append(
             DoctorCheck(

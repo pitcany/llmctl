@@ -13,6 +13,7 @@ invoke them based on ``dry_run``/``safe_mode`` policy.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import signal
@@ -60,6 +61,64 @@ def is_pid_running(pid: int | None) -> bool:
         return False
 
 
+@functools.cache
+def _boot_id() -> str:
+    """Kernel boot id, or "" where it cannot be read. Fixed until the next boot."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def pid_start_time(pid: int | None) -> str | None:
+    """Identity of ``pid``: ``<boot id>:<start time>``, or None if unreadable.
+
+    The start time (field 22 of ``/proc/<pid>/stat``) is clock ticks since
+    boot: stable for the life of a process and different for a later process
+    that is handed the same number. The boot id keeps a process after a reboot
+    from matching a row written before it.
+    """
+    if not pid:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            stat = fh.read()
+        # comm may contain spaces/parens; take everything after the last ')'.
+        rest = stat[stat.rindex(b")") + 2 :].split()
+        ticks = rest[19].decode()
+    except (OSError, IndexError, ValueError):
+        return None
+    boot = _boot_id()
+    return f"{boot}:{ticks}" if boot else ticks
+
+
+def same_start_time(recorded: str, current: str) -> bool:
+    """Compare two :func:`pid_start_time` values.
+
+    A value without a boot id was written by a version that stored the ticks
+    alone (operation owners before the boot id was added). Such a record is
+    compared on the ticks, so an operation that is still running across the
+    upgrade is not taken for a recycled pid.
+    """
+    if ":" not in recorded:
+        return recorded == current.rpartition(":")[2]
+    return recorded == current
+
+
+def is_same_process(pid: int | None, start_time: str | None) -> bool:
+    """Return False only when ``pid`` now provably belongs to another process.
+
+    ``start_time`` is what :func:`pid_start_time` returned when the pid was
+    recorded. With nothing recorded (rows older than the column, fakes) or
+    nothing readable (no ``/proc``) there is no evidence either way and the
+    answer is True: liveness is checked separately.
+    """
+    if not pid or start_time is None:
+        return True
+    current = pid_start_time(pid)
+    return current is None or same_start_time(start_time, current)
+
+
 @dataclass(slots=True)
 class LaunchResult:
     """Result of a successful process launch."""
@@ -68,6 +127,8 @@ class LaunchResult:
     command: list[str]
     log_path: str | None
     started_at: datetime
+    #: Identity of ``pid`` for the PID-reuse guard; see ``pid_start_time``.
+    pid_start_time: str | None = None
 
 
 class ProcessSupervisor:
@@ -144,6 +205,7 @@ class ProcessSupervisor:
             command=argv,
             log_path=str(log_path) if log_path else None,
             started_at=utcnow(),
+            pid_start_time=pid_start_time(process.pid),
         )
 
     def is_running(self, pid: int | None) -> bool:
@@ -155,6 +217,7 @@ class ProcessSupervisor:
         pid: int | None,
         timeout: float = 10.0,
         kill_group: bool = True,
+        start_time: str | None = None,
     ) -> bool:
         """Gracefully terminate a process, escalating to SIGKILL on timeout.
 
@@ -162,17 +225,23 @@ class ProcessSupervisor:
             pid: Process id to terminate.
             timeout: Seconds to wait after SIGTERM before sending SIGKILL.
             kill_group: When True, signal the entire process group.
+            start_time: What :func:`pid_start_time` returned when the pid was
+                recorded. When given, a pid that now belongs to another
+                process counts as exited and is not signalled. The check runs
+                again before SIGKILL, because the process can exit and its
+                number be reused during the wait. (A reuse in the instant
+                between a check and its signal is not covered.)
 
         Returns:
             True if the process is no longer running after the call.
         """
-        if not is_pid_running(pid):
+        if not is_pid_running(pid) or not is_same_process(pid, start_time):
             return True
         assert pid is not None  # for type-checkers; guarded above
 
         children = self._live_children(pid)
         self._signal(pid, signal.SIGTERM, kill_group)
-        if self._wait_for_exit(pid, timeout):
+        if self._wait_for_exit(pid, timeout) or not is_same_process(pid, start_time):
             self._reap_orphans(children)
             return True
 

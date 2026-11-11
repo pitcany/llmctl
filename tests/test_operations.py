@@ -279,6 +279,22 @@ def test_reconcile_pid_reuse_is_detected(store: OperationStore) -> None:
     assert results[0].outcome == "interrupted"
 
 
+def test_reconcile_keeps_a_live_owner_recorded_before_the_boot_id(store: OperationStore) -> None:
+    """An operation started by an older llmctl stored ticks only; it is still ours."""
+    record, _ = store.begin(kind="swap", target="k", interface="api", purpose="p", request={})
+    with Session(get_engine(store.database_url)) as db:
+        row = db.get(OperationRecord, record.id)
+        owner = dict(row.owner)
+        assert ":" in owner["pid_start_time"], "needs a readable boot id"
+        owner["pid_start_time"] = owner["pid_start_time"].rsplit(":", 1)[1]
+        row.owner = owner
+        db.add(row)
+        db.commit()
+    results = store.reconcile()
+    assert results[0].outcome == "reattached"
+    assert [r.id for r in store.unfinished()] == [record.id]
+
+
 def test_reconcile_restoring_phase_becomes_needs_attention(store: OperationStore) -> None:
     record, _ = store.begin(kind="swap", target="k", interface="api", purpose="p", request={})
     with Session(get_engine(store.database_url)) as db:

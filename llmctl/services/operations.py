@@ -44,6 +44,8 @@ from sqlmodel import Session, select
 from typer import Exit as TyperExit
 
 from llmctl.db import OperationRecord, ensure_tables, get_engine, new_id
+from llmctl.telemetry.process import pid_start_time as _pid_start_time
+from llmctl.telemetry.process import same_start_time
 
 #: Environment variables used to hand an operation from a parent (the API)
 #: to the CLI child that actually executes it.
@@ -215,18 +217,6 @@ def fingerprint(request: Any) -> str:
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
-def _pid_start_time(pid: int) -> str | None:
-    """/proc start time (field 22 of stat) — the PID-reuse guard."""
-    try:
-        with open(f"/proc/{pid}/stat", "rb") as fh:
-            stat = fh.read()
-        # comm may contain spaces/parens; take everything after the last ')'.
-        rest = stat[stat.rindex(b")") + 2 :].split()
-        return rest[19].decode()
-    except (OSError, IndexError, ValueError):
-        return None
-
-
 def _proc_cmdline(pid: int) -> list[str]:
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as fh:
@@ -257,7 +247,7 @@ def _owner_alive(owner: dict[str, Any]) -> str:
     if start is None:
         return "dead"
     recorded = owner.get("pid_start_time")
-    if recorded and str(recorded) != start:
+    if recorded and not same_start_time(str(recorded), start):
         # Same number, different process: the original is gone and the PID
         # was recycled. Treating it as alive would attribute someone else's
         # process to our operation.
