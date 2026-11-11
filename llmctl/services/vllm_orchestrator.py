@@ -114,6 +114,14 @@ class RollbackReport:
         """``True`` when everything this launch changed was put back."""
         return self.env_restored is not False and not self.restart_failed
 
+    @property
+    def not_restored(self) -> list[str]:
+        """Labels for what the rollback could not put back."""
+        left = list(self.restart_failed)
+        if self.env_restored is False:
+            left.append(f"env file {self.env_path}" if self.env_path else "env file")
+        return left
+
 
 def attach_rollback(exc: BaseException, report: RollbackReport) -> None:
     """Carry ``report`` on ``exc``: a launch that raises returns no result."""

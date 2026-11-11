@@ -111,10 +111,7 @@ class PresetLaunch:
         else:
             rollback = result.rollback if result is not None else self.rollback
             if rollback is not None:
-                left += rollback.restart_failed
-                if rollback.env_restored is False:
-                    path = rollback.env_path
-                    left.append(f"env file {path}" if path else "env file")
+                left += rollback.not_restored
         if self.lanes is not None:
             left += self.lanes.restore_failed
         return left

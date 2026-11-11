@@ -36,7 +36,12 @@ from llmctl.services.session_swap import (
     resume_after_failed_swap,
     run_session_swap,
 )
-from llmctl.services.vllm_orchestrator import OrchestratorOptions, start_vllm_tp
+from llmctl.services.vllm_orchestrator import (
+    OrchestratorOptions,
+    RollbackReport,
+    rollback_of,
+    start_vllm_tp,
+)
 from llmctl.services.vllm_slots import cuda_devices, engine_config, place
 from llmctl.tui import _data
 from llmctl.tui._base import C_ERR, C_MUTED, C_OK, C_WARN, DataScreen, esc, tone_color
@@ -161,14 +166,27 @@ def _do_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
 
     started = time.monotonic()
 
+    raised: list[str] = []
+    rolled_back: list[RollbackReport] = []
+
     def _start() -> Any:
-        return start_vllm_tp(
-            target.key,
-            managed_unit=engine_config(settings, target),
-            defaults=settings.vllm.defaults,
-            fleet=settings.managed_units.fleet,
-            options=OrchestratorOptions(dry_run=False, gpus=cuda_devices(target)),
-        )
+        try:
+            return start_vllm_tp(
+                target.key,
+                managed_unit=engine_config(settings, target),
+                defaults=settings.vllm.defaults,
+                fleet=settings.managed_units.fleet,
+                options=OrchestratorOptions(dry_run=False, gpus=cuda_devices(target)),
+            )
+        except Exception as exc:
+            # A launch that raises has already stopped the lanes. Report it as
+            # a failed start so swap_to_vllm restarts them, the paused sessions
+            # are resumed below, and the message names the error.
+            raised.append(f"{type(exc).__name__}: {exc}")
+            report = rollback_of(exc)
+            if report is not None:
+                rolled_back.append(report)
+            return None
 
     # Every lane for a preset that takes every card; only those on its card otherwise.
     vllm, lanes = swap_to_vllm(state.lanes_in_the_way(target), _start, deps=deps)
@@ -176,7 +194,8 @@ def _do_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
         again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
         lanes.restored += again.restored
         lanes.restore_failed += again.restore_failed
-        return False, _failure(lanes.error, lanes)
+        rollback = rolled_back[0] if rolled_back else None
+        return False, _failure(raised[0] if raised else lanes.error, lanes, rollback)
     if getattr(vllm, "ok", False):
         record_load(target.key, time.monotonic() - started)
         message = f"{target.model} ready on vLLM"
@@ -189,18 +208,32 @@ def _do_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
     again = resume_after_failed_swap(paused, settings=settings, log=deps.log)
     lanes.restored += again.restored
     lanes.restore_failed += again.restore_failed
-    return False, _failure(reason, lanes)
+    rollback = getattr(vllm, "rollback", None)
+    return False, _failure(reason, lanes, rollback)
 
 
-def _failure(reason: str | None, lanes: Any) -> str:
+def _failure(reason: str | None, lanes: Any, rollback: Any = None) -> str:
+    """The failure message; ``rollback`` is the vLLM launch's own report, if any."""
     from llmctl.services.operations import note_restore_failure
 
+    if not isinstance(rollback, RollbackReport):
+        rollback = None
+    stopped = list(lanes.restore_failed)
+    if rollback is not None:
+        stopped += rollback.restart_failed
     text = esc(reason or "unknown error")
     if lanes.restored:
         text += f"\nStarted again: {esc(', '.join(lanes.restored))}"
-    if lanes.restore_failed:
-        note_restore_failure(lanes.restore_failed)
-        text += f"\nStill stopped: {esc(', '.join(lanes.restore_failed))} — start it by hand."
+    if stopped:
+        text += f"\nStill stopped: {esc(', '.join(stopped))} — start it by hand."
+    # An env file is not a service: it cannot be started, only written again.
+    env_lost = rollback is not None and rollback.env_restored is False
+    if env_lost:
+        text += "\nPrevious env NOT restored — relaunch a known-good preset."
+    recorded = list(lanes.restore_failed)
+    if rollback is not None:
+        recorded += rollback.not_restored
+    note_restore_failure(recorded)
     return text
 
 
