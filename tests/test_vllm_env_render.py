@@ -281,3 +281,20 @@ def test_line_break_in_a_value_cannot_add_a_variable() -> None:
     )
     assert _line(body, "VLLM_EXTRA") == "--x VLLM_MODEL=evil"
     assert sum(line.startswith("VLLM_MODEL=") for line in body.splitlines()) == 1
+
+
+def test_unicode_separators_in_a_value_are_kept() -> None:
+    """U+2028/U+2029 do not end a line for systemd, so they are not line breaks here."""
+    body = render_vllm_env(
+        VLLMLaunchSpec(
+            model="m",
+            served_name="s",
+            spec_config='{"model":"/m/a b"}',
+            extra_args=" --x\r\n--y\r--z\n",
+        )
+    )
+    lines = body.split("\n")
+    assert '{"model":"/m/a b"}' in [
+        line.split("=", 1)[1] for line in lines if line.startswith("VLLM_SPEC_CONFIG=")
+    ]
+    assert "VLLM_EXTRA= --x --y --z" in lines
