@@ -224,3 +224,77 @@ def test_default_hf_home_is_huggingfaces_own(
     body = render_vllm_env(VLLMLaunchSpec(model="m", served_name="s"))
     expected = f"HF_HOME={os.path.expanduser('~/.cache/huggingface')}"
     assert expected in body
+
+
+def _line(body: str, key: str) -> str:
+    return next(
+        line.split("=", 1)[1] for line in body.splitlines() if line.startswith(f"{key}=")
+    )
+
+
+def test_backslashes_are_doubled_for_systemd() -> None:
+    """systemd eats one backslash per pair in an EnvironmentFile value."""
+    body = render_vllm_env(
+        VLLMLaunchSpec(
+            model="m",
+            served_name="s",
+            spec_config={"pattern": "a\\d"},
+            extra_args="--stop \\n",
+        )
+    )
+    # json.dumps writes the one backslash as two; systemd halves them, so four.
+    assert _line(body, "VLLM_SPEC_CONFIG") == '{"pattern":"a\\\\\\\\d"}'
+    assert _line(body, "VLLM_EXTRA") == "--stop \\\\n"
+
+
+def test_leading_quote_is_escaped_for_systemd() -> None:
+    """systemd strips a quote that starts the value and joins what follows."""
+    body = render_vllm_env(
+        VLLMLaunchSpec(model="m", served_name="s", extra_args='"--a" --b')
+    )
+    assert _line(body, "VLLM_EXTRA") == '\\"--a" --b'
+
+
+def test_quote_after_leading_whitespace_is_escaped_for_systemd() -> None:
+    """systemd drops leading whitespace first, so the quote still starts the value."""
+    body = render_vllm_env(
+        VLLMLaunchSpec(
+            model="m", served_name="s", extra_args=" '--chat-template /tmp/a\\b'"
+        )
+    )
+    assert _line(body, "VLLM_EXTRA") == "\\'--chat-template /tmp/a\\\\b'"
+
+
+def test_plain_json_and_flags_are_unchanged() -> None:
+    body = render_vllm_env(
+        VLLMLaunchSpec(
+            model="m", served_name="s", spec_config={"a": 1}, extra_args="--x 1 --y"
+        )
+    )
+    assert _line(body, "VLLM_SPEC_CONFIG") == '{"a":1}'
+    assert _line(body, "VLLM_EXTRA") == "--x 1 --y"
+
+
+def test_line_break_in_a_value_cannot_add_a_variable() -> None:
+    body = render_vllm_env(
+        VLLMLaunchSpec(model="m", served_name="s", extra_args="--x\nVLLM_MODEL=evil")
+    )
+    assert _line(body, "VLLM_EXTRA") == "--x VLLM_MODEL=evil"
+    assert sum(line.startswith("VLLM_MODEL=") for line in body.splitlines()) == 1
+
+
+def test_unicode_separators_in_a_value_are_kept() -> None:
+    """U+2028/U+2029 do not end a line for systemd, so they are not line breaks here."""
+    body = render_vllm_env(
+        VLLMLaunchSpec(
+            model="m",
+            served_name="s",
+            spec_config='{"model":"/m/a b"}',
+            extra_args=" --x\r\n--y\r--z\n",
+        )
+    )
+    lines = body.split("\n")
+    assert '{"model":"/m/a b"}' in [
+        line.split("=", 1)[1] for line in lines if line.startswith("VLLM_SPEC_CONFIG=")
+    ]
+    assert "VLLM_EXTRA= --x --y --z" in lines
