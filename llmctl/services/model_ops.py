@@ -691,7 +691,7 @@ def plan_remove(
             model=model,
             can_purge=False,
             purge_summary=f"{whole[0]} is or contains a whole model root, not one "
-            "model, so llmctl will not delete it. Only the row is hidden.",
+            "model, so llmctl will not delete it. It can only hide the row.",
             purge_label="",
         )
     outside = [t for t in targets if not _inside(t, roots)]

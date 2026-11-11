@@ -599,3 +599,14 @@ def test_purge_refuses_a_target_that_contains_a_model_root(db, tmp_path) -> None
     plan = plan_remove(model, roots=[hub, snap], hub_cache=hub)
     assert not plan.can_purge
     assert "model root" in plan.purge_summary
+
+
+def test_refused_purge_of_a_model_root_does_not_claim_the_row_was_hidden(db, tmp_path) -> None:
+    """`--purge` prints this text and removes nothing, so it must not say "is hidden"."""
+    root = tmp_path / "models"
+    (root / "other-model").mkdir(parents=True)
+    model = _file_model(db, root, RuntimeName.VLLM)
+    plan = plan_remove(model, roots=[root], hub_cache=tmp_path / "hub")
+    assert not plan.can_purge
+    assert "row is hidden" not in plan.purge_summary
+    assert "can only hide the row" in plan.purge_summary
