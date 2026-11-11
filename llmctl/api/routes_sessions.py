@@ -128,7 +128,10 @@ def session_systemd_unit(
     """
     from llmctl.services.systemd import render_session_unit
 
-    session = SessionService(db, settings=settings).get_session(session_id)
+    try:
+        session = SessionService(db, settings=settings).get_session(session_id)
+    except AdoptError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if session is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
     try:
