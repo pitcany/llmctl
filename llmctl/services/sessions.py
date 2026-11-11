@@ -1271,7 +1271,30 @@ class SessionService:
             self.db.add(record)
             self.db.commit()
 
-        result = run_sync(adapter.start(plan, on_spawn=_on_spawn))
+        try:
+            result = run_sync(adapter.start(plan, on_spawn=_on_spawn))
+        except Exception as exc:
+            # Reconcile only fails a STARTING row whose recorded pid is dead.
+            # With no pid the row would stay STARTING forever, so fail it
+            # here. With a pid the child may be alive: leave it to reconcile.
+            self.db.rollback()
+            self.db.refresh(record)
+            if record.pid is None and record.status == SessionStatus.STARTING:
+                set_status(record, SessionStatus.FAILED, why="launch raised")
+                record.error = f"{type(exc).__name__}: {exc}"
+                record.updated_at = utcnow()
+                self.db.add(record)
+                self.db.commit()
+                log_event(
+                    self.db,
+                    EventLevel.ERROR,
+                    "session",
+                    f"Failed to start session {record.id}: {record.error}",
+                    session_id=record.id,
+                    model_id=record.model_id,
+                    data={"error": record.error},
+                )
+            raise
 
         # The readiness wait can take up to readiness_timeout_s, during which
         # a concurrent reconcile pass (gateway loop) may have already promoted
