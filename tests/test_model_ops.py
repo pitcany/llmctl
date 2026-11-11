@@ -583,3 +583,19 @@ def test_purge_of_a_catalog_link_into_the_hf_cache_keeps_the_blob(db, tmp_path) 
         model_ops._unlink_target(target)
     assert not link.is_symlink()
     assert blob.exists()
+
+
+def test_purge_refuses_a_target_that_contains_a_model_root(db, tmp_path) -> None:
+    """A snapshot that is itself a root widens to its repo folder, which holds the root."""
+    hub = tmp_path / "hub"
+    repo = hub / "models--org--M"
+    snap = repo / "snapshots" / "abc"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    other = repo / "snapshots" / "def"
+    other.mkdir()
+    (other / "config.json").write_text("{}")
+    model = _file_model(db, snap, RuntimeName.VLLM)
+    plan = plan_remove(model, roots=[hub, snap], hub_cache=hub)
+    assert not plan.can_purge
+    assert "model root" in plan.purge_summary

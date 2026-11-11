@@ -676,16 +676,22 @@ def plan_remove(
         else:
             targets = (repo_dir,) if repo_dir is not None else (candidate,)
 
-    # A row whose path is a model root (or the whole HF cache) would take every
-    # other model with it; purge only ever deletes something below a root.
+    # A row whose path is a model root (or the whole HF cache), or a folder
+    # that holds one, would take every other model with it; purge only ever
+    # deletes something strictly below every root.
     containers = {*roots, hub.resolve()}
-    whole = [t for t in targets if not t.is_symlink() and t.resolve() in containers]
+    whole = [
+        t
+        for t in targets
+        if not t.is_symlink()
+        and any(c == t.resolve() or c.is_relative_to(t.resolve()) for c in containers)
+    ]
     if whole:
         return RemovePlan(
             model=model,
             can_purge=False,
-            purge_summary=f"{whole[0]} is a whole model root, not one model, so "
-            "llmctl will not delete it. Only the row is hidden.",
+            purge_summary=f"{whole[0]} is or contains a whole model root, not one "
+            "model, so llmctl will not delete it. Only the row is hidden.",
             purge_label="",
         )
     outside = [t for t in targets if not _inside(t, roots)]
