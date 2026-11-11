@@ -528,11 +528,6 @@ class SchedulerService:
                 f"strata is not installed: {resolved} is not the python of a Strata checkout "
                 "(no serve/server.py beside its venv). Run `llmctl setup strata`."
             )
-        if runtime == RuntimeName.STRATA and _strata_server_for(resolved) is None:
-            refusals.append(
-                f"strata is not installed: {resolved} is not the python of a Strata checkout "
-                "(no serve/server.py beside its venv). Run `llmctl setup strata`."
-            )
 
     @staticmethod
     def _check_model_path(
