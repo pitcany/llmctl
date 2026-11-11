@@ -367,8 +367,11 @@ curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
 `GET /swap/jobs/{id}` returns 200 with the captured output, or 404 for an
 unknown id.
 
-Jobs are stored in the llmctl database and survive a restart of `llmctl serve`:
-the same job id keeps answering, with the output captured so far. Only one run
+Job records are stored in the llmctl database and survive a restart of
+`llmctl serve`: the same job id keeps answering, with the output captured so
+far. The swap itself is not resumed. A job whose `llmctl serve` process died is
+reported as interrupted; check `llmctl status` and the serving endpoint before
+you retry. Only one run
 job runs at a time. Output is not streamed: clients poll `GET /swap/jobs/{id}`
 until the job finishes.
 
@@ -397,8 +400,10 @@ Open the printed URL. The page is a browser front end for the swap API above:
 (top of the page) removes it from that browser. The page itself
 (`/ui`, `/ui/app.js`, `/ui/app.css`) loads without a token; it holds no data.
 
-Swap jobs survive a restart of `llmctl serve`, as with the API: reload the page
-and it picks the job up again.
+Swap job records survive a restart of `llmctl serve`. Reloading the page
+picks a job up again only while it is still running. A job whose owner died is
+not shown after a reload; an API client can still read it by job id
+(`GET /swap/jobs/{id}`).
 
 ---
 

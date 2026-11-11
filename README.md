@@ -589,6 +589,7 @@ See the user guide for the full schema.
 ## Test
 
 ```bash
+uv sync --extra dev   # once: installs pytest and ruff into .venv
 LLMCTL_PLUGINS=none .venv/bin/python -m pytest -q
 .venv/bin/ruff check .
 ```
