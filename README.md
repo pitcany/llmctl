@@ -353,7 +353,7 @@ own kind of lie.
 llmctl's core knows the engines, the GPUs, presets, sessions and systemd
 units. Anything tied to one machine's stack lives in a *plugin*: a package
 with an entry point in the `llmctl.plugins` group whose target is a
-`register(registry)` function. Four extension points:
+`register(registry)` function. Seven extension points:
 
 | Point | Used for |
 | --- | --- |
@@ -361,6 +361,9 @@ with an entry point in the `llmctl.plugins` group whose target is a
 | post-start check | a read-only verification once the launched model answers (an agent framework's provider URL, a WebUI pin) |
 | lane source | extra `llmctl run` rows: servers with their own start script and unit |
 | command | extra `llmctl` verbs |
+| doctor check | extra `llmctl doctor` findings |
+| status section | an extra block in `llmctl status` |
+| TUI screen | an extra screen in `llmctl tui` |
 
 `llmctl-stack` (in `packages/llmctl-stack/`) is the plugin for the `~/AI`
 stack: Harbor, Hermes, llm-router lanes and profiles, the model lab.
@@ -586,11 +589,11 @@ See the user guide for the full schema.
 ## Test
 
 ```bash
-cd ~/AI
-uv run pytest packages/llmctl/tests -q
-uv run ruff check packages/llmctl
+LLMCTL_PLUGINS=none .venv/bin/python -m pytest -q
+.venv/bin/ruff check .
 ```
 
-~770 tests, ~130–160s wall time. Tests use temp SQLite databases, fake
+~1,770 tests; about 2.5 minutes when the files are split into four parallel
+runs. Tests use temp SQLite databases, fake
 supervisors/probes, and `LLMCTL_CONFIG_DIR` isolation — no GPUs, no
 installed runtimes, and no running services are required.

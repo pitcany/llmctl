@@ -603,8 +603,6 @@ the gateway has its own `router.auth_token`.
 | `LLMCTL_SLOT_CODER_ENV_FILE`, `LLMCTL_SLOT_REASONER_ENV_FILE` | Per-slot env file overrides *(deprecated 2026-06-14 with the slot system)* |
 | `AI_HOME` | Used to resolve `$AI_HOME/services/<unit>.env` when no explicit path is set |
 | `HF_HOME` | HuggingFace cache (default `~/.cache/huggingface`) |
-| `LLMCTL_QUIET_DEPRECATION` | Set to `1` to silence the `gpu-models` shim's deprecation hint |
-| `LLMCTL_BIN` | Used by the `gpu-models` shim to locate `llmctl` (defaults to conda env's bin) |
 
 ### Env-file path resolution
 
