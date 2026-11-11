@@ -11,6 +11,7 @@ Bound to ``w`` from any screen — see :class:`MissionControlApp`.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from textual.app import ComposeResult
@@ -54,42 +55,59 @@ def _state_cell(status: str) -> str:
     return f"[{color}]{icon} {esc(status)}[/]"
 
 
-def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
-    """Perform the swap with terminal-silent deps. Returns ``(ok, message)``.
+def run_recorded[T](
+    key: str,
+    model: str,
+    work: Callable[[], T],
+    outcome: Callable[[T], tuple[bool, str]],
+) -> T:
+    """Run ``work`` under the GPU operation lock, as a recorded operation.
 
-    Shared by the Swap screen and the Presets screen's launch so both free
-    the lanes before vLLM takes the GPUs. The swap is recorded as a
-    persistent operation (§2B): phases marked by the swap services land on
-    the record, and the outcome — including a rollback that could not
-    restore — survives a TUI restart.
+    Every TUI path that swaps what holds the GPUs goes through here (§2B):
+    phases marked by the swap services land on the record, and the outcome,
+    including a rollback that could not restore, survives a TUI restart.
+    ``outcome`` turns the result into ``(ok, error message)`` for the record.
+    Raises :class:`~llmctl.services.op_lock.LockBusy` when another swap runs.
     """
     from llmctl.services import operations
     from llmctl.services.operations import OperationPhase
 
     settings = load_settings()
     db_url = getattr(settings, "database_url", None) or "sqlite:///:memory:"
-    with gpu_operation_lock(purpose=f"run {target.model}", interface="tui"):
+    with gpu_operation_lock(purpose=f"run {model}", interface="tui"):
         store = operations.OperationStore(db_url)
         record, _ = store.begin(
             kind="swap",
-            target=target.key,
+            target=key,
             interface="tui",
-            purpose=f"run {target.model}",
-            request={"key": target.key, "model": target.model},
+            purpose=f"run {model}",
+            request={"key": key, "model": model},
         )
         operations.bind_current(store, record.id or "")
         try:
-            ok, message = _do_swap(state, target)
+            result = work()
+            ok, message = outcome(result)
             if ok:
                 operations.finish_current(OperationPhase.COMPLETED)
             else:
                 operations.finish_current(OperationPhase.FAILED, error=message)
-            return ok, message
+            return result
         except BaseException as exc:  # record interruption, then let the worker report it
             operations.interrupt_current(f"{type(exc).__name__}: {exc}")
             raise
         finally:
             operations.clear_current()
+
+
+def run_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:
+    """Perform the swap with terminal-silent deps. Returns ``(ok, message)``.
+
+    Used by the Swap screen and the Models screen. The Presets screen's
+    launch calls :func:`run_recorded` itself, around the orchestrator.
+    """
+    return run_recorded(
+        target.key, target.model, lambda: _do_swap(state, target), lambda done: done
+    )
 
 
 def _do_swap(state: SwapState, target: SwapTarget) -> tuple[bool, str]:

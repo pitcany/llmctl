@@ -63,6 +63,45 @@ def _format_link_cell(view: PresetView) -> str:
     return f"[{color}]{glyph}[/] {esc(label)}"
 
 
+def launch_preset(
+    alias: str, settings: Any, options: OrchestratorOptions
+) -> OrchestratorResult:
+    """Start ``alias`` on the vLLM unit; blocking, for a worker thread."""
+
+    def _start() -> OrchestratorResult:
+        # Lanes (FreeToken, llama.cpp) hold GPUs vLLM needs: stop them
+        # first and restart them if the launch fails, like `llmctl run`.
+        active = gather_state(settings).active_lanes()
+        result, lanes = swap_to_vllm(
+            active,
+            lambda: start_vllm_tp(
+                alias,
+                managed_unit=settings.managed_units.vllm_engine,
+                defaults=settings.vllm.defaults,
+                fleet=settings.managed_units.fleet,
+                options=options,
+            ),
+            deps=quiet_deps(),
+        )
+        if result is None:
+            raise RuntimeError(f"{lanes.error}; vLLM not started")
+        return result  # type: ignore[return-value]
+
+    def _outcome(result: OrchestratorResult) -> tuple[bool, str]:
+        if result.ok:
+            return True, ""
+        if result.fleet_failed:
+            return False, f"fleet preflight failed: {', '.join(result.fleet_failed)}"
+        if result.restart is not None and result.restart.error:
+            return False, result.restart.error
+        return False, "vLLM did not become ready"
+
+    # Same GPU lock and operation record as the Swap screen and `llmctl run`.
+    from llmctl.tui.screens_swap import run_recorded
+
+    return run_recorded(alias, alias, _start, _outcome)
+
+
 class PresetsScreen(DataScreen):
     """Live preset table with one-key launch into the TP fleet unit."""
 
@@ -210,27 +249,11 @@ class PresetsScreen(DataScreen):
         options = OrchestratorOptions(dry_run=False)
         label = f"vLLM TP: {alias}"
 
-        def _run() -> OrchestratorResult:
-            # Lanes (FreeToken, llama.cpp) hold GPUs vLLM needs: stop them
-            # first and restart them if the launch fails, like `llmctl run`.
-            active = gather_state(settings).active_lanes()
-            result, lanes = swap_to_vllm(
-                active,
-                lambda: start_vllm_tp(
-                    alias,
-                    managed_unit=settings.managed_units.vllm_engine,
-                    defaults=settings.vllm.defaults,
-                    fleet=settings.managed_units.fleet,
-                    options=options,
-                ),
-                deps=quiet_deps(),
-            )
-            if result is None:
-                raise RuntimeError(f"{lanes.error}; vLLM not started")
-            return result  # type: ignore[return-value]
-
         self.app.notify(f"Starting {label}...", title="Launch")
-        self.run_action_worker(_run, lambda res: self._after_launch(label, res))
+        self.run_action_worker(
+            lambda: launch_preset(alias, settings, options),
+            lambda res: self._after_launch(label, res),
+        )
 
     def action_add_preset(self) -> None:
         """Open the add-preset form and persist on submit."""
