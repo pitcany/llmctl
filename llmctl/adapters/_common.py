@@ -331,7 +331,7 @@ class ProcessControlMixin:
                 state=HealthState.OK,
                 message=f"{self.display_name} process is not running.",
             )
-        stopped = self.supervisor.terminate(session.pid)
+        stopped = self.supervisor.terminate(session.pid, start_time=session.pid_start_time)
         return AdapterStatus(
             runtime=self.runtime,
             state=HealthState.OK if stopped else HealthState.DEGRADED,
