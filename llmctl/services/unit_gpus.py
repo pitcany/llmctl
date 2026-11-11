@@ -79,6 +79,26 @@ def _systemctl_main_pid(unit_name: str, *, run: RunFn, user: bool = False) -> in
     return pid or None
 
 
+def _system_manager_knows(unit_name: str, *, run: RunFn) -> bool:
+    """``True`` when the system manager has the unit loaded, running or not.
+
+    The same ``LoadState`` test as ``SystemctlClient.is_user_unit``; an
+    unreadable state counts as unknown, as it does there.
+    """
+    try:
+        proc = run(
+            _systemctl_show(unit_name, "LoadState", user=False),
+            capture_output=True,
+            text=True,
+            timeout=_SYSTEMCTL_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    state = (proc.stdout or "").strip()
+    return bool(state) and state != "not-found"
+
+
 def _read_proc_environ(pid: int) -> str | None:
     """Return the raw, NUL-delimited environ of ``pid``, or ``None`` on failure."""
     try:
@@ -109,11 +129,14 @@ def unit_gpu_ids(
     """
     if not unit_name:
         return []
-    # System scope first, as SystemctlClient.is_user_unit resolves it; a unit
-    # the system manager is not running is then asked of the user manager.
+    # System scope first, as SystemctlClient.is_user_unit resolves it: only a
+    # name the system manager does not know is asked of the user manager. A
+    # stopped system unit must not report a same-name user unit's GPUs.
     user = False
     pid = _systemctl_main_pid(unit_name, run=run)
     if pid is None:
+        if _system_manager_knows(unit_name, run=run):
+            return []
         user = True
         pid = _systemctl_main_pid(unit_name, run=run, user=True)
     if pid is None:

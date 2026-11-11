@@ -36,12 +36,20 @@ def test_gather_state_asks_for_the_vllm_unit_in_its_configured_scope() -> None:
     assert state.vllm_active is True
 
 
-def _systemd(*, system_pid: str, user_pid: str, calls: list[list[str]]):
+def _systemd(
+    *,
+    system_pid: str,
+    user_pid: str,
+    calls: list[list[str]],
+    system_load_state: str = "not-found\n",
+):
     def run(argv, **_kwargs):
         calls.append(list(argv))
-        return SimpleNamespace(
-            stdout=user_pid if "--user" in argv else system_pid, returncode=0
-        )
+        if "--property=LoadState" in argv:
+            stdout = "loaded\n" if "--user" in argv else system_load_state
+        else:
+            stdout = user_pid if "--user" in argv else system_pid
+        return SimpleNamespace(stdout=stdout, returncode=0)
 
     return run
 
@@ -82,3 +90,17 @@ def test_unit_gpu_ids_reads_the_user_units_environment_file(tmp_path) -> None:
         )
 
     assert unit_gpu_ids("llama.service", run=run, read_environ=lambda pid: None) == [1]
+
+
+def test_unit_gpu_ids_stopped_system_unit_does_not_borrow_a_user_units_gpus() -> None:
+    """System scope wins when both managers know the name (is_user_unit)."""
+    calls: list[list[str]] = []
+    ids = unit_gpu_ids(
+        "vllm-tp.service",
+        run=_systemd(
+            system_pid="0\n", user_pid="4242\n", calls=calls, system_load_state="loaded\n"
+        ),
+        read_environ=lambda pid: "CUDA_VISIBLE_DEVICES=1\0" if pid == 4242 else None,
+    )
+    assert ids == []
+    assert not any("--user" in argv for argv in calls)
