@@ -73,6 +73,22 @@ class VLLMLaunchSpec(BaseModel):
     )
 
 
+def _env_value(value: str) -> str:
+    """Escape a free-form value for a systemd ``EnvironmentFile`` line.
+
+    systemd consumes a backslash as an escape character and strips a
+    quote that starts the value, so ``\\d`` reaches the launcher as
+    ``d`` and ``"--a" --b`` as ``--a--b``. Doubling each backslash and
+    escaping a leading quote makes the launcher see the text unchanged.
+    Quotes inside the value (plain JSON) are left alone: systemd keeps
+    them. A value is one line, so line breaks become spaces.
+    """
+    text = " ".join(value.splitlines()).replace("\\", "\\\\")
+    if text[:1] in ("'", '"'):
+        text = "\\" + text
+    return text
+
+
 def render_vllm_env(spec: VLLMLaunchSpec) -> str:
     """Return the ``services/vllm-tp.env`` body for ``spec``.
 
@@ -150,9 +166,9 @@ def render_vllm_env(spec: VLLMLaunchSpec) -> str:
             spec_str = json.dumps(spec.spec_config, separators=(",", ":"))
         else:
             spec_str = str(spec.spec_config)
-        lines.append(f"VLLM_SPEC_CONFIG={spec_str}")
+        lines.append(f"VLLM_SPEC_CONFIG={_env_value(spec_str)}")
 
     if spec.extra_args:
-        lines.append(f"VLLM_EXTRA={spec.extra_args}")
+        lines.append(f"VLLM_EXTRA={_env_value(spec.extra_args)}")
 
     return "\n".join(lines) + "\n"
