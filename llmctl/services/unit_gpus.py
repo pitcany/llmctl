@@ -49,7 +49,13 @@ def parse_cuda_visible_devices(raw: str) -> list[int]:
     return indices
 
 
-def _systemctl_main_pid(unit_name: str, *, run: RunFn) -> int | None:
+def _systemctl_show(unit_name: str, prop: str, *, user: bool) -> list[str]:
+    """Build the ``systemctl show`` argv for one property in one manager."""
+    scope = ["--user"] if user else []
+    return ["systemctl", *scope, "show", unit_name, f"--property={prop}", "--value"]
+
+
+def _systemctl_main_pid(unit_name: str, *, run: RunFn, user: bool = False) -> int | None:
     """Return a running unit's ``MainPID``, or ``None`` if not resolvable.
 
     systemd reports ``MainPID=0`` for a unit that isn't running; that maps to
@@ -58,7 +64,7 @@ def _systemctl_main_pid(unit_name: str, *, run: RunFn) -> int | None:
     """
     try:
         proc = run(
-            ["systemctl", "show", unit_name, "--property=MainPID", "--value"],
+            _systemctl_show(unit_name, "MainPID", user=user),
             capture_output=True,
             text=True,
             timeout=_SYSTEMCTL_TIMEOUT_S,
@@ -71,6 +77,26 @@ def _systemctl_main_pid(unit_name: str, *, run: RunFn) -> int | None:
         return None
     pid = int(raw)
     return pid or None
+
+
+def _system_manager_knows(unit_name: str, *, run: RunFn) -> bool:
+    """``True`` when the system manager has the unit loaded, running or not.
+
+    The same ``LoadState`` test as ``SystemctlClient.is_user_unit``; an
+    unreadable state counts as unknown, as it does there.
+    """
+    try:
+        proc = run(
+            _systemctl_show(unit_name, "LoadState", user=False),
+            capture_output=True,
+            text=True,
+            timeout=_SYSTEMCTL_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    state = (proc.stdout or "").strip()
+    return bool(state) and state != "not-found"
 
 
 def _read_proc_environ(pid: int) -> str | None:
@@ -103,7 +129,16 @@ def unit_gpu_ids(
     """
     if not unit_name:
         return []
+    # System scope first, as SystemctlClient.is_user_unit resolves it: only a
+    # name the system manager does not know is asked of the user manager. A
+    # stopped system unit must not report a same-name user unit's GPUs.
+    user = False
     pid = _systemctl_main_pid(unit_name, run=run)
+    if pid is None:
+        if _system_manager_knows(unit_name, run=run):
+            return []
+        user = True
+        pid = _systemctl_main_pid(unit_name, run=run, user=True)
     if pid is None:
         return []
     raw_environ = read_environ(pid)
@@ -112,7 +147,7 @@ def unit_gpu_ids(
         # llmctl. Fall back to the unit's EnvironmentFile (which llmctl
         # itself writes for managed units) so adopted sessions don't
         # silently show "no GPUs" on the common production posture.
-        return _gpu_ids_from_environment_file(unit_name, run=run)
+        return _gpu_ids_from_environment_file(unit_name, run=run, user=user)
     for entry in raw_environ.split("\0"):
         key, sep, value = entry.partition("=")
         if sep and key == _CUDA_VISIBLE_DEVICES:
@@ -120,11 +155,13 @@ def unit_gpu_ids(
     return []
 
 
-def _gpu_ids_from_environment_file(unit_name: str, *, run: RunFn) -> list[int]:
+def _gpu_ids_from_environment_file(
+    unit_name: str, *, run: RunFn, user: bool = False
+) -> list[int]:
     """Read ``CUDA_VISIBLE_DEVICES`` from the unit's EnvironmentFile(s)."""
     try:
         proc = run(
-            ["systemctl", "show", unit_name, "--property=EnvironmentFiles", "--value"],
+            _systemctl_show(unit_name, "EnvironmentFiles", user=user),
             capture_output=True,
             text=True,
             timeout=_SYSTEMCTL_TIMEOUT_S,

@@ -281,7 +281,24 @@ def model_add(
     # carried the field, but only ``edit`` exposed it, so a scripted restore
     # recreated a row and silently dropped the operational context attached to it.
     if source is not None:
-        _add_from_source(source, backend, name, yes=yes or non_interactive)
+        if path is not None:
+            raise typer.BadParameter(
+                "--path cannot be combined with SOURCE; SOURCE already names the model."
+            )
+        overrides: dict[str, Any] = {}
+        if quantization is not None:
+            overrides["quantization"] = quantization
+        if max_context is not None:
+            overrides["max_context"] = max_context
+        if estimated_vram is not None:
+            overrides["estimated_vram_gb"] = estimated_vram
+        if notes is not None:
+            overrides["notes"] = notes
+        if tags is not None:
+            overrides["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+        _add_from_source(
+            source, backend, name, yes=yes or non_interactive, overrides=overrides
+        )
         return
     if non_interactive:
         if not name or not backend:
@@ -338,8 +355,19 @@ def model_add(
     console.print(f"[green]Registered model[/green] {model.name} ({model.id})")
 
 
-def _add_from_source(source: str, engine: str | None, name: str | None, *, yes: bool) -> None:
-    """``model add SOURCE``: show the plan, confirm a download, run it."""
+def _add_from_source(
+    source: str,
+    engine: str | None,
+    name: str | None,
+    *,
+    yes: bool,
+    overrides: dict[str, Any] | None = None,
+) -> None:
+    """``model add SOURCE``: show the plan, confirm a download, run it.
+
+    ``overrides`` are the metadata flags given on the command line; they are
+    applied to the new record, on top of what the download discovered.
+    """
     from llmctl.services.model_ops import ModelOps, ModelOpsError, human_size, plan_add
 
     try:
@@ -362,7 +390,9 @@ def _add_from_source(source: str, engine: str | None, name: str | None, *, yes: 
         except ModelOpsError as exc:
             err_console.print(f"[red]{escape(str(exc))}[/red]")
             raise typer.Exit(code=1) from exc
-    model = result.model
+        model = result.model
+        if overrides and model.id is not None:
+            model = RegistryService(db).update_model(model.id, ModelUpdate(**overrides)) or model
     console.print(
         f"[green]Added[/green] {escape(model.name)} ({model.runtime.value}, {model.id})"
     )
@@ -982,12 +1012,13 @@ def import_registry_cmd(
             key = (model.runtime.value, model.source or model.name)
             if key in existing_models:
                 continue
-            reg.add_model(
+            created = reg.add_model(
                 ModelCreate(
                     name=model.name,
                     runtime=model.runtime,
                     source=model.source,
                     path=model.path,
+                    host=model.host,
                     format=model.format,
                     quantization=model.quantization,
                     estimated_vram_gb=model.estimated_vram_gb,
@@ -999,6 +1030,10 @@ def import_registry_cmd(
                     metadata=dict(model.metadata),
                 )
             )
+            if not model.active and created.id is not None:
+                # ModelCreate has no ``active``; a retired model must not come
+                # back as active after a restore.
+                reg.update_model(created.id, ModelUpdate(active=False))
             added_models += 1
         # Snapshot the existing profile names ONCE rather than calling
         # get_by_name() per bundle entry — that helper falls back to

@@ -367,8 +367,14 @@ curl -X POST -H "$AUTH" -H 'Content-Type: application/json' \
 `GET /swap/jobs/{id}` returns 200 with the captured output, or 404 for an
 unknown id.
 
-Jobs live in memory and are lost when `llmctl serve` restarts. Only one run job
-runs at a time. Output is not streamed: clients poll `GET /swap/jobs/{id}`
+Job records are stored in the llmctl database and survive a restart of
+`llmctl serve`: the same job id keeps answering, with the output captured so
+far. The new server does not resume the swap. If the swap's own process outlived
+`llmctl serve`, the job is still running and is reported as running. If that
+process is gone, the job is reported as `interrupted`, or as `needs_attention`
+when it died during a rollback; check `llmctl status` and the serving endpoint
+before you retry. Only one run
+job runs at a time. Output is not streamed: clients poll `GET /swap/jobs/{id}`
 until the job finishes.
 
 ### Web dashboard
@@ -396,7 +402,10 @@ Open the printed URL. The page is a browser front end for the swap API above:
 (top of the page) removes it from that browser. The page itself
 (`/ui`, `/ui/app.js`, `/ui/app.css`) loads without a token; it holds no data.
 
-Swap jobs are lost when `llmctl serve` restarts, as with the API.
+Swap job records survive a restart of `llmctl serve`. Reloading the page
+picks a job up again only while it is still running. A job whose owner died is
+not shown after a reload; an API client can still read it by job id
+(`GET /swap/jobs/{id}`).
 
 ---
 
@@ -601,8 +610,6 @@ the gateway has its own `router.auth_token`.
 | `LLMCTL_SLOT_CODER_ENV_FILE`, `LLMCTL_SLOT_REASONER_ENV_FILE` | Per-slot env file overrides *(deprecated 2026-06-14 with the slot system)* |
 | `AI_HOME` | Used to resolve `$AI_HOME/services/<unit>.env` when no explicit path is set |
 | `HF_HOME` | HuggingFace cache (default `~/.cache/huggingface`) |
-| `LLMCTL_QUIET_DEPRECATION` | Set to `1` to silence the `gpu-models` shim's deprecation hint |
-| `LLMCTL_BIN` | Used by the `gpu-models` shim to locate `llmctl` (defaults to conda env's bin) |
 
 ### Env-file path resolution
 

@@ -1269,18 +1269,94 @@ class SessionService:
             )
             return record_to_session(record)
 
+        # What the adapter reported it spawned, whether or not the row has it.
+        spawned: list[tuple[int, str | None]] = []
+        saved: set[int] = set()  # pids whose commit went through
+
         def _on_spawn(pid: int, log_path: str | None) -> None:
             # Persist the pid BEFORE any readiness wait: if this process is
             # interrupted mid-wait (Ctrl-C, request timeout), reconcile can
             # still find and stop the child instead of orphaning it on a GPU.
+            spawned.append((pid, log_path))
             record.pid = pid
             record.pid_start_time = pid_start_time(pid)
             record.log_path = log_path
             record.updated_at = utcnow()
             self.db.add(record)
             self.db.commit()
+            saved.add(pid)
 
-        result = run_sync(adapter.start(plan, on_spawn=_on_spawn))
+        try:
+            result = run_sync(adapter.start(plan, on_spawn=_on_spawn))
+        except BaseException as exc:
+            # BaseException: Ctrl-C during a pre-spawn check must not leave
+            # the row in STARTING either.
+            # Reconcile only fails a STARTING row whose recorded pid is dead.
+            # With no child the row would stay STARTING forever, so fail it
+            # here. With a child that may be alive, leave it to reconcile.
+            self.db.rollback()
+            self.db.refresh(record)
+            child_possible = record.pid is not None
+            orphan: int | None = None
+            if spawned and not child_possible and spawned[-1][0] not in saved:
+                # The pid commit in _on_spawn failed and the rollback dropped
+                # it, but the child runs. Record it again; if that fails too,
+                # stop the child rather than orphan it on a GPU. (A pid that
+                # was saved and is gone now was cleared by reconcile: the
+                # child is dead and its pid may belong to another process.)
+                pid, log_path = spawned[-1]
+                if record.status == SessionStatus.STARTING:
+                    try:
+                        record.pid = pid
+                        record.log_path = log_path
+                        record.updated_at = utcnow()
+                        self.db.add(record)
+                        self.db.commit()
+                        child_possible = True
+                    except Exception:
+                        self.db.rollback()
+                if not child_possible:
+                    try:
+                        stopped = self.router.supervisor.terminate(pid)
+                    except Exception:
+                        stopped = False
+                    if not stopped:
+                        # Nothing tracks this child now: the error is the
+                        # only place left that can name it.
+                        orphan = pid
+                        note = (
+                            f"child pid {pid} could not be recorded or stopped; "
+                            f"stop it by hand: kill {pid}"
+                        )
+                        exc.add_note(note)
+                        log.error("session %s: %s", record.id, note)
+            if not child_possible:
+                try:
+                    self.db.refresh(record)
+                    if record.status == SessionStatus.STARTING:
+                        set_status(record, SessionStatus.FAILED, why="launch raised")
+                        record.error = f"{type(exc).__name__}: {exc}".rstrip(": ")
+                        if orphan is not None:
+                            record.error += (
+                                f" (child pid {orphan} could not be recorded or "
+                                f"stopped; stop it by hand: kill {orphan})"
+                            )
+                        record.updated_at = utcnow()
+                        self.db.add(record)
+                        self.db.commit()
+                        log_event(
+                            self.db,
+                            EventLevel.ERROR,
+                            "session",
+                            f"Failed to start session {record.id}: {record.error}",
+                            session_id=record.id,
+                            model_id=record.model_id,
+                            data={"error": record.error},
+                        )
+                except Exception:
+                    # The launch error is the one to report, not this one.
+                    self.db.rollback()
+            raise
 
         # The readiness wait can take up to readiness_timeout_s, during which
         # a concurrent reconcile pass (gateway loop) may have already promoted

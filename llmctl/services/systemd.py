@@ -348,10 +348,22 @@ def install_unit(
 
     messages: list[str] = []
     enabled = False
+    written = False
     try:
         if unit.user:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(unit.content, encoding="utf-8")
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(unit.content, encoding="utf-8")
+            except OSError as exc:
+                # Not the `sudo`/`systemctl` lookups handled below.
+                return InstallReport(
+                    unit_path=str(path),
+                    actions=actions,
+                    written=False,
+                    enabled=False,
+                    dry_run=False,
+                    messages=[f"could not write {path}: {exc}"],
+                )
         else:
             # /etc/systemd/system is root's; write through sudo like the
             # start/stop/restart calls the unit will later get.
@@ -362,6 +374,7 @@ def install_unit(
                 capture_output=True,
                 text=True,
             )
+        written = True
         subprocess.run(
             [*systemctl, "daemon-reload"], check=True, capture_output=True, text=True
         )
@@ -375,16 +388,22 @@ def install_unit(
             enabled = True
         messages.append(f"Installed {unit.name} ({'enabled' if enabled else 'written'}).")
     except FileNotFoundError:
-        messages.append(
-            "systemctl not found; wrote the unit file but could not reload/enable it."
-        )
+        if written:
+            messages.append(
+                "systemctl not found; wrote the unit file but could not reload/enable it."
+            )
+        else:
+            messages.append(f"sudo not found; could not write {path}.")
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or "").strip() or str(exc)
-        messages.append(f"systemctl failed: {detail}")
+        if written:
+            messages.append(f"systemctl failed: {detail}")
+        else:
+            messages.append(f"could not write {path}: {detail}")
     return InstallReport(
         unit_path=str(path),
         actions=actions,
-        written=True,
+        written=written,
         enabled=enabled,
         dry_run=False,
         messages=messages,
