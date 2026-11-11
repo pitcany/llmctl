@@ -92,6 +92,19 @@ def pid_start_time(pid: int | None) -> str | None:
     return f"{boot}:{ticks}" if boot else ticks
 
 
+def same_start_time(recorded: str, current: str) -> bool:
+    """Compare two :func:`pid_start_time` values.
+
+    A value without a boot id was written by a version that stored the ticks
+    alone (operation owners before the boot id was added). Such a record is
+    compared on the ticks, so an operation that is still running across the
+    upgrade is not taken for a recycled pid.
+    """
+    if ":" not in recorded:
+        return recorded == current.rpartition(":")[2]
+    return recorded == current
+
+
 def is_same_process(pid: int | None, start_time: str | None) -> bool:
     """Return False only when ``pid`` now provably belongs to another process.
 
@@ -103,7 +116,7 @@ def is_same_process(pid: int | None, start_time: str | None) -> bool:
     if not pid or start_time is None:
         return True
     current = pid_start_time(pid)
-    return current is None or current == start_time
+    return current is None or same_start_time(start_time, current)
 
 
 @dataclass(slots=True)
