@@ -13,5 +13,6 @@ def test_guide_swap_section():
     text = (ROOT / "docs/USER-GUIDE.md").read_text()
     section = text.split("### HTTP API: swap")[1].split("\n## ")[0]
     assert section.count("curl ") >= 4
-    assert "lost when" in section and "poll" in section
+    assert "survive a restart" in section and "poll" in section
+    assert "lost when" not in section
     assert "Bearer" in section
