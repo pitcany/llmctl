@@ -68,11 +68,13 @@ def _format_link_cell(view: PresetView) -> str:
 class PresetLaunch:
     """Outcome of :func:`launch_preset`.
 
-    ``result`` is None when a lane refused to stop, so vLLM was never started.
+    ``result`` is None when a lane refused to stop, so vLLM was never started,
+    or when the launch raised (``error`` then holds why).
     """
 
     result: OrchestratorResult | None
     lanes: LaneSwapResult | None = None
+    error: str = ""
 
     @property
     def ok(self) -> bool:
@@ -83,6 +85,8 @@ class PresetLaunch:
         """Why the launch failed ("" when it did not)."""
         result = self.result
         if result is None:
+            if self.error:
+                return self.error
             error = self.lanes.error if self.lanes is not None else None
             return f"{error or 'a lane could not be stopped'}; vLLM not started"
         if result.ok:
@@ -114,15 +118,24 @@ def launch_preset(alias: str, settings: Any, options: OrchestratorOptions) -> Pr
     """Start ``alias`` on the vLLM unit; blocking, for a worker thread."""
     from llmctl.services.operations import OperationPhase, mark_phase, note_restore_failure
 
-    def _launch_vllm() -> OrchestratorResult:
+    raised: list[str] = []
+
+    def _launch_vllm() -> OrchestratorResult | None:
         mark_phase(OperationPhase.LOADING)
-        return start_vllm_tp(
-            alias,
-            managed_unit=settings.managed_units.vllm_engine,
-            defaults=settings.vllm.defaults,
-            fleet=settings.managed_units.fleet,
-            options=options,
-        )
+        try:
+            return start_vllm_tp(
+                alias,
+                managed_unit=settings.managed_units.vllm_engine,
+                defaults=settings.vllm.defaults,
+                fleet=settings.managed_units.fleet,
+                options=options,
+            )
+        except Exception as exc:
+            # A preset whose weights are gone raises after the lanes were
+            # stopped. Report it as a failed start so swap_to_vllm restarts
+            # them and the record names the error and what stayed down.
+            raised.append(f"{type(exc).__name__}: {exc}")
+            return None
 
     def _start() -> PresetLaunch:
         # Lanes (FreeToken, llama.cpp) hold GPUs vLLM needs: stop them
@@ -131,7 +144,7 @@ def launch_preset(alias: str, settings: Any, options: OrchestratorOptions) -> Pr
         if active:
             mark_phase(OperationPhase.STOPPING)
         result, lanes = swap_to_vllm(active, _launch_vllm, deps=quiet_deps())
-        return PresetLaunch(result, lanes)  # type: ignore[arg-type]
+        return PresetLaunch(result, lanes, "".join(raised))  # type: ignore[arg-type]
 
     def _outcome(launch: PresetLaunch) -> tuple[bool, str]:
         # Before the record is closed: a failure with something left down is

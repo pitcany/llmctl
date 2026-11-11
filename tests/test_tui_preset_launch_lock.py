@@ -192,3 +192,57 @@ def test_refused_lane_stop_notification_says_vllm_was_not_started() -> None:
     assert "Started again: b.service" in message
     assert "Still stopped: c.service" in message
     assert options["severity"] == "error"
+
+
+# --- A launch that raises (a preset whose weights are gone) ----------------
+
+
+def _launch_that_raises(monkeypatch, seen: dict, lanes: LaneSwapResult):
+    """Run the real ``swap_to_vllm`` contract: a failed start restores the lanes."""
+
+    def _swap(active, start, deps):
+        seen["operation_id"] = operations.current_operation_id()
+        result = start()
+        seen["restored"] = not getattr(result, "ok", False)
+        return result, lanes
+
+    def _start(alias, **kwargs):
+        raise FileNotFoundError("preset model path /models/gone is missing")
+
+    monkeypatch.setattr(screens_presets, "swap_to_vllm", _swap)
+    monkeypatch.setattr(screens_presets, "start_vllm_tp", _start)
+    launch = screens_presets.launch_preset(
+        "ornith-35b", load_settings(), OrchestratorOptions(dry_run=False)
+    )
+    return launch, _record_for(seen)
+
+
+def test_launch_that_raises_restores_the_lanes_and_is_recorded_as_failed(
+    monkeypatch, seen
+) -> None:
+    lanes = LaneSwapResult(ok=False, restored=["freetoken.service"])
+    launch, record = _launch_that_raises(monkeypatch, seen, lanes)
+    assert seen["restored"] is True  # swap_to_vllm saw a failed start, not an exception
+    assert not launch.ok
+    assert "/models/gone is missing" in launch.reason
+    assert record.phase == operations.OperationPhase.FAILED.value
+    assert "/models/gone is missing" in record.error
+
+
+def test_launch_that_raises_records_the_lane_that_stayed_down(monkeypatch, seen) -> None:
+    lanes = LaneSwapResult(ok=False, restore_failed=["freetoken.service"])
+    launch, record = _launch_that_raises(monkeypatch, seen, lanes)
+    assert launch.not_restored == ["freetoken.service"]
+    assert record.phase == operations.OperationPhase.NEEDS_ATTENTION.value
+    assert record.recovery["not_restored"] == ["freetoken.service"]
+    assert "/models/gone is missing" in record.error
+
+
+def test_notification_for_a_launch_that_raised_gives_the_error() -> None:
+    lanes = LaneSwapResult(ok=False, restored=["b.service"], restore_failed=["c.service"])
+    launch = screens_presets.PresetLaunch(None, lanes, error="FileNotFoundError: gone")
+    message, options = _notify(launch)
+    assert "FileNotFoundError: gone" in message
+    assert "vLLM not started" not in message
+    assert "Still stopped: c.service" in message
+    assert options["severity"] == "error"
