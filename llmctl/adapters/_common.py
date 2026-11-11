@@ -27,7 +27,7 @@ from llmctl.config import RuntimeConfig
 from llmctl.db import RuntimeName, SessionStatus, utcnow
 from llmctl.discovery import discover_filesystem_models
 from llmctl.schemas import AdapterStatus, HealthState, LaunchPlan, Model, Session
-from llmctl.telemetry.process import ProcessSupervisor
+from llmctl.telemetry.process import ProcessSupervisor, is_same_process
 
 ClientFactory = Callable[[], httpx.AsyncClient]
 
@@ -261,6 +261,7 @@ class ProcessControlMixin:
             runtime=self.runtime,
             status=SessionStatus.RUNNING,
             pid=result.pid,
+            pid_start_time=result.pid_start_time,
             endpoint_url=plan.endpoint_url,
             log_path=result.log_path,
             gpu_ids=plan.gpu_ids,
@@ -270,6 +271,19 @@ class ProcessControlMixin:
         if plan.endpoint_url and self.readiness_gated:
             session = await self._await_readiness(session, plan)
         return session
+
+    def _process_alive(self, session: Session) -> bool:
+        """True while ``session.pid`` is alive and still the process we started.
+
+        A pid that is alive but has a different ``/proc`` start time was
+        reused by an unrelated process: ours is gone, and it must not be
+        signalled.
+        """
+        return (
+            bool(session.pid)
+            and self.supervisor.is_running(session.pid)
+            and is_same_process(session.pid, session.pid_start_time)
+        )
 
     async def _await_readiness(self, session: Session, plan: LaunchPlan) -> Session:
         """Wait for the launched endpoint to answer before declaring RUNNING.
@@ -285,7 +299,7 @@ class ProcessControlMixin:
         deadline = time.monotonic() + max(self.config.readiness_timeout_s, 0.0)
         interval = max(self.config.readiness_poll_interval_s, 0.05)
         while True:
-            if session.pid and not self.supervisor.is_running(session.pid):
+            if session.pid and not self._process_alive(session):
                 session.status = SessionStatus.FAILED
                 session.error = self._startup_failure_message(session)
                 session.started_at = None
@@ -311,7 +325,7 @@ class ProcessControlMixin:
 
     async def stop(self, session: Session) -> AdapterStatus:
         """Terminate the supervised process for ``session``."""
-        if not session.pid or not self.supervisor.is_running(session.pid):
+        if not self._process_alive(session):
             return AdapterStatus(
                 runtime=self.runtime,
                 state=HealthState.OK,
@@ -336,7 +350,7 @@ class ProcessControlMixin:
                 state=HealthState.UNKNOWN,
                 message=f"{self.display_name} has no associated process.",
             )
-        running = self.supervisor.is_running(session.pid)
+        running = self._process_alive(session)
         endpoint = session.endpoint_url
         http_ok = await self._endpoint_alive(endpoint) if endpoint else None
         if http_ok:

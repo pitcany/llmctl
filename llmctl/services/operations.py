@@ -44,6 +44,7 @@ from sqlmodel import Session, select
 from typer import Exit as TyperExit
 
 from llmctl.db import OperationRecord, ensure_tables, get_engine, new_id
+from llmctl.telemetry.process import pid_start_time as _pid_start_time
 
 #: Environment variables used to hand an operation from a parent (the API)
 #: to the CLI child that actually executes it.
@@ -213,18 +214,6 @@ def fingerprint(request: Any) -> str:
     """Stable hash of the request payload, for idempotency comparison."""
     blob = json.dumps(request, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:16]
-
-
-def _pid_start_time(pid: int) -> str | None:
-    """/proc start time (field 22 of stat) — the PID-reuse guard."""
-    try:
-        with open(f"/proc/{pid}/stat", "rb") as fh:
-            stat = fh.read()
-        # comm may contain spaces/parens; take everything after the last ')'.
-        rest = stat[stat.rindex(b")") + 2 :].split()
-        return rest[19].decode()
-    except (OSError, IndexError, ValueError):
-        return None
 
 
 def _proc_cmdline(pid: int) -> list[str]:

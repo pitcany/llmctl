@@ -47,6 +47,7 @@ from llmctl.services.op_lock import gpu_operation_lock
 from llmctl.services.router import RuntimeRouter
 from llmctl.services.scheduler import SchedulerService
 from llmctl.services.unit_gpus import unit_gpu_ids
+from llmctl.telemetry.process import is_same_process, pid_start_time
 
 log = logging.getLogger(__name__)
 
@@ -177,6 +178,7 @@ def record_to_session(record: SessionRecord) -> Session:
         status=record.status,
         kind=record.kind or SessionKind.OWNED,
         pid=record.pid,
+        pid_start_time=record.pid_start_time,
         port=record.port,
         endpoint_url=record.endpoint_url,
         log_path=record.log_path,
@@ -284,6 +286,12 @@ class SessionService:
             self.db.commit()
         return changed
 
+    def _pid_alive(self, record: SessionRecord) -> bool:
+        """True while ``record.pid`` is alive and still the process we started."""
+        return self.router.supervisor.is_running(record.pid) and is_same_process(
+            record.pid, record.pid_start_time
+        )
+
     def _probe_endpoints(self, records: list[SessionRecord]) -> dict[str, list[str] | None]:
         """Probe candidate endpoints, concurrently when there are several.
 
@@ -299,7 +307,7 @@ class SessionService:
             if record.kind != SessionKind.ADOPTED:
                 if record.status not in _TERMINATABLE_STATES:
                     continue
-                if record.pid and not self.router.supervisor.is_running(record.pid):
+                if record.pid and not self._pid_alive(record):
                     continue
             candidates.append(record)
         if not candidates:
@@ -381,7 +389,7 @@ class SessionService:
           alone — large models legitimately take minutes to load.
         """
         now = utcnow()
-        if record.pid and not self.router.supervisor.is_running(record.pid):
+        if record.pid and not self._pid_alive(record):
             died_starting = record.status == SessionStatus.STARTING
             was_stopping = record.status == SessionStatus.STOPPING
             set_status(
@@ -1266,6 +1274,7 @@ class SessionService:
             # interrupted mid-wait (Ctrl-C, request timeout), reconcile can
             # still find and stop the child instead of orphaning it on a GPU.
             record.pid = pid
+            record.pid_start_time = pid_start_time(pid)
             record.log_path = log_path
             record.updated_at = utcnow()
             self.db.add(record)
@@ -1283,6 +1292,7 @@ class SessionService:
 
         set_status(record, result.status, why="adapter spawned")
         record.pid = result.pid
+        record.pid_start_time = result.pid_start_time
         record.endpoint_url = result.endpoint_url or record.endpoint_url
         record.log_path = result.log_path
         record.error = result.error

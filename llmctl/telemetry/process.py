@@ -60,6 +60,38 @@ def is_pid_running(pid: int | None) -> bool:
         return False
 
 
+def pid_start_time(pid: int | None) -> str | None:
+    """/proc start time (field 22 of ``stat``) of ``pid``, or None if unreadable.
+
+    Clock ticks since boot, so it is stable for the life of a process and
+    differs for any later process that is handed the same number.
+    """
+    if not pid:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            stat = fh.read()
+        # comm may contain spaces/parens; take everything after the last ')'.
+        rest = stat[stat.rindex(b")") + 2 :].split()
+        return rest[19].decode()
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def is_same_process(pid: int | None, start_time: str | None) -> bool:
+    """Return False only when ``pid`` now provably belongs to another process.
+
+    ``start_time`` is what :func:`pid_start_time` returned when the pid was
+    recorded. With nothing recorded (rows older than the column, fakes) or
+    nothing readable (no ``/proc``) there is no evidence either way and the
+    answer is True: liveness is checked separately.
+    """
+    if not pid or start_time is None:
+        return True
+    current = pid_start_time(pid)
+    return current is None or current == start_time
+
+
 @dataclass(slots=True)
 class LaunchResult:
     """Result of a successful process launch."""
@@ -68,6 +100,8 @@ class LaunchResult:
     command: list[str]
     log_path: str | None
     started_at: datetime
+    #: Identity of ``pid`` for the PID-reuse guard; see ``pid_start_time``.
+    pid_start_time: str | None = None
 
 
 class ProcessSupervisor:
@@ -144,6 +178,7 @@ class ProcessSupervisor:
             command=argv,
             log_path=str(log_path) if log_path else None,
             started_at=utcnow(),
+            pid_start_time=pid_start_time(process.pid),
         )
 
     def is_running(self, pid: int | None) -> bool:
