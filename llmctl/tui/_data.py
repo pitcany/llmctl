@@ -388,12 +388,6 @@ def get_preset_count_by_model() -> dict[str, int]:
     return preset_count_by_model(models=models)
 
 
-def get_preset(alias: str) -> PresetModel | None:
-    """Return the canonical preset for ``alias`` or None."""
-    record = _load_preset_records().get(alias)
-    return record.model if record else None
-
-
 def save_preset(model: PresetModel) -> Path:
     """Persist a preset to the canonical llmctl directory.
 
@@ -432,12 +426,6 @@ def clone_preset(source_alias: str, new_alias: str) -> Path:
 def delete_preset(alias: str) -> list[Path]:
     """Remove the preset's YAML file(s); returns the deleted paths."""
     return _delete_preset_files(alias)
-
-
-def preset_source_path(alias: str) -> Path | None:
-    """Return the on-disk path the loader currently resolves ``alias`` to."""
-    record = _load_preset_records().get(alias)
-    return record.source_path if record else None
 
 
 def resolve_editor() -> list[str]:

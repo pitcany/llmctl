@@ -24,8 +24,6 @@ from llmctl.tui._base import C_ACCENT, C_MUTED, C_OK, C_WARN, DataScreen, esc
 from llmctl.tui._modals import TextViewModal
 from llmctl.tui._modals_registry import ConfirmDelete, DeleteModal
 
-PROBE_TIMEOUT_S = 1.5
-
 
 @dataclass(frozen=True)
 class _UnitRow:

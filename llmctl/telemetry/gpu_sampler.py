@@ -60,8 +60,6 @@ class GPUSampler:
         self._samples: list[GPUSample] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._started_at: float | None = None
-        self._stopped_at: float | None = None
 
     def __enter__(self) -> GPUSampler:
         self.start()
@@ -79,7 +77,6 @@ class GPUSampler:
         """Spawn the polling thread if NVML is available; otherwise no-op."""
         if self._thread is not None:
             return
-        self._started_at = time.perf_counter()
         self._thread = threading.Thread(
             target=self._run, name="llmctl-gpu-sampler", daemon=True
         )
@@ -91,7 +88,6 @@ class GPUSampler:
             return
         self._stop.set()
         self._thread.join(timeout=self.interval_s * 3 + 1.0)
-        self._stopped_at = time.perf_counter()
         self._thread = None
 
     @property

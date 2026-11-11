@@ -34,7 +34,6 @@ from pathlib import Path
 
 __all__ = [
     "LauncherEnvError",
-    "build_child_env",
     "launcher_env_lines",
     "parse_environment_file",
     "resolve_cuda_root",
@@ -158,14 +157,3 @@ def parse_environment_file(path: Path) -> dict[str, str]:
     return env
 
 
-def build_child_env(env_file_path: Path) -> dict[str, str]:
-    """Merge ``os.environ`` with a parsed EnvironmentFile body.
-
-    EnvironmentFile values win — they're the launcher-required settings
-    the systemd unit would inject via ``EnvironmentFile=``. Inheriting
-    ``os.environ`` first keeps PATH / HOME / TERM available so the
-    spawned subprocess behaves like a normal interactive launch.
-    """
-    env = dict(os.environ)
-    env.update(parse_environment_file(env_file_path))
-    return env
