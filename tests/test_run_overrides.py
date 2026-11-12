@@ -24,7 +24,13 @@ from llmctl.services.run_overrides import (
     session_parameters,
 )
 from llmctl.services.session_swap import start_request_fields
-from llmctl.services.vllm_orchestrator import Dependencies, OrchestratorResult, _build_spec
+from llmctl.services.vllm_orchestrator import (
+    Dependencies,
+    OrchestratorResult,
+    RollbackReport,
+    _build_spec,
+    attach_rollback,
+)
 
 PRESET = """\
 # A hand-written preset: these comments must survive --save.
@@ -208,7 +214,9 @@ FT = Lane(
 )
 
 
-def _invoke(monkeypatch, tmp_path: Path, *args: str, ok: bool = True):
+def _invoke(
+    monkeypatch, tmp_path: Path, *args: str, ok: bool = True, raises: Exception | None = None
+):
     state = SwapState(
         catalog=build_catalog({"tiny": _Spec()}, [FT], vllm_port=8003),
         serving=set(),
@@ -220,6 +228,8 @@ def _invoke(monkeypatch, tmp_path: Path, *args: str, ok: bool = True):
 
     def fake_start(preset, **kwargs):
         seen["overrides"] = kwargs["options"].preset_overrides
+        if raises is not None:
+            raise raises
         return OrchestratorResult(
             spec=VLLMLaunchSpec(model="m", served_name="tiny", port=8003),
             dry_run=kwargs["options"].dry_run,
@@ -241,8 +251,10 @@ def _invoke(monkeypatch, tmp_path: Path, *args: str, ok: bool = True):
     monkeypatch.setattr(cli, "start_vllm_tp", fake_start)
     monkeypatch.setattr(cli, "_confirm_state_change", lambda *a, **k: None)
     monkeypatch.setattr(cli, "record_load", lambda *a, **k: None)
-    monkeypatch.setattr(cli_swap, "stop_lanes_for_vllm", lambda state, console, target=None: [])
-    monkeypatch.setattr(cli_swap, "restore_lanes", lambda lanes, console: None)
+    monkeypatch.setattr(cli_swap, "stop_lanes_for_vllm", lambda state, console, target=None: [FT])
+    monkeypatch.setattr(
+        cli_swap, "restore_lanes", lambda lanes, console: seen.setdefault("restored", lanes)
+    )
     monkeypatch.setattr("llmctl.presets.load_all_records", lambda *a, **k: records)
     result = CliRunner().invoke(cli.app, ["run", *args])
     return result, seen, path
@@ -259,6 +271,29 @@ def test_run_passes_the_flags_and_save_writes_after_success(monkeypatch, tmp_pat
 def test_a_failed_run_saves_nothing(monkeypatch, tmp_path) -> None:
     res, _, path = _invoke(monkeypatch, tmp_path, "tiny", "--max-len", "4096", "--save", ok=False)
     assert res.exit_code == 1
+    assert path.read_text() == PRESET
+
+
+def test_a_launch_that_raises_restores_lanes_and_names_the_rollback(monkeypatch, tmp_path) -> None:
+    """An error out of the restart must not leave the stopped lanes down.
+
+    start_vllm_tp rolls back and re-raises; the CLI caught only three error
+    types, so anything else skipped restore_lanes and printed a traceback.
+    """
+    exc = RuntimeError("systemctl restart vllm-tp timed out")
+    attach_rollback(
+        exc,
+        RollbackReport(env_restored=True, env_path=Path("/tmp/x.env"), restart_failed=["ollama"]),
+    )
+    res, seen, path = _invoke(
+        monkeypatch, tmp_path, "tiny", "--max-len", "4096", "--save", raises=exc
+    )
+
+    assert res.exit_code == 1, res.output
+    assert seen["restored"] == [FT]
+    assert "timed out" in res.output
+    assert "restored previous" in res.output
+    assert "could not start" in res.output and "ollama" in res.output
     assert path.read_text() == PRESET
 
 

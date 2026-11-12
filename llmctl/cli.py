@@ -2433,6 +2433,20 @@ def vllm_cmd(
             console.print(f"[red]Cannot render the launch env:[/red] {escape(str(exc))}")
             cli_swap.restore_lanes(stopped_lanes, console)
             raise typer.Exit(2) from exc
+        except Exception as exc:
+            # The restart itself raised (systemctl error, timeout). start_vllm_tp
+            # has rolled back and attached what it could not undo; the lanes
+            # stopped above are ours to start again.
+            from types import SimpleNamespace
+
+            from llmctl.services.vllm_orchestrator import rollback_of
+
+            console.print(
+                f"[red]vLLM start failed:[/red] {escape(type(exc).__name__)}: {escape(str(exc))}"
+            )
+            cli_swap.restore_lanes(stopped_lanes, console)
+            _print_rollback(SimpleNamespace(rollback=rollback_of(exc)), engine.unit_name)
+            raise typer.Exit(1) from exc
 
         if result.dry_run:
             if save:
