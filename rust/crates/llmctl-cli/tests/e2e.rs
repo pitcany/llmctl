@@ -34,6 +34,29 @@ impl Drop for DaemonGuard {
     }
 }
 
+/// Kills a daemon child if a test panics before reaping it, so a failed
+/// restart test cannot leave an orphaned daemon running.
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    /// SIGKILL and reap now (the simulated crash).
+    fn kill_now(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 impl DaemonGuard {
     fn data_dir(&self) -> &Path {
         self.dir.path()
@@ -237,7 +260,7 @@ async fn daemon_restart_reconciles_honestly() {
         serde_json::to_vec(&serde_json::json!({"effect_delay_ms": 2500})).unwrap(),
     )
     .unwrap();
-    let mut child = spawn_daemon_on(&socket);
+    let mut child = ChildGuard(Some(spawn_daemon_on(&socket)));
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while std::os::unix::net::UnixStream::connect(&socket).is_err() {
         assert!(std::time::Instant::now() < deadline);
@@ -251,8 +274,7 @@ async fn daemon_restart_reconciles_honestly() {
     let id = admitted.operation.id.clone();
     // Let the executor journal the effect-pending marker, then kill hard.
     tokio::time::sleep(Duration::from_millis(600)).await;
-    child.kill().unwrap();
-    child.wait().unwrap();
+    child.kill_now();
     std::fs::remove_file(&socket).unwrap_or(());
 
     // Round 2: restart on the same data dir.
@@ -330,7 +352,7 @@ async fn restart_after_effect_completes_auto_resolves_when_only_observation_rema
         serde_json::to_vec(&serde_json::json!({"readiness_delay_ms": 8000})).unwrap(),
     )
     .unwrap();
-    let mut child = spawn_daemon_on(&socket);
+    let mut child = ChildGuard(Some(spawn_daemon_on(&socket)));
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while std::os::unix::net::UnixStream::connect(&socket).is_err() {
         assert!(std::time::Instant::now() < deadline);
@@ -362,8 +384,7 @@ async fn restart_after_effect_completes_auto_resolves_when_only_observation_rema
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    child.kill().unwrap();
-    child.wait().unwrap();
+    child.kill_now();
     std::fs::remove_file(&socket).unwrap_or(());
 
     std::fs::write(dir.path().join("faults.json"), b"{}").unwrap();
