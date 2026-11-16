@@ -130,10 +130,10 @@ impl HostInventory {
                     w.name
                 )));
             }
-            if !units.insert(w.name.clone()) {
+            if !units.insert(w.unit.clone()) {
                 return Err(CoreError::Validation(format!(
-                    "duplicate unit for workload {}",
-                    w.name
+                    "duplicate unit {} (workload {})",
+                    w.unit, w.name
                 )));
             }
             if !ports.insert(w.port) {
@@ -212,5 +212,16 @@ mod tests {
                 | Err(CoreError::UnknownGpu(_))
                 | Err(CoreError::InvalidConfig { .. })
         ));
+    }
+
+    #[test]
+    fn validate_rejects_two_workloads_on_one_unit() {
+        let mut i = inv();
+        let mut w = i.workloads[0].clone();
+        w.name = WorkloadName::new("qwen3-alias").unwrap();
+        w.port = 8101;
+        i.workloads.push(w);
+        let err = i.validate().unwrap_err();
+        assert!(err.to_string().contains("duplicate unit"), "{err}");
     }
 }
