@@ -24,4 +24,4 @@ pub use inventory::{ControlAuthority, HostInventory, Platform, UnitScope, Worklo
 pub use launch::{EnvFileRef, ExecCommand, FieldDiff, FileProvenance, LaunchDefinition, Ownership};
 pub use observation::{Observation, ProcessState, Readiness, ServedModel};
 pub use plan::{OpKind, Plan, PlanStep};
-pub use planner::{plan_run, plan_stop};
+pub use planner::{plan_restart, plan_run, plan_stop};

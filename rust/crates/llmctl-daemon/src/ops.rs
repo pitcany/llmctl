@@ -253,9 +253,10 @@ impl OpManager {
             .map_err(|e| OpsError::Engine(e.to_string()))?;
         let plan = match kind {
             OpKind::Run => llmctl_core::plan_run(&inv, &observations, &name),
-            OpKind::Stop | OpKind::Restart => llmctl_core::plan_stop(&inv, &observations, &name),
+            OpKind::Stop => llmctl_core::plan_stop(&inv, &observations, &name),
+            OpKind::Restart => llmctl_core::plan_restart(&inv, &observations, &name),
         }
-        .map_err(|e| OpsError::Invalid(e.to_string()))?;
+        .map_err(plan_error)?;
         Ok((
             plan,
             observations
@@ -307,9 +308,10 @@ impl OpManager {
             .map_err(|e| OpsError::Engine(e.to_string()))?;
         let plan = match params.kind {
             OpKind::Run => llmctl_core::plan_run(&inv, &observations, &name),
-            OpKind::Stop | OpKind::Restart => llmctl_core::plan_stop(&inv, &observations, &name),
+            OpKind::Stop => llmctl_core::plan_stop(&inv, &observations, &name),
+            OpKind::Restart => llmctl_core::plan_restart(&inv, &observations, &name),
         }
-        .map_err(|e| OpsError::Invalid(e.to_string()))?;
+        .map_err(plan_error)?;
 
         // Revalidation: refuse obsolete confirmations.
         if let Some(expected) = params.expected_revision {
@@ -1002,5 +1004,13 @@ impl From<llmctl_core::Observation> for ObservationLite {
             gpus: o.gpus.iter().map(|g| g.to_string()).collect(),
             observed_at: o.observed_at,
         }
+    }
+}
+/// A planner refusal about the workload's current state (restart of a
+/// stopped unit) is a 409 state conflict, not a malformed request.
+fn plan_error(e: llmctl_core::CoreError) -> OpsError {
+    match e {
+        llmctl_core::CoreError::NotRunning { .. } => OpsError::InvalidState(e.to_string()),
+        other => OpsError::Invalid(other.to_string()),
     }
 }

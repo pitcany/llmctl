@@ -18,6 +18,11 @@ pub enum CoreError {
     #[error("invalid workload configuration for {workload}: {reason}")]
     InvalidConfig { workload: String, reason: String },
 
+    #[error(
+        "{workload} is not running ({state}); restart applies to a running workload — use run"
+    )]
+    NotRunning { workload: String, state: String },
+
     #[error("validation failed: {0}")]
     Validation(String),
 }

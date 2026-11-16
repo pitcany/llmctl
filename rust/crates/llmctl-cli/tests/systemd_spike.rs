@@ -91,6 +91,11 @@ impl SpikeUnit {
         );
     }
 
+    fn main_pid(&self) -> u32 {
+        let out = systemctl(&["show", &self.name, "--property=MainPID", "--value"]);
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    }
+
     fn active_state(&self) -> String {
         let out = systemctl(&["show", &self.name, "--property=ActiveState", "--value"]);
         String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -239,6 +244,41 @@ fn run_and_stop_a_disposable_user_unit() {
     assert_eq!(unit.active_state(), "inactive");
     let down = spike_status(&d.socket);
     assert_eq!(down["process"], "Stopped", "{down}");
+}
+
+#[test]
+#[ignore = "touches the user's systemd: run with --ignored"]
+fn restart_replaces_the_process_and_reverifies() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("server.py");
+    std::fs::write(&script, SERVER_PY).unwrap();
+    let port = free_port();
+    let model = "spike/model";
+    let unit = SpikeUnit::create(
+        dir.path(),
+        &format!("/usr/bin/python3 {} {port} {model}", script.display()),
+    );
+    write_inventory(dir.path(), &unit.name, port, model);
+    let d = spawn_daemon(dir.path());
+
+    // Not running yet: refused, and nothing is started behind our back.
+    let (code, text) = cli_code(&d.socket, &["restart", "spike", "--wait"]);
+    assert_eq!(code, Some(4), "{text}");
+    assert_eq!(unit.active_state(), "inactive");
+
+    let (ok, text) = cli(&d.socket, &["run", "spike", "--wait"]);
+    assert!(ok, "{text}");
+    let before = unit.main_pid();
+    assert_ne!(before, 0);
+
+    let (ok, text) = cli(&d.socket, &["restart", "spike", "--wait"]);
+    assert!(ok, "{text}");
+    assert!(text.contains("succeeded"), "{text}");
+    let after = unit.main_pid();
+    assert_ne!(after, 0);
+    assert_ne!(before, after, "restart must replace the main process");
+    let up = spike_status(&d.socket);
+    assert_eq!(up["readiness"], "Ready", "{up}");
 }
 
 #[test]

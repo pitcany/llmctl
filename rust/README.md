@@ -104,8 +104,19 @@ Opt-in tests against disposable `llmctl-next-spike-*.service` units
 cargo test -p llmctl-cli --test systemd_spike -- --ignored --test-threads=1
 ```
 
-They prove run → Ready → stop, early exit fails as "exited before
-readiness" (not a timeout), and a wrong served model fails verification.
+They prove run → Ready → stop, restart (new main PID, re-verified; a
+stopped unit is refused rather than started), early exit fails as "exited
+before readiness" (not a timeout), and a wrong served model fails
+verification.
+
+### Restart (`llmctl-next restart NAME [--dry-run] [--wait]`)
+
+The run plan of an observed-running workload — stop, start, await
+readiness, re-verify the served model — journaled as kind `restart`. A
+stopped or `Unknown` workload is refused with `invalid_state` (exit 4):
+restarting something not known to run would be a silent `run`. Unlike
+run/stop, the default idempotency key is unique per invocation (a restart
+is an event); pass `--key` with an earlier key to retry that attempt.
 
 ### Adoption (`llmctl-next adopt`, `crates/llmctl-daemon/src/{adopt,unitdef}.rs`)
 
@@ -149,7 +160,7 @@ unverified gate, and inline secrets (refused, never echoed).
 
 ## Not yet here (per the plan's milestones)
 
-The rest of M2 (logs, restart, writing/owning the generated unit file,
+The rest of M2 (logs, writing/owning the generated unit file,
 version pin + staged upgrade, real-model pilot), SSH transport and Mac agents (M3), installers
 and version pinning (M4), TUI and config/preset parity (M5), migration of
 Python data (M5/M6). The YAML reader choice is deliberately still open —

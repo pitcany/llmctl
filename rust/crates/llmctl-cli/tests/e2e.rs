@@ -673,3 +673,52 @@ fn cli_run_wait_reports_success_and_json_status() {
     assert_eq!(coder["process"], "Running");
     assert_eq!(coder["readiness"], "Ready");
 }
+
+#[test]
+fn cli_restart_refuses_stopped_then_restarts_running_each_time() {
+    let d = spawn_daemon();
+    // Stopped workload: restart is refused (409 invalid_state → exit 4),
+    // nothing is admitted.
+    let out = cli(&d.socket, &["restart", "coder", "--wait"]);
+    assert_eq!(out.status.code(), Some(4));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("not running"), "{err}");
+
+    let out = cli(&d.socket, &["run", "coder", "--wait"]);
+    assert!(out.status.success());
+
+    let out = cli(&d.socket, &["restart", "coder", "--dry-run"]);
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("plan: restart coder"), "{text}");
+
+    // Two restarts at the same revision are two operations, not a replay.
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let out = cli(&d.socket, &["restart", "coder", "--wait"]);
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(out.status.success(), "{text}");
+        assert!(!text.contains("replaying"), "{text}");
+        assert!(text.contains("succeeded"), "{text}");
+        ids.push(
+            text.lines()
+                .find_map(|l| l.strip_prefix("admitted operation "))
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    assert_ne!(ids[0], ids[1]);
+
+    let out = cli(&d.socket, &["status", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let coder = json["workloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "coder")
+        .unwrap();
+    assert_eq!(coder["process"], "Running");
+    assert_eq!(coder["readiness"], "Ready");
+}

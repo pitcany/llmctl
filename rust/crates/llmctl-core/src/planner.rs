@@ -150,6 +150,39 @@ pub fn plan_run(
     })
 }
 
+/// Build a restart plan: the run plan of an observed-running target (stop,
+/// start, await readiness, re-verify the served model), kept as its own
+/// kind so the journal says what the owner asked for. A target that is
+/// stopped — or whose state is unknown — is refused rather than started:
+/// restarting something not known to run would be a silent `run`.
+pub fn plan_restart(
+    inventory: &crate::inventory::HostInventory,
+    observations: &[Observation],
+    target: &WorkloadName,
+) -> CoreResult<Plan> {
+    if inventory.workload(target).is_none() {
+        return Err(CoreError::UnknownWorkload(target.to_string()));
+    }
+    let state = observations
+        .iter()
+        .find(|o| &o.workload == target)
+        .map(|o| o.process);
+    if state != Some(ProcessState::Running) {
+        return Err(CoreError::NotRunning {
+            workload: target.to_string(),
+            state: match state {
+                Some(ProcessState::Stopped) => "stopped",
+                Some(ProcessState::Unknown) => "state unknown",
+                Some(ProcessState::Running) | None => "not observed",
+            }
+            .into(),
+        });
+    }
+    let mut plan = plan_run(inventory, observations, target)?;
+    plan.kind = OpKind::Restart;
+    Ok(plan)
+}
+
 /// Build a stop plan. Manual by default: a stop through llmctl is an owner
 /// decision that survives restarts and blocks automatic recovery from
 /// flipping the workload back on. Stopping a non-running target is a no-op

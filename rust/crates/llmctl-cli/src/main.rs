@@ -58,6 +58,20 @@ enum Command {
         #[arg(long)]
         key: Option<String>,
     },
+    /// Restart a running workload: stop, start, await readiness and
+    /// re-verify the served model. Refused when it is not running.
+    Restart {
+        name: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        wait: bool,
+        /// Override the idempotency key. The default is unique per
+        /// invocation (each restart is a new request); pass the key printed
+        /// by an earlier attempt to retry that attempt instead.
+        #[arg(long)]
+        key: Option<String>,
+    },
     /// List operations from the journal.
     Ops {
         #[arg(long)]
@@ -200,6 +214,12 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Stop { name, wait, key } => {
             cmd_mutate(cli, OpKind::Stop, &name, false, wait, key).await
         }
+        Command::Restart {
+            name,
+            dry_run,
+            wait,
+            key,
+        } => cmd_mutate(cli, OpKind::Restart, &name, dry_run, wait, key).await,
         Command::Ops { json } => cmd_ops(cli, json).await,
         Command::Op { id, watch } => cmd_op(cli, &id, watch).await,
         Command::Cancel { id } => cmd_cancel(cli, &id).await,
@@ -387,17 +407,19 @@ async fn cmd_mutate(
         return Ok(0);
     }
 
-    let idempotency_key = key.unwrap_or_else(|| {
-        format!(
-            "{}-{}-r{}",
-            match kind {
-                OpKind::Run => "run",
-                OpKind::Stop => "stop",
-                OpKind::Restart => "restart",
-            },
-            name,
-            plan_resp.revision
-        )
+    // run/stop are idempotent on state, so a repeat at the same revision
+    // replays the first operation. A restart is an event: each invocation
+    // is new unless the caller passes an earlier key to retry it.
+    let idempotency_key = key.unwrap_or_else(|| match kind {
+        OpKind::Run | OpKind::Stop => format!("{kind}-{name}-r{}", plan_resp.revision),
+        OpKind::Restart => format!(
+            "restart-{name}-r{}-{}",
+            plan_resp.revision,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or_default()
+        ),
     });
     let admit = client
         .admit(AdmitRequest {

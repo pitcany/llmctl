@@ -5,9 +5,9 @@
 use chrono::{TimeZone, Utc};
 use llmctl_core::identity;
 use llmctl_core::{
-    plan_run, plan_stop, ControlAuthority, CoreError, DesiredIntent, GpuId, HostId, HostInventory,
-    Observation, Plan, PlanStep, Platform, ProcessState, Readiness, ServedModel, UnitName,
-    UnitScope, WorkloadDefinition, WorkloadName,
+    plan_restart, plan_run, plan_stop, ControlAuthority, CoreError, DesiredIntent, GpuId, HostId,
+    HostInventory, Observation, Plan, PlanStep, Platform, ProcessState, Readiness, ServedModel,
+    UnitName, UnitScope, WorkloadDefinition, WorkloadName,
 };
 
 fn host() -> HostId {
@@ -207,6 +207,42 @@ fn stop_plan_stops_a_running_workload() {
     let plan = plan_stop(&inv, &observations, &WorkloadName::new("coder").unwrap()).unwrap();
     assert_eq!(plan.steps.len(), 2);
     assert!(matches!(plan.steps[1], PlanStep::StopUnit { .. }));
+}
+
+// ---- restart plans -------------------------------------------------------
+
+#[test]
+fn restart_plan_stops_then_starts_and_reverifies_a_running_target() {
+    let inv = inventory();
+    let observations = vec![obs("coder", &[0], true)];
+    let plan = plan_restart(&inv, &observations, &WorkloadName::new("coder").unwrap()).unwrap();
+    assert_eq!(plan.kind, llmctl_core::OpKind::Restart);
+    let labels: Vec<String> = plan.steps.iter().map(|s| s.label()).collect();
+    assert_eq!(
+        labels,
+        vec![
+            "record intent: coder → Running",
+            "stop coder",
+            "start coder",
+            &plan.steps[3].label(),
+            &plan.steps[4].label(),
+        ]
+    );
+    assert!(matches!(plan.steps[3], PlanStep::AwaitReadiness { .. }));
+    assert!(matches!(plan.steps[4], PlanStep::VerifyServedModel { .. }));
+}
+
+#[test]
+fn restart_refuses_a_target_that_is_not_running() {
+    let inv = inventory();
+    let target = WorkloadName::new("coder").unwrap();
+    let err = plan_restart(&inv, &[obs("coder", &[0], false)], &target).unwrap_err();
+    assert!(matches!(err, CoreError::NotRunning { .. }), "{err:?}");
+    // Unknown process state is not "running" either: never restart blind.
+    let mut unknown = obs("coder", &[0], true);
+    unknown.process = ProcessState::Unknown;
+    let err = plan_restart(&inv, &[unknown], &target).unwrap_err();
+    assert!(matches!(err, CoreError::NotRunning { .. }), "{err:?}");
 }
 
 // ---- plan identity -------------------------------------------------------
