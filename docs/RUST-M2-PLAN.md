@@ -16,6 +16,7 @@ startup/stop failures, bounded recovery, daemon restart and upgrade rollback.*
 | Adoption: import via D-Bus, systemd round-trip equivalence, pinned digest, drift guard | `f7ac5c8`, `fd22a74` | adopt → stop → run → daemon restart; stale confirm; drift blocks run; inline secret refused |
 | `restart` as its own plan kind | `4cd6f13` | new MainPID + re-verify; stopped unit refused |
 | `logs` from the journal, follow by cursor | `d86d642`, `5786628` | output, run markers, follow across a restart, bad cursor → 400 |
+| Pilot window 1 on `vllm-engine2` + its three fixes | `1a5d123`, `43f673d`, `8109ae8` | [RUST-M2-PILOT-2026-11-16.md](RUST-M2-PILOT-2026-11-16.md) |
 | A: foreign GPU occupancy guard | 2026-11-16 | nvidia-smi + `/proc/<pid>/cgroup`; foreign pid/unit → `gpu_occupied` (409) before anything is journaled; probe failure refuses; status shows per-card enrolled vs foreign; e2e: refuse-before-journal, enrolled-conflict allowed, stale enrolled unit refused |
 | B: bounded recovery | 2026-11-16 | watcher (only background loop), opt-in `recovery` policy, SQLite budget surviving daemon restart, exhaustion → `needs_attention` marker blocking until acked; systemd retries first (`auto-restart` → report only; a start after start-limit does `reset-failed`); manual stop never recovered; e2e: recover-once, budget-exhaust + block + survive restart, manual-stop untouched; spike: SIGKILL → systemd burns retries → start-limit → one recovery succeeds |
 | B: stop-timeout honesty | 2026-11-16 | `LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS` configurable effect timeout; spike: TERM-trapped unit with `TimeoutStopSec=infinity` → `Unconfirmed`, op fails, process observed honestly |
@@ -196,7 +197,7 @@ Size: ~1–2 days.
 
 ### E. Real-model pilot (two windows, owner present)
 
-**Window 1 — lifecycle, after A–C.** It runs as a `longjob` GPU job, whose
+**Window 1 — lifecycle, after A–C. Done 2026-11-16 ([pilot 2026-11-16](RUST-M2-PILOT-2026-11-16.md)).** It runs as a `longjob` GPU job, whose
 lease keeps the router and llm-heal from switching underneath it.
 
 1. **Pre-checks:**
@@ -224,13 +225,13 @@ pilot env, promote it, run a smoke check, force a rollback, then release.
 
 ## Exit checklist (maps to the parent criterion)
 
-- [x] Startup failures: early exit, wrong model, GPU occupied — disposable (all three: early exit `unit_that_exits…`, wrong model, `gpu_occupied` e2e + the live card refused while a docker process held it); **pilot pending (E)**
+- [x] Startup failures: early exit, wrong model, GPU occupied — disposable (all three: early exit `unit_that_exits…`, wrong model, `gpu_occupied` e2e + the live card refused while a docker process held it); **pilot pass** ([pilot 2026-11-16](RUST-M2-PILOT-2026-11-16.md): early exit + GPU occupied; wrong model disposable only)
 - [x] Stop failures: timeout → `Unconfirmed` handled honestly — disposable
   (`a_stop_that_outlives_the_effect_timeout_is_unconfirmed`: TERM-trapped
   unit, `TimeoutStopSec=infinity`, effect timeout via
   `LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS`)
-- [x] Bounded recovery: budgeted, coordinated with `Restart=`, respects manual stop — disposable (e2e budget/survival + spike start-limit drill); **pilot pending (E)**
-- [x] Daemon restart: mid-operation SIGKILL reconciles, engine survives — disposable (done previously); **pilot pending (E)**
+- [x] Bounded recovery: budgeted, coordinated with `Restart=`, respects manual stop — disposable (e2e budget/survival + spike start-limit drill); **pilot pass** ([pilot 2026-11-16](RUST-M2-PILOT-2026-11-16.md))
+- [x] Daemon restart: mid-operation SIGKILL reconciles, engine survives — disposable (done previously); **pilot pass** ([pilot 2026-11-16](RUST-M2-PILOT-2026-11-16.md))
 - [x] Upgrade rollback: failed promotion rolls back to the pinned N — disposable (fakeengine drill: automatic rollback on failure verified in the first promote attempts, explicit `upgrade rollback` green); **pilot pending (E, window 2)**
 
 Only **E — the real-model pilot** remains (two windows, owner present).
