@@ -1,4 +1,4 @@
-# Rust successor — M2 pilot, window 1 (2026-11-16)
+# Rust successor — M2 pilot, windows 1 and 2 (2026-11-16)
 
 Plan: [RUST-M2-PLAN.md](RUST-M2-PLAN.md) § E, window 1 (lifecycle).
 Owner present; started on the owner's "start window 1".
@@ -94,4 +94,86 @@ the env files was changed.
 - Bounded recovery — budgeted, systemd retries first, manual stop respected: **pilot pass**.
 - Daemon restart — mid-operation SIGKILL reconciles, engine survives: **pilot pass**.
 - Stop failures (timeout → `Unconfirmed`): disposable only (a real vLLM stop took < 60 s).
-- Upgrade rollback: window 2 (vLLM 0.30.0 → 0.32.0), not yet run.
+- Upgrade rollback: **pilot pass** in window 2 (below).
+
+---
+
+# Window 2 — staged upgrade with rollback (2026-11-16)
+
+Plan: § E window 2; target decided in the plan's owner decision 3 (vLLM
+0.30.0 → 0.32.0, same `torch==2.13.0`).
+
+## Before the window (no GPU, `vllm-engine` serving)
+
+Reading the upgrade path for an `apply: "env"` recipe found two defects that
+would have made the pilot pass falsely; both were fixed first (`8544662`):
+
+**F4 — the env override did not apply.** Promote set an inline
+`Environment=VLLM_PYTHON=<staged>`, but systemd lets `EnvironmentFile=`
+override `Environment=`, and `vllm-engine2.env` sets `VLLM_PYTHON` itself:
+the unit would have started the old env. Fix: an llmctl-owned override env
+file listed *last* (a later env file wins), content-digest pinned.
+
+**F5 — `VerifyVersion` proved nothing.** It asked the *staged* interpreter
+for its own package versions, so promote would report `vllm=0.32.0` while
+0.30.0 served. Fix: a process in the unit's cgroup must run the staged
+interpreter (argv[0] or files mapped from its env), in addition to the
+package check. Stage also builds the venv on the replaced env's Python
+minor version (3.12) instead of whatever uv finds first.
+
+Then: re-adopt `engine2` with the recipe (`vllm`, interpreter
+`vllm-muse/bin/python`, `packages: [vllm]`, `apply: env`, `model_config` =
+the model dir), daemon restart pinned version facts (schema 2: vllm 0.30.0,
+lock digest, launcher digest), `own`, and **stage 0.32.0 in 26 s** (uv cache)
+— validated offline: `vllm 0.32.0`, `torch 2.13.0+cu130`, CUDA 13.0, model
+config loads (`qwen3_5`). Evidence `30`–`32`.
+
+## In the window (`m2-pilot-w2 --stop-engine`, 12:27–12:44 PST, ~17 min)
+
+| # | Step | Result | Evidence |
+|---|---|---|---|
+| 1 | Baseline `run` | 0.30.0 from `vllm-muse` (argv[0]), `/version` 0.30.0, smoke "baseline ok", 181 s | `33` |
+| 2 | `upgrade promote engine2 0.32.0 --wait` | stop → apply → start → ready → identity → `VerifyVersion` all Done; engine argv[0] = the staged env's python; `/version` **0.32.0**; smoke "upgraded ok"; override env file listed after the unit's; 263 s | `34` |
+| 3 | `upgrade rollback engine2 --wait` | back to `vllm-muse`, `/version` 0.30.0, override gone, `VerifyVersion vllm=0.30.0` Done, 204 s | `35` |
+| 4 | Promote again with the new engine SIGKILLed 25 s into its load | promote **failed** at readiness ("process exited before readiness"); automatic rollback: stop → old definition → start → ready → identity, all applied; `vllm-muse` 0.30.0 serving; history row `failed`; 173 s | `36`, `37` |
+| 5 | stop, `release` | stop ok; **release refused** (F7) — original link restored by hand from the recorded target; repo copy sha256 `9ffe2340…` unchanged | `38`, `39` |
+
+## Findings in the window (fixed)
+
+**F6 — a second promote of the same version replayed the first
+(`f3c923c`).** After step 3, promoting 0.32.0 again returned the first
+promote's `Succeeded` (exit 0) under key `upgrade-engine2-0.32.0` while
+0.30.0 kept serving, and the completion poller marked the history row
+`promoted`. Same class as F3. Rollback keyed on the history row had the same
+flaw. Fix: unique keys per invocation. (A rolled-back or promoted stage must
+be restaged before another promote: by design; 30 s from the uv cache.)
+
+**F7 — release after an upgrade could not hand back the original
+(`c6e0f51`).** Every definition change (promote, rollback) replaced the
+ownership record's release target with the current llmctl render, reusing
+the original's backup slot. `release` then restored the 0.32.0 render,
+failed its equivalence check, and wrote back an llmctl render *without*
+`[Install]` (the unit turned `static`). For a regular-file original it
+would have overwritten the only backup of the original bytes. Fix:
+definition changes undo to their own slot; the release target recorded by
+`own` is carried forward; release's fallback keeps `[Install]`. The
+disposable upgrade spike now re-promotes, rolls back again and checks that
+`release` restores the original unit byte for byte (it fails on the old
+code with the pilot's exact error).
+
+Smaller: the README said `upgrade stage NAME --version X` (it is
+positional); the interrupted-stage marker was named `engine2-0.32.staging`
+(`with_extension` ate the version suffix) — both fixed in `193816f`.
+
+## Gaps (not fixed)
+
+- `promote --wait` can return before the completion poller marks the
+  history row; an immediate `rollback` is refused ("no promoted upgrade")
+  for a moment.
+- History keeps one row per staged env id: restaging the same version
+  overwrites the earlier promote/rollback record.
+- Release after an upgrade is proven on the disposable unit only; on the
+  real unit the hand-back in this window was the manual relink (exactly the
+  recorded target).
+- The staged env (8.0 GB, `~/.local/state/llmctl-next-pilot/envs/`) is
+  kept; `upgrade gc` would remove it.

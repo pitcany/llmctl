@@ -16,7 +16,7 @@ startup/stop failures, bounded recovery, daemon restart and upgrade rollback.*
 | Adoption: import via D-Bus, systemd round-trip equivalence, pinned digest, drift guard | `f7ac5c8`, `fd22a74` | adopt → stop → run → daemon restart; stale confirm; drift blocks run; inline secret refused |
 | `restart` as its own plan kind | `4cd6f13` | new MainPID + re-verify; stopped unit refused |
 | `logs` from the journal, follow by cursor | `d86d642`, `5786628` | output, run markers, follow across a restart, bad cursor → 400 |
-| Pilot window 1 on `vllm-engine2` + its three fixes | `1a5d123`, `43f673d`, `8109ae8` | [RUST-M2-PILOT-2026-11-16.md](RUST-M2-PILOT-2026-11-16.md) |
+| Pilot windows 1 and 2 on `vllm-engine2` + their fixes | `1a5d123` `43f673d` `8109ae8` `8544662` `193816f` `f3c923c` `c6e0f51` | [RUST-M2-PILOT-2026-11-16.md](RUST-M2-PILOT-2026-11-16.md) |
 | A: foreign GPU occupancy guard | 2026-11-16 | nvidia-smi + `/proc/<pid>/cgroup`; foreign pid/unit → `gpu_occupied` (409) before anything is journaled; probe failure refuses; status shows per-card enrolled vs foreign; e2e: refuse-before-journal, enrolled-conflict allowed, stale enrolled unit refused |
 | B: bounded recovery | 2026-11-16 | watcher (only background loop), opt-in `recovery` policy, SQLite budget surviving daemon restart, exhaustion → `needs_attention` marker blocking until acked; systemd retries first (`auto-restart` → report only; a start after start-limit does `reset-failed`); manual stop never recovered; e2e: recover-once, budget-exhaust + block + survive restart, manual-stop untouched; spike: SIGKILL → systemd burns retries → start-limit → one recovery succeeds |
 | B: stop-timeout honesty | 2026-11-16 | `LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS` configurable effect timeout; spike: TERM-trapped unit with `TimeoutStopSec=infinity` → `Unconfirmed`, op fails, process observed honestly |
@@ -220,7 +220,7 @@ lease keeps the router and llm-heal from switching underneath it.
 5. `release`, then confirm Python llmctl and the router drive it as before.
 6. Write up as `docs/RUST-M2-PILOT-<date>.md`.
 
-**Window 2 — upgrade, after D.** Stage vLLM 0.32.0 (decision 3) for the
+**Window 2 — upgrade, after D. Done 2026-11-16 (see the pilot report).** Stage vLLM 0.32.0 (decision 3) for the
 pilot env, promote it, run a smoke check, force a rollback, then release.
 
 ## Exit checklist (maps to the parent criterion)
@@ -232,7 +232,7 @@ pilot env, promote it, run a smoke check, force a rollback, then release.
   `LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS`)
 - [x] Bounded recovery: budgeted, coordinated with `Restart=`, respects manual stop — disposable (e2e budget/survival + spike start-limit drill); **pilot pass** ([pilot 2026-11-16](RUST-M2-PILOT-2026-11-16.md))
 - [x] Daemon restart: mid-operation SIGKILL reconciles, engine survives — disposable (done previously); **pilot pass** ([pilot 2026-11-16](RUST-M2-PILOT-2026-11-16.md))
-- [x] Upgrade rollback: failed promotion rolls back to the pinned N — disposable (fakeengine drill: automatic rollback on failure verified in the first promote attempts, explicit `upgrade rollback` green); **pilot pending (E, window 2)**
+- [x] Upgrade rollback: failed promotion rolls back to the pinned N — disposable (fakeengine drill: automatic rollback on failure verified in the first promote attempts, explicit `upgrade rollback` green); **pilot pass** (window 2: promote 0.30.0 → 0.32.0 verified on the running process, explicit rollback, failed promote rolled back automatically — [pilot](RUST-M2-PILOT-2026-11-16.md))
 
 Only **E — the real-model pilot** remains (two windows, owner present).
 
