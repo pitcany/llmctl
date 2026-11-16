@@ -1,0 +1,23 @@
+[package]
+name = "llmctl-cli"
+description = "The llmctl-next CLI: composition root over llmctl-client and llmctl-daemon."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "llmctl-next"
+path = "src/main.rs"
+
+[dependencies]
+llmctl-core = { workspace = true }
+llmctl-client = { workspace = true }
+llmctl-daemon = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

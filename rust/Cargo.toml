@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/llmctl-core",
+  "crates/llmctl-daemon",
+  "crates/llmctl-client",
+  "crates/llmctl-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+llmctl-core = { path = "crates/llmctl-core" }
+llmctl-client = { path = "crates/llmctl-client" }
+llmctl-daemon = { path = "crates/llmctl-daemon" }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "time",
+  "process",
+  "signal",
+  "sync",
+  "fs",
+  "io-util",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+hyper = { version = "1", features = ["http1", "client"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"
