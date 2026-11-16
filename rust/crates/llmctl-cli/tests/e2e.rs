@@ -806,7 +806,7 @@ async fn enrolled_workload_the_plan_stops_is_not_foreign_but_a_stale_one_is() {
     run_to_success(&d, "helper", "gpu-enr-1").await;
     write_gpus(
         &d,
-        serde_json::json!([{"gpu": 1, "pid": 4242, "unit": "llmctl-next-fake-helper.service", "memory_mib": 512}]),
+        serde_json::json!([{"gpu": 1, "pid": 4242, "unit": "user/llmctl-next-fake-helper.service", "memory_mib": 512}]),
     );
     run_to_success(&d, "big", "gpu-enr-2").await;
 
@@ -815,7 +815,7 @@ async fn enrolled_workload_the_plan_stops_is_not_foreign_but_a_stale_one_is() {
     run_to_success(&d, "coder", "gpu-enr-3").await; // coder now on gpu 0
     write_gpus(
         &d,
-        serde_json::json!([{"gpu": 0, "pid": 777, "unit": "llmctl-next-fake-helper.service", "memory_mib": 8}]),
+        serde_json::json!([{"gpu": 0, "pid": 777, "unit": "user/llmctl-next-fake-helper.service", "memory_mib": 8}]),
     );
     match d
         .client()

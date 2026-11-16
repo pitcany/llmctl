@@ -329,9 +329,11 @@ impl OpManager {
                 _ => None,
             })
             .collect();
+        // Full unit identities (scope included): a user unit and a system
+        // unit with the same name are different units.
         let allowed: std::collections::BTreeSet<String> = touched
             .iter()
-            .filter_map(|w| inv.workload(w).map(|d| d.unit.name.clone()))
+            .filter_map(|w| inv.workload(w).map(|d| d.unit.to_string()))
             .collect();
 
         let occupants = self

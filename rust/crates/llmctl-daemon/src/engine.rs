@@ -475,6 +475,7 @@ impl Engine for FakeEngine {
     /// Foreign occupants are injected through `gpus.json` in the dev data
     /// dir (absent = every card free), so the guard is testable without a
     /// real GPU: `[{"gpu":0,"pid":999,"unit":null,"memory_mib":123}]`.
+    /// `unit` is the full identity in display form (`user/foo.service`).
     fn gpu_occupancy(
         &self,
         gpus: &[GpuId],

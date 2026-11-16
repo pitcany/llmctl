@@ -16,9 +16,11 @@ pub struct GpuOccupant {
     /// Card index on this host.
     pub gpu: u32,
     pub pid: u32,
-    /// Bare unit name (`vllm-engine.service`) when the pid maps to a service
-    /// manager cgroup; `None` when it does not map — which always counts as
-    /// foreign to llmctl.
+    /// Full unit identity in display form (`system/vllm-engine.service`,
+    /// `user/foo.service`) when the pid maps to a service-manager cgroup;
+    /// `None` when it does not map — which always counts as foreign to
+    /// llmctl. Scope is part of the identity: a system unit and a user
+    /// unit with the same name are different units.
     pub unit: Option<String>,
     pub memory_mib: u64,
 }
@@ -44,42 +46,73 @@ pub fn parse_uuid_index(csv: &str) -> BTreeMap<String, u32> {
 
 /// `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory
 /// --format=csv,noheader,nounits` rows: `1234, GPU-6d44..., 2048`.
-pub fn parse_compute_apps(csv: &str, uuid_index: &BTreeMap<String, u32>) -> Vec<GpuOccupant> {
-    csv.lines()
-        .filter_map(|line| {
-            let mut parts = line.split(',');
-            let pid = parts.next()?.trim().parse::<u32>().ok()?;
-            let uuid = parts.next()?.trim().to_string();
-            let mem = parts
-                .next()?
-                .trim()
-                .parse::<u64>()
-                .ok()
-                .filter(|m| *m > 0)
-                .unwrap_or(0);
-            let gpu = *uuid_index.get(&uuid)?;
-            Some(GpuOccupant {
-                gpu,
-                pid,
-                unit: None,
-                memory_mib: mem,
-            })
-        })
-        .collect()
+///
+/// Fail-closed: a row whose pid does not parse or whose `gpu_uuid` is not
+/// in `uuid_index` (e.g. a MIG device this host does not index) is a
+/// process we cannot place — `Err`, never a silently dropped row that
+/// would read as "free". Memory is informational: `[N/A]` becomes 0.
+pub fn parse_compute_apps(
+    csv: &str,
+    uuid_index: &BTreeMap<String, u32>,
+) -> Result<Vec<GpuOccupant>, String> {
+    let mut out = Vec::new();
+    for line in csv.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.split(',');
+        let pid = parts
+            .next()
+            .and_then(|p| p.trim().parse::<u32>().ok())
+            .ok_or_else(|| format!("compute-apps row with unparseable pid: {line:?}"))?;
+        let uuid = parts
+            .next()
+            .map(|u| u.trim().to_string())
+            .ok_or_else(|| format!("compute-apps row without gpu_uuid: {line:?}"))?;
+        let gpu = *uuid_index.get(&uuid).ok_or_else(|| {
+            format!("compute app {pid} on unknown device {uuid} (not an indexed GPU)")
+        })?;
+        let mem = parts
+            .next()
+            .and_then(|m| m.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        out.push(GpuOccupant {
+            gpu,
+            pid,
+            unit: None,
+            memory_mib: mem,
+        });
+    }
+    Ok(out)
 }
 
-/// Extract the owning unit name from a cgroup file's contents, e.g.
+/// Extract the owning unit identity (display form, scope included) from a
+/// cgroup file's contents, e.g.
 /// `0::/user.slice/user-1000.slice/user@1000.service/app.slice/foo.service`
-/// → `foo.service`, or `/system.slice/vllm-engine.service` →
-/// `vllm-engine.service`. `user@1000.service` is the user manager, not the
-/// unit; it is skipped so an unmapped process stays foreign.
+/// → `user/foo.service`, or `/system.slice/vllm-engine.service` →
+/// `system/vllm-engine.service`. Scope comes from the path (a
+/// `user-<uid>.slice` / `user@<uid>.service` ancestor ⇒ user scope);
+/// `user@1000.service` itself is the user manager, not the unit, and is
+/// skipped so an unmapped process stays foreign. Docker-style `.scope`
+/// cgroups carry no unit name and map to `None` (foreign).
 pub fn unit_from_cgroup(cgroup: &str) -> Option<String> {
+    let user_scope = cgroup.lines().any(|line| {
+        line.rsplit("::")
+            .next()
+            .unwrap_or(line)
+            .split('/')
+            .any(|seg| {
+                (seg.starts_with("user-") && seg.ends_with(".slice"))
+                    || (seg.starts_with("user@") && seg.ends_with(".service"))
+            })
+    });
+    let scope = if user_scope { "user" } else { "system" };
     cgroup
         .lines()
         .flat_map(|line| line.rsplit("::").next().unwrap_or(line).split('/'))
         .filter(|seg| seg.ends_with(".service") && !seg.contains('@'))
         .next_back()
-        .map(str::to_owned)
+        .map(|name| format!("{scope}/{name}"))
 }
 
 /// Probe the cards through nvidia-smi and map pids to their units through
@@ -96,7 +129,8 @@ pub async fn probe_nvidia(timeout: Duration) -> Result<Vec<GpuOccupant>, EngineE
     )
     .await?;
     let uuid_index = parse_uuid_index(&uuids);
-    let mut occupants = parse_compute_apps(&apps, &uuid_index);
+    let mut occupants =
+        parse_compute_apps(&apps, &uuid_index).map_err(EngineError::Io)?;
     for occ in &mut occupants {
         occ.unit = cgroup_unit_of(occ.pid).await;
     }
@@ -145,26 +179,46 @@ mod tests {
         let mut idx = BTreeMap::new();
         idx.insert("GPU-a".into(), 0u32);
         idx.insert("GPU-b".into(), 1u32);
-        let csv = "1234, GPU-a, 2048\n77, GPU-b, 512\n999, GPU-zz, 10\nnotapid, GPU-a, 5\n";
-        let occ = parse_compute_apps(csv, &idx);
+        let csv = "1234, GPU-a, 2048\n77, GPU-b, 512\n";
+        let occ = parse_compute_apps(csv, &idx).unwrap();
         assert_eq!(occ.len(), 2, "{occ:?}");
         assert_eq!(occ[0].pid, 1234);
         assert_eq!(occ[0].gpu, 0);
         assert_eq!(occ[0].memory_mib, 2048);
         assert_eq!(occ[1].gpu, 1);
+        // Memory is informational: [N/A] becomes 0, not an error.
+        let occ = parse_compute_apps("5, GPU-a, [N/A]\n", &idx).unwrap();
+        assert_eq!(occ[0].memory_mib, 0);
     }
 
     #[test]
-    fn cgroup_yields_the_owning_unit_not_the_user_manager() {
+    fn compute_apps_fail_closed_on_unknown_rows() {
+        let mut idx = BTreeMap::new();
+        idx.insert("GPU-a".into(), 0u32);
+        // A process on a device that is not an indexed GPU (e.g. MIG):
+        // dropping the row would read the card as free.
+        let err = parse_compute_apps("999, GPU-zz, 10\n", &idx).unwrap_err();
+        assert!(err.contains("unknown device"), "{err}");
+        let err = parse_compute_apps("notapid, GPU-a, 5\n", &idx).unwrap_err();
+        assert!(err.contains("unparseable pid"), "{err}");
+    }
+
+    #[test]
+    fn cgroup_yields_the_scoped_owning_unit() {
         assert_eq!(
             unit_from_cgroup(
                 "0::/user.slice/user-1000.slice/user@1000.service/app.slice/vllm-engine2.service"
             ),
-            Some("vllm-engine2.service".into())
+            Some("user/vllm-engine2.service".into())
         );
         assert_eq!(
             unit_from_cgroup("0::/system.slice/vllm-engine.service/some/scope"),
-            Some("vllm-engine.service".into())
+            Some("system/vllm-engine.service".into())
+        );
+        // A user-scope workload must never match a same-named system unit.
+        assert_ne!(
+            unit_from_cgroup("0::/system.slice/foo.service"),
+            unit_from_cgroup("0::/user.slice/user-1000.slice/user@1000.service/app.slice/foo.service")
         );
         // Only the user manager: no unit → foreign.
         assert_eq!(
@@ -172,10 +226,15 @@ mod tests {
             None
         );
         assert_eq!(unit_from_cgroup(""), None);
+        // Docker-style scope cgroups carry no unit name → foreign.
+        assert_eq!(
+            unit_from_cgroup("0::/system.slice/docker-abc123.scope"),
+            None
+        );
         // cgroup v1 lines (multiple controllers) also handled: last .service wins.
         assert_eq!(
             unit_from_cgroup("10:memory:/system.slice/foo.service\n0::/"),
-            Some("foo.service".into())
+            Some("system/foo.service".into())
         );
     }
 }

@@ -146,7 +146,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
     let enrolled_units: std::collections::BTreeSet<String> = inv
         .workloads
         .iter()
-        .map(|d| d.unit.name.clone())
+        .map(|d| d.unit.to_string())
         .collect();
     let probe = state.ops.engine().gpu_occupancy(&inv.gpus).await;
     let gpus = inv
