@@ -60,6 +60,13 @@ fn env_id(workload: &str, version: &str) -> String {
     format!("{workload}-{version}-{}", &hex[..8])
 }
 
+/// Each promote/rollback is a new operation. Keys built from the version
+/// or the history row alone replayed an earlier promote's success when the
+/// same version was promoted again after a rollback (M2 pilot window 2).
+fn unique_suffix() -> String {
+    Utc::now().timestamp_millis().to_string()
+}
+
 fn envs_root(state: &AppState) -> PathBuf {
     state.paths.data_dir.join("envs")
 }
@@ -439,7 +446,7 @@ pub async fn promote(
         .ops
         .admit(AdmitParams {
             protocol: PROTOCOL_VERSION,
-            idempotency_key: format!("upgrade-{name}-{version}"),
+            idempotency_key: format!("upgrade-{name}-{version}-{}", unique_suffix()),
             kind: OpKind::Upgrade,
             workload: name.to_string(),
             expected_revision: None,
@@ -576,7 +583,7 @@ pub async fn rollback(
         .ops
         .admit(AdmitParams {
             protocol: PROTOCOL_VERSION,
-            idempotency_key: format!("upgrade-rollback-{name}-{}", last.id),
+            idempotency_key: format!("upgrade-rollback-{name}-{}-{}", last.id, unique_suffix()),
             kind: OpKind::Upgrade,
             workload: name.to_string(),
             expected_revision: None,
