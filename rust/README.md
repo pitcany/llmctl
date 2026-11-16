@@ -173,7 +173,7 @@ unverified gate, and inline secrets (refused, never echoed).
 
 ## Not yet here (per the plan's milestones)
 
-The rest of M2 (writing/owning the generated unit file,
+The rest of M2 — planned in [docs/RUST-M2-PLAN.md](../docs/RUST-M2-PLAN.md) (GPU occupancy guard, bounded recovery, writing/owning the generated unit file,
 version pin + staged upgrade, real-model pilot), SSH transport and Mac agents (M3), installers
 and version pinning (M4), TUI and config/preset parity (M5), migration of
 Python data (M5/M6). The YAML reader choice is deliberately still open —
