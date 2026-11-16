@@ -241,13 +241,13 @@ Version ownership is not auto-update. Per workload, an inventory `recipe`
   covers it: an in-place `pip install -U` or a launcher edit is
   `definition_drift` (`version.*` fields) even though the unit file is
   byte-identical.
-- **Stage** (`llmctl-next upgrade stage NAME --version X`): a new env at
+- **Stage** (`llmctl-next upgrade stage NAME VERSION`): a new env at
   `<data-dir>/envs/<name>-<ver>-<hash>` built with `uv venv` + `uv pip
   install` (≥10 GiB free checked first, install log kept), then offline
   validation: imports, reported versions, the served model's config. The
   manifest is written last — an interrupted or failed stage is never
   promotable. The serving env is never touched.
-- **Promote** (`upgrade promote NAME --version X`): an admitted `upgrade`
+- **Promote** (`upgrade promote NAME VERSION`): an admitted `upgrade`
   operation — stop, `ApplyDefinition` (prove-or-restore), start, await
   readiness, verify served identity, then `VerifyVersion` (the running env
   must report exactly the target versions). Failure rolls back to N

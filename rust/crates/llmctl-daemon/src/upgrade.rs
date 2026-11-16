@@ -173,7 +173,9 @@ pub async fn stage(
     let _ = tokio::fs::remove_file(&log).await;
 
     // A stage marker so an interrupted attempt is identifiable garbage.
-    let staging = env.with_extension("staging");
+    // `with_extension` would eat the version suffix (`engine2-0.32.0-<h>`
+    // → `engine2-0.32.staging`), colliding across patch versions.
+    let staging = root.join(format!("{id}.staging"));
     tokio::fs::write(&staging, b"interrupted stage; not promotable\n").await?;
 
     // Same Python minor version as the env being replaced: uv would
