@@ -108,7 +108,68 @@ pub enum Ownership {
         digest: String,
         adopted_at: DateTime<Utc>,
         provenance: Vec<FileProvenance>,
+        /// Set once llmctl has *written* the unit file itself (`own`):
+        /// where the rendered unit lives and what was there before, so
+        /// `release` can hand the exact original back.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service_file: Option<ServiceFileRecord>,
+        /// Version facts pinned next to the definition (plan D).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<VersionRef>,
+        /// Which checks the drift guard performs. 1: the effective
+        /// definition only (legacy pins). 2: definition + service file +
+        /// version facts. Re-pinned on load, so legacy pins never read as
+        /// false drift.
+        #[serde(default = "default_definition_schema")]
+        definition_schema: u32,
     },
+}
+
+fn default_definition_schema() -> u32 {
+    1
+}
+
+/// The unit file llmctl owns, plus the release target it replaced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceFileRecord {
+    /// Absolute path of the unit file (the link itself when it was one).
+    pub path: String,
+    /// `sha256:<hex>` of the bytes llmctl wrote.
+    pub digest: String,
+    pub previous: PreviousUnitFile,
+}
+
+/// Versioned-environment facts pinned next to a managed definition (plan
+/// D): what the interpreter reports, plus content digests of the non-system
+/// `Exec*` files (the launcher script). The drift guard recomputes these;
+/// an in-place `pip install -U` or a launcher edit is `definition_drift`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionRef {
+    /// The interpreter the recipe resolves (absolute path).
+    pub interpreter: Option<String>,
+    /// Package versions as the env reports them, sorted by name.
+    pub packages: Vec<(String, String)>,
+    /// CUDA runtime version as the env reports it (`torch.version.cuda`).
+    pub cuda: Option<String>,
+    /// `sha256:<hex>` over the env's sorted `pip freeze` output.
+    pub lock_digest: String,
+    /// Content digests of non-system `Exec*` paths.
+    pub exec_digests: Vec<(String, String)>,
+}
+
+/// What `own` replaced — everything `release` needs to restore exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PreviousUnitFile {
+    /// A regular file; its bytes are kept at `backup_path` (outside the
+    /// inventory, which never stores file contents).
+    File {
+        content_digest: String,
+        backup_path: String,
+    },
+    /// A symlink; re-created pointing at `target` (the repo copy is never
+    /// touched in either direction).
+    Link { target: String },
 }
 
 /// Inline environment names adoption refuses to import: credentials belong

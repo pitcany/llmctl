@@ -47,6 +47,10 @@ pub struct ImportedUnit {
     /// Inline `Environment=` names that look like credentials. Their values
     /// are never kept; their presence blocks adoption.
     pub secret_env_names: Vec<String>,
+    /// The `FragmentPath=` unit file (empty when the unit has none), and
+    /// every drop-in systemd reported, in order.
+    pub fragment_path: String,
+    pub drop_in_paths: Vec<String>,
 }
 
 pub async fn import_unit(unit: &UnitName, timeout: Duration) -> Result<ImportedUnit, EngineError> {
@@ -90,12 +94,21 @@ pub async fn import_unit(unit: &UnitName, timeout: Duration) -> Result<ImportedU
 
     let mut provenance = Vec::new();
     let mut files: Vec<String> = Vec::new();
-    if let Some(f) = fragment["data"].as_str().filter(|s| !s.is_empty()) {
-        files.push(f.to_string());
+    let fragment_path = fragment["data"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string();
+    if !fragment_path.is_empty() {
+        files.push(fragment_path.clone());
     }
-    if let Some(list) = dropins["data"].as_array() {
-        files.extend(list.iter().filter_map(|v| v.as_str().map(str::to_owned)));
-    }
+    let drop_in_paths: Vec<String> = dropins["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    files.extend(drop_in_paths.iter().cloned());
     for path in files {
         provenance.push(FileProvenance {
             content_digest: file_digest(Path::new(&path)).await,
@@ -109,6 +122,8 @@ pub async fn import_unit(unit: &UnitName, timeout: Duration) -> Result<ImportedU
             definition: None,
             provenance,
             secret_env_names: Vec::new(),
+            fragment_path,
+            drop_in_paths,
         });
     }
 
@@ -174,6 +189,8 @@ pub async fn import_unit(unit: &UnitName, timeout: Duration) -> Result<ImportedU
         definition: Some(definition),
         provenance,
         secret_env_names,
+        fragment_path,
+        drop_in_paths,
     })
 }
 
@@ -405,7 +422,7 @@ fn user_unit_dir() -> Result<PathBuf, EngineError> {
         .map_err(|_| EngineError::Io("HOME is not set".into()))
 }
 
-async fn daemon_reload(timeout: Duration) -> Result<(), EngineError> {
+pub(crate) async fn daemon_reload(timeout: Duration) -> Result<(), EngineError> {
     let mut cmd = Command::new("systemctl");
     cmd.args(["--user", "daemon-reload"]).kill_on_drop(true);
     match tokio::time::timeout(timeout, cmd.output()).await {
