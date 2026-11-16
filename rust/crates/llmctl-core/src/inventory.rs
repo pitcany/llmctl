@@ -58,6 +58,61 @@ impl ControlAuthority {
     }
 }
 
+/// Opt-in automatic recovery budget for one workload: at most
+/// `max_attempts` recovery runs within any rolling `window_secs`, never
+/// less than `min_interval_secs` apart (so the manager's own retry loop —
+/// and a failing unit — get real time between llmctl attempts). When the
+/// budget is exhausted the workload goes `needs_attention` instead of being
+/// retried again. Recovery is off unless configured, and stays off for
+/// adopted workloads until the owner turns it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryPolicy {
+    pub max_attempts: u32,
+    pub window_secs: u64,
+    #[serde(default = "default_min_interval")]
+    pub min_interval_secs: u64,
+}
+
+fn default_min_interval() -> u64 {
+    30
+}
+
+/// How to observe and stage a workload's software environment (plan D).
+/// The recipe says which interpreter to watch, which packages pin the
+/// version, how a new environment is staged, and how promote rewrites the
+/// definition to use it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeConfig {
+    /// `vllm` or `fakeengine`.
+    pub name: String,
+    /// Explicit interpreter; when absent it is derived from `ExecStart`
+    /// (the first exec path that is a python).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpreter: Option<String>,
+    /// Package names whose versions are pinned and verified.
+    #[serde(default)]
+    pub packages: Vec<String>,
+    /// How promote switches the definition to the staged interpreter:
+    /// `exec` rewrites `ExecStart` (the interpreter *is* the command);
+    /// `env` sets `Environment=<NAME>_PYTHON=<interpreter>` (a launcher
+    /// script resolves it).
+    pub apply: String,
+    /// Name of the env var for `apply: "env"` (e.g. `VLLM`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_prefix: Option<String>,
+    /// Local wheel directory for staging (`--find-links`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub find_links: Option<String>,
+    /// Absolute path to the served model's config, for offline validation
+    /// (`transformers.AutoConfig.from_pretrained` for vllm; the recipe's
+    /// `validate()` for others). Absent → the workload's model id is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_config: Option<String>,
+    /// Package index URL for staging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_url: Option<String>,
+}
+
 /// One workload definition: stable identity plus effective launch
 /// configuration. GPU ids are host-qualified and must exist in the host
 /// inventory.
@@ -75,6 +130,13 @@ pub struct WorkloadDefinition {
     /// Absent in older inventory files → external.
     #[serde(default)]
     pub ownership: crate::launch::Ownership,
+    /// Absent → automatic recovery is off for this workload.
+    #[serde(default)]
+    pub recovery: Option<RecoveryPolicy>,
+    /// Software-environment recipe: enables version pinning and staged
+    /// upgrades (plan D). Absent → no version facts are pinned.
+    #[serde(default)]
+    pub recipe: Option<RecipeConfig>,
 }
 
 /// The enrolled host and everything a plan needs to reason about it.
@@ -191,6 +253,8 @@ mod tests {
                     unit: "llmctl-next-fake-qwen3.service".into(),
                 },
                 ownership: Default::default(),
+                recovery: None,
+                recipe: None,
             }],
             revision: 7,
         }

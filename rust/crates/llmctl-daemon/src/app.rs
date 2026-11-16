@@ -99,6 +99,8 @@ pub fn sample_inventory(host: &HostId) -> HostInventory {
             unit: format!("llmctl-next-fake-{name}.service"),
         },
         ownership: Default::default(),
+        recovery: None,
+        recipe: None,
     };
     let mut inv = HostInventory {
         host: host.clone(),
@@ -176,12 +178,18 @@ impl AppState {
             Arc::new(systemd.clone()),
         );
         let engine: Arc<dyn Engine> = Arc::new(RoutedEngine::new(&inv, engines)?);
-        let ops = Arc::new(OpManager::new(
-            db,
-            engine,
-            Arc::new(inv),
-            Some(paths.faults.clone()),
-        ));
+        let ops = Arc::new(
+            OpManager::new(
+                db,
+                engine,
+                Arc::new(inv),
+                Some(paths.faults.clone()),
+            )
+            .with_own_ctx(crate::own::OwnCtx {
+                paths: paths.clone(),
+                systemd: systemd.clone(),
+            }),
+        );
 
         // Startup reconciliation: finalize anything a previous daemon left
         // nonterminal, honestly, before serving a single mutation.
@@ -196,6 +204,14 @@ impl AppState {
             );
         }
 
+        // Re-pin legacy definition schemas: an old pin (schema 1) gets its
+        // version facts probed from the live env and recorded (schema 2),
+        // so it is never reported as false drift — the current world is
+        // declared the baseline.
+        if let Err(e) = repin_legacy_versions(&ops, &paths.inventory).await {
+            tracing::warn!(error = %e, "version re-pin skipped");
+        }
+
         Ok(Arc::new(Self {
             host,
             paths,
@@ -205,6 +221,66 @@ impl AppState {
             adopt_lock: tokio::sync::Mutex::new(()),
         }))
     }
+}
+
+/// Pin version facts for managed systemd workloads whose pin predates
+/// schema 2, writing the inventory file back (revision unchanged: an
+/// idempotent normalization, not a semantic change).
+async fn repin_legacy_versions(ops: &Arc<OpManager>, inventory_path: &std::path::Path) -> Result<(), String> {
+    let inv = ops.inventory().await;
+    let mut changed = false;
+    let mut next = (*inv).clone();
+    for i in 0..next.workloads.len() {
+        let needs = {
+            let w = &next.workloads[i];
+            matches!(
+                &w.ownership,
+                llmctl_core::Ownership::Managed {
+                    definition_schema: s,
+                    version: v,
+                    ..
+                } if *s < 2 && v.is_none()
+            ) && w.engine == crate::systemd::ENGINE_NAME
+                && w.recipe.is_some()
+        };
+        if !needs {
+            continue;
+        }
+        let recipe = next.workloads[i].recipe.clone().expect("checked");
+        match crate::version::probe(&recipe, &next.workloads[i]).await {
+            Ok(v) => {
+                let w = &mut next.workloads[i];
+                tracing::info!(workload = %w.name, packages = ?v.packages, "pinned version facts (schema 2)");
+                if let llmctl_core::Ownership::Managed {
+                    version,
+                    definition_schema,
+                    ..
+                } = &mut w.ownership
+                {
+                    *version = Some(v);
+                    *definition_schema = 2;
+                }
+                changed = true;
+            }
+            Err(e) => {
+                // No baseline possible: stay schema 1 rather than pin
+                // something unprobed.
+                let name = next.workloads[i].name.to_string();
+                tracing::warn!(workload = %name, error = %e, "version probe failed; pin stays schema 1");
+            }
+        }
+    }
+    if changed {
+        let text = serde_json::to_string_pretty(&InventoryFile {
+            inventory: next.clone(),
+        })
+        .map_err(|e| e.to_string())?;
+        tokio::fs::write(inventory_path, text)
+            .await
+            .map_err(|e| format!("writing {}: {e}", inventory_path.display()))?;
+        ops.update_inventory(Arc::new(next)).await;
+    }
+    Ok(())
 }
 
 /// Bind the Unix control socket with user-only permissions and serve until
@@ -240,7 +316,8 @@ pub async fn serve(state: Arc<AppState>) -> Result<(), String> {
         .await
         .map_err(|e| format!("setting socket permissions: {e}"))?;
 
-    let app = api::router(state);
+    let app = api::router(state.clone());
+    crate::recover::spawn(state);
     tracing::info!(socket = %socket_path.display(), "llmctl-next daemon serving");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

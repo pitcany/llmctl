@@ -20,8 +20,14 @@ pub use identity::{
     GpuId, HostId, IdempotencyKey, OperationId, UnitName, UnitScopeMarker, WorkloadName,
 };
 pub use intent::DesiredIntent;
-pub use inventory::{ControlAuthority, HostInventory, Platform, UnitScope, WorkloadDefinition};
-pub use launch::{EnvFileRef, ExecCommand, FieldDiff, FileProvenance, LaunchDefinition, Ownership};
+pub use inventory::{
+    ControlAuthority, HostInventory, Platform, RecipeConfig, RecoveryPolicy, UnitScope,
+    WorkloadDefinition,
+};
+pub use launch::{
+    EnvFileRef, ExecCommand, FieldDiff, FileProvenance, LaunchDefinition, Ownership,
+    PreviousUnitFile, ServiceFileRecord, VersionRef,
+};
 pub use observation::{Observation, ProcessState, Readiness, ServedModel};
 pub use plan::{OpKind, Plan, PlanStep};
-pub use planner::{plan_restart, plan_run, plan_stop};
+pub use planner::{plan_restart, plan_run, plan_stop, plan_upgrade};

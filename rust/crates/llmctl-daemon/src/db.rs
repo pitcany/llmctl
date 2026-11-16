@@ -78,6 +78,33 @@ enum DbMsg {
     MutateOp(String, OpMutation, oneshot::Sender<Result<(), DbError>>),
     SetIntent(String, String, oneshot::Sender<Result<(), DbError>>),
     GetIntents(oneshot::Sender<Result<Vec<(String, String)>, DbError>>),
+    RecordRecovery(String, String, oneshot::Sender<Result<(), DbError>>),
+    RecoveryAttempts(
+        String,
+        DateTime<Utc>,
+        oneshot::Sender<Result<(Vec<RecoveryAttempt>, u64), DbError>>,
+    ),
+    InsertUpgrade(Box<UpgradeRow>, oneshot::Sender<Result<(), DbError>>),
+    UpdateUpgradeStatus(String, String, Option<String>, Option<String>, oneshot::Sender<Result<(), DbError>>),
+    ListUpgrades(String, oneshot::Sender<Result<Vec<UpgradeRow>, DbError>>),
+    DeleteUpgrade(String, oneshot::Sender<Result<(), DbError>>),
+}
+
+/// One staged/promoted upgrade of one workload (plan D.6: history).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeRow {
+    pub id: String,
+    pub workload: String,
+    pub from_version: String,
+    pub to_version: String,
+    pub env_path: String,
+    pub interpreter: String,
+    /// staged → validated → promoting → promoted | failed | rolled_back | discarded
+    pub status: String,
+    pub detail: Option<serde_json::Value>,
+    pub operation_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone)]
@@ -169,6 +196,71 @@ impl Db {
         self.send(DbMsg::GetIntents(tx))?;
         rx.await.map_err(|_| DbError::Closed)?
     }
+
+    /// Record one admitted recovery attempt for `workload`.
+    pub async fn record_recovery(&self, workload: &str, op_id: &str) -> Result<(), DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::RecordRecovery(workload.into(), op_id.into(), tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    /// All recovery attempts of `workload` at or after `since`, oldest
+    /// first, plus the total attempt count ever (for monotonic keys).
+    pub async fn recovery_attempts(
+        &self,
+        workload: &str,
+        since: &DateTime<Utc>,
+    ) -> Result<(Vec<RecoveryAttempt>, u64), DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::RecoveryAttempts(workload.into(), *since, tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    pub async fn insert_upgrade(&self, row: UpgradeRow) -> Result<(), DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::InsertUpgrade(Box::new(row), tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    pub async fn update_upgrade_status(
+        &self,
+        id: &str,
+        status: &str,
+        detail: Option<serde_json::Value>,
+        operation_id: Option<String>,
+    ) -> Result<(), DbError> {
+        let (tx, rx) = oneshot::channel();
+        let detail_str = detail
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        self.send(DbMsg::UpdateUpgradeStatus(
+            id.into(),
+            status.into(),
+            detail_str,
+            operation_id,
+            tx,
+        ))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    pub async fn list_upgrades(&self, workload: &str) -> Result<Vec<UpgradeRow>, DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::ListUpgrades(workload.into(), tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    pub async fn delete_upgrade(&self, id: &str) -> Result<(), DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::DeleteUpgrade(id.into(), tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+}
+
+/// One recorded recovery attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryAttempt {
+    pub op_id: String,
+    pub attempted_at: DateTime<Utc>,
 }
 
 const SCHEMA: &str = r#"
@@ -196,6 +288,26 @@ CREATE TABLE IF NOT EXISTS intents(
   intent TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS recoveries(
+  workload TEXT NOT NULL,
+  op_id TEXT NOT NULL,
+  attempted_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_recoveries_workload ON recoveries(workload, attempted_at);
+CREATE TABLE IF NOT EXISTS upgrades(
+  id TEXT PRIMARY KEY,
+  workload TEXT NOT NULL,
+  from_version TEXT NOT NULL,
+  to_version TEXT NOT NULL,
+  env_path TEXT NOT NULL,
+  interpreter TEXT NOT NULL,
+  status TEXT NOT NULL,
+  detail TEXT,
+  operation_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_upgrades_workload ON upgrades(workload, created_at);
 "#;
 
 fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::Error>> {
@@ -341,8 +453,126 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
                 .map_err(DbError::from);
             let _ = tx.send(out);
         }
+        DbMsg::RecordRecovery(workload, op_id, tx) => {
+            let out = conn
+                .execute(
+                    "INSERT INTO recoveries(workload, op_id, attempted_at) VALUES(?1,?2,?3)",
+                    params![workload, op_id, Utc::now().to_rfc3339()],
+                )
+                .map(|_| ())
+                .map_err(DbError::from);
+            let _ = tx.send(out);
+        }
+        DbMsg::RecoveryAttempts(workload, since, tx) => {
+            let mut stmt = conn.prepare(
+                "SELECT op_id, attempted_at FROM recoveries WHERE workload = ?1 AND attempted_at >= ?2
+                 ORDER BY attempted_at",
+            )?;
+            let recent = stmt
+                .query_map(params![workload, since.to_rfc3339()], |r| {
+                    Ok(RecoveryAttempt {
+                        op_id: r.get(0)?,
+                        attempted_at: parse_rfc3339(r.get(1)?),
+                    })
+                })
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from);
+            let total = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM recoveries WHERE workload = ?1",
+                    params![workload],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(DbError::from);
+            let out = match (recent, total) {
+                (Ok(recent), Ok(total)) => Ok((recent, total as u64)),
+                (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+            };
+            let _ = tx.send(out);
+        }
+        DbMsg::InsertUpgrade(boxed, tx) => {
+            let row = *boxed;
+            let out = conn
+                .execute(
+                    "INSERT INTO upgrades(id, workload, from_version, to_version, env_path,
+                                          interpreter, status, detail, operation_id,
+                                          created_at, updated_at)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                    params![
+                        row.id,
+                        row.workload,
+                        row.from_version,
+                        row.to_version,
+                        row.env_path,
+                        row.interpreter,
+                        row.status,
+                        row.detail
+                            .as_ref()
+                            .map(|v| serde_json::to_string(v).unwrap_or_default()),
+                        row.operation_id,
+                        row.created_at.to_rfc3339(),
+                        row.updated_at.to_rfc3339(),
+                    ],
+                )
+                .map(|_| ())
+                .map_err(DbError::from);
+            let _ = tx.send(out);
+        }
+        DbMsg::UpdateUpgradeStatus(id, status, detail, op_id, tx) => {
+            // `detail` arrives pre-serialized by the method.
+            let out = conn
+                .execute(
+                    "UPDATE upgrades SET status=?2, detail=COALESCE(?3, detail),
+                                        operation_id=COALESCE(?4, operation_id),
+                                        updated_at=?5
+                     WHERE id = ?1",
+                    params![id, status, detail, op_id, Utc::now().to_rfc3339()],
+                )
+                .map(|_| ())
+                .map_err(DbError::from);
+            let _ = tx.send(out);
+        }
+        DbMsg::ListUpgrades(workload, tx) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, workload, from_version, to_version, env_path, interpreter,
+                        status, detail, operation_id, created_at, updated_at
+                 FROM upgrades WHERE workload = ?1 ORDER BY created_at",
+            )?;
+            let out = stmt
+                .query_map(params![workload], upgrade_row_from)
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from);
+            let _ = tx.send(out);
+        }
+        DbMsg::DeleteUpgrade(id, tx) => {
+            let out = conn
+                .execute("DELETE FROM upgrades WHERE id = ?1", params![id])
+                .map(|_| ())
+                .map_err(DbError::from);
+            let _ = tx.send(out);
+        }
     }
     Ok(())
+}
+
+fn upgrade_row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<UpgradeRow> {
+    Ok(UpgradeRow {
+        id: r.get(0)?,
+        workload: r.get(1)?,
+        from_version: r.get(2)?,
+        to_version: r.get(3)?,
+        env_path: r.get(4)?,
+        interpreter: r.get(5)?,
+        status: r.get(6)?,
+        detail: r
+            .get::<_, Option<String>>(7)?
+            .and_then(|v| serde_json::from_str(&v).ok()),
+        operation_id: r.get(8)?,
+        created_at: parse_rfc3339(r.get(9)?),
+        updated_at: parse_rfc3339(r.get(10)?),
+    })
 }
 
 fn op_row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<OpRow> {
