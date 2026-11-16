@@ -223,13 +223,21 @@ pilot env, promote it, run a smoke check, force a rollback, then release.
 - [ ] Daemon restart: mid-operation SIGKILL reconciles, engine survives — disposable (done) and pilot
 - [ ] Upgrade rollback: failed promotion rolls back to the pinned N — disposable and pilot
 
-## Open questions for the owner
+## Owner decisions (2026-11-16)
 
-1. **Pilot window and model**: when can `vllm-engine` be off one card, and
-   which installed one-card model goes on `vllm-engine2`?
-2. **Recovery default**: confirm opt-in per workload (proposed) rather than
-   on by default.
-3. **Window 2 target**: which vLLM version to stage? Blackwell (RTX 5090)
-   builds constrain the choice, and the download is several GB.
-4. **After the pilot**: hand `vllm-engine2` back to Python llmctl (proposed;
-   M5 is the daily-use switch) or keep it under llmctl-next?
+1. **Pilot window and model: open.** The owner doesn't know yet, and it
+   isn't needed before E. Proposed default, to confirm at window time: the
+   already-installed `qwen27b-awq` profile (Qwen3.8-27B AWQ, one card,
+   router config "one card") on `vllm-engine2`, in a window where
+   `vllm-engine` is stopped or on the other card. Ask again when A–C are
+   done.
+2. **Recovery default: decided, opt-in per workload.** It stays off for
+   adopted workloads until enabled in the inventory.
+3. **Window 2 upgrade target: open.** Not needed before D. The serving env
+   `vllm-serve` has `vllm 0.25.1` and `torch 2.11.0+cu129`. Proposed rule
+   at D time: the newest vLLM patch release above 0.25.1 whose wheels
+   support Blackwell and CUDA 12.9, staged side by side and never in place.
+   If none qualifies, use a *reinstall* of 0.25.1 into a fresh env: it
+   still proves stage, promote and rollback.
+4. **After the pilot: decided, hand back.** `release` returns
+   `vllm-engine2` to Python llmctl; llmctl-next takes over daily use at M5.
