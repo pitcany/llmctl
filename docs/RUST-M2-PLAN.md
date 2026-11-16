@@ -1,6 +1,6 @@
 # Rust successor — M2 plan (what is left)
 
-Status 2026-11-16 (A–D implemented; only E remains). Parent:
+Status 2026-11-16: **M2 done** (A–D implemented, pilot windows 1–3 passed; see the [pilot report](RUST-M2-PILOT-2026-11-16.md)). Parent:
 [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table, M2 row).
 Code: `rust/` (`llmctl-next`), see [rust/README.md](../rust/README.md).
 
@@ -225,8 +225,8 @@ pilot env, promote it, run a smoke check, force a rollback, then release.
 
 ## Exit checklist (maps to the parent criterion)
 
-- [x] Startup failures: early exit, wrong model, GPU occupied — disposable (all three: early exit `unit_that_exits…`, wrong model, `gpu_occupied` e2e + the live card refused while a docker process held it); **pilot pass** ([pilot 2026-11-16](RUST-M2-PILOT-2026-11-16.md): early exit + GPU occupied; wrong model disposable only)
-- [x] Stop failures: timeout → `Unconfirmed` handled honestly — disposable
+- [x] Startup failures: early exit, wrong model, GPU occupied — disposable (all three: early exit `unit_that_exits…`, wrong model, `gpu_occupied` e2e + the live card refused while a docker process held it); **pilot pass** ([pilot 2026-11-16](RUST-M2-PILOT-2026-11-16.md): early exit + GPU occupied; wrong model disposable only) **Pilot pass:** early exit (window 1), GPU occupied (window 1), wrong model (window 3).
+- [x] Stop failures: timeout → `Unconfirmed` handled honestly — disposable — and **pilot pass** (window 3: real vLLM stop with a 100 ms effect timeout → `unconfirmed`, no fake success)
   (`a_stop_that_outlives_the_effect_timeout_is_unconfirmed`: TERM-trapped
   unit, `TimeoutStopSec=infinity`, effect timeout via
   `LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS`)
@@ -234,7 +234,7 @@ pilot env, promote it, run a smoke check, force a rollback, then release.
 - [x] Daemon restart: mid-operation SIGKILL reconciles, engine survives — disposable (done previously); **pilot pass** ([pilot 2026-11-16](RUST-M2-PILOT-2026-11-16.md))
 - [x] Upgrade rollback: failed promotion rolls back to the pinned N — disposable (fakeengine drill: automatic rollback on failure verified in the first promote attempts, explicit `upgrade rollback` green); **pilot pass** (window 2: promote 0.30.0 → 0.32.0 verified on the running process, explicit rollback, failed promote rolled back automatically — [pilot](RUST-M2-PILOT-2026-11-16.md))
 
-Only **E — the real-model pilot** remains (two windows, owner present).
+All rows pass on disposable units and in the real-model pilot. The hand-back path (`release` after an upgrade) is also proven on the real unit (window 3).
 
 ## Owner decisions (2026-11-16)
 

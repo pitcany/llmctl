@@ -1,6 +1,6 @@
 # Rust successor for llmctl
 
-Status: proposed implementation plan, November 15, 2026.
+Status: proposed implementation plan, November 15, 2026. Progress: M2 done 2026-11-16 (pilot on `vllm-engine2`; [M2 plan](RUST-M2-PLAN.md)); next is M3.
 
 User priority: **daily use first, broader distribution later**. Rust is the
 working language choice following the C++/Rust discussion. This document plans
@@ -348,7 +348,7 @@ into fixtures, operation histories, or migration reports.
 | --- | --- | --- |
 | M0: contracts and design spikes | Required engine/host capability matrix, install/upgrade recipes, MLX/custom-server identification, authority map, compatibility fixtures, dependency/platform/transport spikes | Every required engine has a supported-host target and concrete ownership path or a surfaced blocker; no silent deferral of day-one engines |
 | M1: agent foundation | Workspace, host-qualified types, versioned local API, durable operations, fake engine/supervisor boundaries, CLI status/polling | Isolated tests prove idempotency, serialization, disconnect handling, restart reconstruction, unknown state and DB failures; no real GPU required |
-| M2: one owned Linux workload | Adopt, compare configuration, transfer ownership, plan/run/stop/restart/readiness/logs, pin version and exercise staged upgrade | Disposable-unit tests then controlled real-model pilot pass startup/stop failures, bounded recovery, daemon restart and upgrade rollback |
+| M2: one owned Linux workload — **done 2026-11-16** ([report](RUST-M2-PILOT-2026-11-16.md)) | Adopt, compare configuration, transfer ownership, plan/run/stop/restart/readiness/logs, pin version and exercise staged upgrade | Disposable-unit tests then controlled real-model pilot pass startup/stop failures, bounded recovery, daemon restart and upgrade rollback |
 | M3: remote execution | macOS agent/supervisor adapter, SSH transport/enrollment, remote install and operations, local CLI targeting remote hosts | Linux-to-Mac management works; disconnect/lost ACK, sleep/reconnect, host/agent restart, stale plans and protocol mismatch do not duplicate effects or imply false success |
 | M4: required engines and coordination | All day-one engine adapters/installers, model acquisition, GPU/memory placement, swaps/rollback, router handoff and companion hooks | Capability matrix passes installation, version pinning, launch, readiness, stop, logs and upgrade/recovery tests on applicable hosts; request safety/manual-stop protection pass |
 | M5: daily-use replacement | Minimal multi-host TUI, config/preset parity, catalog operations, migration/reversal rehearsal | Daily workflows pass across workstation and Macs without legacy lifecycle writes; at least seven consecutive days of recorded pilot use |

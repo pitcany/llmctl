@@ -1,4 +1,4 @@
-# Rust successor — M2 pilot, windows 1 and 2 (2026-11-16)
+# Rust successor — M2 pilot, windows 1–3 (2026-11-16)
 
 Plan: [RUST-M2-PLAN.md](RUST-M2-PLAN.md) § E, window 1 (lifecycle).
 Owner present; started on the owner's "start window 1".
@@ -177,3 +177,26 @@ positional); the interrupted-stage marker was named `engine2-0.32.staging`
   recorded target).
 - The staged env (8.0 GB, `~/.local/state/llmctl-next-pilot/envs/`) is
   kept; `upgrade gc` would remove it.
+
+---
+
+# Window 3 — the remaining pilot rows (2026-11-16)
+
+Closes the three exit-checklist items that had only disposable evidence.
+`m2-pilot-w3 --stop-engine`, ~14 min with `vllm-engine` down (15:02–15:16
+PST). Binary at `fec0361` (all window-1/2 fixes). Prep without the GPU:
+adopt `engine2` under a deliberately wrong model name, add the recipe
+(version re-pin), `own`, restage 0.32.0. Evidence `40`–`47`.
+
+| # | Step | Result | Evidence |
+|---|---|---|---|
+| 1 | **Wrong served model:** `run` with the workload's model set to `qwen3.8-27b-WRONG` | loaded (182 s), then `verify` failed "endpoint serves qwen3.8-27b-awq, expected qwen3.8-27b-WRONG"; rollback stopped the unit; GPU 1 back to 18 MiB | `42` |
+| 2 | Correct model, `upgrade promote 0.32.0` on the owned unit | Succeeded in 170 s (stop step skipped: unit already stopped); engine argv[0] = staged env, `/version` 0.32.0 | `43` |
+| 3 | `upgrade rollback` | 0.30.0, override env file gone, 90 s | `44` |
+| 4 | **Stop failure**, effect timeout 1 s | a real vLLM shutdown finished inside 1 s: confirmed `Succeeded` (honest, but not the failure path) | `45` |
+| 5 | **Stop failure**, effect timeout 100 ms (after another run) | stop op `Failed`, effect recorded as `unconfirmed`, `rollback: none`; systemd showed `deactivating stop-sigterm` right after; unit inactive and GPU freed 1 s later; next observation `Stopped`, intent `stopped/manual` | `46` |
+| 6 | **Release after promote + rollback** | original symlink restored; repo copy sha256 `9ffe2340…` = pre-pilot; `UnitFileState=linked`; ownership external; Python `llmctl status` lists `vllm-engine2` as before | `47` |
+
+Two small CLI defects found and fixed (`2d5e676`): `llmctl-next ops | head`
+panicked on a broken pipe (30/30 runs with an early-exiting reader → 0/30),
+and a 100 ms timeout printed as "timed out after 0s".
