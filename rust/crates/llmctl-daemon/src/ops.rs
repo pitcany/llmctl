@@ -64,6 +64,8 @@ pub enum OpsError {
     UnknownOperation(String),
     #[error("invalid state: {0}")]
     InvalidState(String),
+    #[error("unsupported: {0}")]
+    Unsupported(String),
     #[error(transparent)]
     Db(#[from] crate::db::DbError),
     #[error("engine error: {0}")]
@@ -92,6 +94,7 @@ impl OpsError {
             OpsError::DefinitionDrift { .. } => (llmctl_client::wire::codes::DEFINITION_DRIFT, 409),
             OpsError::UnknownOperation(_) => (llmctl_client::wire::codes::UNKNOWN_OPERATION, 404),
             OpsError::InvalidState(_) => (llmctl_client::wire::codes::INVALID_STATE, 409),
+            OpsError::Unsupported(_) => (llmctl_client::wire::codes::UNSUPPORTED, 501),
             OpsError::Db(_) | OpsError::Engine(_) => {
                 (llmctl_client::wire::codes::DAEMON_ERROR, 500)
             }

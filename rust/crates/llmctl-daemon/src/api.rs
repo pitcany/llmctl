@@ -14,8 +14,8 @@ use serde_json::json;
 use llmctl_client::wire::codes;
 use llmctl_client::wire::{
     AckRequest, AdmitRequest, AdmitResponse, AdoptRequest, AdoptResponse, AdoptionPreview,
-    CancelRequest, HealthResponse, OperationListResponse, OperationView, PhaseView, PlanRequest,
-    PlanResponse, StatusResponse, WorkloadView, PROTOCOL_VERSION,
+    CancelRequest, HealthResponse, LogsRequest, LogsResponse, OperationListResponse, OperationView,
+    PhaseView, PlanRequest, PlanResponse, StatusResponse, WorkloadView, PROTOCOL_VERSION,
 };
 
 use crate::adopt::AdoptError;
@@ -36,6 +36,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/operations/{id}/acknowledge", post(ack_operation))
         .route("/v1/adoptions/preview", post(adoption_preview))
         .route("/v1/adoptions", post(adoption_transfer))
+        .route("/v1/logs", post(logs))
         .with_state(state)
 }
 
@@ -144,6 +145,44 @@ async fn create_plan(
         revision,
         stop_targets,
         plan,
+    }))
+}
+
+/// Read-only: no admission lock, so logs stay readable while an operation
+/// runs (that is when they matter most).
+async fn logs(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LogsRequest>,
+) -> Result<Json<LogsResponse>, ApiError> {
+    use llmctl_client::wire::{DEFAULT_LOG_LINES, MAX_LOG_LINES};
+    let lines = req.lines.unwrap_or(DEFAULT_LOG_LINES);
+    if !(1..=MAX_LOG_LINES).contains(&lines) {
+        return Err(
+            OpsError::Invalid(format!("lines must be 1..={MAX_LOG_LINES}, got {lines}")).into(),
+        );
+    }
+    let name = llmctl_core::WorkloadName::new(&req.workload)
+        .map_err(|e| OpsError::Invalid(e.to_string()))?;
+    let inv = state.ops.inventory().await;
+    let Some(def) = inv.workload(&name) else {
+        return Err(OpsError::UnknownWorkload(req.workload).into());
+    };
+    let page = state
+        .ops
+        .engine()
+        .logs(def, lines, req.after.clone())
+        .await
+        .map_err(|e| match e {
+            crate::engine::EngineError::Unsupported(m) => OpsError::Unsupported(m),
+            crate::engine::EngineError::InvalidInput(m) => OpsError::Invalid(m),
+            other => OpsError::Engine(other.to_string()),
+        })?;
+    Ok(Json(LogsResponse {
+        workload: def.name.to_string(),
+        unit: def.unit.to_string(),
+        entries: page.entries,
+        cursor: page.cursor,
+        more: page.more,
     }))
 }
 

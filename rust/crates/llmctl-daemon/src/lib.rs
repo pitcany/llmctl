@@ -19,6 +19,7 @@ pub mod api;
 pub mod app;
 pub mod db;
 pub mod engine;
+pub mod journal;
 pub mod ops;
 pub mod systemd;
 pub mod unitdef;

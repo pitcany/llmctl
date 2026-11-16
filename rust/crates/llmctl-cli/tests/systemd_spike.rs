@@ -31,7 +31,9 @@ class H(BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(body)))
         self.end_headers(); self.wfile.write(body)
     def log_message(self, *a): pass
-HTTPServer(("127.0.0.1", port), H).serve_forever()
+server = HTTPServer(("127.0.0.1", port), H)
+print(f"serving {model} on {port}", flush=True)
+server.serve_forever()
 "#;
 
 fn systemctl(args: &[&str]) -> std::process::Output {
@@ -279,6 +281,116 @@ fn restart_replaces_the_process_and_reverifies() {
     assert_ne!(before, after, "restart must replace the main process");
     let up = spike_status(&d.socket);
     assert_eq!(up["readiness"], "Ready", "{up}");
+}
+
+#[test]
+#[ignore = "touches the user's systemd: run with --ignored"]
+fn logs_show_output_and_run_boundaries_and_follow_a_restart() {
+    use std::io::BufRead;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("server.py");
+    std::fs::write(&script, SERVER_PY).unwrap();
+    let port = free_port();
+    let model = "spike/model";
+    let unit = SpikeUnit::create(
+        dir.path(),
+        &format!("/usr/bin/python3 {} {port} {model}", script.display()),
+    );
+    write_inventory(dir.path(), &unit.name, port, model);
+    let d = spawn_daemon(dir.path());
+
+    let (ok, text) = cli(&d.socket, &["run", "spike", "--wait"]);
+    assert!(ok, "{text}");
+    let (ok, text) = cli(&d.socket, &["logs", "spike"]);
+    assert!(ok, "{text}");
+    assert!(
+        text.contains(&format!("serving {model} on {port}")),
+        "{text}"
+    );
+    assert!(
+        text.contains("systemd: Started llmctl-next disposable spike"),
+        "{text}"
+    );
+    assert!(text.contains("-- run "), "{text}");
+
+    let (ok, text) = cli(&d.socket, &["logs", "spike", "--json", "-n", "3"]);
+    assert!(ok, "{text}");
+    let entries: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(!entries.is_empty() && entries.len() <= 3, "{text}");
+    assert!(
+        entries.iter().all(|e| e["invocation"].is_string()),
+        "{text}"
+    );
+
+    // Follow: a restart shows up as the old run stopping and a new run
+    // serving, under a second run marker.
+    let mut follower = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket")
+        .arg(&d.socket)
+        .args(["logs", "spike", "-f", "-n", "1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = follower.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let (ok, text) = cli(&d.socket, &["restart", "spike", "--wait"]);
+    assert!(ok, "{text}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut seen = Vec::new();
+    let mut stopped = false;
+    let mut served_again = false;
+    while !served_again {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let Ok(line) = rx.recv_timeout(left) else {
+            break;
+        };
+        stopped |= line.contains("systemd: Stopped");
+        served_again |= stopped && line.contains(&format!("serving {model}"));
+        seen.push(line);
+    }
+    let _ = follower.kill();
+    let _ = follower.wait();
+    let runs = seen.iter().filter(|l| l.starts_with("-- run ")).count();
+    assert!(
+        served_again,
+        "follow never showed the restarted run: {seen:#?}"
+    );
+    assert!(runs >= 2, "expected a new run marker: {seen:#?}");
+
+    // A cursor the journal does not know is a request error, not a 500.
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--unix-socket",
+        ])
+        .arg(&d.socket)
+        .args([
+            "-H",
+            "content-type: application/json",
+            "-d",
+            r#"{"workload":"spike","after":"s=deadbeef;i=1"}"#,
+            "http://localhost/v1/logs",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "400");
 }
 
 #[test]

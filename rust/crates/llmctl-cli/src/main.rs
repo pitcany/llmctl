@@ -8,8 +8,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use llmctl_client::wire::{
-    codes, AdmitRequest, AdoptRequest, AdoptionPreview, CheckStatus, OpStatus, OperationView,
-    PlanRequest, PROTOCOL_VERSION,
+    codes, AdmitRequest, AdoptRequest, AdoptionPreview, CheckStatus, LogEntry, LogSource,
+    LogsRequest, OpStatus, OperationView, PlanRequest, DEFAULT_LOG_LINES, MAX_LOG_LINES,
+    PROTOCOL_VERSION,
 };
 use llmctl_client::{ClientError, ControlClient};
 use llmctl_core::{OpKind, Plan};
@@ -115,6 +116,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show a workload's log from its service manager (journal). Manager
+    /// lines are prefixed `systemd:`; `-- run … --` marks each new start.
+    Logs {
+        name: String,
+        /// Newest entries to show (max 1000).
+        #[arg(short = 'n', long, default_value_t = DEFAULT_LOG_LINES)]
+        lines: u32,
+        /// Keep printing new entries until interrupted.
+        #[arg(short, long)]
+        follow: bool,
+        /// One JSON object per entry.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the daemon in the foreground (binds the control socket).
     Daemon {
         #[arg(long)]
@@ -136,7 +151,8 @@ fn exit_code_for_client_error(e: &ClientError) -> u8 {
             | codes::DEFINITION_DRIFT
             | codes::STALE_ADOPTION
             | codes::ADOPTION_REFUSED
-            | codes::ADOPTION_UNVERIFIED => 4,
+            | codes::ADOPTION_UNVERIFIED
+            | codes::UNSUPPORTED => 4,
             _ => 1,
         },
         ClientError::Disconnected(_) | ClientError::BadResponse(_) => 1,
@@ -224,6 +240,12 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Op { id, watch } => cmd_op(cli, &id, watch).await,
         Command::Cancel { id } => cmd_cancel(cli, &id).await,
         Command::Ack { id } => cmd_ack(cli, &id).await,
+        Command::Logs {
+            name,
+            lines,
+            follow,
+            json,
+        } => cmd_logs(cli, &name, lines, follow, json).await,
         Command::Adopt {
             unit,
             name,
@@ -445,6 +467,80 @@ async fn cmd_mutate(
         return Ok(0);
     }
     watch_and_report(&client, &op.id).await
+}
+
+async fn cmd_logs(
+    cli: &Cli,
+    name: &str,
+    lines: u32,
+    follow: bool,
+    json: bool,
+) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    let mut printer = LogPrinter {
+        json,
+        last_run: None,
+    };
+    let mut page = client
+        .logs(&LogsRequest {
+            workload: name.to_string(),
+            lines: Some(lines),
+            after: None,
+        })
+        .await?;
+    loop {
+        for entry in &page.entries {
+            if printer.print(entry).is_err() {
+                return Ok(0); // reader went away (`| head`)
+            }
+        }
+        if !follow {
+            return Ok(0);
+        }
+        if !page.more {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => return Ok(0),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            }
+        }
+        page = client
+            .logs(&LogsRequest {
+                workload: name.to_string(),
+                lines: Some(MAX_LOG_LINES),
+                after: page.cursor.clone(),
+            })
+            .await?;
+    }
+}
+
+struct LogPrinter {
+    json: bool,
+    last_run: Option<String>,
+}
+
+impl LogPrinter {
+    fn print(&mut self, e: &LogEntry) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        if self.json {
+            return writeln!(out, "{}", serde_json::to_string(e).unwrap());
+        }
+        if e.invocation.is_some() && e.invocation != self.last_run {
+            let id = e.invocation.as_deref().unwrap_or_default();
+            writeln!(out, "-- run {} --", &id[..id.len().min(8)])?;
+            self.last_run = e.invocation.clone();
+        }
+        let when = e
+            .timestamp
+            .with_timezone(&chrono::Local)
+            .format("%b %d %H:%M:%S");
+        let who = match e.source {
+            LogSource::Manager => "systemd: ",
+            LogSource::Unit => "",
+        };
+        let cut = if e.truncated { " […truncated]" } else { "" };
+        writeln!(out, "{when} {who}{}{cut}", e.message)
+    }
 }
 
 async fn cmd_ops(cli: &Cli, json: bool) -> Result<u8, CliError> {

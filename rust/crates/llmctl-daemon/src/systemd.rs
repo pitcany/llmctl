@@ -299,6 +299,17 @@ impl Engine for SystemdEngine {
     fn reload(&self, inventory: &HostInventory) {
         *self.endpoints.write().expect("endpoints lock") = Self::endpoints_for(inventory);
     }
+
+    fn logs(
+        &self,
+        workload: &llmctl_core::WorkloadDefinition,
+        lines: u32,
+        after: Option<String>,
+    ) -> BoxFut<Result<crate::engine::LogPage, EngineError>> {
+        let unit = workload.unit.clone();
+        let timeout = self.show_timeout;
+        Box::pin(async move { crate::journal::read(&unit, lines, after.as_deref(), timeout).await })
+    }
 }
 
 // ---- systemctl -------------------------------------------------------------

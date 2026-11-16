@@ -293,6 +293,62 @@ pub struct ApiError {
     pub error: ApiErrorBody,
 }
 
+// ---- logs -----------------------------------------------------------------
+
+/// Upper bound on entries per logs request.
+pub const MAX_LOG_LINES: u32 = 1000;
+/// Default entries per logs request.
+pub const DEFAULT_LOG_LINES: u32 = 100;
+
+/// Read a workload's service-manager log. Without `after`: the newest
+/// `lines` entries. With `after` (a cursor from a previous response): the
+/// next entries after it, oldest first, so a follower pages without gaps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogsRequest {
+    pub workload: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogSource {
+    /// The workload's own stdout/stderr.
+    Unit,
+    /// The service manager about the unit (started, exited, failed).
+    Manager,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub timestamp: DateTime<Utc>,
+    /// syslog priority 0 (emerg) ..= 7 (debug), when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
+    pub source: LogSource,
+    /// One start of the unit; changes mark run boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation: Option<String>,
+    /// Lossily decoded to UTF-8 and capped; `truncated` says when cut.
+    pub message: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogsResponse {
+    pub workload: String,
+    pub unit: String,
+    pub entries: Vec<LogEntry>,
+    /// Pass back as `after` to continue; the request's cursor when no new
+    /// entries arrived, `None` only when the log is empty.
+    pub cursor: Option<String>,
+    /// The page is full: more entries may already be waiting.
+    pub more: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiErrorBody {
     pub code: String,
@@ -316,4 +372,5 @@ pub mod codes {
     pub const STALE_ADOPTION: &str = "stale_adoption";
     pub const ADOPTION_REFUSED: &str = "adoption_refused";
     pub const ADOPTION_UNVERIFIED: &str = "adoption_unverified";
+    pub const UNSUPPORTED: &str = "unsupported";
 }

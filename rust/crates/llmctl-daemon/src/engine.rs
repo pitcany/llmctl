@@ -35,6 +35,9 @@ pub enum EngineError {
     /// The adapter cannot do this here (wrong scope, platform, …).
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// The caller's input was refused (malformed log cursor, …).
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     /// The service manager did not answer in time; nothing was decided.
     #[error("timed out: {0}")]
     Timeout(String),
@@ -118,6 +121,32 @@ pub trait Engine: Send + Sync {
 
     /// The inventory changed (adoption): refresh enrolled units.
     fn reload(&self, _inventory: &HostInventory) {}
+
+    /// Read the workload's log: the newest `lines` entries, or the next
+    /// `lines` after `after` (a cursor from an earlier page).
+    fn logs(
+        &self,
+        _workload: &llmctl_core::WorkloadDefinition,
+        _lines: u32,
+        _after: Option<String>,
+    ) -> BoxFut<Result<LogPage, EngineError>> {
+        let name = self.name();
+        Box::pin(async move {
+            Err(EngineError::Unsupported(format!(
+                "the {name} engine has no log source"
+            )))
+        })
+    }
+}
+
+/// One page of a workload's log.
+#[derive(Debug, Clone)]
+pub struct LogPage {
+    pub entries: Vec<llmctl_client::wire::LogEntry>,
+    /// Continue from here; the caller's cursor when nothing new arrived.
+    pub cursor: Option<String>,
+    /// The page is full; more may be waiting.
+    pub more: bool,
 }
 
 // ---- the fake engine ------------------------------------------------------
@@ -490,6 +519,18 @@ impl Engine for RoutedEngine {
     ) -> BoxFut<Result<(), EngineError>> {
         match self.route(&workload.unit) {
             Ok(engine) => engine.verify_definition(workload),
+            Err(e) => Box::pin(async move { Err(e) }),
+        }
+    }
+
+    fn logs(
+        &self,
+        workload: &llmctl_core::WorkloadDefinition,
+        lines: u32,
+        after: Option<String>,
+    ) -> BoxFut<Result<LogPage, EngineError>> {
+        match self.route(&workload.unit) {
+            Ok(engine) => engine.logs(workload, lines, after),
             Err(e) => Box::pin(async move { Err(e) }),
         }
     }

@@ -20,8 +20,8 @@ use tower::Service;
 
 use crate::wire::{
     AckRequest, AdmitRequest, AdmitResponse, AdoptRequest, AdoptResponse, AdoptionPreview,
-    ApiError, CancelRequest, HealthResponse, OperationListResponse, OperationView, PlanRequest,
-    PlanResponse, StatusResponse, PROTOCOL_VERSION,
+    ApiError, CancelRequest, HealthResponse, LogsRequest, LogsResponse, OperationListResponse,
+    OperationView, PlanRequest, PlanResponse, StatusResponse, PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Error)]
@@ -144,6 +144,10 @@ impl ControlClient {
 
     pub async fn adopt(&self, req: &AdoptRequest) -> Result<AdoptResponse, ClientError> {
         self.post_json("/v1/adoptions", req).await
+    }
+
+    pub async fn logs(&self, req: &LogsRequest) -> Result<LogsResponse, ClientError> {
+        self.post_json("/v1/logs", req).await
     }
 
     pub async fn list_operations(&self) -> Result<OperationListResponse, ClientError> {

@@ -722,3 +722,18 @@ fn cli_restart_refuses_stopped_then_restarts_running_each_time() {
     assert_eq!(coder["process"], "Running");
     assert_eq!(coder["readiness"], "Ready");
 }
+
+#[test]
+fn cli_logs_is_an_explicit_capability_error_on_the_fake_engine() {
+    let d = spawn_daemon();
+    let out = cli(&d.socket, &["logs", "coder"]);
+    assert_eq!(out.status.code(), Some(4));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("no log source"), "{err}");
+
+    let out = cli(&d.socket, &["logs", "nope"]);
+    assert_eq!(out.status.code(), Some(5));
+
+    let out = cli(&d.socket, &["logs", "coder", "-n", "0"]);
+    assert_eq!(out.status.code(), Some(6));
+}
