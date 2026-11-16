@@ -40,7 +40,11 @@ Evidence: 65 tests + 16 opt-in disposable-unit tests
   recovery must not stack a second retry loop on top.
 - **The vLLM version is invisible to today's drift guard.** `vllm-engine2`
   runs `~/AI/scripts/vllm-launcher.sh`, which execs
-  `${VLLM_PYTHON:-~/miniconda3/envs/vllm-serve/bin/python}`. The pinned
+  `${VLLM_PYTHON:-~/miniconda3/envs/vllm-serve/bin/python}`. *Correction
+  2026-11-16:* `vllm-engine2.env` sets `VLLM_PYTHON` to the `vllm-muse` env
+  (vllm 0.30.0, torch 2.13.0), not the `vllm-serve` default (0.25.1), so
+  the interpreter must be read from the env file, never assumed from the
+  launcher. The real recipe therefore needs `apply: "env"`. The pinned
   digest covers argv and the `EnvironmentFile=` contents, but not the
   launcher script's contents or the Python env. An in-place
   `pip install -U vllm` or a launcher edit is not detected.
@@ -215,7 +219,7 @@ lease keeps the router and llm-heal from switching underneath it.
 5. `release`, then confirm Python llmctl and the router drive it as before.
 6. Write up as `docs/RUST-M2-PILOT-<date>.md`.
 
-**Window 2 — upgrade, after D.** Stage an owner-chosen vLLM version for the
+**Window 2 — upgrade, after D.** Stage vLLM 0.32.0 (decision 3) for the
 pilot env, promote it, run a smoke check, force a rollback, then release.
 
 ## Exit checklist (maps to the parent criterion)
@@ -233,19 +237,23 @@ Only **E — the real-model pilot** remains (two windows, owner present).
 
 ## Owner decisions (2026-11-16)
 
-1. **Pilot window and model: open.** The owner doesn't know yet, and it
-   isn't needed before E. Proposed default, to confirm at window time: the
-   already-installed `qwen27b-awq` profile (Qwen3.8-27B AWQ, one card,
-   router config "one card") on `vllm-engine2`, in a window where
-   `vllm-engine` is stopped or on the other card. Ask again when A–C are
-   done.
+1. **Pilot model: decided (2026-11-16), the default.** `qwen27b-awq`
+   (served name `qwen3.8-27b-awq`) on `vllm-engine2`, GPU 1, :8010. This is
+   the preset already in `vllm-engine2.env` (placed 2026-10-22), so no
+   Python re-placement is needed. GPU 1 is held by `vllm-engine` (TP=2,
+   both cards), so the window needs `vllm-engine` stopped for its length.
+   The time slot is set when the owner says go.
 2. **Recovery default: decided, opt-in per workload.** It stays off for
    adopted workloads until enabled in the inventory.
-3. **Window 2 upgrade target: open.** Not needed before D. The serving env
-   `vllm-serve` has `vllm 0.25.1` and `torch 2.11.0+cu129`. Proposed rule
-   at D time: the newest vLLM patch release above 0.25.1 whose wheels
-   support Blackwell and CUDA 12.9, staged side by side and never in place.
-   If none qualifies, use a *reinstall* of 0.25.1 into a fresh env: it
-   still proves stage, promote and rollback.
+3. **Window 2 upgrade target: decided (2026-11-16, owner delegated),
+   vLLM 0.30.0 → 0.32.0.** The earlier rule assumed the wrong env (see the
+   correction under Facts). `vllm-engine2` runs `vllm-muse`: vllm 0.30.0,
+   torch 2.13.0, CUDA 13.0 runtime (driver 595.99, CUDA 13.2). On PyPI,
+   0.31.0 and 0.32.0 pin the same `torch==2.13.0`; 0.33.0 (2026-11-02) moves
+   to torch 2.14.0. 0.32.0 (2026-10-18) is therefore the newest release that
+   changes only vLLM, so a failed promote points at vLLM and not at a torch
+   or CUDA jump. No 0.30.x/0.31.x/0.32.x patch releases exist. Staged side
+   by side with uv and never installed in place; `vllm-muse` is the
+   rollback target N. Free disk on `/`: 221 GB (stage needs ~10 GB).
 4. **After the pilot: decided, hand back.** `release` returns
    `vllm-engine2` to Python llmctl; llmctl-next takes over daily use at M5.
