@@ -3,8 +3,10 @@
 //! file-backed simulation whose state survives daemon restarts — the
 //! external world for tests.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,17 @@ pub enum EngineError {
     /// caller sees an error — the crash-between-effect-and-result window.
     #[error("fault injected after effect: {0}")]
     FaultAfter(String),
+    /// The adapter cannot do this here (wrong scope, platform, …).
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+    /// The service manager did not answer in time; nothing was decided.
+    #[error("timed out: {0}")]
+    Timeout(String),
+    /// The effect may have happened but could not be confirmed (manager
+    /// timed out mid-effect, readback failed). Same honesty rules as
+    /// `FaultAfter`: observe before concluding anything.
+    #[error("effect unconfirmed: {0}")]
+    Unconfirmed(String),
 }
 
 /// One external effect the executor requests. Carries everything needed to
@@ -352,6 +365,91 @@ impl Engine for FakeEngine {
             let state = world.units.get(&key).cloned().unwrap_or_default();
             Ok(Self::probe_state(&state, &faults))
         })
+    }
+}
+
+// ---- routing by inventory engine name -------------------------------------
+
+/// Dispatches each unit to the adapter its inventory workload names
+/// (`engine: "fake" | "systemd"`). A unit no workload routes is unknown —
+/// adapters never see units they were not enrolled for.
+pub struct RoutedEngine {
+    engines: BTreeMap<String, Arc<dyn Engine>>,
+    /// unit display → engine name.
+    routes: BTreeMap<String, String>,
+}
+
+impl RoutedEngine {
+    pub fn new(
+        inventory: &HostInventory,
+        engines: BTreeMap<String, Arc<dyn Engine>>,
+    ) -> Result<Self, String> {
+        let mut routes = BTreeMap::new();
+        for w in &inventory.workloads {
+            if !engines.contains_key(&w.engine) {
+                return Err(format!(
+                    "workload {} names engine {:?}; known engines: {:?}",
+                    w.name,
+                    w.engine,
+                    engines.keys().collect::<Vec<_>>()
+                ));
+            }
+            routes.insert(w.unit.to_string(), w.engine.clone());
+        }
+        Ok(Self { engines, routes })
+    }
+
+    fn route(&self, unit: &UnitName) -> Result<Arc<dyn Engine>, EngineError> {
+        self.routes
+            .get(&unit.to_string())
+            .and_then(|name| self.engines.get(name))
+            .cloned()
+            .ok_or_else(|| EngineError::UnknownUnit(unit.to_string()))
+    }
+}
+
+impl Engine for RoutedEngine {
+    fn name(&self) -> &'static str {
+        "routed"
+    }
+
+    fn observe(&self, inventory: &HostInventory) -> BoxFut<Result<Vec<Observation>, EngineError>> {
+        // One sub-inventory per engine, results put back in inventory order.
+        let mut futs = Vec::new();
+        for (name, engine) in &self.engines {
+            let mut sub = inventory.clone();
+            sub.workloads.retain(|w| &w.engine == name);
+            if !sub.workloads.is_empty() {
+                futs.push(engine.observe(&sub));
+            }
+        }
+        let order: Vec<WorkloadName> = inventory.workloads.iter().map(|w| w.name.clone()).collect();
+        Box::pin(async move {
+            let mut by_name = BTreeMap::new();
+            for fut in futs {
+                for obs in fut.await? {
+                    by_name.insert(obs.workload.to_string(), obs);
+                }
+            }
+            Ok(order
+                .iter()
+                .filter_map(|n| by_name.remove(&n.to_string()))
+                .collect())
+        })
+    }
+
+    fn apply(&self, effect: Effect) -> BoxFut<Result<EffectOutcome, EngineError>> {
+        match self.route(effect.unit()) {
+            Ok(engine) => engine.apply(effect),
+            Err(e) => Box::pin(async move { Err(e) }),
+        }
+    }
+
+    fn probe(&self, unit: &UnitName) -> BoxFut<Result<UnitProbe, EngineError>> {
+        match self.route(unit) {
+            Ok(engine) => engine.probe(unit),
+            Err(e) => Box::pin(async move { Err(e) }),
+        }
     }
 }
 

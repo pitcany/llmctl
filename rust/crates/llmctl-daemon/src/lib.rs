@@ -19,6 +19,7 @@ pub mod app;
 pub mod db;
 pub mod engine;
 pub mod ops;
+pub mod systemd;
 
 pub use app::{serve, AppState, DevPaths, DEFAULT_DATA_DIR_SUFFIX};
 

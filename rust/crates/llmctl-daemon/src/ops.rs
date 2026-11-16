@@ -569,7 +569,7 @@ impl OpManager {
                 applied.push(outcome.identity);
                 StepOutcome::Done
             }
-            Err(EngineError::FaultAfter(msg)) => {
+            Err(EngineError::FaultAfter(msg) | EngineError::Unconfirmed(msg)) => {
                 // The effect very likely happened; the journal's marker plus
                 // the observed world is the ambiguity the recovery path and
                 // reconciliation must handle honestly. Treat as failure and

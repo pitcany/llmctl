@@ -516,6 +516,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -555,6 +556,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "llmctl-client",
  "llmctl-core",
  "rusqlite",

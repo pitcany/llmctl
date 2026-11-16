@@ -3,8 +3,10 @@
 Implementation of [docs/RUST-SUCCESSOR-PLAN.md](../docs/RUST-SUCCESSOR-PLAN.md).
 Status: **first implementation batch complete** (see the plan's "First
 implementation batch" section). This is `llmctl-next`, a dev-stage control
-plane that runs entirely against a fake engine — nothing here touches the
-installed inference stack or the Python llmctl data.
+plane that runs against a fake engine by default — nothing here touches the
+installed inference stack or the Python llmctl data. M2 has started: a
+`systemd` adapter drives user units, but only units an inventory workload
+explicitly enrolls with `engine: "systemd"` (see below).
 
 ## Layout
 
@@ -81,6 +83,30 @@ then reports failure — the crash-between-effect-and-result window
 reconciliation must resolve. Rules are consumed in order when unit and
 kind match.
 
+## systemd adapter (M2 spike, `crates/llmctl-daemon/src/systemd.rs`)
+
+Each inventory workload names its adapter (`engine: "fake" | "systemd"`);
+`RoutedEngine` dispatches by unit, so an adapter never sees a unit it was
+not enrolled for. The systemd adapter adopts an *existing* unit — the unit
+file stays the configuration authority:
+
+- process state from `systemctl --user show` (manager unreachable →
+  `Unknown`, never `Stopped`; `activating/auto-restart` → `Stopped`);
+- readiness + served-model identity from `GET 127.0.0.1:<port>/v1/models`;
+- `start`/`stop` on user units only (system scope → `Unsupported`); effect
+  identity carries systemd's `InvocationID`; a timed-out start/stop is
+  `Unconfirmed` and handled like the after-effect fault.
+
+Opt-in tests against disposable `llmctl-next-spike-*.service` units
+(written, enrolled and removed per test):
+
+```bash
+cargo test -p llmctl-cli --test systemd_spike -- --ignored --test-threads=1
+```
+
+They prove run → Ready → stop, early exit fails as "exited before
+readiness" (not a timeout), and a wrong served model fails verification.
+
 ## Measured (release build, 2026-11-15, this machine)
 
 - `--version` p95 **4 ms** over 20 runs (plan's provisional budget: <100 ms).
@@ -89,7 +115,8 @@ kind match.
 
 ## Not yet here (per the plan's milestones)
 
-Real engine adapters (M2+), SSH transport and Mac agents (M3), installers
+The rest of M2 (config comparison + ownership transfer on adoption, logs,
+restart, version pin + staged upgrade, real-model pilot), SSH transport and Mac agents (M3), installers
 and version pinning (M4), TUI and config/preset parity (M5), migration of
 Python data (M5/M6). The YAML reader choice is deliberately still open —
 pick a maintained crate against current docs before config parity lands.

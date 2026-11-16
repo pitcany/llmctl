@@ -15,8 +15,9 @@ use llmctl_core::{
 
 use crate::api;
 use crate::db::Db;
-use crate::engine::{Engine, FakeEngine};
+use crate::engine::{Engine, FakeEngine, RoutedEngine};
 use crate::ops::OpManager;
+use crate::systemd::SystemdEngine;
 
 pub const DEFAULT_DATA_DIR_SUFFIX: &str = "llmctl-next-dev";
 
@@ -160,7 +161,15 @@ impl AppState {
         inv.validate()
             .map_err(|e| format!("inventory invalid: {e}"))?;
 
-        let engine: Arc<dyn Engine> = Arc::new(FakeEngine::new(&paths.data_dir));
+        // Each workload names its adapter; only `systemd` workloads reach a
+        // real service manager, and only their own enrolled units.
+        let mut engines: std::collections::BTreeMap<String, Arc<dyn Engine>> = Default::default();
+        engines.insert("fake".into(), Arc::new(FakeEngine::new(&paths.data_dir)));
+        engines.insert(
+            crate::systemd::ENGINE_NAME.into(),
+            Arc::new(SystemdEngine::from_inventory(&inv)),
+        );
+        let engine: Arc<dyn Engine> = Arc::new(RoutedEngine::new(&inv, engines)?);
         let ops = Arc::new(OpManager::new(
             db,
             engine,
