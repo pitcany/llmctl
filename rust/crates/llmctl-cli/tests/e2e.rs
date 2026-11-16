@@ -1078,3 +1078,29 @@ async fn a_manually_stopped_workload_is_never_recovered() {
         "manual stop must not be recovered: {ops:?}"
     );
 }
+
+#[test]
+fn cli_run_after_a_stop_at_the_same_revision_starts_again() {
+    // M2 pilot finding: the default key used to be `run-<name>-r<rev>`, so
+    // a second `run` at the same revision replayed the first run's success
+    // and left the workload stopped.
+    let d = spawn_daemon();
+    for verb in ["run", "stop", "run"] {
+        let out = cli(&d.socket, &[verb, "coder", "--wait"]);
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(out.status.success(), "{verb}: {text}");
+        assert!(
+            !text.contains("replaying"),
+            "{verb} must be a new operation: {text}"
+        );
+    }
+    let out = cli(&d.socket, &["status", "--json"]);
+    let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let coder = status["workloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "coder")
+        .unwrap();
+    assert_eq!(coder["process"], "Running");
+}

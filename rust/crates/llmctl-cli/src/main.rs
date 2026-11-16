@@ -521,19 +521,20 @@ async fn cmd_mutate(
         return Ok(0);
     }
 
-    // run/stop are idempotent on state, so a repeat at the same revision
-    // replays the first operation. A restart is an event: each invocation
-    // is new unless the caller passes an earlier key to retry it.
-    let idempotency_key = key.unwrap_or_else(|| match kind {
-        OpKind::Run | OpKind::Stop => format!("{kind}-{name}-r{}", plan_resp.revision),
-        OpKind::Restart | OpKind::Upgrade => format!(
-            "restart-{name}-r{}-{}",
+    // Every invocation is a new operation unless the caller passes an
+    // earlier key to retry it. (run/stop used to key on the inventory
+    // revision alone; the M2 pilot showed why that is wrong: the revision
+    // does not move when the world does, so a `run` after a crash replayed
+    // the first run's success and changed nothing.)
+    let idempotency_key = key.unwrap_or_else(|| {
+        format!(
+            "{kind}-{name}-r{}-{}",
             plan_resp.revision,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis())
                 .unwrap_or_default()
-        ),
+        )
     });
     let admit = client
         .admit(AdmitRequest {

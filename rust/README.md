@@ -115,9 +115,11 @@ verification.
 The run plan of an observed-running workload — stop, start, await
 readiness, re-verify the served model — journaled as kind `restart`. A
 stopped or `Unknown` workload is refused with `invalid_state` (exit 4):
-restarting something not known to run would be a silent `run`. Unlike
-run/stop, the default idempotency key is unique per invocation (a restart
-is an event); pass `--key` with an earlier key to retry that attempt.
+restarting something not known to run would be a silent `run`. As for
+every verb, the default idempotency key is unique per invocation; pass
+`--key` with an earlier key to retry that attempt. (run/stop once keyed on
+the inventory revision alone, so a `run` after a crash replayed the first
+run's success without starting anything — found in the M2 pilot.)
 
 ### Logs (`llmctl-next logs NAME [-n 100] [-f] [--json]`)
 
