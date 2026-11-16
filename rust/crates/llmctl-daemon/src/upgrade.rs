@@ -176,7 +176,16 @@ pub async fn stage(
     let staging = env.with_extension("staging");
     tokio::fs::write(&staging, b"interrupted stage; not promotable\n").await?;
 
-    run_logged(Command::new("uv").arg("venv").arg(&env), &log, "uv venv").await?;
+    // Same Python minor version as the env being replaced: uv would
+    // otherwise pick whatever interpreter it finds first.
+    let mut venv = Command::new("uv");
+    venv.arg("venv");
+    if let Some(old) = crate::version::interpreter_for(&recipe, &inv_def_for(state, &wl).await) {
+        if let Ok(minor) = crate::version::python_minor(&old).await {
+            venv.arg("--python").arg(minor);
+        }
+    }
+    run_logged(venv.arg(&env), &log, "uv venv").await?;
     let mut install = Command::new("uv");
     install
         .arg("pip")
@@ -378,6 +387,13 @@ pub async fn promote(
         .collect();
 
     let next_def = crate::version::rewrite_definition(&old_def, &recipe, &interpreter);
+    if recipe.apply != "exec" {
+        // The override env file next_def points at must exist with exactly
+        // the pinned content before the definition is applied.
+        let prefix = recipe.env_prefix.clone().unwrap_or_else(|| "VLLM".into());
+        let (path, content) = crate::version::override_env(&interpreter, &prefix);
+        tokio::fs::write(&path, content.as_bytes()).await?;
+    }
     // N (the definition and env being replaced) is the rollback target:
     // stash it in the row's detail.
     let old_interpreter = crate::version::interpreter_for(&recipe, &inv_def_for(state, &wl).await)

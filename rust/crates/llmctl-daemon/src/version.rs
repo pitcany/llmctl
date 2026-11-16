@@ -186,9 +186,32 @@ pub async fn validate_offline(
     serde_json::from_str(out.trim()).map_err(|e| format!("validation output not JSON: {e}"))
 }
 
+/// File name of the env file `apply: "env"` adds, inside the staged env.
+pub const OVERRIDE_ENV_FILE: &str = "llmctl-next-override.env";
+
+/// Where the override env file for `interpreter` lives and what it holds.
+/// The staged env is `<env>/bin/python`, so the file sits in `<env>/`.
+pub fn override_env(interpreter: &str, prefix: &str) -> (std::path::PathBuf, String) {
+    let env_dir = Path::new(interpreter)
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| Path::new("/"));
+    (
+        env_dir.join(OVERRIDE_ENV_FILE),
+        format!("{prefix}_PYTHON={interpreter}\n"),
+    )
+}
+
 /// The definition for the staged interpreter: `exec` recipes run the
 /// interpreter directly (rewrite `ExecStart`), `env` recipes keep a
 /// launcher and point its env var at the new interpreter.
+///
+/// `env` adds an `EnvironmentFile=` *last* rather than an inline
+/// `Environment=`: systemd lets `EnvironmentFile=` override `Environment=`,
+/// so an inline override loses to a unit env file that sets the same
+/// variable (the M2 pilot's `vllm-engine2.env` sets `VLLM_PYTHON`). A later
+/// env file overrides earlier ones. The caller writes the file
+/// (`override_env`); its content digest is pinned here.
 pub fn rewrite_definition(
     old: &LaunchDefinition,
     recipe: &RecipeConfig,
@@ -208,13 +231,110 @@ pub fn rewrite_definition(
         }
         _ => {
             let prefix = recipe.env_prefix.clone().unwrap_or_else(|| "VLLM".into());
-            let name = format!("{prefix}_PYTHON");
-            next.environment.retain(|(k, _)| k != &name);
-            next.environment.push((name, interpreter.to_string()));
-            next.environment.sort();
+            let (path, content) = override_env(interpreter, &prefix);
+            next.environment_files
+                .retain(|f| !f.path.ends_with(&format!("/{OVERRIDE_ENV_FILE}")));
+            next.environment_files.push(llmctl_core::EnvFileRef {
+                path: path.display().to_string(),
+                optional: false,
+                content_digest: format!("sha256:{:x}", Sha256::digest(content.as_bytes())),
+            });
         }
     }
     next
+}
+
+/// The unit's processes must actually run `interpreter`: some process in
+/// the unit's cgroup was exec'd as `interpreter` (argv[0]) or has files
+/// from its env mapped. Asking the staged interpreter for its own package
+/// versions proves nothing about what the unit runs (M2 pilot finding).
+pub async fn verify_running_interpreter(
+    unit: &llmctl_core::UnitName,
+    interpreter: &str,
+) -> Result<(), String> {
+    let scope = match unit.scope {
+        llmctl_core::UnitScopeMarker::User => "--user",
+        llmctl_core::UnitScopeMarker::System => "--system",
+        llmctl_core::UnitScopeMarker::Launchd => return Err("launchd labels have no cgroup".into()),
+    };
+    let out = tokio::time::timeout(
+        PROBE_TIMEOUT,
+        Command::new("systemctl")
+            .args([scope, "show", "-p", "ControlGroup", "--value", &unit.name])
+            .output(),
+    )
+    .await
+    .map_err(|_| "systemctl show timed out".to_string())?
+    .map_err(|e| format!("systemctl show: {e}"))?;
+    let cgroup = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if cgroup.is_empty() {
+        return Err(format!("{unit} has no control group (not running?)"));
+    }
+    let pids = cgroup_pids(&Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/')));
+    if pids.is_empty() {
+        return Err(format!("{unit} has no processes"));
+    }
+    let env_prefix = Path::new(interpreter)
+        .parent()
+        .and_then(Path::parent)
+        .map(|p| format!("{}/", p.display()))
+        .unwrap_or_default();
+    let mut seen = Vec::new();
+    for pid in &pids {
+        let argv0 = std::fs::read(format!("/proc/{pid}/cmdline"))
+            .ok()
+            .and_then(|b| {
+                b.split(|c| *c == 0)
+                    .next()
+                    .map(|a| String::from_utf8_lossy(a).into_owned())
+            })
+            .unwrap_or_default();
+        if argv0 == interpreter {
+            return Ok(());
+        }
+        let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).unwrap_or_default();
+        if !env_prefix.is_empty() && maps.contains(&env_prefix) {
+            return Ok(());
+        }
+        if !argv0.is_empty() {
+            seen.push(argv0);
+        }
+    }
+    seen.sort();
+    seen.dedup();
+    Err(format!(
+        "no process of {unit} runs {interpreter} (running: {})",
+        seen.join(", ")
+    ))
+}
+
+/// Every pid in a cgroup and its children.
+fn cgroup_pids(dir: &Path) -> Vec<u32> {
+    let mut pids: Vec<u32> = std::fs::read_to_string(dir.join("cgroup.procs"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                pids.extend(cgroup_pids(&e.path()));
+            }
+        }
+    }
+    pids
+}
+
+/// `X.Y` of an interpreter, so a staged env uses the same Python minor
+/// version as the env it replaces.
+pub async fn python_minor(interpreter: &str) -> Result<String, EngineError> {
+    let out = run_python(
+        interpreter,
+        &["-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+        PROBE_TIMEOUT,
+    )
+    .await?;
+    Ok(out.trim().to_string())
 }
 
 /// Verify the environment reports exactly `packages` through
@@ -318,4 +438,61 @@ pub fn version_drift(pinned: &VersionRef, live: &VersionRef) -> Vec<llmctl_core:
     );
     let _ = Path::new("");
     diffs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use llmctl_core::EnvFileRef;
+
+    fn recipe(apply: &str) -> RecipeConfig {
+        RecipeConfig {
+            name: "vllm".into(),
+            interpreter: None,
+            packages: vec!["vllm".into()],
+            apply: apply.into(),
+            env_prefix: Some("VLLM".into()),
+            find_links: None,
+            model_config: None,
+            index_url: None,
+        }
+    }
+
+    #[test]
+    fn env_apply_adds_a_last_env_file_instead_of_an_inline_override() {
+        let unit_env = EnvFileRef {
+            path: "/home/u/AI/services/vllm-engine2.env".into(),
+            optional: false,
+            content_digest: "sha256:aa".into(),
+        };
+        let old = LaunchDefinition {
+            environment_files: vec![unit_env.clone()],
+            ..Default::default()
+        };
+        let py = "/d/envs/engine2-0.32.0-abc/bin/python";
+        let next = rewrite_definition(&old, &recipe("env"), py);
+        assert!(next.environment.is_empty(), "no inline override");
+        assert_eq!(next.environment_files.len(), 2);
+        assert_eq!(next.environment_files[0], unit_env);
+        let (path, content) = override_env(py, "VLLM");
+        assert_eq!(
+            path,
+            Path::new("/d/envs/engine2-0.32.0-abc/llmctl-next-override.env")
+        );
+        assert_eq!(content, format!("VLLM_PYTHON={py}\n"));
+        let last = &next.environment_files[1];
+        assert_eq!(last.path, path.display().to_string());
+        assert_eq!(
+            last.content_digest,
+            format!("sha256:{:x}", Sha256::digest(content.as_bytes()))
+        );
+
+        // Re-applying (another promote) replaces the override, never stacks.
+        let again = rewrite_definition(&next, &recipe("env"), "/d/envs/x/bin/python");
+        assert_eq!(again.environment_files.len(), 2);
+        assert_eq!(
+            again.environment_files[1].path,
+            "/d/envs/x/llmctl-next-override.env"
+        );
+    }
 }

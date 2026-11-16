@@ -717,11 +717,16 @@ impl OpManager {
                 }
             }
             PlanStep::VerifyVersion {
+                unit,
                 interpreter,
                 packages,
                 ..
             } => match crate::version::verify_packages(interpreter, packages).await {
-                Ok(()) => StepOutcome::Done,
+                Ok(()) => match crate::version::verify_running_interpreter(unit, interpreter).await
+                {
+                    Ok(()) => StepOutcome::Done,
+                    Err(e) => StepOutcome::Failed(format!("version verification: {e}")),
+                },
                 Err(e) => StepOutcome::Failed(format!("version verification: {e}")),
             },
         }
