@@ -35,6 +35,8 @@ fn workload(name: &str, gpus: &[u32], port: u16) -> WorkloadDefinition {
             unit: format!("llmctl-next-fake-{name}.service"),
         },
         ownership: Default::default(),
+        recovery: None,
+        recipe: None,
     }
 }
 

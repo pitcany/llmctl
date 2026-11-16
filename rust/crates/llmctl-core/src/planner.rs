@@ -187,6 +187,7 @@ pub fn plan_restart(
 /// decision that survives restarts and blocks automatic recovery from
 /// flipping the workload back on. Stopping a non-running target is a no-op
 /// externally (intent only) — preserving the recorded intent still matters.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_stop(
     inventory: &crate::inventory::HostInventory,
     _observations: &[Observation],
@@ -223,5 +224,112 @@ pub fn plan_stop(
         affected_gpus: def.gpus.clone(),
         steps,
         rollback: Vec::new(),
+    })
+}
+
+/// Build an upgrade (promote) plan (plan D.5): stop, swap the owned
+/// definition to `next`, start, await readiness, verify the served model,
+/// then verify the environment itself reports the target versions. Failure
+/// rolls back to `previous` — definition, start, readiness, identity — and
+/// a failed rollback is `needs_attention` (the executor's normal honesty).
+pub fn plan_upgrade(
+    inventory: &crate::inventory::HostInventory,
+    observations: &[Observation],
+    target: &WorkloadName,
+    previous: &crate::launch::LaunchDefinition,
+    next: &crate::launch::LaunchDefinition,
+    interpreter: &str,
+    packages: &[(String, String)],
+) -> CoreResult<Plan> {
+    let def = inventory
+        .workload(target)
+        .ok_or_else(|| CoreError::UnknownWorkload(target.to_string()))?;
+    if !def.authority.supports_lifecycle() {
+        return Err(CoreError::InvalidConfig {
+            workload: target.to_string(),
+            reason: "control authority is observe-only; lifecycle ownership not proven".into(),
+        });
+    }
+    let running = observations
+        .iter()
+        .any(|o| &o.workload == target && o.process == ProcessState::Running);
+    let mut steps: Vec<PlanStep> = vec![PlanStep::PersistIntent {
+        workload: target.clone(),
+        intent: DesiredIntent::Running,
+    }];
+    if running {
+        steps.push(PlanStep::StopUnit {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+        });
+    }
+    steps.push(PlanStep::ApplyDefinition {
+        workload: target.clone(),
+        unit: def.unit.clone(),
+        definition: next.clone(),
+    });
+    steps.push(PlanStep::StartUnit {
+        workload: target.clone(),
+        unit: def.unit.clone(),
+    });
+    steps.push(PlanStep::AwaitReadiness {
+        workload: target.clone(),
+        unit: def.unit.clone(),
+        timeout_secs: DEFAULT_READINESS_TIMEOUT_SECS,
+    });
+    steps.push(PlanStep::VerifyServedModel {
+        workload: target.clone(),
+        unit: def.unit.clone(),
+        model: def.model.clone(),
+    });
+    steps.push(PlanStep::VerifyVersion {
+        workload: target.clone(),
+        unit: def.unit.clone(),
+        interpreter: interpreter.to_string(),
+        packages: packages.to_vec(),
+    });
+
+    // One card means downtime; the rollback is the old definition back,
+    // started, awaited and identity-verified (plan says so).
+    let mut rollback = vec![
+        PlanStep::ApplyDefinition {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+            definition: previous.clone(),
+        },
+        PlanStep::StartUnit {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+        },
+        PlanStep::AwaitReadiness {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+            timeout_secs: DEFAULT_READINESS_TIMEOUT_SECS,
+        },
+        PlanStep::VerifyServedModel {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+            model: def.model.clone(),
+        },
+    ];
+    if running {
+        rollback.insert(
+            0,
+            PlanStep::StopUnit {
+                workload: target.clone(),
+                unit: def.unit.clone(),
+            },
+        );
+    }
+
+    Ok(Plan {
+        id: OperationId::generate(),
+        kind: OpKind::Upgrade,
+        target: target.clone(),
+        revision: inventory.revision,
+        expected_model: def.model.clone(),
+        affected_gpus: def.gpus.clone(),
+        steps,
+        rollback,
     })
 }

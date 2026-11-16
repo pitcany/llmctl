@@ -48,6 +48,14 @@ pub struct WorkloadView {
     /// Pinned definition digest for managed workloads.
     #[serde(default)]
     pub adopted_digest: Option<String>,
+    /// What the manager says about a down unit (`alive`, `manager_retrying`,
+    /// `gave_up`, `idle`, `unknown`) — the recovery decision input, shown
+    /// as-is while systemd retries on its own.
+    #[serde(default)]
+    pub recovery_state: String,
+    /// Recovery budget when configured, `max/window_secs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_policy: Option<String>,
 }
 
 fn external() -> String {
@@ -123,6 +131,100 @@ pub struct AdoptResponse {
     pub inventory_revision: u64,
 }
 
+// ---- ownership (own / release) ----------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnRequest {
+    pub workload: String,
+}
+
+/// What llmctl now owns after `own`: the file it wrote and what was there
+/// before (the release target).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnResponse {
+    pub workload: String,
+    pub path: String,
+    pub digest: String,
+    /// `file` (bytes backed up) or `link` (re-created on release).
+    pub previous_kind: String,
+    pub inventory_revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseRequest {
+    pub workload: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseResponse {
+    pub workload: String,
+    /// `external` — ownership handed back, original restored.
+    pub ownership: String,
+    pub inventory_revision: u64,
+}
+
+// ---- staged upgrades ---------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageRequest {
+    pub workload: String,
+    /// Target version of the recipe's primary package.
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageResponse {
+    pub workload: String,
+    pub version: String,
+    pub env: String,
+    pub interpreter: String,
+    pub status: String,
+    pub validation: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromoteRequest {
+    pub workload: String,
+    pub version: String,
+    /// Wait for the operation to finish before answering.
+    #[serde(default)]
+    pub wait: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackRequest {
+    pub workload: String,
+    #[serde(default)]
+    pub wait: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeListResponse {
+    pub upgrades: Vec<UpgradeRowView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeRowView {
+    pub id: String,
+    pub workload: String,
+    pub from_version: String,
+    pub to_version: String,
+    pub env_path: String,
+    pub interpreter: String,
+    pub status: String,
+    pub detail: Option<serde_json::Value>,
+    pub operation_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GcResponse {
+    pub workload: String,
+    pub removed: Vec<String>,
+    pub kept: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub host: String,
@@ -130,6 +232,30 @@ pub struct StatusResponse {
     pub inventory_revision: u64,
     pub generated_at: DateTime<Utc>,
     pub workloads: Vec<WorkloadView>,
+    /// Per card: enrolled workloads (observed running) vs everyone else.
+    #[serde(default)]
+    pub gpus: Vec<GpuView>,
+}
+
+/// One foreign compute process on a card.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuOccupantView {
+    pub pid: u32,
+    /// Owning unit when it maps to one; `None` = unmappable (always foreign).
+    pub unit: Option<String>,
+    pub memory_mib: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuView {
+    pub index: u32,
+    /// Enrolled workloads observed running on this card.
+    pub enrolled: Vec<String>,
+    /// Processes on the card that no enrolled workload accounts for.
+    pub foreign: Vec<GpuOccupantView>,
+    /// Set when occupancy could not be determined at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // ---- planning -------------------------------------------------------------
@@ -369,8 +495,12 @@ pub mod codes {
     pub const INVALID_STATE: &str = "invalid_state";
     pub const DAEMON_ERROR: &str = "daemon_error";
     pub const DEFINITION_DRIFT: &str = "definition_drift";
+    pub const GPU_OCCUPIED: &str = "gpu_occupied";
+    pub const GPU_PROBE_FAILED: &str = "gpu_probe_failed";
     pub const STALE_ADOPTION: &str = "stale_adoption";
     pub const ADOPTION_REFUSED: &str = "adoption_refused";
     pub const ADOPTION_UNVERIFIED: &str = "adoption_unverified";
+    pub const OWNERSHIP_REFUSED: &str = "ownership_refused";
+    pub const UPGRADE_REFUSED: &str = "upgrade_refused";
     pub const UNSUPPORTED: &str = "unsupported";
 }

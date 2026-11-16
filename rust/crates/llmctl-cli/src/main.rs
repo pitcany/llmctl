@@ -130,11 +130,55 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Take over an adopted workload's unit file: replace the file (or the
+    /// symlink itself) with the rendered definition, prove systemd still
+    /// sees the identical effective definition, and keep the original for
+    /// release. The unit is not restarted.
+    Own { name: String },
+    /// Hand an owned workload back: restore the recorded original
+    /// byte-for-byte (or the link) and set ownership to external.
+    Release { name: String },
+    /// Staged version upgrades (plan D): stage builds a new env side by
+    /// side with uv and validates it offline; promote swaps the definition
+    /// as an operation with automatic rollback to the pinned N.
+    Upgrade {
+        #[command(subcommand)]
+        cmd: UpgradeCmd,
+    },
+    /// Version facts of a managed workload's environment.
+    Version { name: String },
     /// Run the daemon in the foreground (binds the control socket).
     Daemon {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand, Clone)]
+enum UpgradeCmd {
+    /// Build and offline-validate a new env for the workload's recipe.
+    Stage {
+        name: String,
+        /// Target version of the recipe's primary package.
+        version: String,
+    },
+    /// Promote a validated stage; --wait follows the operation.
+    Promote {
+        name: String,
+        version: String,
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Roll back to the last promoted upgrade's N.
+    Rollback {
+        name: String,
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Upgrade history for the workload.
+    List { name: String },
+    /// Remove envs no upgrade row or the live interpreter needs.
+    Gc { name: String },
 }
 
 fn exit_code_for_client_error(e: &ClientError) -> u8 {
@@ -149,9 +193,13 @@ fn exit_code_for_client_error(e: &ClientError) -> u8 {
             | codes::BLOCKED_NEEDS_ATTENTION
             | codes::INVALID_STATE
             | codes::DEFINITION_DRIFT
+            | codes::GPU_OCCUPIED
+            | codes::GPU_PROBE_FAILED
             | codes::STALE_ADOPTION
             | codes::ADOPTION_REFUSED
             | codes::ADOPTION_UNVERIFIED
+            | codes::OWNERSHIP_REFUSED
+            | codes::UPGRADE_REFUSED
             | codes::UNSUPPORTED => 4,
             _ => 1,
         },
@@ -246,6 +294,10 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             follow,
             json,
         } => cmd_logs(cli, &name, lines, follow, json).await,
+        Command::Own { name } => cmd_own(cli, &name).await,
+        Command::Release { name } => cmd_release(cli, &name).await,
+        Command::Upgrade { cmd } => cmd_upgrade(cli, cmd).await,
+        Command::Version { name } => cmd_version(cli, &name).await,
         Command::Adopt {
             unit,
             name,
@@ -305,18 +357,55 @@ async fn cmd_status(cli: &Cli, json: bool) -> Result<u8, CliError> {
             Some(t) => t.format("%H:%M:%S").to_string(),
             None => "never".to_string(),
         };
-        println!(
-            "{:<10} {:<14} gpus={:<28} {:<8} {:<8} serves={:<18} intent={:<18} {:<8} seen {}",
-            w.name,
-            w.model,
-            w.gpus.join(","),
-            w.process,
-            w.readiness,
-            serves,
-            w.intent,
-            w.ownership,
-            observed
-        );
+        let recovery = match &w.recovery_policy {
+            Some(p) => format!("recover={} state={}", p, w.recovery_state),
+            None if w.recovery_state != "alive" => format!("state={}", w.recovery_state),
+            None => String::new(),
+        };
+        if recovery.is_empty() {
+            println!(
+                "{:<10} {:<14} gpus={:<28} {:<8} {:<8} serves={:<18} intent={:<18} {:<8} seen {}",
+                w.name,
+                w.model,
+                w.gpus.join(","),
+                w.process,
+                w.readiness,
+                serves,
+                w.intent,
+                w.ownership,
+                observed
+            );
+        } else {
+            println!(
+                "{:<10} {:<14} gpus={:<28} {:<8} {:<8} serves={:<18} intent={:<18} {:<8} seen {}  {}",
+                w.name, w.model, w.gpus.join(","), w.process, w.readiness, serves, w.intent,
+                w.ownership, observed, recovery
+            );
+        }
+    }
+    for g in &status.gpus {
+        if let Some(err) = &g.error {
+            println!("gpu {:<6} occupancy unknown: {err}", g.index);
+            continue;
+        }
+        let enrolled = if g.enrolled.is_empty() {
+            "-".to_string()
+        } else {
+            g.enrolled.join(",")
+        };
+        let foreign = if g.foreign.is_empty() {
+            "-".to_string()
+        } else {
+            g.foreign
+                .iter()
+                .map(|o| match &o.unit {
+                    Some(u) => format!("pid {} ({}, {} MiB)", o.pid, u, o.memory_mib),
+                    None => format!("pid {} (no unit, {} MiB)", o.pid, o.memory_mib),
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        println!("gpu {:<6} enrolled={:<12} foreign={}", g.index, enrolled, foreign);
     }
     Ok(0)
 }
@@ -434,7 +523,7 @@ async fn cmd_mutate(
     // is new unless the caller passes an earlier key to retry it.
     let idempotency_key = key.unwrap_or_else(|| match kind {
         OpKind::Run | OpKind::Stop => format!("{kind}-{name}-r{}", plan_resp.revision),
-        OpKind::Restart => format!(
+        OpKind::Restart | OpKind::Upgrade => format!(
             "restart-{name}-r{}-{}",
             plan_resp.revision,
             std::time::SystemTime::now()
@@ -564,6 +653,114 @@ fn printable(text: &str) -> std::borrow::Cow<'_, str> {
         }
     }
     std::borrow::Cow::Owned(out)
+}
+
+async fn cmd_own(cli: &Cli, name: &str) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    let resp = client.own(name).await?;
+    println!(
+        "own: {} → {} (previous: {}, digest {})",
+        name, resp.path, resp.previous_kind, resp.digest
+    );
+    println!("the unit was not restarted; release restores the previous {}", {
+        if resp.previous_kind == "link" {
+            "link"
+        } else {
+            "file byte-for-byte"
+        }
+    });
+    Ok(0)
+}
+
+async fn cmd_release(cli: &Cli, name: &str) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    let resp = client.release(name).await?;
+    println!(
+        "release: {} back to {} (revision {})",
+        name, resp.ownership, resp.inventory_revision
+    );
+    Ok(0)
+}
+
+async fn cmd_version(cli: &Cli, name: &str) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    let status = client.status().await?;
+    let Some(w) = status.workloads.iter().find(|w| w.name == name) else {
+        eprintln!("error: unknown workload {name}");
+        return Ok(5);
+    };
+    match &w.adopted_digest {
+        Some(d) => println!("{name}: {d}"),
+        None => println!("{name}: not managed (no pinned definition)"),
+    }
+    Ok(0)
+}
+
+async fn cmd_upgrade(cli: &Cli, cmd: UpgradeCmd) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    match cmd {
+        UpgradeCmd::Stage { name, version } => {
+            let resp = client.stage(&name, &version).await?;
+            println!(
+                "staged {} {} at {}\n  interpreter: {}\n  status: {}\n  validation: {}",
+                name, version, resp.env, resp.interpreter, resp.status, resp.validation
+            );
+            Ok(0)
+        }
+        UpgradeCmd::Promote {
+            name,
+            version,
+            wait,
+        } => {
+            let view = client.promote(&name, &version, wait).await?;
+            let id = view["id"].as_str().unwrap_or("?");
+            if wait {
+                watch_and_report(&client, id).await
+            } else {
+                println!("promote admitted: llmctl-next op {id} --watch");
+                Ok(0)
+            }
+        }
+        UpgradeCmd::Rollback { name, wait } => {
+            let view = client.rollback_upgrade(&name, wait).await?;
+            let id = view["id"].as_str().unwrap_or("?");
+            if wait {
+                watch_and_report(&client, id).await
+            } else {
+                println!("rollback admitted: llmctl-next op {id} --watch");
+                Ok(0)
+            }
+        }
+        UpgradeCmd::List { name } => {
+            let rows = client.list_upgrades(&name).await?;
+            if rows.upgrades.is_empty() {
+                println!("no upgrades for {name}");
+                return Ok(0);
+            }
+            for r in &rows.upgrades {
+                println!(
+                    "{}  {:<12} {} → {}  {}  op={}",
+                    r.created_at.format("%Y-%m-%d %H:%M:%S"),
+                    r.status,
+                    r.from_version,
+                    r.to_version,
+                    r.env_path,
+                    r.operation_id.as_deref().unwrap_or("-")
+                );
+            }
+            Ok(0)
+        }
+        UpgradeCmd::Gc { name } => {
+            let resp = client.gc_upgrades(&name).await?;
+            for r in &resp.removed {
+                println!("removed {r}");
+            }
+            for k in &resp.kept {
+                println!("kept    {k}");
+            }
+            Ok(0)
+        }
+    }
 }
 
 async fn cmd_ops(cli: &Cli, json: bool) -> Result<u8, CliError> {

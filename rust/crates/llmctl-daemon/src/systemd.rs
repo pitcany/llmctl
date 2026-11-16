@@ -49,6 +49,7 @@ pub struct SystemdEngine {
     show_timeout: Duration,
     effect_timeout: Duration,
     http_timeout: Duration,
+    gpu_probe_timeout: Duration,
 }
 
 impl SystemdEngine {
@@ -58,8 +59,9 @@ impl SystemdEngine {
             endpoints: Arc::new(std::sync::RwLock::new(Self::endpoints_for(inventory))),
             show_timeout: Duration::from_secs(5),
             // systemd's default stop timeout is 90 s; stay just above it.
-            effect_timeout: Duration::from_secs(100),
+            effect_timeout: systemd_effect_timeout(),
             http_timeout: Duration::from_secs(2),
+            gpu_probe_timeout: Duration::from_secs(10),
         }
     }
 
@@ -118,7 +120,7 @@ impl SystemdEngine {
             &[
                 "show",
                 &unit.name,
-                "--property=LoadState,ActiveState,SubState,MainPID,InvocationID",
+                "--property=LoadState,ActiveState,SubState,MainPID,InvocationID,Restart",
             ],
             self.show_timeout,
         )
@@ -164,6 +166,17 @@ impl SystemdEngine {
                 "{unit} is enrolled but systemd has no such unit"
             )));
         }
+        // A start after start-limit-hit is refused by the manager until the
+        // failure bookkeeping is cleared. `reset-failed` only resets that
+        // bookkeeping — it never starts or stops anything.
+        if verb == "start" && before.active_state == "failed" {
+            let _ = systemctl(
+                unit.scope,
+                &["reset-failed", &unit.name],
+                self.show_timeout,
+            )
+            .await;
+        }
         let out = match systemctl(unit.scope, &[verb, &unit.name], self.effect_timeout).await {
             Ok(out) => out,
             Err(EngineError::Timeout(msg)) => {
@@ -186,6 +199,17 @@ impl SystemdEngine {
             .await
             .map_err(|e| EngineError::Unconfirmed(format!("{verb} {unit} done, readback: {e}")))
     }
+}
+
+/// `LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS` overrides the fixed effect
+/// timeout (dev/test hook for stop-timeout drills; default 100 s, just
+/// above systemd's 90 s default stop timeout).
+fn systemd_effect_timeout() -> Duration {
+    std::env::var("LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(100))
 }
 
 impl Engine for SystemdEngine {
@@ -261,14 +285,40 @@ impl Engine for SystemdEngine {
         workload: &llmctl_core::WorkloadDefinition,
     ) -> BoxFut<Result<(), EngineError>> {
         let llmctl_core::Ownership::Managed {
-            definition: pinned, ..
+            definition: pinned,
+            service_file,
+            version: pinned_version,
+            definition_schema,
+            ..
         } = workload.ownership.clone()
         else {
             return Box::pin(async { Ok(()) });
         };
         let unit = workload.unit.clone();
         let timeout = self.show_timeout;
+        let mut wl = workload.clone();
         Box::pin(async move {
+            // Cheap short circuit first: once llmctl owns the file, its
+            // digest alone answers "did anything touch it".
+            if let Some(record) = &service_file {
+                let actual = match tokio::fs::read(&record.path).await {
+                    Ok(bytes) => {
+                        use sha2::Digest as _;
+                        format!("sha256:{:x}", sha2::Sha256::digest(bytes))
+                    }
+                    Err(_) => "missing".to_string(),
+                };
+                if actual != record.digest {
+                    return Err(EngineError::Drift {
+                        unit: unit.to_string(),
+                        diffs: vec![llmctl_core::FieldDiff {
+                            field: "service_file".into(),
+                            expected: record.digest.clone().into(),
+                            actual: actual.into(),
+                        }],
+                    });
+                }
+            }
             let imported = crate::unitdef::import_unit(&unit, timeout).await?;
             let mut diffs = match &imported.definition {
                 Some(live) => pinned.diff(live),
@@ -284,6 +334,22 @@ impl Engine for SystemdEngine {
                     expected: serde_json::Value::Array(vec![]),
                     actual: imported.secret_env_names.clone().into(),
                 });
+            }
+            // Schema 2 pins version facts too: an in-place package change
+            // or an edited launcher is drift even though the unit file is
+            // byte-identical. The probe hashes the *live* files at the
+            // pinned paths and asks the live env what it runs.
+            if definition_schema >= 2 {
+                if let (Some(pinned_v), Some(recipe)) = (&pinned_version, &wl.recipe) {
+                    match crate::version::probe(recipe, &wl).await {
+                        Ok(live_v) => diffs.extend(crate::version::version_drift(pinned_v, &live_v)),
+                        Err(e) => {
+                            return Err(EngineError::Io(format!(
+                                "probing live version facts of {unit}: {e}"
+                            )))
+                        }
+                    }
+                }
             }
             if diffs.is_empty() {
                 Ok(())
@@ -309,6 +375,59 @@ impl Engine for SystemdEngine {
         let unit = workload.unit.clone();
         let timeout = self.show_timeout;
         Box::pin(async move { crate::journal::read(&unit, lines, after.as_deref(), timeout).await })
+    }
+
+    /// The real cards, through nvidia-smi and `/proc/<pid>/cgroup`.
+    fn gpu_occupancy(
+        &self,
+        gpus: &[llmctl_core::GpuId],
+    ) -> BoxFut<Result<Vec<crate::gpu::GpuOccupant>, EngineError>> {
+        let wanted: std::collections::BTreeSet<u32> = gpus.iter().map(|g| g.index).collect();
+        let timeout = self.gpu_probe_timeout;
+        Box::pin(async move {
+            let all = crate::gpu::probe_nvidia(timeout).await?;
+            Ok(all.into_iter().filter(|o| wanted.contains(&o.gpu)).collect())
+        })
+    }
+
+    /// systemd retries first: `activating/auto-restart` means the manager
+    /// is on it; llmctl acts only on `failed` (start-limit-hit) or a down
+    /// unit with `Restart=no`. A manager that cannot be asked is `Unknown`
+    /// — never a licence to recover.
+    fn recovery_state(
+        &self,
+        workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Result<crate::engine::RecoveryState, EngineError>> {
+        let unit = workload.unit.clone();
+        let this = self.clone();
+        Box::pin(async move {
+            let status = match this.show(&unit).await {
+                Ok(s) => s,
+                Err(_) => return Ok(crate::engine::RecoveryState::Unknown),
+            };
+            Ok(recovery_state_of(&status))
+        })
+    }
+}
+
+/// Pure mapping from manager state to the recovery decision input.
+///
+/// `inactive` counts as `GaveUp`, not idle: an inactive unit with
+/// `Restart=on-failure` is one the manager is *not* retrying (it exited
+/// cleanly, or something stopped it — including a failed run's own
+/// rollback). Whether that warrants action is the watcher's intent check,
+/// not the manager's.
+pub fn recovery_state_of(status: &UnitStatus) -> crate::engine::RecoveryState {
+    use crate::engine::RecoveryState;
+    if status.load_state == "not-found" {
+        return RecoveryState::Unknown;
+    }
+    match (status.active_state.as_str(), status.sub_state.as_str()) {
+        ("activating", "auto-restart") => RecoveryState::ManagerRetrying,
+        ("active" | "activating" | "reloading", _) => RecoveryState::Alive,
+        ("deactivating", _) => RecoveryState::Alive,
+        ("failed", _) | ("inactive", _) => RecoveryState::GaveUp,
+        _ => RecoveryState::Unknown,
     }
 }
 
@@ -353,6 +472,8 @@ pub struct UnitStatus {
     pub sub_state: String,
     pub main_pid: Option<u32>,
     pub invocation_id: Option<String>,
+    /// `Restart=` policy (`no`, `on-failure`, `always`, …).
+    pub restart: String,
 }
 
 pub fn parse_show(text: &str) -> UnitStatus {
@@ -368,6 +489,7 @@ pub fn parse_show(text: &str) -> UnitStatus {
             "SubState" => s.sub_state = value.into(),
             "MainPID" => s.main_pid = value.parse().ok().filter(|p| *p != 0),
             "InvocationID" if !value.is_empty() => s.invocation_id = Some(value.into()),
+            "Restart" => s.restart = value.into(),
             _ => {}
         }
     }
@@ -531,6 +653,24 @@ mod tests {
     }
 
     #[test]
+    fn recovery_state_follows_the_manager() {
+        use crate::engine::RecoveryState;
+        assert_eq!(recovery_state_of(&status("active", "running")), RecoveryState::Alive);
+        // Crash loop: the manager is retrying — llmctl only reports.
+        assert_eq!(
+            recovery_state_of(&status("activating", "auto-restart")),
+            RecoveryState::ManagerRetrying
+        );
+        // start-limit-hit: the manager gave up — llmctl may act.
+        assert_eq!(recovery_state_of(&status("failed", "failed")), RecoveryState::GaveUp);
+        // Down and the manager is not retrying (clean exit or stopped by a
+        // failed run's own rollback): whether that warrants action is the
+        // watcher's intent check.
+        assert_eq!(recovery_state_of(&status("inactive", "dead")), RecoveryState::GaveUp);
+        assert_eq!(recovery_state_of(&status("weird", "x")), RecoveryState::Unknown);
+    }
+
+    #[test]
     fn parse_models_reads_openai_list() {
         let body = br#"{"object":"list","data":[{"id":"qwen/a"},{"id":"qwen/b"}]}"#;
         assert_eq!(parse_models(body).unwrap(), vec!["qwen/a", "qwen/b"]);
@@ -583,6 +723,7 @@ mod tests {
             show_timeout: Duration::from_millis(1),
             effect_timeout: Duration::from_millis(1),
             http_timeout: Duration::from_millis(1),
+            gpu_probe_timeout: Duration::from_millis(1),
         };
         let unit = UnitName::systemd(UnitScopeMarker::User, "vllm-engine.service").unwrap();
         let err = engine

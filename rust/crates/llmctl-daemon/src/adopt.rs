@@ -295,7 +295,16 @@ pub async fn transfer(state: &AppState, req: AdoptRequest) -> Result<AdoptRespon
             digest,
             adopted_at: Utc::now(),
             provenance: preview.provenance.clone(),
+            service_file: None,
+            version: None,
+            // Schema 2 (version facts) is pinned by the startup re-pin
+            // once the inventory names a recipe for this workload.
+            definition_schema: 1,
         },
+        // Recovery stays off for adopted workloads until the owner turns it
+        // on in the inventory (owner decision, 2026-11-16).
+        recovery: None,
+        recipe: None,
     });
     next.revision += 1;
     next.validate()

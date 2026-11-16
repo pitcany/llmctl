@@ -60,6 +60,16 @@ pub enum OpsError {
     },
     #[error("stale plan: {reason}")]
     StalePlan { reason: String, revised: Box<Plan> },
+    #[error(
+        "{workload}: gpu {gpu} is held by a process this plan does not manage ({desc}); refusing"
+    )]
+    GpuOccupied {
+        workload: String,
+        gpu: u32,
+        desc: String,
+    },
+    #[error("gpu occupancy could not be determined: {0}; unknown is never free")]
+    GpuProbe(String),
     #[error("unknown operation: {0}")]
     UnknownOperation(String),
     #[error("invalid state: {0}")]
@@ -91,6 +101,8 @@ impl OpsError {
                 (llmctl_client::wire::codes::BLOCKED_NEEDS_ATTENTION, 409)
             }
             OpsError::StalePlan { .. } => (llmctl_client::wire::codes::STALE_PLAN, 409),
+            OpsError::GpuOccupied { .. } => (llmctl_client::wire::codes::GPU_OCCUPIED, 409),
+            OpsError::GpuProbe(_) => (llmctl_client::wire::codes::GPU_PROBE_FAILED, 409),
             OpsError::DefinitionDrift { .. } => (llmctl_client::wire::codes::DEFINITION_DRIFT, 409),
             OpsError::UnknownOperation(_) => (llmctl_client::wire::codes::UNKNOWN_OPERATION, 404),
             OpsError::InvalidState(_) => (llmctl_client::wire::codes::INVALID_STATE, 409),
@@ -117,6 +129,9 @@ impl OpsError {
             })),
             OpsError::ProtocolMismatch { supported, .. } => Some(json!({ "supported": supported })),
             OpsError::DefinitionDrift { diffs, .. } => Some(json!({ "diffs": diffs })),
+            OpsError::GpuOccupied {
+                workload, gpu, desc, ..
+            } => Some(json!({ "workload": workload, "gpu": gpu, "occupant": desc })),
             _ => None,
         }
     }
@@ -135,6 +150,10 @@ pub struct AdmitParams {
     pub workload: String,
     pub expected_revision: Option<u64>,
     pub expected_stop_targets: Option<Vec<String>>,
+    /// Upgrade promotions carry their plan (built by the upgrade module
+    /// against fresh observations under the admission lock); required for
+    /// `OpKind::Upgrade`, ignored otherwise.
+    pub plan_override: Option<Plan>,
 }
 
 pub struct OpManager {
@@ -146,6 +165,9 @@ pub struct OpManager {
     /// Serializes admission (checks + insert) so two clients cannot both
     /// pass the overlap check concurrently.
     admit_lock: tokio::sync::Mutex<()>,
+    /// Set when the host runs the systemd adapter: lets the executor apply
+    /// owned definitions (upgrade steps) mid-operation.
+    pub(crate) own_ctx: Option<Arc<crate::own::OwnCtx>>,
 }
 
 impl OpManager {
@@ -161,7 +183,13 @@ impl OpManager {
             inventory: RwLock::new(inventory),
             faults_path,
             admit_lock: tokio::sync::Mutex::new(()),
+            own_ctx: None,
         }
+    }
+
+    pub fn with_own_ctx(mut self, ctx: crate::own::OwnCtx) -> Self {
+        self.own_ctx = Some(Arc::new(ctx));
+        self
     }
 
     /// Blockers for any mutation: one active operation at a time, and
@@ -258,8 +286,16 @@ impl OpManager {
             OpKind::Run => llmctl_core::plan_run(&inv, &observations, &name),
             OpKind::Stop => llmctl_core::plan_stop(&inv, &observations, &name),
             OpKind::Restart => llmctl_core::plan_restart(&inv, &observations, &name),
+            // Upgrade plans are built by the upgrade module and admitted
+            // through `admit`; they cannot be dry-run planned generically.
+            OpKind::Upgrade => {
+                return Err(OpsError::Unsupported(
+                    "upgrade plans are built by `upgrade promote`".into(),
+                ))
+            }
         }
         .map_err(plan_error)?;
+        self.guard_gpus(&inv, &plan).await?;
         Ok((
             plan,
             observations
@@ -267,6 +303,61 @@ impl OpManager {
                 .map(ObservationLite::from)
                 .collect(),
         ))
+    }
+
+    /// Foreign GPU occupancy guard: a plan that starts a unit asks the
+    /// affected cards who is on them. Allowed on those cards: the target
+    /// itself and enrolled workloads this plan already stops (its
+    /// conflicts). Anything else — an unenrolled unit or an unmappable
+    /// process — refuses the operation before anything is journaled, and a
+    /// probe that cannot answer refuses too: unknown is never "free".
+    async fn guard_gpus(&self, inv: &HostInventory, plan: &Plan) -> Result<(), OpsError> {
+        let starts_units = plan
+            .steps
+            .iter()
+            .any(|s| matches!(s, PlanStep::StartUnit { .. }));
+        if !starts_units || plan.affected_gpus.is_empty() {
+            return Ok(());
+        }
+        let touched: Vec<&WorkloadName> = plan
+            .steps
+            .iter()
+            .filter_map(|s| match s {
+                PlanStep::StartUnit { workload, .. } | PlanStep::StopUnit { workload, .. } => {
+                    Some(workload)
+                }
+                _ => None,
+            })
+            .collect();
+        let allowed: std::collections::BTreeSet<String> = touched
+            .iter()
+            .filter_map(|w| inv.workload(w).map(|d| d.unit.name.clone()))
+            .collect();
+
+        let occupants = self
+            .engine
+            .gpu_occupancy(&plan.affected_gpus)
+            .await
+            .map_err(|e| OpsError::GpuProbe(e.to_string()))?;
+        for occ in occupants {
+            let allowed_here = occ
+                .unit
+                .as_ref()
+                .is_some_and(|u| allowed.contains(u));
+            if allowed_here {
+                continue;
+            }
+            let desc = match &occ.unit {
+                Some(u) => format!("pid {} in unit {u}, {} MiB", occ.pid, occ.memory_mib),
+                None => format!("pid {} (no unit), {} MiB", occ.pid, occ.memory_mib),
+            };
+            return Err(OpsError::GpuOccupied {
+                workload: plan.target.to_string(),
+                gpu: occ.gpu,
+                desc,
+            });
+        }
+        Ok(())
     }
 
     pub async fn admit(self: &Arc<Self>, params: AdmitParams) -> Result<AdmitOutcome, OpsError> {
@@ -309,12 +400,22 @@ impl OpManager {
             .observe(&inv)
             .await
             .map_err(|e| OpsError::Engine(e.to_string()))?;
-        let plan = match params.kind {
-            OpKind::Run => llmctl_core::plan_run(&inv, &observations, &name),
-            OpKind::Stop => llmctl_core::plan_stop(&inv, &observations, &name),
-            OpKind::Restart => llmctl_core::plan_restart(&inv, &observations, &name),
-        }
-        .map_err(plan_error)?;
+        let plan = match (&params.kind, params.plan_override) {
+            (OpKind::Upgrade, Some(prebuilt)) => prebuilt,
+            (OpKind::Upgrade, None) => {
+                return Err(OpsError::Invalid(
+                    "upgrade admission requires its prebuilt plan".into(),
+                ))
+            }
+            (kind, _) => match kind {
+                OpKind::Run => llmctl_core::plan_run(&inv, &observations, &name),
+                OpKind::Stop => llmctl_core::plan_stop(&inv, &observations, &name),
+                OpKind::Restart => llmctl_core::plan_restart(&inv, &observations, &name),
+                OpKind::Upgrade => unreachable!(),
+            }
+            .map_err(plan_error)?,
+        };
+        self.guard_gpus(&inv, &plan).await?;
 
         // Revalidation: refuse obsolete confirmations.
         if let Some(expected) = params.expected_revision {
@@ -586,19 +687,48 @@ impl OpManager {
                 timeout_secs,
             } => self.await_readiness(row, index, unit, *timeout_secs).await,
             PlanStep::VerifyServedModel { unit, model, .. } => {
-                match self.engine.probe(unit).await {
-                    Ok(probe) => match &probe.served_model {
-                        ServedModel::Verified { model: m } if m == model => StepOutcome::Done,
-                        ServedModel::Verified { model: m } => {
-                            StepOutcome::Failed(format!("endpoint serves {m}, expected {model}"))
-                        }
-                        other => StepOutcome::Failed(format!(
-                            "served model not verified (observed {other:?})"
-                        )),
-                    },
-                    Err(e) => StepOutcome::Failed(format!("model verification probe: {e}")),
+                self.verify_served_model(unit, model).await
+            }
+            PlanStep::ApplyDefinition {
+                workload,
+                definition,
+                ..
+            } => {
+                let Some(ctx) = self.own_ctx.clone() else {
+                    return StepOutcome::Failed(
+                        "this daemon cannot apply definitions (no systemd ownership context)"
+                            .into(),
+                    );
+                };
+                let inv = self.inventory().await;
+                match crate::own::apply_definition_ctx(&ctx, &inv, workload.as_str(), definition, self).await {
+                    Ok(_) => StepOutcome::Done,
+                    Err(e) => StepOutcome::Failed(format!("applying definition: {e}")),
                 }
             }
+            PlanStep::VerifyVersion {
+                interpreter,
+                packages,
+                ..
+            } => match crate::version::verify_packages(interpreter, packages).await {
+                Ok(()) => StepOutcome::Done,
+                Err(e) => StepOutcome::Failed(format!("version verification: {e}")),
+            },
+        }
+    }
+
+    async fn verify_served_model(&self, unit: &UnitName, model: &str) -> StepOutcome {
+        match self.engine.probe(unit).await {
+            Ok(probe) => match &probe.served_model {
+                ServedModel::Verified { model: m } if m == model => StepOutcome::Done,
+                ServedModel::Verified { model: m } => {
+                    StepOutcome::Failed(format!("endpoint serves {m}, expected {model}"))
+                }
+                other => StepOutcome::Failed(format!(
+                    "served model not verified (observed {other:?})"
+                )),
+            },
+            Err(e) => StepOutcome::Failed(format!("model verification probe: {e}")),
         }
     }
 
@@ -726,22 +856,31 @@ impl OpManager {
                 self.persist(row).await?;
             }
 
-            let effect = match &step {
-                PlanStep::StopUnit { workload, unit } => Some(Effect::StopUnit {
-                    workload: workload.clone(),
-                    unit: unit.clone(),
-                }),
+            let outcome: Result<Option<String>, String> = match &step {
+                PlanStep::StopUnit { workload, unit } => self
+                    .engine
+                    .apply(Effect::StopUnit {
+                        workload: workload.clone(),
+                        unit: unit.clone(),
+                    })
+                    .await
+                    .map(|o| Some(o.identity))
+                    .map_err(|e| e.to_string()),
                 PlanStep::StartUnit { workload, unit, .. } => {
                     let model = self
                         .model_for(row, workload)
                         .unwrap_or_else(|| "unknown".into());
                     let gpus = self.gpus_for(row, workload).unwrap_or_default();
-                    Some(Effect::StartUnit {
-                        workload: workload.clone(),
-                        unit: unit.clone(),
-                        model,
-                        gpus,
-                    })
+                    self.engine
+                        .apply(Effect::StartUnit {
+                            workload: workload.clone(),
+                            unit: unit.clone(),
+                            model,
+                            gpus,
+                        })
+                        .await
+                        .map(|o| Some(o.identity))
+                        .map_err(|e| e.to_string())
                 }
                 PlanStep::PersistIntent { workload, intent } => {
                     let _ = self
@@ -751,27 +890,62 @@ impl OpManager {
                             &serde_json::to_string(intent).expect("intent"),
                         )
                         .await;
-                    None
+                    Ok(None)
                 }
-                _ => None,
+                PlanStep::ApplyDefinition {
+                    workload,
+                    definition,
+                    ..
+                } => match self.own_ctx.clone() {
+                    Some(ctx) => {
+                        let inv = self.inventory().await;
+                        crate::own::apply_definition_ctx(
+                            &ctx,
+                            &inv,
+                            workload.as_str(),
+                            definition,
+                            self,
+                        )
+                        .await
+                        .map(|_| None)
+                        .map_err(|e| e.to_string())
+                    }
+                    None => Err("no systemd ownership context".to_string()),
+                },
+                PlanStep::AwaitReadiness {
+                    unit,
+                    timeout_secs,
+                    ..
+                } => match self
+                    .await_readiness(row, start_index + offset, unit, *timeout_secs)
+                    .await
+                {
+                    StepOutcome::Done => Ok(None),
+                    StepOutcome::Canceled(why) | StepOutcome::Failed(why) => Err(why),
+                },
+                PlanStep::VerifyServedModel { unit, model, .. } => {
+                    match self.verify_served_model(unit, model).await {
+                        StepOutcome::Done => Ok(None),
+                        StepOutcome::Canceled(why) | StepOutcome::Failed(why) => Err(why),
+                    }
+                }
+                // Restoring the *version* is what ApplyDefinition in this
+                // rollback already did; no separate action.
+                PlanStep::VerifyVersion { .. } => Ok(None),
             };
-            if let Some(effect) = effect {
-                match self.engine.apply(effect).await {
-                    Ok(o) => {
-                        recovery_steps.push(json!({
-                            "step": step.label(),
-                            "outcome": "applied",
-                            "identity": o.identity,
-                        }));
-                    }
-                    Err(e) => {
-                        restoration_failed = true;
-                        recovery_steps.push(json!({
-                            "step": step.label(),
-                            "outcome": "failed",
-                            "error": e.to_string(),
-                        }));
-                    }
+            match outcome {
+                Ok(identity) => recovery_steps.push(json!({
+                    "step": step.label(),
+                    "outcome": "applied",
+                    "identity": identity,
+                })),
+                Err(e) => {
+                    restoration_failed = true;
+                    recovery_steps.push(json!({
+                        "step": step.label(),
+                        "outcome": "failed",
+                        "error": e,
+                    }));
                 }
             }
             let last = row.phases.len() - 1;

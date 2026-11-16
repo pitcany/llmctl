@@ -14,8 +14,9 @@ use serde_json::json;
 use llmctl_client::wire::codes;
 use llmctl_client::wire::{
     AckRequest, AdmitRequest, AdmitResponse, AdoptRequest, AdoptResponse, AdoptionPreview,
-    CancelRequest, HealthResponse, LogsRequest, LogsResponse, OperationListResponse, OperationView,
-    PhaseView, PlanRequest, PlanResponse, StatusResponse, WorkloadView, PROTOCOL_VERSION,
+    CancelRequest, GpuOccupantView, GpuView, HealthResponse, LogsRequest, LogsResponse,
+    OperationListResponse, OperationView, PhaseView, PlanRequest, PlanResponse, StatusResponse,
+    WorkloadView, PROTOCOL_VERSION,
 };
 
 use crate::adopt::AdoptError;
@@ -36,6 +37,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/operations/{id}/acknowledge", post(ack_operation))
         .route("/v1/adoptions/preview", post(adoption_preview))
         .route("/v1/adoptions", post(adoption_transfer))
+        .route("/v1/ownership/own", post(ownership_own))
+        .route("/v1/ownership/release", post(ownership_release))
+        .route("/v1/upgrades/stage", post(upgrade_stage))
+        .route("/v1/upgrades/promote", post(upgrade_promote))
+        .route("/v1/upgrades/rollback", post(upgrade_rollback))
+        .route("/v1/upgrades/gc", post(upgrade_gc))
+        .route("/v1/upgrades", post(upgrade_list))
         .route("/v1/logs", post(logs))
         .with_state(state)
 }
@@ -67,6 +75,20 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
         .map_err(|e| ApiError::from_ops(&OpsError::Db(e)))?
         .into_iter()
         .collect();
+
+    // Manager view of each unit (recovery decision input) up front.
+    let mut recovery_states: std::collections::HashMap<String, String> =
+        Default::default();
+    for def in &inv.workloads {
+        let s = state
+            .ops
+            .engine()
+            .recovery_state(def)
+            .await
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_else(|_| "unknown".into());
+        recovery_states.insert(def.name.to_string(), s);
+    }
 
     let workloads = inv
         .workloads
@@ -109,6 +131,66 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
                     llmctl_core::Ownership::Managed { digest, .. } => Some(digest.clone()),
                     llmctl_core::Ownership::External => None,
                 },
+                recovery_state: recovery_states
+                    .get(def.name.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".into()),
+                recovery_policy: def
+                    .recovery
+                    .map(|p| format!("{}/{}s", p.max_attempts, p.window_secs)),
+            }
+        })
+        .collect();
+
+    // Per card: enrolled workloads observed running vs foreign processes.
+    let enrolled_units: std::collections::BTreeSet<String> = inv
+        .workloads
+        .iter()
+        .map(|d| d.unit.name.clone())
+        .collect();
+    let probe = state.ops.engine().gpu_occupancy(&inv.gpus).await;
+    let gpus = inv
+        .gpus
+        .iter()
+        .map(|g| {
+            let enrolled: Vec<String> = inv
+                .workloads
+                .iter()
+                .filter(|d| {
+                    d.gpus.contains(g)
+                        && observations.iter().any(|o| {
+                            o.workload == d.name
+                                && o.process == llmctl_core::ProcessState::Running
+                        })
+                })
+                .map(|d| d.name.to_string())
+                .collect();
+            let (foreign, error) = match &probe {
+                Ok(occupants) => {
+                    let foreign = occupants
+                        .iter()
+                        .filter(|o| {
+                            o.gpu == g.index
+                                && !o
+                                    .unit
+                                    .as_ref()
+                                    .is_some_and(|u| enrolled_units.contains(u))
+                        })
+                        .map(|o| GpuOccupantView {
+                            pid: o.pid,
+                            unit: o.unit.clone(),
+                            memory_mib: o.memory_mib,
+                        })
+                        .collect();
+                    (foreign, None)
+                }
+                Err(e) => (Vec::new(), Some(e.to_string())),
+            };
+            GpuView {
+                index: g.index,
+                enrolled,
+                foreign,
+                error,
             }
         })
         .collect();
@@ -119,6 +201,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
         inventory_revision: inv.revision,
         generated_at: chrono::Utc::now(),
         workloads,
+        gpus,
     }))
 }
 
@@ -199,6 +282,7 @@ async fn admit_operation(
             workload: req.workload,
             expected_revision: req.expected_revision,
             expected_stop_targets: req.expected_stop_targets,
+            plan_override: None,
         })
         .await?;
     let (row, replayed, status) = match outcome {
@@ -314,6 +398,141 @@ async fn adoption_transfer(
         .map_err(ApiError::from_adopt)
 }
 
+async fn ownership_own(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::OwnRequest>,
+) -> Result<Json<llmctl_client::wire::OwnResponse>, ApiError> {
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    let record = crate::own::own(&state, &req.workload)
+        .await
+        .map_err(ApiError::from_own)?;
+    let revision = state.ops.inventory().await.revision;
+    Ok(Json(llmctl_client::wire::OwnResponse {
+        workload: req.workload,
+        path: record.path,
+        digest: record.digest,
+        previous_kind: match record.previous {
+            llmctl_core::PreviousUnitFile::File { .. } => "file",
+            llmctl_core::PreviousUnitFile::Link { .. } => "link",
+        }
+        .to_string(),
+        inventory_revision: revision,
+    }))
+}
+
+async fn ownership_release(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::ReleaseRequest>,
+) -> Result<Json<llmctl_client::wire::ReleaseResponse>, ApiError> {
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    crate::own::release(&state, &req.workload)
+        .await
+        .map_err(ApiError::from_own)?;
+    let revision = state.ops.inventory().await.revision;
+    Ok(Json(llmctl_client::wire::ReleaseResponse {
+        workload: req.workload,
+        ownership: "external".into(),
+        inventory_revision: revision,
+    }))
+}
+
+async fn upgrade_stage(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::StageRequest>,
+) -> Result<Json<llmctl_client::wire::StageResponse>, ApiError> {
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    let out = crate::upgrade::stage(&state, &req.workload, &req.version)
+        .await
+        .map_err(ApiError::from_upgrade)?;
+    Ok(Json(llmctl_client::wire::StageResponse {
+        workload: req.workload,
+        version: req.version,
+        env: out.row.env_path,
+        interpreter: out.row.interpreter,
+        status: out.row.status,
+        validation: out.validation,
+    }))
+}
+
+async fn upgrade_promote(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::PromoteRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    let view = crate::upgrade::promote(&state, &req.workload, &req.version)
+        .await
+        .map_err(ApiError::from_upgrade)?;
+    Ok(Json(serde_json::to_value(&view).unwrap_or_default()))
+}
+
+async fn upgrade_rollback(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::RollbackRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    let view = crate::upgrade::rollback(&state, &req.workload)
+        .await
+        .map_err(ApiError::from_upgrade)?;
+    Ok(Json(serde_json::to_value(&view).unwrap_or_default()))
+}
+
+async fn upgrade_gc(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<llmctl_client::wire::GcResponse>, ApiError> {
+    let workload = req
+        .get("workload")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let out = crate::upgrade::gc(&state, &workload)
+        .await
+        .map_err(ApiError::from_upgrade)?;
+    Ok(Json(llmctl_client::wire::GcResponse {
+        workload,
+        removed: out
+            .get("removed")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
+        kept: out
+            .get("kept")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
+    }))
+}
+
+async fn upgrade_list(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<llmctl_client::wire::UpgradeListResponse>, ApiError> {
+    let workload = req
+        .get("workload")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let rows = crate::upgrade::list(&state, &workload)
+        .await
+        .map_err(ApiError::from_upgrade)?;
+    Ok(Json(llmctl_client::wire::UpgradeListResponse {
+        upgrades: rows
+            .into_iter()
+            .map(|r| llmctl_client::wire::UpgradeRowView {
+                id: r.id,
+                workload: r.workload,
+                from_version: r.from_version,
+                to_version: r.to_version,
+                env_path: r.env_path,
+                interpreter: r.interpreter,
+                status: r.status,
+                detail: r.detail,
+                operation_id: r.operation_id,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            })
+            .collect(),
+    }))
+}
+
 pub struct ApiError {
     status: StatusCode,
     body: llmctl_client::wire::ApiError,
@@ -349,6 +568,59 @@ impl ApiError {
 }
 
 impl ApiError {
+    fn from_upgrade(e: crate::upgrade::UpgradeError) -> Self {
+        match e {
+            crate::upgrade::UpgradeError::Ops(e) => ApiError::from_ops(&e),
+            crate::upgrade::UpgradeError::Db(e) => ApiError::from_ops(&OpsError::Db(e)),
+            crate::upgrade::UpgradeError::Refused(msg) => Self {
+                status: StatusCode::CONFLICT,
+                body: llmctl_client::wire::ApiError {
+                    error: llmctl_client::wire::ApiErrorBody {
+                        code: codes::UPGRADE_REFUSED.to_string(),
+                        message: msg,
+                        details: None,
+                    },
+                },
+            },
+            crate::upgrade::UpgradeError::Io(msg) => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                body: llmctl_client::wire::ApiError {
+                    error: llmctl_client::wire::ApiErrorBody {
+                        code: codes::DAEMON_ERROR.to_string(),
+                        message: msg,
+                        details: None,
+                    },
+                },
+            },
+        }
+    }
+
+    fn from_own(e: crate::own::OwnError) -> Self {
+        match e {
+            crate::own::OwnError::Ops(e) => ApiError::from_ops(&e),
+            crate::own::OwnError::Refused(msg) => Self {
+                status: StatusCode::CONFLICT,
+                body: llmctl_client::wire::ApiError {
+                    error: llmctl_client::wire::ApiErrorBody {
+                        code: codes::OWNERSHIP_REFUSED.to_string(),
+                        message: msg,
+                        details: None,
+                    },
+                },
+            },
+            crate::own::OwnError::Io(msg) => Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                body: llmctl_client::wire::ApiError {
+                    error: llmctl_client::wire::ApiErrorBody {
+                        code: codes::DAEMON_ERROR.to_string(),
+                        message: msg,
+                        details: None,
+                    },
+                },
+            },
+        }
+    }
+
     fn from_adopt(e: AdoptError) -> Self {
         let (code, message, preview) = match e {
             AdoptError::Ops(e) => return ApiError::from_ops(&e),

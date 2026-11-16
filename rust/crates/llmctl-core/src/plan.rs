@@ -14,6 +14,9 @@ pub enum OpKind {
     Run,
     Stop,
     Restart,
+    /// Staged version promotion: stop, swap the definition, start, verify
+    /// readiness, served identity and the version itself (plan D).
+    Upgrade,
 }
 
 impl std::fmt::Display for OpKind {
@@ -22,6 +25,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Run => "run",
             OpKind::Stop => "stop",
             OpKind::Restart => "restart",
+            OpKind::Upgrade => "upgrade",
         })
     }
 }
@@ -62,6 +66,21 @@ pub enum PlanStep {
         unit: UnitName,
         model: String,
     },
+    /// External: swap the owned unit file for `definition` and prove the
+    /// effective definition matches it (restore on mismatch). Upgrade-only.
+    ApplyDefinition {
+        workload: WorkloadName,
+        unit: UnitName,
+        definition: crate::launch::LaunchDefinition,
+    },
+    /// External observation: the running environment must report exactly
+    /// these package versions through `interpreter` (importlib metadata).
+    VerifyVersion {
+        workload: WorkloadName,
+        unit: UnitName,
+        interpreter: String,
+        packages: Vec<(String, String)>,
+    },
 }
 
 impl PlanStep {
@@ -71,7 +90,9 @@ impl PlanStep {
             | PlanStep::StopUnit { workload, .. }
             | PlanStep::StartUnit { workload, .. }
             | PlanStep::AwaitReadiness { workload, .. }
-            | PlanStep::VerifyServedModel { workload, .. } => workload,
+            | PlanStep::VerifyServedModel { workload, .. }
+            | PlanStep::ApplyDefinition { workload, .. }
+            | PlanStep::VerifyVersion { workload, .. } => workload,
         }
     }
 
@@ -92,6 +113,20 @@ impl PlanStep {
                 workload, model, ..
             } => {
                 format!("verify {workload} serves {model}")
+            }
+            PlanStep::ApplyDefinition { workload, .. } => {
+                format!("apply new definition to {workload}")
+            }
+            PlanStep::VerifyVersion {
+                workload,
+                packages, ..
+            } => {
+                let pkgs = packages
+                    .iter()
+                    .map(|(n, v)| format!("{n}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("verify {workload} runs {pkgs}")
             }
         }
     }

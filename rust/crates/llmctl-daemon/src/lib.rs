@@ -19,10 +19,15 @@ pub mod api;
 pub mod app;
 pub mod db;
 pub mod engine;
+pub mod gpu;
 pub mod journal;
 pub mod ops;
+pub mod own;
+pub mod recover;
 pub mod systemd;
 pub mod unitdef;
+pub mod upgrade;
+pub mod version;
 
 pub use app::{serve, AppState, DevPaths, DEFAULT_DATA_DIR_SUFFIX};
 
