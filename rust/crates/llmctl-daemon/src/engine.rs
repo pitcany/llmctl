@@ -17,6 +17,8 @@ use llmctl_core::{
     GpuId, HostInventory, Observation, ProcessState, Readiness, ServedModel, UnitName, WorkloadName,
 };
 
+use crate::gpu::GpuOccupant;
+
 pub type BoxFut<T> = Pin<Box<dyn std::future::Future<Output = T> + Send>>;
 
 #[derive(Debug, Error)]
@@ -93,6 +95,36 @@ pub struct UnitProbe {
     pub served_model: ServedModel,
 }
 
+/// What the service manager says about a unit that is down — the recovery
+/// decision input. Recovery decides; observation only reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryState {
+    /// The process is alive; nothing to do.
+    Alive,
+    /// The manager is retrying on its own (`Restart=on-failure`,
+    /// auto-restart). llmctl only reports this; acting here would stack a
+    /// second retry loop on top of the manager's.
+    ManagerRetrying,
+    /// The manager gave up (`failed`, start-limit-hit) or the unit is down
+    /// and the manager is not retrying it: llmctl may act (the watcher
+    /// still gates on the recorded intent).
+    GaveUp,
+    /// The manager could not be asked: never recover on this.
+    Unknown,
+}
+
+impl RecoveryState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecoveryState::Alive => "alive",
+            RecoveryState::ManagerRetrying => "manager_retrying",
+            RecoveryState::GaveUp => "gave_up",
+            RecoveryState::Unknown => "unknown",
+        }
+    }
+}
+
 /// The port for engine adapters. Futures are boxed so the daemon holds
 /// `Arc<dyn Engine>`.
 pub trait Engine: Send + Sync {
@@ -136,6 +168,27 @@ pub trait Engine: Send + Sync {
                 "the {name} engine has no log source"
             )))
         })
+    }
+
+    /// Who currently occupies these cards (compute processes, with the
+    /// owning unit when it maps to one). Occupancy is part of each engine's
+    /// world: adapters that have no GPUs to see answer empty; adapters that
+    /// cannot ask answer `Err` — unknown is never "free".
+    fn gpu_occupancy(
+        &self,
+        _gpus: &[GpuId],
+    ) -> BoxFut<Result<Vec<GpuOccupant>, EngineError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// What the manager says about a down unit (the recovery decision
+    /// input). Engines without a retrying manager report `GaveUp` for a
+    /// down unit; engines that cannot ask report `Unknown`.
+    fn recovery_state(
+        &self,
+        _workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Result<RecoveryState, EngineError>> {
+        Box::pin(async { Ok(RecoveryState::Unknown) })
     }
 }
 
@@ -198,6 +251,10 @@ pub struct Faults {
     /// acknowledgement without losing the operation.
     #[serde(default)]
     pub admit_delay_ms: u64,
+    /// Test hook: `own`/`apply_definition` renders a subtly wrong unit, so
+    /// the prove step must catch it, restore and refuse.
+    #[serde(default)]
+    pub corrupt_render: bool,
 }
 
 impl Faults {
@@ -414,6 +471,41 @@ impl Engine for FakeEngine {
             Ok(Self::probe_state(&state, &faults))
         })
     }
+
+    /// Foreign occupants are injected through `gpus.json` in the dev data
+    /// dir (absent = every card free), so the guard is testable without a
+    /// real GPU: `[{"gpu":0,"pid":999,"unit":null,"memory_mib":123}]`.
+    fn gpu_occupancy(
+        &self,
+        gpus: &[GpuId],
+    ) -> BoxFut<Result<Vec<GpuOccupant>, EngineError>> {
+        let path = self.dir.join("gpus.json");
+        let wanted: std::collections::BTreeSet<u32> = gpus.iter().map(|g| g.index).collect();
+        Box::pin(async move {
+            let all: Vec<GpuOccupant> = read_json(&path).await?;
+            Ok(all.into_iter().filter(|o| wanted.contains(&o.gpu)).collect())
+        })
+    }
+
+    /// The fake engine has no retrying manager: a down unit has given up.
+    fn recovery_state(
+        &self,
+        workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Result<RecoveryState, EngineError>> {
+        let this = FakeEngine {
+            dir: self.dir.clone(),
+        };
+        let key = workload.unit.to_string();
+        Box::pin(async move {
+            let world = this.read_world().await?;
+            let state = world.units.get(&key).cloned().unwrap_or_default();
+            Ok(if state.active {
+                RecoveryState::Alive
+            } else {
+                RecoveryState::GaveUp
+            })
+        })
+    }
 }
 
 // ---- routing by inventory engine name -------------------------------------
@@ -523,6 +615,16 @@ impl Engine for RoutedEngine {
         }
     }
 
+    fn recovery_state(
+        &self,
+        workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Result<RecoveryState, EngineError>> {
+        match self.route(&workload.unit) {
+            Ok(engine) => engine.recovery_state(workload),
+            Err(e) => Box::pin(async move { Err(e) }),
+        }
+    }
+
     fn logs(
         &self,
         workload: &llmctl_core::WorkloadDefinition,
@@ -545,6 +647,35 @@ impl Engine for RoutedEngine {
         for engine in self.engines.values() {
             engine.reload(inventory);
         }
+    }
+
+    /// Ask every engine that has enrolled units about its world and merge;
+    /// an engine with nothing enrolled cannot answer for this host, but one
+    /// that has units and cannot answer makes the whole occupancy unknown.
+    fn gpu_occupancy(
+        &self,
+        gpus: &[GpuId],
+    ) -> BoxFut<Result<Vec<GpuOccupant>, EngineError>> {
+        let enrolled: std::collections::BTreeSet<String> = self
+            .routes
+            .read()
+            .expect("routes lock")
+            .values()
+            .cloned()
+            .collect();
+        let mut futs = Vec::new();
+        for (name, engine) in &self.engines {
+            if enrolled.contains(name) {
+                futs.push(engine.gpu_occupancy(gpus));
+            }
+        }
+        Box::pin(async move {
+            let mut out = Vec::new();
+            for fut in futs {
+                out.extend(fut.await?);
+            }
+            Ok(out)
+        })
     }
 }
 

@@ -737,3 +737,334 @@ fn cli_logs_is_an_explicit_capability_error_on_the_fake_engine() {
     let out = cli(&d.socket, &["logs", "coder", "-n", "0"]);
     assert_eq!(out.status.code(), Some(6));
 }
+
+// ---- A: foreign GPU occupancy guard ----------------------------------------
+
+/// `gpus.json` (fake-engine world): occupants per card.
+fn write_gpus(d: &DaemonGuard, occupants: serde_json::Value) {
+    std::fs::write(
+        d.data_dir().join("gpus.json"),
+        serde_json::to_vec_pretty(&occupants).unwrap(),
+    )
+    .expect("write gpus.json");
+}
+
+#[tokio::test]
+async fn foreign_gpu_occupant_refuses_run_before_anything_is_journaled() {
+    let d = spawn_daemon();
+    write_gpus(
+        &d,
+        serde_json::json!([{"gpu": 0, "pid": 99123, "unit": null, "memory_mib": 4096}]),
+    );
+    let client = d.client();
+
+    // Dry run refuses too — the preview tells the owner why.
+    match client
+        .plan(PlanRequest {
+            kind: OpKind::Run,
+            workload: "coder".into(),
+        })
+        .await
+    {
+        Err(ClientError::Api { code, message, .. }) => {
+            assert_eq!(code, codes::GPU_OCCUPIED, "{message}");
+            assert!(message.contains("99123"), "{message}");
+        }
+        other => panic!("expected gpu_occupied on dry run, got {other:?}"),
+    }
+
+    match client
+        .admit(admit_req(OpKind::Run, "coder", "gpu-foreign-1"))
+        .await
+    {
+        Err(ClientError::Api { code, message, .. }) => {
+            assert_eq!(code, codes::GPU_OCCUPIED, "{message}");
+        }
+        other => panic!("expected gpu_occupied, got {other:?}"),
+    }
+
+    // Nothing journaled, nothing started.
+    let ops = client.list_operations().await.unwrap();
+    assert!(ops.operations.is_empty(), "{ops:?}");
+    let status = client.status().await.unwrap();
+    let gpu0 = status.gpus.iter().find(|g| g.index == 0).unwrap();
+    assert_eq!(gpu0.foreign.len(), 1);
+    assert_eq!(gpu0.foreign[0].pid, 99123);
+    assert_eq!(gpu0.foreign[0].unit, None);
+    assert_eq!(gpu0.enrolled.len(), 0);
+
+    // The card freed → the same run succeeds.
+    write_gpus(&d, serde_json::json!([]));
+    run_to_success(&d, "coder", "gpu-foreign-2").await;
+}
+
+#[tokio::test]
+async fn enrolled_workload_the_plan_stops_is_not_foreign_but_a_stale_one_is() {
+    let d = spawn_daemon();
+
+    // helper runs on gpu 1; big (gpus 0+1) plans to stop it → allowed.
+    run_to_success(&d, "helper", "gpu-enr-1").await;
+    write_gpus(
+        &d,
+        serde_json::json!([{"gpu": 1, "pid": 4242, "unit": "llmctl-next-fake-helper.service", "memory_mib": 512}]),
+    );
+    run_to_success(&d, "big", "gpu-enr-2").await;
+
+    // A stopped enrolled workload's leftover process is foreign: the plan
+    // does not manage it.
+    run_to_success(&d, "coder", "gpu-enr-3").await; // coder now on gpu 0
+    write_gpus(
+        &d,
+        serde_json::json!([{"gpu": 0, "pid": 777, "unit": "llmctl-next-fake-helper.service", "memory_mib": 8}]),
+    );
+    match d
+        .client()
+        .admit(admit_req(OpKind::Run, "coder", "gpu-enr-4"))
+        .await
+    {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, codes::GPU_OCCUPIED),
+        other => panic!("expected gpu_occupied, got {other:?}"),
+    }
+}
+
+// ---- B: bounded recovery ----------------------------------------------------
+
+/// A daemon whose inventory gives `coder` a recovery budget and whose
+/// watcher runs fast (200 ms), in its own temp dir. Attempt spacing is 0 so
+/// the budget math is observable in seconds.
+fn spawn_recovery_daemon(mut policy: serde_json::Value) -> DaemonGuard {
+    policy["min_interval_secs"] = serde_json::json!(0);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("control.sock");
+    let host = llmctl_core::HostId::new("workstation").unwrap();
+    let inv = serde_json::json!({
+        "inventory": {
+            "host": host.to_string(),
+            "platform": "linux",
+            "gpus": [
+                {"host": host.to_string(), "index": 0},
+                {"host": host.to_string(), "index": 1}
+            ],
+            "workloads": [{
+                "name": "coder",
+                "engine": "fake",
+                "model": "fake/coder",
+                "gpus": [{"host": host.to_string(), "index": 0}],
+                "port": 8100,
+                "unit": {"scope": "user", "name": "llmctl-next-fake-coder.service"},
+                "authority": {"kind": "systemd_unit", "scope": "user", "unit": "llmctl-next-fake-coder.service"},
+                "ownership": {"kind": "external"},
+                "recovery": policy
+            }],
+            "revision": 1
+        }
+    });
+    std::fs::write(dir.path().join("inventory.json"), inv.to_string()).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--data-dir")
+        .arg(dir.path())
+        .env("LLMCTL_NEXT_WATCH_INTERVAL_MS", "200")
+        .arg("daemon")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn daemon");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            return DaemonGuard { child, dir, socket };
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            panic!("daemon exited before accepting connections");
+        }
+        assert!(std::time::Instant::now() < deadline, "daemon never bound");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Simulate the workload's process dying: the fake world no longer has it
+/// active, while the durable intent still says Running.
+fn kill_fake_unit(d: &DaemonGuard, name: &str) {
+    let path = d.data_dir().join("world.json");
+    let mut world: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    world["units"][&format!("user/llmctl-next-fake-{name}.service")]["active"] = false.into();
+    world["units"][&format!("user/llmctl-next-fake-{name}.service")]["pid"] = serde_json::Value::Null;
+    std::fs::write(&path, world.to_string()).unwrap();
+}
+
+/// Wait until a predicate over the operations list holds.
+async fn wait_for_ops(
+    d: &DaemonGuard,
+    mut pred: impl FnMut(&[llmctl_client::wire::OperationView]) -> bool,
+) -> Vec<llmctl_client::wire::OperationView> {
+    let client = d.client();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let ops = client.list_operations().await.unwrap().operations;
+        if pred(&ops) {
+            return ops;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "condition on ops never held: {ops:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_dead_unit_with_running_intent_is_recovered_once() {
+    let d = spawn_recovery_daemon(serde_json::json!({"max_attempts": 2, "window_secs": 3600}));
+    run_to_success(&d, "coder", "rec-1").await;
+
+    kill_fake_unit(&d, "coder");
+    let ops = wait_for_ops(&d, |ops| {
+        ops.iter()
+            .any(|o| o.idempotency_key == "recover-coder-1" && o.status.is_terminal())
+    })
+    .await;
+    let recover = ops.iter().find(|o| o.idempotency_key == "recover-coder-1").unwrap();
+    assert_eq!(recover.status, OpStatus::Succeeded, "{recover:?}");
+    assert_eq!(recover.kind, OpKind::Run);
+
+    let status = d.client().status().await.unwrap();
+    let coder = status.workloads.iter().find(|w| w.name == "coder").unwrap();
+    assert_eq!(coder.process, "Running");
+    assert_eq!(coder.recovery_state, "alive");
+}
+
+#[tokio::test]
+async fn recovery_budget_exhausts_blocks_and_survives_the_daemon_restart() {
+    let mut d = spawn_recovery_daemon(serde_json::json!({"max_attempts": 2, "window_secs": 3600}));
+    run_to_success(&d, "coder", "rec-2").await;
+
+    // Every start fails from here on: the watcher's recoveries must fail
+    // and the budget must run out.
+    let unit = "user/llmctl-next-fake-coder.service";
+    d.write_faults(serde_json::json!({"fail_effects": [
+        {"unit": unit, "kind": "start", "mode": "before"},
+        {"unit": unit, "kind": "start", "mode": "before"},
+        {"unit": unit, "kind": "start", "mode": "before"},
+        {"unit": unit, "kind": "start", "mode": "before"},
+        {"unit": unit, "kind": "start", "mode": "before"}
+    ]}));
+    kill_fake_unit(&d, "coder");
+
+    // Two failed recoveries, then the exhaustion marker.
+    let ops = wait_for_ops(&d, |ops| {
+        ops.iter().any(|o| o.idempotency_key.starts_with("recover-stalled-coder-"))
+    })
+    .await;
+    let recoveries: Vec<_> = ops
+        .iter()
+        .filter(|o| o.idempotency_key.starts_with("recover-coder-"))
+        .collect();
+    assert_eq!(recoveries.len(), 2, "{ops:?}");
+    assert!(
+        recoveries
+            .iter()
+            .all(|o| o.status == OpStatus::Failed),
+        "{recoveries:?}"
+    );
+    let marker = ops
+        .iter()
+        .find(|o| o.idempotency_key.starts_with("recover-stalled-coder-"))
+        .unwrap();
+    assert_eq!(marker.status, OpStatus::NeedsAttention);
+    assert!(!marker.acknowledged);
+
+    // No third attempt, and mutations are blocked until the marker is acked.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let ops = d.client().list_operations().await.unwrap().operations;
+    assert_eq!(
+        ops.iter()
+            .filter(|o| o.idempotency_key.starts_with("recover-coder-"))
+            .count(),
+        2
+    );
+    match d.client().admit(admit_req(OpKind::Run, "coder", "rec-blocked")).await {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, codes::BLOCKED_NEEDS_ATTENTION),
+        other => panic!("expected blocked_needs_attention, got {other:?}"),
+    }
+
+    // Budget survives the daemon: after a restart nothing new is attempted.
+    d.child.kill().unwrap();
+    d.child.wait().unwrap();
+    let socket2 = d.socket.clone();
+    let dir2 = d.data_dir().to_path_buf();
+    wait_socket_gone(&socket2).await;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket")
+        .arg(&socket2)
+        .arg("--data-dir")
+        .arg(&dir2)
+        .env("LLMCTL_NEXT_WATCH_INTERVAL_MS", "200")
+        .arg("daemon")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::os::unix::net::UnixStream::connect(&socket2).is_err() {
+        assert!(std::time::Instant::now() < deadline, "daemon never rebound");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    // Several ticks pass: still exactly two attempts, still blocked.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let client = ControlClient::connect(&socket2).unwrap();
+    let ops = client.list_operations().await.unwrap().operations;
+    assert_eq!(
+        ops.iter()
+            .filter(|o| o.idempotency_key.starts_with("recover-coder-"))
+            .count(),
+        2,
+        "restart must not reset the budget"
+    );
+    assert!(
+        ops.iter()
+            .any(|o| o.idempotency_key.starts_with("recover-stalled-coder-")),
+        "the exhaustion marker survives"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+async fn wait_socket_gone(socket: &Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match std::os::unix::net::UnixStream::connect(socket) {
+            Err(_) => return,
+            Ok(_) => {
+                assert!(tokio::time::Instant::now() < deadline, "socket never closed");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_manually_stopped_workload_is_never_recovered() {
+    let d = spawn_recovery_daemon(serde_json::json!({"max_attempts": 3, "window_secs": 3600}));
+    run_to_success(&d, "coder", "rec-3").await;
+
+    // Owner stop: durable manual intent, unit down.
+    let resp = d
+        .client()
+        .admit(admit_req(OpKind::Stop, "coder", "rec-stop"))
+        .await
+        .unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Succeeded);
+
+    // The watcher has plenty of ticks to misbehave.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let ops = d.client().list_operations().await.unwrap().operations;
+    assert!(
+        !ops.iter().any(|o| o.idempotency_key.starts_with("recover-")),
+        "manual stop must not be recovered: {ops:?}"
+    );
+}
+
