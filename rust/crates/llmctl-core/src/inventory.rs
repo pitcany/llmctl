@@ -137,6 +137,18 @@ pub struct WorkloadDefinition {
     /// upgrades (plan D). Absent → no version facts are pinned.
     #[serde(default)]
     pub recipe: Option<RecipeConfig>,
+    /// Seconds an `AwaitReadiness` step waits for this workload. Absent →
+    /// `DEFAULT_READINESS_TIMEOUT_SECS`. Real model loads (vLLM) can take
+    /// minutes; a fake or tiny server is ready in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_timeout_secs: Option<u64>,
+}
+
+impl WorkloadDefinition {
+    pub fn readiness_timeout_secs(&self) -> u64 {
+        self.readiness_timeout_secs
+            .unwrap_or(crate::planner::DEFAULT_READINESS_TIMEOUT_SECS)
+    }
 }
 
 /// The enrolled host and everything a plan needs to reason about it.
@@ -255,6 +267,7 @@ mod tests {
                 ownership: Default::default(),
                 recovery: None,
                 recipe: None,
+                readiness_timeout_secs: None,
             }],
             revision: 7,
         }

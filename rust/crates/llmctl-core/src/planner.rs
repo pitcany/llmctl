@@ -126,7 +126,7 @@ pub fn plan_run(
     steps.push(PlanStep::AwaitReadiness {
         workload: target.clone(),
         unit: def.unit.clone(),
-        timeout_secs: DEFAULT_READINESS_TIMEOUT_SECS,
+        timeout_secs: def.readiness_timeout_secs(),
     });
     steps.push(PlanStep::VerifyServedModel {
         workload: target.clone(),
@@ -275,7 +275,7 @@ pub fn plan_upgrade(
     steps.push(PlanStep::AwaitReadiness {
         workload: target.clone(),
         unit: def.unit.clone(),
-        timeout_secs: DEFAULT_READINESS_TIMEOUT_SECS,
+        timeout_secs: def.readiness_timeout_secs(),
     });
     steps.push(PlanStep::VerifyServedModel {
         workload: target.clone(),
@@ -304,7 +304,7 @@ pub fn plan_upgrade(
         PlanStep::AwaitReadiness {
             workload: target.clone(),
             unit: def.unit.clone(),
-            timeout_secs: DEFAULT_READINESS_TIMEOUT_SECS,
+            timeout_secs: def.readiness_timeout_secs(),
         },
         PlanStep::VerifyServedModel {
             workload: target.clone(),

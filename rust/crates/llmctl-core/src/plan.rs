@@ -118,8 +118,7 @@ impl PlanStep {
                 format!("apply new definition to {workload}")
             }
             PlanStep::VerifyVersion {
-                workload,
-                packages, ..
+                workload, packages, ..
             } => {
                 let pkgs = packages
                     .iter()

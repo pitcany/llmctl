@@ -22,8 +22,8 @@ use crate::wire::{
     AckRequest, AdmitRequest, AdmitResponse, AdoptRequest, AdoptResponse, AdoptionPreview,
     ApiError, CancelRequest, GcResponse, HealthResponse, LogsRequest, LogsResponse,
     OperationListResponse, OperationView, OwnRequest, OwnResponse, PlanRequest, PlanResponse,
-    PromoteRequest, ReleaseRequest, ReleaseResponse, RollbackRequest, StageRequest,
-    StageResponse, StatusResponse, UpgradeListResponse, PROTOCOL_VERSION,
+    PromoteRequest, ReleaseRequest, ReleaseResponse, RollbackRequest, StageRequest, StageResponse,
+    StatusResponse, UpgradeListResponse, PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Error)]
@@ -149,14 +149,21 @@ impl ControlClient {
     }
 
     pub async fn own(&self, workload: &str) -> Result<OwnResponse, ClientError> {
-        self.post_json("/v1/ownership/own", &OwnRequest { workload: workload.into() })
-            .await
+        self.post_json(
+            "/v1/ownership/own",
+            &OwnRequest {
+                workload: workload.into(),
+            },
+        )
+        .await
     }
 
     pub async fn release(&self, workload: &str) -> Result<ReleaseResponse, ClientError> {
         self.post_json(
             "/v1/ownership/release",
-            &ReleaseRequest { workload: workload.into() },
+            &ReleaseRequest {
+                workload: workload.into(),
+            },
         )
         .await
     }
@@ -164,7 +171,10 @@ impl ControlClient {
     pub async fn stage(&self, workload: &str, version: &str) -> Result<StageResponse, ClientError> {
         self.post_json(
             "/v1/upgrades/stage",
-            &StageRequest { workload: workload.into(), version: version.into() },
+            &StageRequest {
+                workload: workload.into(),
+                version: version.into(),
+            },
         )
         .await
     }
@@ -178,15 +188,26 @@ impl ControlClient {
     ) -> Result<serde_json::Value, ClientError> {
         self.post_json(
             "/v1/upgrades/promote",
-            &PromoteRequest { workload: workload.into(), version: version.into(), wait },
+            &PromoteRequest {
+                workload: workload.into(),
+                version: version.into(),
+                wait,
+            },
         )
         .await
     }
 
-    pub async fn rollback_upgrade(&self, workload: &str, wait: bool) -> Result<serde_json::Value, ClientError> {
+    pub async fn rollback_upgrade(
+        &self,
+        workload: &str,
+        wait: bool,
+    ) -> Result<serde_json::Value, ClientError> {
         self.post_json(
             "/v1/upgrades/rollback",
-            &RollbackRequest { workload: workload.into(), wait },
+            &RollbackRequest {
+                workload: workload.into(),
+                wait,
+            },
         )
         .await
     }

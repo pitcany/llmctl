@@ -405,7 +405,10 @@ async fn cmd_status(cli: &Cli, json: bool) -> Result<u8, CliError> {
                 .collect::<Vec<_>>()
                 .join("; ")
         };
-        println!("gpu {:<6} enrolled={:<12} foreign={}", g.index, enrolled, foreign);
+        println!(
+            "gpu {:<6} enrolled={:<12} foreign={}",
+            g.index, enrolled, foreign
+        );
     }
     Ok(0)
 }
@@ -662,13 +665,16 @@ async fn cmd_own(cli: &Cli, name: &str) -> Result<u8, CliError> {
         "own: {} → {} (previous: {}, digest {})",
         name, resp.path, resp.previous_kind, resp.digest
     );
-    println!("the unit was not restarted; release restores the previous {}", {
-        if resp.previous_kind == "link" {
-            "link"
-        } else {
-            "file byte-for-byte"
+    println!(
+        "the unit was not restarted; release restores the previous {}",
+        {
+            if resp.previous_kind == "link" {
+                "link"
+            } else {
+                "file byte-for-byte"
+            }
         }
-    });
+    );
     Ok(0)
 }
 

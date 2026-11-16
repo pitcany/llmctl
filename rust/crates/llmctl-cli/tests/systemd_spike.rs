@@ -182,6 +182,7 @@ fn write_inventory(dir: &Path, unit: &str, port: u16, model: &str) {
             ownership: Default::default(),
             recovery: None,
             recipe: None,
+            readiness_timeout_secs: None,
         }],
         revision: 1,
     };
@@ -735,7 +736,13 @@ fn spawn_daemon_env(dir: &Path, envs: &[(&str, &str)]) -> Daemon {
     Daemon { child, socket }
 }
 
-fn write_inventory_recovery(dir: &Path, unit: &str, port: u16, model: &str, policy: serde_json::Value) {
+fn write_inventory_recovery(
+    dir: &Path,
+    unit: &str,
+    port: u16,
+    model: &str,
+    policy: serde_json::Value,
+) {
     let host = HostId::new("workstation").unwrap();
     let inv = serde_json::json!({
         "inventory": {
@@ -795,7 +802,11 @@ fn recovery_waits_out_systemd_retries_then_recovers_after_start_limit() {
     let gate = dir.path().join("gate");
     let unit = SpikeUnit::create_with(
         dir.path(),
-        &format!("/usr/bin/python3 {} {port} {model} {}", script.display(), gate.display()),
+        &format!(
+            "/usr/bin/python3 {} {port} {model} {}",
+            script.display(),
+            gate.display()
+        ),
         "Restart=on-failure\nRestartSec=1\nStartLimitIntervalSec=20\nStartLimitBurst=3\n",
     );
     write_inventory_recovery(
@@ -811,7 +822,10 @@ fn recovery_waits_out_systemd_retries_then_recovers_after_start_limit() {
 
     // Start healthy: intent Running, unit serving.
     std::fs::write(&gate, b"ok").unwrap();
-    let (ok, text) = cli(&d.socket, &["run", "spike", "--wait", "--key", "sr-healthy"]);
+    let (ok, text) = cli(
+        &d.socket,
+        &["run", "spike", "--wait", "--key", "sr-healthy"],
+    );
     assert!(ok, "{text}");
     let run_at = chrono::Utc::now();
 
@@ -888,9 +902,15 @@ fn a_stop_that_outlives_the_effect_timeout_is_unconfirmed() {
     );
     unit.start();
     write_inventory(dir.path(), &unit.name, port, "spike/model");
-    let d = spawn_daemon_env(dir.path(), &[("LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS", "6000")]);
+    let d = spawn_daemon_env(
+        dir.path(),
+        &[("LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS", "6000")],
+    );
 
-    let (ok, text) = cli(&d.socket, &["stop", "spike", "--wait", "--key", "stuck-stop"]);
+    let (ok, text) = cli(
+        &d.socket,
+        &["stop", "spike", "--wait", "--key", "stuck-stop"],
+    );
     assert!(!ok, "a stop that cannot confirm must not succeed: {text}");
     assert!(
         text.to_lowercase().contains("unconfirmed"),
@@ -952,14 +972,20 @@ fn own_replaces_the_file_keeps_the_pid_and_guards_the_bytes() {
 
     // The file is now llmctl's, and the drift guard watches its bytes.
     let text_now = std::fs::read_to_string(&unit.file).unwrap();
-    assert!(text_now.contains("llmctl-next managed workload"), "{text_now}");
+    assert!(
+        text_now.contains("llmctl-next managed workload"),
+        "{text_now}"
+    );
     let (ok, text) = cli(&d.socket, &["run", "adopted", "--wait", "--key", "own-run"]);
     assert!(ok, "equivalent definition must not block run: {text}");
 
     // Someone edits the owned file → drift names the service file.
     std::fs::write(&unit.file, format!("{text_now}Environment=TOUCHED=1\n")).unwrap();
     assert!(systemctl(&["daemon-reload"]).status.success());
-    let (code, text) = cli_code(&d.socket, &["run", "adopted", "--wait", "--key", "own-drift"]);
+    let (code, text) = cli_code(
+        &d.socket,
+        &["run", "adopted", "--wait", "--key", "own-drift"],
+    );
     assert_eq!(code, Some(4), "{text}");
     assert!(text.contains("service_file"), "{text}");
     assert_eq!(unit.active_state(), "active", "no effect on a drifted unit");
@@ -970,7 +996,10 @@ fn own_replaces_the_file_keeps_the_pid_and_guards_the_bytes() {
     assert_eq!(code, Some(0), "{text}");
     let status = spike_status_named(&d.socket, "adopted");
     assert_eq!(status["ownership"], "external", "{status}");
-    let (ok, text) = cli(&d.socket, &["run", "adopted", "--wait", "--key", "post-release"]);
+    let (ok, text) = cli(
+        &d.socket,
+        &["run", "adopted", "--wait", "--key", "post-release"],
+    );
     assert!(ok, "external ownership has no pinned drift: {text}");
     assert_ne!(unit.main_pid(), 0);
     let _ = original; // byte identity is asserted in the symlink test below
@@ -1010,7 +1039,10 @@ fn own_a_symlinked_unit_replaces_the_link_and_release_restores_byte_identical() 
             let _ = systemctl(&["daemon-reload"]);
         }
     }
-    let guard = LinkGuard { name: name.clone(), link: link.clone() };
+    let guard = LinkGuard {
+        name: name.clone(),
+        link: link.clone(),
+    };
     assert!(systemctl(&["daemon-reload"]).status.success());
     assert!(systemctl(&["start", &name]).status.success());
     write_empty_inventory(dir.path());
@@ -1022,7 +1054,10 @@ fn own_a_symlinked_unit_replaces_the_link_and_release_restores_byte_identical() 
     assert_eq!(code, Some(0), "{text}");
     assert!(text.contains("previous: link"), "{text}");
     assert!(
-        !std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+        !std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
         "the link itself must be replaced, never written through"
     );
     assert_eq!(
@@ -1041,7 +1076,10 @@ fn own_a_symlinked_unit_replaces_the_link_and_release_restores_byte_identical() 
     // Release: the link comes back, pointing at the untouched repo copy.
     let (code, text) = cli_code(&d.socket, &["release", "adopted"]);
     assert_eq!(code, Some(0), "{text}");
-    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
     assert_eq!(
         std::fs::read_link(&link).unwrap(),
         repo_unit,
@@ -1079,7 +1117,10 @@ fn a_bad_render_is_caught_restored_and_refused() {
         "the original must be back byte-for-byte"
     );
     // And the unit was never left drifted from its pin.
-    let (ok, text) = cli(&d.socket, &["run", "adopted", "--wait", "--key", "bad-render-ok"]);
+    let (ok, text) = cli(
+        &d.socket,
+        &["run", "adopted", "--wait", "--key", "bad-render-ok"],
+    );
     assert!(ok, "{text}");
 }
 
@@ -1098,7 +1139,11 @@ fn a_unit_with_a_dropin_is_refused_for_own() {
     // cannot own a definition the drop-in modifies).
     let drop_dir = unit.file.with_extension("service.d");
     std::fs::create_dir_all(&drop_dir).unwrap();
-    std::fs::write(drop_dir.join("override.conf"), "[Service]\nEnvironment=EXTRA=1\n").unwrap();
+    std::fs::write(
+        drop_dir.join("override.conf"),
+        "[Service]\nEnvironment=EXTRA=1\n",
+    )
+    .unwrap();
     assert!(systemctl(&["daemon-reload"]).status.success());
     let (code, text) = cli_code(&d.socket, &["own", "adopted"]);
     assert_eq!(code, Some(4), "{text}");
@@ -1194,7 +1239,11 @@ fn make_env(root: &Path, wheelhouse: &Path, version: &str) -> PathBuf {
         .arg(&env)
         .output()
         .expect("uv venv");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let out = Command::new("uv")
         .args(["pip", "install", "--python"])
         .arg(env.join("bin/python"))
@@ -1270,11 +1319,18 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
 
     // Promote: stop, apply definition, start, verify served identity and
     // the version itself. The unit must now serve 2.0.
-    let (ok, text) = cli(&d.socket, &["upgrade", "promote", "adopted", "2.0", "--wait"]);
+    let (ok, text) = cli(
+        &d.socket,
+        &["upgrade", "promote", "adopted", "2.0", "--wait"],
+    );
     assert!(ok, "{text}");
-    assert!(text.contains("verify adopted runs fakeengine=2.0"), "{text}");
+    assert!(
+        text.contains("verify adopted runs fakeengine=2.0"),
+        "{text}"
+    );
     assert_eq!(
-        http_get_json(port, "/v1/version")["version"], "2.0",
+        http_get_json(port, "/v1/version")["version"],
+        "2.0",
         "the promoted env must be serving"
     );
     let mut promoted = false;
@@ -1318,8 +1374,15 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
         .arg(&wheelhouse)
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let (code, text) = cli_code(&d.socket, &["run", "adopted", "--wait", "--key", "up-drift"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (code, text) = cli_code(
+        &d.socket,
+        &["run", "adopted", "--wait", "--key", "up-drift"],
+    );
     assert_eq!(code, Some(4), "{text}");
     assert!(text.contains("version.packages"), "{text}");
     assert!(

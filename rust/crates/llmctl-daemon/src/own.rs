@@ -58,13 +58,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
 pub async fn own(state: &AppState, name: &str) -> Result<OwnOutcome, OwnError> {
     let _quiet = state.ops.quiesce().await?;
     let inv = state.ops.inventory().await;
-    let wl_name = llmctl_core::WorkloadName::new(name).map_err(|e| OpsError::Invalid(e.to_string()))?;
+    let wl_name =
+        llmctl_core::WorkloadName::new(name).map_err(|e| OpsError::Invalid(e.to_string()))?;
     let Some(def) = inv.workload(&wl_name) else {
         return Err(OpsError::UnknownWorkload(name.to_string()).into());
     };
     let Ownership::Managed {
-        definition: pinned,
-        ..
+        definition: pinned, ..
     } = &def.ownership
     else {
         return Err(refuse(format!(
@@ -114,7 +114,8 @@ pub type OwnOutcome = ServiceFileRecord;
 pub async fn release(state: &AppState, name: &str) -> Result<(), OwnError> {
     let _quiet = state.ops.quiesce().await?;
     let inv = state.ops.inventory().await;
-    let wl_name = llmctl_core::WorkloadName::new(name).map_err(|e| OpsError::Invalid(e.to_string()))?;
+    let wl_name =
+        llmctl_core::WorkloadName::new(name).map_err(|e| OpsError::Invalid(e.to_string()))?;
     let Some(def) = inv.workload(&wl_name) else {
         return Err(OpsError::UnknownWorkload(name.to_string()).into());
     };
@@ -245,9 +246,9 @@ pub async fn apply_definition_ctx(
     preconditions(&imported, pinned, name)?;
     let path = PathBuf::from(&record.path);
     // The *current* owned bytes become the rollback target (version N).
-    let current_bytes = tokio::fs::read(&path).await.map_err(|e| {
-        refuse(format!("reading owned unit file {}: {e}", path.display()))
-    })?;
+    let current_bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| refuse(format!("reading owned unit file {}: {e}", path.display())))?;
     let backup = backup_path(&ctx.paths.data_dir, &wl_name);
     tokio::fs::create_dir_all(backup.parent().expect("parent"))
         .await
@@ -369,8 +370,7 @@ async fn restore_previous(previous: &PreviousUnitFile, path: &Path) -> Result<()
             let bytes = tokio::fs::read(backup_path).await.map_err(|e| {
                 OwnError::Io(format!(
                     "reading backup {} (original {}): {e}",
-                    backup_path,
-                    content_digest
+                    backup_path, content_digest
                 ))
             })?;
             write_file_atomic(path, &bytes).await?;

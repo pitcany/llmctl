@@ -130,7 +130,10 @@ impl OpsError {
             OpsError::ProtocolMismatch { supported, .. } => Some(json!({ "supported": supported })),
             OpsError::DefinitionDrift { diffs, .. } => Some(json!({ "diffs": diffs })),
             OpsError::GpuOccupied {
-                workload, gpu, desc, ..
+                workload,
+                gpu,
+                desc,
+                ..
             } => Some(json!({ "workload": workload, "gpu": gpu, "occupant": desc })),
             _ => None,
         }
@@ -342,10 +345,7 @@ impl OpManager {
             .await
             .map_err(|e| OpsError::GpuProbe(e.to_string()))?;
         for occ in occupants {
-            let allowed_here = occ
-                .unit
-                .as_ref()
-                .is_some_and(|u| allowed.contains(u));
+            let allowed_here = occ.unit.as_ref().is_some_and(|u| allowed.contains(u));
             if allowed_here {
                 continue;
             }
@@ -703,7 +703,15 @@ impl OpManager {
                     );
                 };
                 let inv = self.inventory().await;
-                match crate::own::apply_definition_ctx(&ctx, &inv, workload.as_str(), definition, self).await {
+                match crate::own::apply_definition_ctx(
+                    &ctx,
+                    &inv,
+                    workload.as_str(),
+                    definition,
+                    self,
+                )
+                .await
+                {
                     Ok(_) => StepOutcome::Done,
                     Err(e) => StepOutcome::Failed(format!("applying definition: {e}")),
                 }
@@ -726,9 +734,9 @@ impl OpManager {
                 ServedModel::Verified { model: m } => {
                     StepOutcome::Failed(format!("endpoint serves {m}, expected {model}"))
                 }
-                other => StepOutcome::Failed(format!(
-                    "served model not verified (observed {other:?})"
-                )),
+                other => {
+                    StepOutcome::Failed(format!("served model not verified (observed {other:?})"))
+                }
             },
             Err(e) => StepOutcome::Failed(format!("model verification probe: {e}")),
         }
@@ -915,9 +923,7 @@ impl OpManager {
                     None => Err("no systemd ownership context".to_string()),
                 },
                 PlanStep::AwaitReadiness {
-                    unit,
-                    timeout_secs,
-                    ..
+                    unit, timeout_secs, ..
                 } => match self
                     .await_readiness(row, start_index + offset, unit, *timeout_secs)
                     .await

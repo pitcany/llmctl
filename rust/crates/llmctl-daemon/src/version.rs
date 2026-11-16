@@ -59,7 +59,10 @@ pub fn interpreter_for(recipe: &RecipeConfig, def: &WorkloadDefinition) -> Optio
 }
 
 /// Probe the environment's version facts.
-pub async fn probe(recipe: &RecipeConfig, def: &WorkloadDefinition) -> Result<VersionRef, EngineError> {
+pub async fn probe(
+    recipe: &RecipeConfig,
+    def: &WorkloadDefinition,
+) -> Result<VersionRef, EngineError> {
     let interpreter = interpreter_for(recipe, def)
         .ok_or_else(|| EngineError::Io("recipe has no interpreter to probe".into()))?;
 
@@ -100,7 +103,11 @@ pub async fn probe(recipe: &RecipeConfig, def: &WorkloadDefinition) -> Result<Ve
     let freeze = run_python(&interpreter, &["-m", "pip", "freeze"], FREEZE_TIMEOUT)
         .await
         .unwrap_or_default();
-    let mut lines: Vec<&str> = freeze.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let mut lines: Vec<&str> = freeze
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     lines.sort();
     let lock_digest = sha256_hex_string(lines.join("\n").as_bytes());
 
@@ -202,8 +209,7 @@ pub fn rewrite_definition(
         _ => {
             let prefix = recipe.env_prefix.clone().unwrap_or_else(|| "VLLM".into());
             let name = format!("{prefix}_PYTHON");
-            next.environment
-                .retain(|(k, _)| k != &name);
+            next.environment.retain(|(k, _)| k != &name);
             next.environment.push((name, interpreter.to_string()));
             next.environment.sort();
         }
@@ -245,14 +251,16 @@ pub async fn verify_packages(
     }
 }
 
-async fn run_python(interpreter: &str, args: &[&str], timeout: Duration) -> Result<String, EngineError> {
+async fn run_python(
+    interpreter: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, EngineError> {
     let mut cmd = Command::new(interpreter);
     cmd.args(args).kill_on_drop(true);
     let out = match tokio::time::timeout(timeout, cmd.output()).await {
         Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            return Err(EngineError::Io(format!("spawning {interpreter}: {e}")))
-        }
+        Ok(Err(e)) => return Err(EngineError::Io(format!("spawning {interpreter}: {e}"))),
         Err(_) => {
             return Err(EngineError::Timeout(format!(
                 "{interpreter} {} timed out",
@@ -272,10 +280,7 @@ async fn run_python(interpreter: &str, args: &[&str], timeout: Duration) -> Resu
 }
 
 /// True when the recomputed version facts differ from the pin.
-pub fn version_drift(
-    pinned: &VersionRef,
-    live: &VersionRef,
-) -> Vec<llmctl_core::FieldDiff> {
+pub fn version_drift(pinned: &VersionRef, live: &VersionRef) -> Vec<llmctl_core::FieldDiff> {
     let mut diffs = Vec::new();
     let mut push = |field: &str, expected: Value, actual: Value| {
         if expected != actual {

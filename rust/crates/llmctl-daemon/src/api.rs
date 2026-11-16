@@ -77,8 +77,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
         .collect();
 
     // Manager view of each unit (recovery decision input) up front.
-    let mut recovery_states: std::collections::HashMap<String, String> =
-        Default::default();
+    let mut recovery_states: std::collections::HashMap<String, String> = Default::default();
     for def in &inv.workloads {
         let s = state
             .ops
@@ -143,11 +142,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
         .collect();
 
     // Per card: enrolled workloads observed running vs foreign processes.
-    let enrolled_units: std::collections::BTreeSet<String> = inv
-        .workloads
-        .iter()
-        .map(|d| d.unit.to_string())
-        .collect();
+    let enrolled_units: std::collections::BTreeSet<String> =
+        inv.workloads.iter().map(|d| d.unit.to_string()).collect();
     let probe = state.ops.engine().gpu_occupancy(&inv.gpus).await;
     let gpus = inv
         .gpus
@@ -159,8 +155,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
                 .filter(|d| {
                     d.gpus.contains(g)
                         && observations.iter().any(|o| {
-                            o.workload == d.name
-                                && o.process == llmctl_core::ProcessState::Running
+                            o.workload == d.name && o.process == llmctl_core::ProcessState::Running
                         })
                 })
                 .map(|d| d.name.to_string())
@@ -171,10 +166,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
                         .iter()
                         .filter(|o| {
                             o.gpu == g.index
-                                && !o
-                                    .unit
-                                    .as_ref()
-                                    .is_some_and(|u| enrolled_units.contains(u))
+                                && !o.unit.as_ref().is_some_and(|u| enrolled_units.contains(u))
                         })
                         .map(|o| GpuOccupantView {
                             pid: o.pid,

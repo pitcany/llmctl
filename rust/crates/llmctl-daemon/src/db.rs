@@ -85,7 +85,13 @@ enum DbMsg {
         oneshot::Sender<Result<(Vec<RecoveryAttempt>, u64), DbError>>,
     ),
     InsertUpgrade(Box<UpgradeRow>, oneshot::Sender<Result<(), DbError>>),
-    UpdateUpgradeStatus(String, String, Option<String>, Option<String>, oneshot::Sender<Result<(), DbError>>),
+    UpdateUpgradeStatus(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        oneshot::Sender<Result<(), DbError>>,
+    ),
     ListUpgrades(String, oneshot::Sender<Result<Vec<UpgradeRow>, DbError>>),
     DeleteUpgrade(String, oneshot::Sender<Result<(), DbError>>),
 }

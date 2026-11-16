@@ -101,6 +101,7 @@ pub fn sample_inventory(host: &HostId) -> HostInventory {
         ownership: Default::default(),
         recovery: None,
         recipe: None,
+        readiness_timeout_secs: None,
     };
     let mut inv = HostInventory {
         host: host.clone(),
@@ -179,16 +180,12 @@ impl AppState {
         );
         let engine: Arc<dyn Engine> = Arc::new(RoutedEngine::new(&inv, engines)?);
         let ops = Arc::new(
-            OpManager::new(
-                db,
-                engine,
-                Arc::new(inv),
-                Some(paths.faults.clone()),
-            )
-            .with_own_ctx(crate::own::OwnCtx {
-                paths: paths.clone(),
-                systemd: systemd.clone(),
-            }),
+            OpManager::new(db, engine, Arc::new(inv), Some(paths.faults.clone())).with_own_ctx(
+                crate::own::OwnCtx {
+                    paths: paths.clone(),
+                    systemd: systemd.clone(),
+                },
+            ),
         );
 
         // Startup reconciliation: finalize anything a previous daemon left
@@ -226,7 +223,10 @@ impl AppState {
 /// Pin version facts for managed systemd workloads whose pin predates
 /// schema 2, writing the inventory file back (revision unchanged: an
 /// idempotent normalization, not a semantic change).
-async fn repin_legacy_versions(ops: &Arc<OpManager>, inventory_path: &std::path::Path) -> Result<(), String> {
+async fn repin_legacy_versions(
+    ops: &Arc<OpManager>,
+    inventory_path: &std::path::Path,
+) -> Result<(), String> {
     let inv = ops.inventory().await;
     let mut changed = false;
     let mut next = (*inv).clone();

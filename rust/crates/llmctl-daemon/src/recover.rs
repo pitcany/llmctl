@@ -102,9 +102,14 @@ async fn tick(state: &Arc<AppState>) -> Result<(), crate::ops::OpsError> {
             }
         }
 
-        if let Err(e) =
-            maybe_recover(&state.ops, def, policy.max_attempts, policy.window_secs, policy.min_interval_secs)
-                .await
+        if let Err(e) = maybe_recover(
+            &state.ops,
+            def,
+            policy.max_attempts,
+            policy.window_secs,
+            policy.min_interval_secs,
+        )
+        .await
         {
             tracing::warn!(workload = %def.name, error = %e, "recovery refused");
         }
@@ -168,10 +173,7 @@ async fn maybe_recover(
 
     // Budget exhausted: one unacknowledged needs_attention marker per
     // exhaustion episode (keyed by the last attempt), blocking mutations.
-    let last = recent
-        .last()
-        .map(|a| a.op_id.clone())
-        .unwrap_or_default();
+    let last = recent.last().map(|a| a.op_id.clone()).unwrap_or_default();
     let key = format!("recover-stalled-{}-{}", def.name, last);
     if db.find_by_key(&key).await?.is_some() {
         return Ok(());

@@ -37,6 +37,7 @@ fn workload(name: &str, gpus: &[u32], port: u16) -> WorkloadDefinition {
         ownership: Default::default(),
         recovery: None,
         recipe: None,
+        readiness_timeout_secs: None,
     }
 }
 
@@ -279,4 +280,31 @@ fn plan_json_round_trips() {
     let j = serde_json::to_string(&plan).unwrap();
     let back: Plan = serde_json::from_str(&j).unwrap();
     assert_eq!(back, plan);
+}
+
+#[test]
+fn readiness_wait_comes_from_the_workload_with_a_default() {
+    let readiness = |plan: &Plan| {
+        plan.steps
+            .iter()
+            .find_map(|s| match s {
+                PlanStep::AwaitReadiness { timeout_secs, .. } => Some(*timeout_secs),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let mut inv = inventory();
+    let target = WorkloadName::new("coder").unwrap();
+    let plan = plan_run(&inv, &[], &target).unwrap();
+    assert_eq!(
+        readiness(&plan),
+        llmctl_core::planner::DEFAULT_READINESS_TIMEOUT_SECS
+    );
+
+    // A real model load takes minutes: the inventory says how long.
+    inv.workloads[0].readiness_timeout_secs = Some(600);
+    let plan = plan_run(&inv, &[], &target).unwrap();
+    assert_eq!(readiness(&plan), 600);
+    let plan = plan_restart(&inv, &[obs("coder", &[0], true)], &target).unwrap();
+    assert_eq!(readiness(&plan), 600);
 }

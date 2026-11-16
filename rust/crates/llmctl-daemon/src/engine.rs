@@ -174,10 +174,7 @@ pub trait Engine: Send + Sync {
     /// owning unit when it maps to one). Occupancy is part of each engine's
     /// world: adapters that have no GPUs to see answer empty; adapters that
     /// cannot ask answer `Err` — unknown is never "free".
-    fn gpu_occupancy(
-        &self,
-        _gpus: &[GpuId],
-    ) -> BoxFut<Result<Vec<GpuOccupant>, EngineError>> {
+    fn gpu_occupancy(&self, _gpus: &[GpuId]) -> BoxFut<Result<Vec<GpuOccupant>, EngineError>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
@@ -476,15 +473,15 @@ impl Engine for FakeEngine {
     /// dir (absent = every card free), so the guard is testable without a
     /// real GPU: `[{"gpu":0,"pid":999,"unit":null,"memory_mib":123}]`.
     /// `unit` is the full identity in display form (`user/foo.service`).
-    fn gpu_occupancy(
-        &self,
-        gpus: &[GpuId],
-    ) -> BoxFut<Result<Vec<GpuOccupant>, EngineError>> {
+    fn gpu_occupancy(&self, gpus: &[GpuId]) -> BoxFut<Result<Vec<GpuOccupant>, EngineError>> {
         let path = self.dir.join("gpus.json");
         let wanted: std::collections::BTreeSet<u32> = gpus.iter().map(|g| g.index).collect();
         Box::pin(async move {
             let all: Vec<GpuOccupant> = read_json(&path).await?;
-            Ok(all.into_iter().filter(|o| wanted.contains(&o.gpu)).collect())
+            Ok(all
+                .into_iter()
+                .filter(|o| wanted.contains(&o.gpu))
+                .collect())
         })
     }
 
@@ -653,10 +650,7 @@ impl Engine for RoutedEngine {
     /// Ask every engine that has enrolled units about its world and merge;
     /// an engine with nothing enrolled cannot answer for this host, but one
     /// that has units and cannot answer makes the whole occupancy unknown.
-    fn gpu_occupancy(
-        &self,
-        gpus: &[GpuId],
-    ) -> BoxFut<Result<Vec<GpuOccupant>, EngineError>> {
+    fn gpu_occupancy(&self, gpus: &[GpuId]) -> BoxFut<Result<Vec<GpuOccupant>, EngineError>> {
         let enrolled: std::collections::BTreeSet<String> = self
             .routes
             .read()

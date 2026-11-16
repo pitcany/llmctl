@@ -119,7 +119,11 @@ pub fn unit_from_cgroup(cgroup: &str) -> Option<String> {
 /// `/proc/<pid>/cgroup`. Any probe failure is an error: callers must refuse
 /// rather than treat an unobservable card as free.
 pub async fn probe_nvidia(timeout: Duration) -> Result<Vec<GpuOccupant>, EngineError> {
-    let uuids = run_nvidia(&["--query-gpu=index,uuid", "--format=csv,noheader"], timeout).await?;
+    let uuids = run_nvidia(
+        &["--query-gpu=index,uuid", "--format=csv,noheader"],
+        timeout,
+    )
+    .await?;
     let apps = run_nvidia(
         &[
             "--query-compute-apps=pid,gpu_uuid,used_memory",
@@ -129,8 +133,7 @@ pub async fn probe_nvidia(timeout: Duration) -> Result<Vec<GpuOccupant>, EngineE
     )
     .await?;
     let uuid_index = parse_uuid_index(&uuids);
-    let mut occupants =
-        parse_compute_apps(&apps, &uuid_index).map_err(EngineError::Io)?;
+    let mut occupants = parse_compute_apps(&apps, &uuid_index).map_err(EngineError::Io)?;
     for occ in &mut occupants {
         occ.unit = cgroup_unit_of(occ.pid).await;
     }
@@ -218,7 +221,9 @@ mod tests {
         // A user-scope workload must never match a same-named system unit.
         assert_ne!(
             unit_from_cgroup("0::/system.slice/foo.service"),
-            unit_from_cgroup("0::/user.slice/user-1000.slice/user@1000.service/app.slice/foo.service")
+            unit_from_cgroup(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/foo.service"
+            )
         );
         // Only the user manager: no unit → foreign.
         assert_eq!(

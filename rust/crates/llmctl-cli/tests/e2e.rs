@@ -891,7 +891,8 @@ fn kill_fake_unit(d: &DaemonGuard, name: &str) {
     let mut world: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     world["units"][&format!("user/llmctl-next-fake-{name}.service")]["active"] = false.into();
-    world["units"][&format!("user/llmctl-next-fake-{name}.service")]["pid"] = serde_json::Value::Null;
+    world["units"][&format!("user/llmctl-next-fake-{name}.service")]["pid"] =
+        serde_json::Value::Null;
     std::fs::write(&path, world.to_string()).unwrap();
 }
 
@@ -926,7 +927,10 @@ async fn a_dead_unit_with_running_intent_is_recovered_once() {
             .any(|o| o.idempotency_key == "recover-coder-1" && o.status.is_terminal())
     })
     .await;
-    let recover = ops.iter().find(|o| o.idempotency_key == "recover-coder-1").unwrap();
+    let recover = ops
+        .iter()
+        .find(|o| o.idempotency_key == "recover-coder-1")
+        .unwrap();
     assert_eq!(recover.status, OpStatus::Succeeded, "{recover:?}");
     assert_eq!(recover.kind, OpKind::Run);
 
@@ -955,7 +959,8 @@ async fn recovery_budget_exhausts_blocks_and_survives_the_daemon_restart() {
 
     // Two failed recoveries, then the exhaustion marker.
     let ops = wait_for_ops(&d, |ops| {
-        ops.iter().any(|o| o.idempotency_key.starts_with("recover-stalled-coder-"))
+        ops.iter()
+            .any(|o| o.idempotency_key.starts_with("recover-stalled-coder-"))
     })
     .await;
     let recoveries: Vec<_> = ops
@@ -964,9 +969,7 @@ async fn recovery_budget_exhausts_blocks_and_survives_the_daemon_restart() {
         .collect();
     assert_eq!(recoveries.len(), 2, "{ops:?}");
     assert!(
-        recoveries
-            .iter()
-            .all(|o| o.status == OpStatus::Failed),
+        recoveries.iter().all(|o| o.status == OpStatus::Failed),
         "{recoveries:?}"
     );
     let marker = ops
@@ -985,7 +988,11 @@ async fn recovery_budget_exhausts_blocks_and_survives_the_daemon_restart() {
             .count(),
         2
     );
-    match d.client().admit(admit_req(OpKind::Run, "coder", "rec-blocked")).await {
+    match d
+        .client()
+        .admit(admit_req(OpKind::Run, "coder", "rec-blocked"))
+        .await
+    {
         Err(ClientError::Api { code, .. }) => assert_eq!(code, codes::BLOCKED_NEEDS_ATTENTION),
         other => panic!("expected blocked_needs_attention, got {other:?}"),
     }
@@ -1038,7 +1045,10 @@ async fn wait_socket_gone(socket: &Path) {
         match std::os::unix::net::UnixStream::connect(socket) {
             Err(_) => return,
             Ok(_) => {
-                assert!(tokio::time::Instant::now() < deadline, "socket never closed");
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "socket never closed"
+                );
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
@@ -1063,8 +1073,8 @@ async fn a_manually_stopped_workload_is_never_recovered() {
     tokio::time::sleep(Duration::from_millis(800)).await;
     let ops = d.client().list_operations().await.unwrap().operations;
     assert!(
-        !ops.iter().any(|o| o.idempotency_key.starts_with("recover-")),
+        !ops.iter()
+            .any(|o| o.idempotency_key.starts_with("recover-")),
         "manual stop must not be recovered: {ops:?}"
     );
 }
-

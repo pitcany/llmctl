@@ -120,16 +120,16 @@ fn free_bytes(path: &Path) -> Result<u64, UpgradeError> {
         .ok_or_else(|| UpgradeError::Io("df output not understood".into()))
 }
 
-async fn managed_parts(state: &AppState, name: &str) -> Result<(WorkloadName, LaunchDefinition, llmctl_core::RecipeConfig), UpgradeError> {
+async fn managed_parts(
+    state: &AppState,
+    name: &str,
+) -> Result<(WorkloadName, LaunchDefinition, llmctl_core::RecipeConfig), UpgradeError> {
     let inv = state.ops.inventory().await;
     let wl = WorkloadName::new(name).map_err(|e| OpsError::Invalid(e.to_string()))?;
     let Some(def) = inv.workload(&wl) else {
         return Err(OpsError::UnknownWorkload(name.to_string()).into());
     };
-    let Ownership::Managed {
-        definition, ..
-    } = &def.ownership
-    else {
+    let Ownership::Managed { definition, .. } = &def.ownership else {
         return Err(refuse(format!("{name} is not a managed workload")));
     };
     let Some(recipe) = &def.recipe else {
@@ -143,7 +143,11 @@ async fn managed_parts(state: &AppState, name: &str) -> Result<(WorkloadName, La
 /// Stage a new environment for `workload` at `version`, then validate it
 /// offline. An interrupted stage leaves no manifest and is never
 /// promotable.
-pub async fn stage(state: &AppState, name: &str, version: &str) -> Result<StageOutcome, UpgradeError> {
+pub async fn stage(
+    state: &AppState,
+    name: &str,
+    version: &str,
+) -> Result<StageOutcome, UpgradeError> {
     let (wl, _definition, recipe) = managed_parts(state, name).await?;
     let root = envs_root(state);
     let id = env_id(name, version);
@@ -172,12 +176,7 @@ pub async fn stage(state: &AppState, name: &str, version: &str) -> Result<StageO
     let staging = env.with_extension("staging");
     tokio::fs::write(&staging, b"interrupted stage; not promotable\n").await?;
 
-    run_logged(
-        Command::new("uv").arg("venv").arg(&env),
-        &log,
-        "uv venv",
-    )
-    .await?;
+    run_logged(Command::new("uv").arg("venv").arg(&env), &log, "uv venv").await?;
     let mut install = Command::new("uv");
     install
         .arg("pip")
@@ -205,19 +204,28 @@ pub async fn stage(state: &AppState, name: &str, version: &str) -> Result<StageO
                 .or_else(|| Some(d.model.clone()))
         })
         .unwrap_or_default();
-    let validation = match crate::version::validate_offline(&recipe, &interpreter.display().to_string(), &model).await {
-        Ok(report) => report,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&staging).await;
-            record_row(
-                state, name, version, &env, &interpreter, "failed",
-                Some(json!({"error": e})),
-            ).await?;
-            return Err(refuse(format!(
-                "validation of {version} failed; never promoted: {e}"
-            )));
-        }
-    };
+    let validation =
+        match crate::version::validate_offline(&recipe, &interpreter.display().to_string(), &model)
+            .await
+        {
+            Ok(report) => report,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&staging).await;
+                record_row(
+                    state,
+                    name,
+                    version,
+                    &env,
+                    &interpreter,
+                    "failed",
+                    Some(json!({"error": e})),
+                )
+                .await?;
+                return Err(refuse(format!(
+                    "validation of {version} failed; never promoted: {e}"
+                )));
+            }
+        };
 
     // The manifest is written LAST: its presence is what makes an env
     // promotable.
@@ -282,11 +290,7 @@ async fn record_row(
     // Idempotent re-staging replaces the row's status via a fresh id? The
     // id is the env dir name, so re-staging the same version hits the same
     // id: upsert by delete+insert.
-    let _ = state
-        .ops
-        .db()
-        .delete_upgrade(&row.id)
-        .await;
+    let _ = state.ops.db().delete_upgrade(&row.id).await;
     state.ops.db().insert_upgrade(row.clone()).await?;
     Ok(row)
 }
@@ -348,11 +352,7 @@ pub async fn promote(
             )))
         }
     };
-    let rows = state
-        .ops
-        .db()
-        .list_upgrades(name)
-        .await?;
+    let rows = state.ops.db().list_upgrades(name).await?;
     let Some(row) = rows.iter().find(|r| r.to_version == version) else {
         return Err(refuse(format!("no upgrade record for {name} at {version}")));
     };
@@ -437,8 +437,7 @@ pub async fn promote(
             tokio::spawn(async move {
                 // Record the outcome once the operation terminalizes, so
                 // `upgrade list` and the history stay truthful.
-                let deadline =
-                    tokio::time::Instant::now() + Duration::from_secs(60 * 30);
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(60 * 30);
                 loop {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     let Ok(Some(op)) = ops.db().get_op(&op_id).await else {
@@ -466,12 +465,7 @@ pub async fn promote(
             state
                 .ops
                 .db()
-                .update_upgrade_status(
-                    &row.id,
-                    "promoting",
-                    None,
-                    Some(row_op.id.to_string()),
-                )
+                .update_upgrade_status(&row.id, "promoting", None, Some(row_op.id.to_string()))
                 .await?;
             Ok(crate::api::operation_view(&row_op))
         }
@@ -479,7 +473,12 @@ pub async fn promote(
             state
                 .ops
                 .db()
-                .update_upgrade_status(&row.id, "failed", Some(json!({"error": e.to_string()})), None)
+                .update_upgrade_status(
+                    &row.id,
+                    "failed",
+                    Some(json!({"error": e.to_string()})),
+                    None,
+                )
                 .await?;
             Err(e.into())
         }
@@ -521,7 +520,9 @@ pub async fn rollback(
         .unwrap_or("?")
         .to_string();
     if old_interpreter.is_empty() || from_version == "?" {
-        return Err(refuse("the pre-upgrade interpreter or version was never pinned"));
+        return Err(refuse(
+            "the pre-upgrade interpreter or version was never pinned",
+        ));
     }
     let expected: Vec<(String, String)> = recipe
         .packages
@@ -571,8 +572,7 @@ pub async fn rollback(
             let row_id = last.id.clone();
             let op_id = row_op.id.to_string();
             tokio::spawn(async move {
-                let deadline =
-                    tokio::time::Instant::now() + Duration::from_secs(60 * 30);
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(60 * 30);
                 loop {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     let Ok(Some(op)) = ops.db().get_op(&op_id).await else {
@@ -601,7 +601,12 @@ pub async fn rollback(
             state
                 .ops
                 .db()
-                .update_upgrade_status(&last.id, "failed", Some(json!({"error": e.to_string()})), None)
+                .update_upgrade_status(
+                    &last.id,
+                    "failed",
+                    Some(json!({"error": e.to_string()})),
+                    None,
+                )
                 .await?;
             Err(e.into())
         }
@@ -618,9 +623,7 @@ pub async fn gc(state: &AppState, name: &str) -> Result<serde_json::Value, Upgra
     let (wl, ..) = managed_parts(state, name).await?;
     let inv = state.ops.inventory().await;
     let current_interpreter = inv.workload(&wl).and_then(|d| match &d.ownership {
-        Ownership::Managed { version, .. } => version
-            .as_ref()
-            .and_then(|v| v.interpreter.clone()),
+        Ownership::Managed { version, .. } => version.as_ref().and_then(|v| v.interpreter.clone()),
         _ => None,
     });
     let rows = state.ops.db().list_upgrades(name).await?;
@@ -642,7 +645,10 @@ pub async fn gc(state: &AppState, name: &str) -> Result<serde_json::Value, Upgra
     let mut entries = tokio::fs::read_dir(&root).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "staging" || e == "log") {
+        if path
+            .extension()
+            .is_some_and(|e| e == "staging" || e == "log")
+        {
             if path.extension().is_some_and(|e| e == "staging") {
                 let _ = tokio::fs::remove_file(&path).await;
                 removed.push(path.display().to_string());

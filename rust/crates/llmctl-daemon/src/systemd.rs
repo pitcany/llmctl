@@ -170,12 +170,7 @@ impl SystemdEngine {
         // failure bookkeeping is cleared. `reset-failed` only resets that
         // bookkeeping — it never starts or stops anything.
         if verb == "start" && before.active_state == "failed" {
-            let _ = systemctl(
-                unit.scope,
-                &["reset-failed", &unit.name],
-                self.show_timeout,
-            )
-            .await;
+            let _ = systemctl(unit.scope, &["reset-failed", &unit.name], self.show_timeout).await;
         }
         let out = match systemctl(unit.scope, &[verb, &unit.name], self.effect_timeout).await {
             Ok(out) => out,
@@ -342,7 +337,9 @@ impl Engine for SystemdEngine {
             if definition_schema >= 2 {
                 if let (Some(pinned_v), Some(recipe)) = (&pinned_version, &wl.recipe) {
                     match crate::version::probe(recipe, &wl).await {
-                        Ok(live_v) => diffs.extend(crate::version::version_drift(pinned_v, &live_v)),
+                        Ok(live_v) => {
+                            diffs.extend(crate::version::version_drift(pinned_v, &live_v))
+                        }
                         Err(e) => {
                             return Err(EngineError::Io(format!(
                                 "probing live version facts of {unit}: {e}"
@@ -386,7 +383,10 @@ impl Engine for SystemdEngine {
         let timeout = self.gpu_probe_timeout;
         Box::pin(async move {
             let all = crate::gpu::probe_nvidia(timeout).await?;
-            Ok(all.into_iter().filter(|o| wanted.contains(&o.gpu)).collect())
+            Ok(all
+                .into_iter()
+                .filter(|o| wanted.contains(&o.gpu))
+                .collect())
         })
     }
 
@@ -655,19 +655,31 @@ mod tests {
     #[test]
     fn recovery_state_follows_the_manager() {
         use crate::engine::RecoveryState;
-        assert_eq!(recovery_state_of(&status("active", "running")), RecoveryState::Alive);
+        assert_eq!(
+            recovery_state_of(&status("active", "running")),
+            RecoveryState::Alive
+        );
         // Crash loop: the manager is retrying — llmctl only reports.
         assert_eq!(
             recovery_state_of(&status("activating", "auto-restart")),
             RecoveryState::ManagerRetrying
         );
         // start-limit-hit: the manager gave up — llmctl may act.
-        assert_eq!(recovery_state_of(&status("failed", "failed")), RecoveryState::GaveUp);
+        assert_eq!(
+            recovery_state_of(&status("failed", "failed")),
+            RecoveryState::GaveUp
+        );
         // Down and the manager is not retrying (clean exit or stopped by a
         // failed run's own rollback): whether that warrants action is the
         // watcher's intent check.
-        assert_eq!(recovery_state_of(&status("inactive", "dead")), RecoveryState::GaveUp);
-        assert_eq!(recovery_state_of(&status("weird", "x")), RecoveryState::Unknown);
+        assert_eq!(
+            recovery_state_of(&status("inactive", "dead")),
+            RecoveryState::GaveUp
+        );
+        assert_eq!(
+            recovery_state_of(&status("weird", "x")),
+            RecoveryState::Unknown
+        );
     }
 
     #[test]

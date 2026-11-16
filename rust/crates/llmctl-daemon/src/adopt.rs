@@ -305,6 +305,7 @@ pub async fn transfer(state: &AppState, req: AdoptRequest) -> Result<AdoptRespon
         // on in the inventory (owner decision, 2026-11-16).
         recovery: None,
         recipe: None,
+        readiness_timeout_secs: None,
     });
     next.revision += 1;
     next.validate()
