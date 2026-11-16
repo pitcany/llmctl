@@ -16,7 +16,7 @@ decisions — they are surfaced here rather than silently deferred.
 | LM Studio | Required | Required | Vendor app install + `lms` CLI; headless core `llmster` via `lms daemon up/down/status` (LM Studio ≥ 0.4.0) | **Q3 answered 2026-11-16** (needs a console login on macOS; see below) |
 | MLX | — | Required | **Q1 answered 2026-11-16:** no single MLX server. Engines run as recipes under llama-swap: `mlx-serve` (ddalcu/mlx-serve, native Zig binary, versioned runtime dirs), MTPLX, `mlx-vlm` server; plus LM Studio's MLX runtime | Unblocked: model as llama-swap-managed recipes (M3) |
 | Strata | Required | out of scope (owner, 2026-11-16: cannot run on macOS) | Python repo knows the installer; Rust needs the recipe re-verified on the workstation | **Q4: Linux only**; installer re-verification remains (M3) |
-| Custom servers | ds4 (CUDA build in `~/Work/ds41-workstation-*`, no unit yet) | ds4 (Metal, `~/Work/ds41-1017/mac-local/serve.sh`), MTPLX | **Q2 answered 2026-11-16:** day one = antirez's **ds4** (owner's fork `pitcany/ds41-m5`; C, build from source) and **MTPLX** (`youssofal/mtplx`, pip, MLX; Macs only). Recipes still to be written down from the live llama-swap entries | Recipes: M3 |
+| Custom servers | ds4 (CUDA build in `~/Work/ds41-workstation-*`, no unit yet) | ds4 (Metal, `~/Work/ds41-1017/mac-local/serve.sh`), MTPLX | **Q2 answered 2026-11-16:** day one = antirez's **ds4** (owner's fork `pitcany/ds41-m5`; C, build from source) and **MTPLX** (`youssofal/mtplx`, pip, MLX; Macs only). Lifecycle comes from llama-swap's config; only install/version recipes remain | Install/version: M3 |
 | Generic OpenAI endpoints | Connection/health only | same | Observe-only `ControlAuthority` (implemented in `llmctl-core`); lifecycle needs an enrolled host + known recipe | Type support done; enrollment = M3 |
 | SGLang, FreeToken | Later | Later | Import records without lifecycle claims | Deferred by plan |
 
@@ -54,9 +54,17 @@ one disposable launchd agent on mbp2 (created, exercised, booted out).
    dirs and per-engine venvs already match the plan's staged-upgrade model.
 2. **Custom-server recipes — owner answer.** Day one: **ds4** (antirez's
    engine; owner fork `pitcany/ds41-m5` on the M5, a CUDA build in
-   `~/Work/ds41-workstation-*` on the workstation) and **MTPLX** (Macs). The
-   install/build/run/health/stop recipes are still to be written down from
-   the live llama-swap entries and confirmed by the owner.
+   `~/Work/ds41-workstation-*` on the workstation) and **MTPLX** (Macs).
+   *Refined 2026-11-16 (owner):* because llmctl-next supervises llama-swap
+   on the Macs, run / health / stop are already declared per engine in
+   llama-swap's config (13 entries, each with `cmd`, `proxy`,
+   `checkEndpoint`, `ttl`), so no separate lifecycle recipes are needed for
+   ds4 or MTPLX. What remains is only **install and version**, and only if
+   llmctl-next owns engine versions under llama-swap (the parent plan says
+   it does): building ds4 from a pinned git sha, and creating an MTPLX venv
+   at a pinned version — the same stage → promote → rollback flow as the
+   M2 vLLM pilot. The workstation has no llama-swap; running ds4 there would
+   need a systemd unit (the M2 adoption path).
 3. **LM Studio unattended capabilities — answered, with one limit.** Since
    0.4.0, LM Studio ships `llmster`, a headless daemon (`lms daemon
    up/down/status`), plus `lms server start/stop/status`, `lms load/unload`,
