@@ -59,11 +59,14 @@ one disposable launchd agent on mbp2 (created, exercised, booted out).
    on the Macs, run / health / stop are already declared per engine in
    llama-swap's config (13 entries, each with `cmd`, `proxy`,
    `checkEndpoint`, `ttl`), so no separate lifecycle recipes are needed for
-   ds4 or MTPLX. What remains is only **install and version**, and only if
-   llmctl-next owns engine versions under llama-swap (the parent plan says
-   it does): building ds4 from a pinned git sha, and creating an MTPLX venv
-   at a pinned version — the same stage → promote → rollback flow as the
-   M2 vLLM pilot. The workstation has no llama-swap; running ds4 there would
+   ds4 or MTPLX. What remains is **install and version**. *Decided
+   2026-11-16 (owner): llmctl-next owns engine versions under llama-swap.*
+   Per engine: build ds4 from a pinned git sha of the fork, create an MTPLX
+   venv at a pinned version (likewise `mlx-serve` runtime dirs and the
+   `mlx-vlm` venv) — the same stage → promote → rollback flow as the M2
+   vLLM pilot, where "apply" rewrites that engine's llama-swap entry
+   (`cmd` / macro path) instead of a systemd unit, and llama-swap's
+   `-watch-config` picks it up. The workstation has no llama-swap; running ds4 there would
    need a systemd unit (the M2 adoption path).
 3. **LM Studio unattended capabilities — answered, with one limit.** Since
    0.4.0, LM Studio ships `llmster`, a headless daemon (`lms daemon
