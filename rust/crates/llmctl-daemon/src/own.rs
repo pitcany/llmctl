@@ -91,7 +91,16 @@ pub async fn own(state: &AppState, name: &str) -> Result<OwnOutcome, OwnError> {
         paths: state.paths.clone(),
         systemd: state.systemd.clone(),
     };
-    let record = write_and_prove(&ctx, &def.unit, &pinned, &header, &path, previous).await?;
+    let record = write_and_prove(
+        &ctx,
+        &def.unit,
+        &pinned,
+        &header,
+        &path,
+        previous.clone(),
+        previous,
+    )
+    .await?;
 
     // Inventory: the ownership gains the service file record. Revision
     // moves, so stale plans cannot confirm against a changed world.
@@ -149,7 +158,13 @@ pub async fn release(state: &AppState, name: &str) -> Result<(), OwnError> {
                 pinned.digest(),
                 chrono::Utc::now().to_rfc3339()
             );
-            let rendered = unitdef::render_unit(pinned, &header);
+            let mut rendered = unitdef::render_unit(pinned, &header);
+            // Keep the unit enable-able: the restored original's [Install].
+            let source = tokio::fs::read_to_string(path).await.unwrap_or_default();
+            if let Some(install) = unitdef::install_section(&source) {
+                rendered.push('\n');
+                rendered.push_str(&install);
+            }
             write_file_atomic(path, rendered.as_bytes()).await?;
             unitdef::daemon_reload(timeout).await?;
             return Err(refuse(format!(
@@ -245,18 +260,23 @@ pub async fn apply_definition_ctx(
     // not the candidate: an upgrade's whole point is that `next` differs.
     preconditions(&imported, pinned, name)?;
     let path = PathBuf::from(&record.path);
-    // The *current* owned bytes become the rollback target (version N).
+    // The *current* owned bytes are what a failed prove puts back (N). They
+    // go to their own slot: the release target recorded at `own` time —
+    // the original file or link — must survive every definition change, or
+    // `release` hands back an llmctl render instead of the original (M2
+    // pilot window 2; for a regular-file original it would also overwrite
+    // the only backup of the original bytes).
     let current_bytes = tokio::fs::read(&path)
         .await
         .map_err(|e| refuse(format!("reading owned unit file {}: {e}", path.display())))?;
-    let backup = backup_path(&ctx.paths.data_dir, &wl_name);
+    let backup = undo_path(&ctx.paths.data_dir, &wl_name);
     tokio::fs::create_dir_all(backup.parent().expect("parent"))
         .await
         .map_err(|e| OwnError::Io(format!("creating backup dir: {e}")))?;
     tokio::fs::write(&backup, &current_bytes)
         .await
         .map_err(|e| OwnError::Io(format!("writing backup: {e}")))?;
-    let previous = PreviousUnitFile::File {
+    let undo = PreviousUnitFile::File {
         content_digest: sha256_hex(&current_bytes),
         backup_path: backup.display().to_string(),
     };
@@ -267,7 +287,16 @@ pub async fn apply_definition_ctx(
         next.digest(),
         chrono::Utc::now().to_rfc3339()
     );
-    let new_record = write_and_prove(ctx, &def.unit, next, &header, &path, previous).await?;
+    let new_record = write_and_prove(
+        ctx,
+        &def.unit,
+        next,
+        &header,
+        &path,
+        undo,
+        record.previous.clone(),
+    )
+    .await?;
 
     let mut next_inv = inv.clone();
     for w in &mut next_inv.workloads {
@@ -389,6 +418,14 @@ async fn remove_path(path: &Path) -> Result<(), OwnError> {
     }
 }
 
+/// Where a definition change keeps the owned bytes it replaces, for its
+/// own prove-or-restore. Never the release target's slot.
+fn undo_path(data_dir: &Path, workload: &llmctl_core::WorkloadName) -> PathBuf {
+    data_dir
+        .join("ownership")
+        .join(format!("{}.apply-undo", workload.as_str()))
+}
+
 fn backup_path(data_dir: &Path, workload: &llmctl_core::WorkloadName) -> PathBuf {
     data_dir
         .join("ownership")
@@ -405,7 +442,10 @@ async fn write_and_prove(
     expected: &LaunchDefinition,
     header: &str,
     path: &Path,
-    previous: PreviousUnitFile,
+    // Put back if the prove fails.
+    undo: PreviousUnitFile,
+    // Recorded for `release` (what `own` replaced; never an llmctl render).
+    release_target: PreviousUnitFile,
 ) -> Result<ServiceFileRecord, OwnError> {
     let timeout = ctx.systemd.show_timeout();
     // What is there now (through a link: the file it points at). Every
@@ -441,7 +481,7 @@ async fn write_and_prove(
     let imported = unitdef::import_unit(unit, timeout).await?;
     let equivalent = matches!(&imported.definition, Some(live) if live.diff(expected).is_empty());
     if !equivalent {
-        restore_previous(&previous, path).await?;
+        restore_previous(&undo, path).await?;
         unitdef::daemon_reload(timeout).await?;
         return Err(refuse(format!(
             "the rendered unit for {unit} did not load to the identical effective definition; original restored"
@@ -450,7 +490,7 @@ async fn write_and_prove(
     Ok(ServiceFileRecord {
         path: path.display().to_string(),
         digest,
-        previous,
+        previous: release_target,
     })
 }
 

@@ -1295,6 +1295,7 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
         &format!("WorkingDirectory={}\n", dir.path().display()),
     );
     unit.start();
+    let original_unit = std::fs::read(&unit.file).unwrap();
     write_empty_inventory(dir.path());
     let d = spawn_daemon(dir.path());
     adopt_running(&d.socket, &unit.name, port);
@@ -1349,6 +1350,34 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
     assert!(ok, "{text}");
     assert_eq!(http_get_json(port, "/v1/version")["version"], "1.0");
 
+    // The same version again (pilot window 2): restage, promote, roll back.
+    // Each is a new operation — a key built from the version alone
+    // replayed the first promote's success and served nothing new.
+    let (ok, text) = cli(&d.socket, &["upgrade", "stage", "adopted", "2.0"]);
+    assert!(ok, "{text}");
+    let (ok, text) = cli(
+        &d.socket,
+        &["upgrade", "promote", "adopted", "2.0", "--wait"],
+    );
+    assert!(ok, "{text}");
+    assert!(!text.contains("replaying"), "{text}");
+    assert_eq!(http_get_json(port, "/v1/version")["version"], "2.0");
+    // History is marked by a completion poller after the op finishes
+    // (known gap: `promote --wait` can return before it).
+    for _ in 0..20 {
+        if cli(&d.socket, &["upgrade", "list", "adopted"])
+            .1
+            .contains("promoted")
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    let (ok, text) = cli(&d.socket, &["upgrade", "rollback", "adopted", "--wait"]);
+    assert!(ok, "{text}");
+    assert!(!text.contains("replaying"), "{text}");
+    assert_eq!(http_get_json(port, "/v1/version")["version"], "1.0");
+
     // A broken version fails offline validation and is never promotable.
     let (code, text) = cli_code(&d.socket, &["upgrade", "stage", "adopted", "2.0.1"]);
     assert_eq!(code, Some(4), "{text}");
@@ -1388,6 +1417,17 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
     assert!(
         text.contains("drifted"),
         "an in-place env change is definition drift: {text}"
+    );
+
+    // Hand back after several definition changes: release restores what
+    // `own` replaced, byte for byte — not an llmctl render from a promote
+    // or rollback (pilot window 2).
+    let (code, text) = cli_code(&d.socket, &["release", "adopted"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(
+        std::fs::read(&unit.file).unwrap(),
+        original_unit,
+        "release must restore the original unit file"
     );
 }
 
