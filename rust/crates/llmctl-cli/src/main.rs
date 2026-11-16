@@ -224,6 +224,15 @@ fn connect(cli: &Cli) -> Result<ControlClient, ClientError> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Rust ignores SIGPIPE, so `println!` panics when the reader goes away
+    // (`llmctl-next ops | head`). A CLI should end quietly like other Unix
+    // tools: restore the default action before any output.
+    #[cfg(unix)]
+    // SAFETY: called once at startup, before any other thread writes output;
+    // `signal` with SIG_DFL has no other preconditions.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     let command = cli.command.clone();
     let result = dispatch(&cli, command).await;

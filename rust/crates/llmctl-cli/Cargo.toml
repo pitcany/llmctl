@@ -19,6 +19,10 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# Already in the lockfile through tokio; used to restore SIGPIPE.
+libc = "0.2.191"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 uuid = { workspace = true }

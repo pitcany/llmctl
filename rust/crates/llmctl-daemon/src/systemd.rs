@@ -457,9 +457,9 @@ async fn systemctl(
         Ok(Ok(out)) => Ok(out),
         Ok(Err(e)) => Err(EngineError::Io(format!("spawning systemctl: {e}"))),
         Err(_) => Err(EngineError::Timeout(format!(
-            "systemctl {} timed out after {}s",
+            "systemctl {} timed out after {:?}",
             args.join(" "),
-            timeout.as_secs()
+            timeout
         ))),
     }
 }
