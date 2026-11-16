@@ -165,6 +165,106 @@ The opt-in `systemd_spike` tests cover adopt → stop → run → daemon
 restart, stale confirm, drift blocking run without touching the unit, the
 unverified gate, and inline secrets (refused, never echoed).
 
+## The rest of M2 (docs/RUST-M2-PLAN.md, items A–D, 2026-11-16)
+
+### Foreign GPU occupancy guard (A)
+
+Before a plan starts a unit, the affected cards are asked who is on them:
+`nvidia-smi` compute apps + the index→UUID map, pids mapped to units
+through `/proc/<pid>/cgroup`. A process that is neither the target nor an
+enrolled workload the plan already stops refuses the operation with
+`gpu_occupied` (409, exit 4) before anything is journaled; a probe that
+cannot answer refuses too (`gpu_probe_failed`) — unknown is never "free".
+The probe is part of each engine's world: the fake engine reads a
+`gpus.json` hook file, systemd probes nvidia-smi, and engines with nothing
+enrolled are not asked. `status` shows per card enrolled vs foreign users.
+
+### Bounded recovery (B)
+
+A single background watcher observes enrolled workloads (default 15 s;
+`LLMCTL_NEXT_WATCH_INTERVAL_MS` for tests). Policy per workload, off by
+default (`recovery: {max_attempts, window_secs, min_interval_secs}` in the
+inventory; adopted workloads stay off until the owner turns it on):
+
+- systemd retries first: `activating/auto-restart` is only reported
+  (`status` shows `manager_retrying`); llmctl acts when the manager gave
+  up (`failed`, start-limit-hit — a start then does `reset-failed` first)
+  or the unit is down and not retrying.
+- A recovery is an ordinary admitted `run` (key `recover-<workload>-<n>`):
+  admission, the drift guard, the GPU guard, the journal and rollback come
+  for free. The budget is SQLite-persisted (`recoveries` table), so a
+  daemon restart does not reset it; attempts are spaced by
+  `min_interval_secs` (default 30).
+- Never recovered: manual stops (durable intent), unmanaged workloads,
+  unknown manager state, drifted definitions, foreign GPU occupants,
+  active/unacknowledged operations, and the daemon's first interval.
+- Budget exhausted → one unacknowledged `needs_attention` marker per
+  episode (`recover-stalled-…`), blocking mutations until `op ack`.
+
+The stop-timeout row of the exit checklist: `LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS`
+makes the effect timeout configurable; a stop that cannot confirm is
+`Unconfirmed` (never a fake success) and the op fails naming it.
+
+### Owning the unit file (C: `own` / `release`)
+
+Adoption pins the definition and leaves the unit file alone; `own` goes
+further — llmctl writes the unit file itself:
+
+- Preconditions: no drop-ins (listed when refused), no drift, no active
+  operation. The rendered unit (header naming llmctl-next and the digest)
+  replaces the file **or the symlink itself** atomically — never writing
+  through a link, never touching the repo copy it pointed at.
+- Prove-or-restore: `daemon-reload` + re-import must equal the pinned
+  definition, or the recorded original goes back byte-for-byte (regular
+  file bytes are backed up under `<data-dir>/ownership/`, links by target)
+  and the operation refuses. The unit is never restarted — a running
+  engine keeps its MainPID.
+- Once owned, the drift check short-circuits on the file digest; a hand
+  edit is `definition_drift` naming `service_file`.
+- `release` restores the original byte-identical (or relinks) and hands
+  ownership back to external — the Python-llmctl hand-back path.
+- `apply_definition` is the staged-upgrade primitive (below).
+
+### Version pin + staged upgrade with rollback (D)
+
+Version ownership is not auto-update. Per workload, an inventory `recipe`
+(`name`, `packages`, `apply: exec|env`, optional `find_links`, `index_url`,
+`model_config`) enables it:
+
+- **Version reference** (`VersionRef`, pinned at `definition_schema: 2`):
+  interpreter, package versions as the env reports them, CUDA, a
+  `pip freeze` lock digest, and content digests of non-system `Exec*`
+  files (the launcher script). Legacy schema-1 pins are re-pinned at daemon
+  start from the live env — never reported as false drift. The drift guard
+  covers it: an in-place `pip install -U` or a launcher edit is
+  `definition_drift` (`version.*` fields) even though the unit file is
+  byte-identical.
+- **Stage** (`llmctl-next upgrade stage NAME --version X`): a new env at
+  `<data-dir>/envs/<name>-<ver>-<hash>` built with `uv venv` + `uv pip
+  install` (≥10 GiB free checked first, install log kept), then offline
+  validation: imports, reported versions, the served model's config. The
+  manifest is written last — an interrupted or failed stage is never
+  promotable. The serving env is never touched.
+- **Promote** (`upgrade promote NAME --version X`): an admitted `upgrade`
+  operation — stop, `ApplyDefinition` (prove-or-restore), start, await
+  readiness, verify served identity, then `VerifyVersion` (the running env
+  must report exactly the target versions). Failure rolls back to N
+  automatically (definition, start, readiness, identity); a failed
+  rollback is `needs_attention`, as always.
+- **Rollback / history / gc**: `upgrade rollback NAME` applies the stashed
+  N (definition + env recorded in the `upgrades` table at promote time);
+  `upgrade list NAME` shows the history; `upgrade gc NAME` drops envs no
+  row or the live interpreter needs. Old envs, shared weights and HF
+  caches are never touched by anything else.
+
+Proven by an opt-in spike that builds a real `fakeengine` 1.0 / 2.0 /
+2.0.1-broken package into a temp wheel index and drives: adopt → own →
+recipe+re-pin → stage 2.0 (validated) → promote (unit serves 2.0, history
+`promoted`) → rollback (serves 1.0) → broken 2.0.1 fails validation and is
+never promotable → a manifest-less stage is not promotable → an in-place
+env change is drift. The real vLLM staging (recipe `vllm`) runs in pilot
+window 2 with the owner.
+
 ## Measured (release build, 2026-11-15, this machine)
 
 - `--version` p95 **4 ms** over 20 runs (plan's provisional budget: <100 ms).
@@ -173,8 +273,9 @@ unverified gate, and inline secrets (refused, never echoed).
 
 ## Not yet here (per the plan's milestones)
 
-The rest of M2 — planned in [docs/RUST-M2-PLAN.md](../docs/RUST-M2-PLAN.md) (GPU occupancy guard, bounded recovery, writing/owning the generated unit file,
-version pin + staged upgrade, real-model pilot), SSH transport and Mac agents (M3), installers
-and version pinning (M4), TUI and config/preset parity (M5), migration of
-Python data (M5/M6). The YAML reader choice is deliberately still open —
-pick a maintained crate against current docs before config parity lands.
+E — the real-model pilot on `vllm-engine2` (two windows with the owner
+present; see [docs/RUST-M2-PLAN.md](../docs/RUST-M2-PLAN.md)), SSH
+transport and Mac agents (M3), installers and version pinning (M4), TUI
+and config/preset parity (M5), migration of Python data (M5/M6). The YAML
+reader choice is deliberately still open — pick a maintained crate against
+current docs before config parity lands.

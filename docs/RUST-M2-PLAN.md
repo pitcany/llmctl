@@ -1,8 +1,8 @@
 # Rust successor — M2 plan (what is left)
 
-Status 2026-11-16. Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md)
-(milestone table, M2 row). Code: `rust/` (`llmctl-next`), see
-[rust/README.md](../rust/README.md).
+Status 2026-11-16 (A–D implemented; only E remains). Parent:
+[RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table, M2 row).
+Code: `rust/` (`llmctl-next`), see [rust/README.md](../rust/README.md).
 
 M2 is "one owned Linux workload". Its exit criterion, verbatim from the parent
 plan: *disposable-unit tests then controlled real-model pilot pass
@@ -16,8 +16,13 @@ startup/stop failures, bounded recovery, daemon restart and upgrade rollback.*
 | Adoption: import via D-Bus, systemd round-trip equivalence, pinned digest, drift guard | `f7ac5c8`, `fd22a74` | adopt → stop → run → daemon restart; stale confirm; drift blocks run; inline secret refused |
 | `restart` as its own plan kind | `4cd6f13` | new MainPID + re-verify; stopped unit refused |
 | `logs` from the journal, follow by cursor | `d86d642`, `5786628` | output, run markers, follow across a restart, bad cursor → 400 |
+| A: foreign GPU occupancy guard | 2026-11-16 | nvidia-smi + `/proc/<pid>/cgroup`; foreign pid/unit → `gpu_occupied` (409) before anything is journaled; probe failure refuses; status shows per-card enrolled vs foreign; e2e: refuse-before-journal, enrolled-conflict allowed, stale enrolled unit refused |
+| B: bounded recovery | 2026-11-16 | watcher (only background loop), opt-in `recovery` policy, SQLite budget surviving daemon restart, exhaustion → `needs_attention` marker blocking until acked; systemd retries first (`auto-restart` → report only; a start after start-limit does `reset-failed`); manual stop never recovered; e2e: recover-once, budget-exhaust + block + survive restart, manual-stop untouched; spike: SIGKILL → systemd burns retries → start-limit → one recovery succeeds |
+| B: stop-timeout honesty | 2026-11-16 | `LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS` configurable effect timeout; spike: TERM-trapped unit with `TimeoutStopSec=infinity` → `Unconfirmed`, op fails, process observed honestly |
+| C: `own` / `release` + `apply_definition` primitive | 2026-11-16 | drop-ins refused (listed); rendered unit written atomically (never through a symlink — the link itself is replaced, repo copy untouched); `daemon-reload` + re-import prove or restore byte-for-byte; MainPID unchanged; owned-file digest is a drift short circuit; `release` restores the original byte-identical / relinks and sets ownership external; corrupted render (fault hook) restored + refused |
+| D: version pin + staged upgrade with rollback | 2026-11-16 | `VersionRef` pinned at `definition_schema: 2` (interpreter, package versions, CUDA, `pip freeze` lock digest, non-system `Exec*` digests); legacy pins re-pinned on load; version drift guard (`version.*` fields); `upgrade stage` (uv env side by side, ≥10 GiB check, install log, manifest-last so an interrupted stage is never promotable) + offline validation; `upgrade promote` = admitted `upgrade` operation (stop → ApplyDefinition → start → readiness → identity → VerifyVersion) with automatic rollback to N; `upgrade rollback/list/gc`; fakeengine 1.0/2.0/2.0.1-broken wheel-index spike: stage → validate → promote (serves 2.0, history `promoted`) → rollback (serves 1.0) → broken never promoted → manifest-less stage never promotable → in-place env change = drift |
 
-Evidence: 56 tests + 9 opt-in disposable-unit tests
+Evidence: 65 tests + 16 opt-in disposable-unit tests
 (`cargo test -p llmctl-cli --test systemd_spike -- --ignored --test-threads=1`).
 
 ## Facts that shape the rest (checked 2026-11-16, read-only)
@@ -215,13 +220,16 @@ pilot env, promote it, run a smoke check, force a rollback, then release.
 
 ## Exit checklist (maps to the parent criterion)
 
-- [ ] Startup failures: early exit, wrong model, GPU occupied — disposable and pilot
-- [ ] Stop failures: timeout → `Unconfirmed` handled honestly — disposable.
-  Not yet tested: needs a spike unit that ignores SIGTERM, plus a
-  configurable adapter effect timeout (today a fixed 100 s); belongs with B.
-- [ ] Bounded recovery: budgeted, coordinated with `Restart=`, respects manual stop — disposable and pilot
-- [ ] Daemon restart: mid-operation SIGKILL reconciles, engine survives — disposable (done) and pilot
-- [ ] Upgrade rollback: failed promotion rolls back to the pinned N — disposable and pilot
+- [x] Startup failures: early exit, wrong model, GPU occupied — disposable (all three: early exit `unit_that_exits…`, wrong model, `gpu_occupied` e2e + the live card refused while a docker process held it); **pilot pending (E)**
+- [x] Stop failures: timeout → `Unconfirmed` handled honestly — disposable
+  (`a_stop_that_outlives_the_effect_timeout_is_unconfirmed`: TERM-trapped
+  unit, `TimeoutStopSec=infinity`, effect timeout via
+  `LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS`)
+- [x] Bounded recovery: budgeted, coordinated with `Restart=`, respects manual stop — disposable (e2e budget/survival + spike start-limit drill); **pilot pending (E)**
+- [x] Daemon restart: mid-operation SIGKILL reconciles, engine survives — disposable (done previously); **pilot pending (E)**
+- [x] Upgrade rollback: failed promotion rolls back to the pinned N — disposable (fakeengine drill: automatic rollback on failure verified in the first promote attempts, explicit `upgrade rollback` green); **pilot pending (E, window 2)**
+
+Only **E — the real-model pilot** remains (two windows, owner present).
 
 ## Owner decisions (2026-11-16)
 
