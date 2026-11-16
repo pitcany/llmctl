@@ -13,11 +13,12 @@ use serde_json::json;
 
 use llmctl_client::wire::codes;
 use llmctl_client::wire::{
-    AckRequest, AdmitRequest, AdmitResponse, CancelRequest, HealthResponse, OperationListResponse,
-    OperationView, PhaseView, PlanRequest, PlanResponse, StatusResponse, WorkloadView,
-    PROTOCOL_VERSION,
+    AckRequest, AdmitRequest, AdmitResponse, AdoptRequest, AdoptResponse, AdoptionPreview,
+    CancelRequest, HealthResponse, OperationListResponse, OperationView, PhaseView, PlanRequest,
+    PlanResponse, StatusResponse, WorkloadView, PROTOCOL_VERSION,
 };
 
+use crate::adopt::AdoptError;
 use crate::app::AppState;
 use crate::db::OpRow;
 use crate::ops::{AdmitOutcome, OpsError};
@@ -33,6 +34,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/operations/{id}", get(get_operation))
         .route("/v1/operations/{id}/cancel", post(cancel_operation))
         .route("/v1/operations/{id}/acknowledge", post(ack_operation))
+        .route("/v1/adoptions/preview", post(adoption_preview))
+        .route("/v1/adoptions", post(adoption_transfer))
         .with_state(state)
 }
 
@@ -97,6 +100,14 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
                     .unwrap_or(false),
                 observed_at: obs.map(|o| o.observed_at),
                 observation_unknown: obs.is_none(),
+                ownership: match &def.ownership {
+                    llmctl_core::Ownership::External => "external".into(),
+                    llmctl_core::Ownership::Managed { .. } => "managed".into(),
+                },
+                adopted_digest: match &def.ownership {
+                    llmctl_core::Ownership::Managed { digest, .. } => Some(digest.clone()),
+                    llmctl_core::Ownership::External => None,
+                },
             }
         })
         .collect();
@@ -245,6 +256,25 @@ pub fn operation_view(row: &OpRow) -> OperationView {
     }
 }
 
+async fn adoption_preview(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AdoptRequest>,
+) -> Result<Json<AdoptionPreview>, ApiError> {
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    Ok(Json(crate::adopt::preview(&state, &req).await?))
+}
+
+async fn adoption_transfer(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AdoptRequest>,
+) -> Result<Json<AdoptResponse>, ApiError> {
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    crate::adopt::transfer(&state, req)
+        .await
+        .map(Json)
+        .map_err(ApiError::from_adopt)
+}
+
 pub struct ApiError {
     status: StatusCode,
     body: llmctl_client::wire::ApiError,
@@ -273,6 +303,39 @@ impl ApiError {
                     code: code.to_string(),
                     message: e.to_string(),
                     details: e.details(),
+                },
+            },
+        }
+    }
+}
+
+impl ApiError {
+    fn from_adopt(e: AdoptError) -> Self {
+        let (code, message, preview) = match e {
+            AdoptError::Ops(e) => return ApiError::from_ops(&e),
+            AdoptError::Stale(p) => (
+                codes::STALE_ADOPTION,
+                "the unit's effective definition changed since the confirmed preview; review the fresh preview",
+                p,
+            ),
+            AdoptError::Refused(p) => (
+                codes::ADOPTION_REFUSED,
+                "an adoption check failed; ownership was not transferred",
+                p,
+            ),
+            AdoptError::Unverified(p) => (
+                codes::ADOPTION_UNVERIFIED,
+                "served identity could not be checked; start the unit or pass allow_unverified",
+                p,
+            ),
+        };
+        Self {
+            status: StatusCode::CONFLICT,
+            body: llmctl_client::wire::ApiError {
+                error: llmctl_client::wire::ApiErrorBody {
+                    code: code.to_string(),
+                    message: message.to_string(),
+                    details: Some(json!({ "preview": preview })),
                 },
             },
         }

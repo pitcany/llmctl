@@ -19,9 +19,9 @@ use thiserror::Error;
 use tower::Service;
 
 use crate::wire::{
-    AckRequest, AdmitRequest, AdmitResponse, ApiError, CancelRequest, HealthResponse,
-    OperationListResponse, OperationView, PlanRequest, PlanResponse, StatusResponse,
-    PROTOCOL_VERSION,
+    AckRequest, AdmitRequest, AdmitResponse, AdoptRequest, AdoptResponse, AdoptionPreview,
+    ApiError, CancelRequest, HealthResponse, OperationListResponse, OperationView, PlanRequest,
+    PlanResponse, StatusResponse, PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Error)]
@@ -133,6 +133,17 @@ impl ControlClient {
 
     pub async fn admit(&self, req: AdmitRequest) -> Result<AdmitResponse, ClientError> {
         self.post_json("/v1/operations", &req).await
+    }
+
+    pub async fn adoption_preview(
+        &self,
+        req: &AdoptRequest,
+    ) -> Result<AdoptionPreview, ClientError> {
+        self.post_json("/v1/adoptions/preview", req).await
+    }
+
+    pub async fn adopt(&self, req: &AdoptRequest) -> Result<AdoptResponse, ClientError> {
+        self.post_json("/v1/adoptions", req).await
     }
 
     pub async fn list_operations(&self) -> Result<OperationListResponse, ClientError> {

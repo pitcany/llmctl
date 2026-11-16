@@ -34,6 +34,7 @@ fn workload(name: &str, gpus: &[u32], port: u16) -> WorkloadDefinition {
             scope: UnitScope::User,
             unit: format!("llmctl-next-fake-{name}.service"),
         },
+        ownership: Default::default(),
     }
 }
 

@@ -6,7 +6,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use llmctl_core::{OpKind, Plan};
+use llmctl_core::{FileProvenance, LaunchDefinition, OpKind, Plan};
 
 /// Protocol version for mutation requests. Bump on incompatible change;
 /// the daemon refuses mismatched versions with `protocol_mismatch`.
@@ -42,6 +42,85 @@ pub struct WorkloadView {
     pub observed_at: Option<DateTime<Utc>>,
     /// True when the observation could not be refreshed (stale/unknown).
     pub observation_unknown: bool,
+    /// `external` or `managed` (adopted, definition pinned).
+    #[serde(default = "external")]
+    pub ownership: String,
+    /// Pinned definition digest for managed workloads.
+    #[serde(default)]
+    pub adopted_digest: Option<String>,
+}
+
+fn external() -> String {
+    "external".into()
+}
+
+// ---- adoption ---------------------------------------------------------------
+
+/// Preview (no `confirm_digest`) or transfer ownership of an existing user
+/// unit. Transfer requires the digest from a preview: if the unit changed
+/// since, the daemon answers `stale_adoption` with a fresh preview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdoptRequest {
+    pub protocol: u32,
+    /// Bare user unit name, e.g. `qwen-coder.service`.
+    pub unit: String,
+    pub workload: String,
+    pub model: String,
+    pub port: u16,
+    /// GPU indices on this host.
+    pub gpus: Vec<u32>,
+    #[serde(default)]
+    pub confirm_digest: Option<String>,
+    /// Transfer even if served identity could not be checked (unit stopped).
+    #[serde(default)]
+    pub allow_unverified: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Pass,
+    Fail,
+    Unverified,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdoptionCheck {
+    pub name: String,
+    pub status: CheckStatus,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdoptionPreview {
+    pub unit: String,
+    pub workload: String,
+    /// Digest to pass as `confirm_digest`; absent when nothing was imported.
+    pub digest: Option<String>,
+    pub definition: Option<LaunchDefinition>,
+    /// The service definition llmctl would own.
+    pub generated_unit: Option<String>,
+    pub provenance: Vec<FileProvenance>,
+    pub checks: Vec<AdoptionCheck>,
+    pub inventory_revision: u64,
+}
+
+impl AdoptionPreview {
+    pub fn has_failures(&self) -> bool {
+        self.checks.iter().any(|c| c.status == CheckStatus::Fail)
+    }
+
+    pub fn has_unverified(&self) -> bool {
+        self.checks
+            .iter()
+            .any(|c| c.status == CheckStatus::Unverified)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdoptResponse {
+    pub preview: AdoptionPreview,
+    pub inventory_revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,4 +312,8 @@ pub mod codes {
     pub const UNKNOWN_OPERATION: &str = "unknown_operation";
     pub const INVALID_STATE: &str = "invalid_state";
     pub const DAEMON_ERROR: &str = "daemon_error";
+    pub const DEFINITION_DRIFT: &str = "definition_drift";
+    pub const STALE_ADOPTION: &str = "stale_adoption";
+    pub const ADOPTION_REFUSED: &str = "adoption_refused";
+    pub const ADOPTION_UNVERIFIED: &str = "adoption_unverified";
 }

@@ -14,12 +14,14 @@
 //! - [`api`]: the versioned local HTTP/JSON API over the Unix socket.
 //! - [`app`]: paths, inventory bootstrap, host identity, serve loop.
 
+pub mod adopt;
 pub mod api;
 pub mod app;
 pub mod db;
 pub mod engine;
 pub mod ops;
 pub mod systemd;
+pub mod unitdef;
 
 pub use app::{serve, AppState, DevPaths, DEFAULT_DATA_DIR_SUFFIX};
 

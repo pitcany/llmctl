@@ -72,6 +72,10 @@ pub struct AppState {
     pub paths: DevPaths,
     pub started_at: DateTime<Utc>,
     pub ops: Arc<OpManager>,
+    /// The systemd adapter, also reachable for adoption's read-only probes.
+    pub systemd: SystemdEngine,
+    /// Serializes adoption previews' scratch-unit round trips with transfers.
+    pub adopt_lock: tokio::sync::Mutex<()>,
 }
 
 /// Sample M1 inventory: fake-engine workloads only, nothing that touches
@@ -94,6 +98,7 @@ pub fn sample_inventory(host: &HostId) -> HostInventory {
             scope: UnitScope::User,
             unit: format!("llmctl-next-fake-{name}.service"),
         },
+        ownership: Default::default(),
     };
     let mut inv = HostInventory {
         host: host.clone(),
@@ -165,9 +170,10 @@ impl AppState {
         // real service manager, and only their own enrolled units.
         let mut engines: std::collections::BTreeMap<String, Arc<dyn Engine>> = Default::default();
         engines.insert("fake".into(), Arc::new(FakeEngine::new(&paths.data_dir)));
+        let systemd = SystemdEngine::from_inventory(&inv);
         engines.insert(
             crate::systemd::ENGINE_NAME.into(),
-            Arc::new(SystemdEngine::from_inventory(&inv)),
+            Arc::new(systemd.clone()),
         );
         let engine: Arc<dyn Engine> = Arc::new(RoutedEngine::new(&inv, engines)?);
         let ops = Arc::new(OpManager::new(
@@ -195,6 +201,8 @@ impl AppState {
             paths,
             started_at: Utc::now(),
             ops,
+            systemd,
+            adopt_lock: tokio::sync::Mutex::new(()),
         }))
     }
 }

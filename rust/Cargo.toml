@@ -43,6 +43,7 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+sha2 = "0.10"
 
 [profile.release]
 lto = "thin"

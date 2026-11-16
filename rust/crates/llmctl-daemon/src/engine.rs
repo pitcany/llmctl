@@ -43,6 +43,12 @@ pub enum EngineError {
     /// `FaultAfter`: observe before concluding anything.
     #[error("effect unconfirmed: {0}")]
     Unconfirmed(String),
+    /// A managed unit's live definition no longer matches the pinned one.
+    #[error("{unit} has drifted from its adopted definition ({} field(s) differ)", diffs.len())]
+    Drift {
+        unit: String,
+        diffs: Vec<llmctl_core::FieldDiff>,
+    },
 }
 
 /// One external effect the executor requests. Carries everything needed to
@@ -99,6 +105,19 @@ pub trait Engine: Send + Sync {
 
     /// Probe one unit.
     fn probe(&self, unit: &UnitName) -> BoxFut<Result<UnitProbe, EngineError>>;
+
+    /// Refuse (`EngineError::Drift`) when a managed workload's live launch
+    /// definition differs from the pinned one. Adapters without definition
+    /// ownership accept everything.
+    fn verify_definition(
+        &self,
+        _workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Result<(), EngineError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// The inventory changed (adoption): refresh enrolled units.
+    fn reload(&self, _inventory: &HostInventory) {}
 }
 
 // ---- the fake engine ------------------------------------------------------
@@ -375,8 +394,8 @@ impl Engine for FakeEngine {
 /// adapters never see units they were not enrolled for.
 pub struct RoutedEngine {
     engines: BTreeMap<String, Arc<dyn Engine>>,
-    /// unit display → engine name.
-    routes: BTreeMap<String, String>,
+    /// unit display → engine name; replaced wholesale on reload.
+    routes: std::sync::RwLock<BTreeMap<String, String>>,
 }
 
 impl RoutedEngine {
@@ -384,6 +403,17 @@ impl RoutedEngine {
         inventory: &HostInventory,
         engines: BTreeMap<String, Arc<dyn Engine>>,
     ) -> Result<Self, String> {
+        let routes = Self::routes_for(inventory, &engines)?;
+        Ok(Self {
+            engines,
+            routes: std::sync::RwLock::new(routes),
+        })
+    }
+
+    fn routes_for(
+        inventory: &HostInventory,
+        engines: &BTreeMap<String, Arc<dyn Engine>>,
+    ) -> Result<BTreeMap<String, String>, String> {
         let mut routes = BTreeMap::new();
         for w in &inventory.workloads {
             if !engines.contains_key(&w.engine) {
@@ -396,11 +426,13 @@ impl RoutedEngine {
             }
             routes.insert(w.unit.to_string(), w.engine.clone());
         }
-        Ok(Self { engines, routes })
+        Ok(routes)
     }
 
     fn route(&self, unit: &UnitName) -> Result<Arc<dyn Engine>, EngineError> {
         self.routes
+            .read()
+            .expect("routes lock")
             .get(&unit.to_string())
             .and_then(|name| self.engines.get(name))
             .cloned()
@@ -451,6 +483,28 @@ impl Engine for RoutedEngine {
             Err(e) => Box::pin(async move { Err(e) }),
         }
     }
+
+    fn verify_definition(
+        &self,
+        workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Result<(), EngineError>> {
+        match self.route(&workload.unit) {
+            Ok(engine) => engine.verify_definition(workload),
+            Err(e) => Box::pin(async move { Err(e) }),
+        }
+    }
+
+    fn reload(&self, inventory: &HostInventory) {
+        match Self::routes_for(inventory, &self.engines) {
+            Ok(routes) => *self.routes.write().expect("routes lock") = routes,
+            // The caller validated engine names before swapping inventory;
+            // keep the old routes rather than route to nothing.
+            Err(e) => tracing::error!(error = %e, "inventory reload rejected"),
+        }
+        for engine in self.engines.values() {
+            engine.reload(inventory);
+        }
+    }
 }
 
 // ---- tiny async json file helpers -----------------------------------------
@@ -471,7 +525,7 @@ async fn read_json<T: serde::de::DeserializeOwned + Default>(
     }
 }
 
-async fn write_json_atomic<T: Serialize>(
+pub(crate) async fn write_json_atomic<T: Serialize>(
     path: &std::path::Path,
     value: &T,
 ) -> Result<(), EngineError> {

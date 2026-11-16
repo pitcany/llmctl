@@ -107,6 +107,40 @@ cargo test -p llmctl-cli --test systemd_spike -- --ignored --test-threads=1
 They prove run → Ready → stop, early exit fails as "exited before
 readiness" (not a timeout), and a wrong served model fails verification.
 
+### Adoption (`llmctl-next adopt`, `crates/llmctl-daemon/src/{adopt,unitdef}.rs`)
+
+```bash
+llmctl-next adopt foo.service --name coder --model org/model --port 8003 --gpus 0,1
+# → preview: checks, generated service definition, digest, exact confirm command
+llmctl-next adopt foo.service … --confirm sha256:… [--allow-unverified]
+```
+
+- **Import** reads the effective definition through systemd's D-Bus API
+  (`busctl --json`): exact argv arrays (`systemctl show` loses argument
+  boundaries), env, `EnvironmentFile=` paths + content digests (contents
+  never stored), type, restart, stop timeout, kill mode, unit-file provenance.
+- **Equivalence** is proven by systemd itself: the generated definition is
+  loaded under a scratch `llmctl-next-verify-*.service` (never started,
+  always removed) and re-imported; any differing field fails the check.
+- **Checks**: enrollment (unit/name/port free, GPUs exist), unit loaded,
+  no credential-like inline `Environment=` names (move them to an
+  `EnvironmentFile=`; values are never echoed), definition round trip,
+  served identity (`/v1/models`; a stopped unit is *unverified*, which
+  transfer accepts only with `--allow-unverified`).
+- **Transfer** re-previews under the admission lock (refused while another
+  operation is active or unacknowledged), requires the confirmed digest to
+  still match (`stale_adoption` + fresh preview otherwise), then enrolls the
+  workload as `ownership: managed` with the digest pinned in
+  `inventory.json` (revision bumped). The unit keeps running; its file is
+  not touched.
+- **Drift guard**: `run`/`restart` of a managed workload re-imports the unit
+  and refuses with `definition_drift` (exit 4, differing fields listed)
+  before anything is journaled; `stop` stays allowed.
+
+The opt-in `systemd_spike` tests cover adopt → stop → run → daemon
+restart, stale confirm, drift blocking run without touching the unit, the
+unverified gate, and inline secrets (refused, never echoed).
+
 ## Measured (release build, 2026-11-15, this machine)
 
 - `--version` p95 **4 ms** over 20 runs (plan's provisional budget: <100 ms).
@@ -115,8 +149,8 @@ readiness" (not a timeout), and a wrong served model fails verification.
 
 ## Not yet here (per the plan's milestones)
 
-The rest of M2 (config comparison + ownership transfer on adoption, logs,
-restart, version pin + staged upgrade, real-model pilot), SSH transport and Mac agents (M3), installers
+The rest of M2 (logs, restart, writing/owning the generated unit file,
+version pin + staged upgrade, real-model pilot), SSH transport and Mac agents (M3), installers
 and version pinning (M4), TUI and config/preset parity (M5), migration of
 Python data (M5/M6). The YAML reader choice is deliberately still open —
 pick a maintained crate against current docs before config parity lands.

@@ -43,8 +43,9 @@ struct Endpoint {
 
 #[derive(Debug, Clone)]
 pub struct SystemdEngine {
-    /// Keyed by `UnitName` display (`user/foo.service`).
-    endpoints: Arc<BTreeMap<String, Endpoint>>,
+    /// Keyed by `UnitName` display (`user/foo.service`); shared by clones
+    /// and replaced on inventory reload.
+    endpoints: Arc<std::sync::RwLock<BTreeMap<String, Endpoint>>>,
     show_timeout: Duration,
     effect_timeout: Duration,
     http_timeout: Duration,
@@ -53,7 +54,17 @@ pub struct SystemdEngine {
 impl SystemdEngine {
     /// Knows exactly the inventory workloads routed to `systemd`.
     pub fn from_inventory(inventory: &HostInventory) -> Self {
-        let endpoints = inventory
+        Self {
+            endpoints: Arc::new(std::sync::RwLock::new(Self::endpoints_for(inventory))),
+            show_timeout: Duration::from_secs(5),
+            // systemd's default stop timeout is 90 s; stay just above it.
+            effect_timeout: Duration::from_secs(100),
+            http_timeout: Duration::from_secs(2),
+        }
+    }
+
+    fn endpoints_for(inventory: &HostInventory) -> BTreeMap<String, Endpoint> {
+        inventory
             .workloads
             .iter()
             .filter(|w| w.engine == ENGINE_NAME)
@@ -66,14 +77,22 @@ impl SystemdEngine {
                     },
                 )
             })
-            .collect();
-        Self {
-            endpoints: Arc::new(endpoints),
-            show_timeout: Duration::from_secs(5),
-            // systemd's default stop timeout is 90 s; stay just above it.
-            effect_timeout: Duration::from_secs(100),
-            http_timeout: Duration::from_secs(2),
-        }
+            .collect()
+    }
+
+    /// Manager/effect timeout used for imports.
+    pub fn show_timeout(&self) -> Duration {
+        self.show_timeout
+    }
+
+    /// Probe a unit that is not (yet) enrolled — adoption's served-identity
+    /// check. Read-only: no effect is ever applied to an unenrolled unit.
+    pub async fn probe_unenrolled(&self, unit: &UnitName, port: u16, model: &str) -> UnitProbe {
+        let ep = Endpoint {
+            port,
+            model: model.to_string(),
+        };
+        self.probe_endpoint(unit, &ep).await
     }
 
     /// Shorter manager/effect timeouts (tests).
@@ -86,6 +105,8 @@ impl SystemdEngine {
 
     fn endpoint(&self, unit: &UnitName) -> Result<Endpoint, EngineError> {
         self.endpoints
+            .read()
+            .expect("endpoints lock")
             .get(&unit.to_string())
             .cloned()
             .ok_or_else(|| EngineError::UnknownUnit(unit.to_string()))
@@ -233,6 +254,50 @@ impl Engine for SystemdEngine {
             let ep = this.endpoint(&unit)?;
             Ok(this.probe_endpoint(&unit, &ep).await)
         })
+    }
+
+    fn verify_definition(
+        &self,
+        workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Result<(), EngineError>> {
+        let llmctl_core::Ownership::Managed {
+            definition: pinned, ..
+        } = workload.ownership.clone()
+        else {
+            return Box::pin(async { Ok(()) });
+        };
+        let unit = workload.unit.clone();
+        let timeout = self.show_timeout;
+        Box::pin(async move {
+            let imported = crate::unitdef::import_unit(&unit, timeout).await?;
+            let mut diffs = match &imported.definition {
+                Some(live) => pinned.diff(live),
+                None => vec![llmctl_core::FieldDiff {
+                    field: "load_state".into(),
+                    expected: "loaded".into(),
+                    actual: imported.load_state.clone().into(),
+                }],
+            };
+            if !imported.secret_env_names.is_empty() {
+                diffs.push(llmctl_core::FieldDiff {
+                    field: "inline_secret_environment".into(),
+                    expected: serde_json::Value::Array(vec![]),
+                    actual: imported.secret_env_names.clone().into(),
+                });
+            }
+            if diffs.is_empty() {
+                Ok(())
+            } else {
+                Err(EngineError::Drift {
+                    unit: unit.to_string(),
+                    diffs,
+                })
+            }
+        })
+    }
+
+    fn reload(&self, inventory: &HostInventory) {
+        *self.endpoints.write().expect("endpoints lock") = Self::endpoints_for(inventory);
     }
 }
 
@@ -503,7 +568,7 @@ mod tests {
     #[tokio::test]
     async fn unenrolled_unit_is_refused_without_touching_systemd() {
         let engine = SystemdEngine {
-            endpoints: Arc::new(BTreeMap::new()),
+            endpoints: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             show_timeout: Duration::from_millis(1),
             effect_timeout: Duration::from_millis(1),
             http_timeout: Duration::from_millis(1),

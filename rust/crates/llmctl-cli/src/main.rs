@@ -8,7 +8,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use llmctl_client::wire::{
-    codes, AdmitRequest, OpStatus, OperationView, PlanRequest, PROTOCOL_VERSION,
+    codes, AdmitRequest, AdoptRequest, AdoptionPreview, CheckStatus, OpStatus, OperationView,
+    PlanRequest, PROTOCOL_VERSION,
 };
 use llmctl_client::{ClientError, ControlClient};
 use llmctl_core::{OpKind, Plan};
@@ -72,6 +73,34 @@ enum Command {
     Cancel { id: String },
     /// Acknowledge a needs_attention/interrupted operation; unblocks mutations.
     Ack { id: String },
+    /// Adopt an existing systemd user unit. Without --confirm this only
+    /// previews: imported definition, generated service definition, checks
+    /// and the digest to confirm. With --confirm DIGEST it transfers
+    /// ownership (the unit keeps running; its file is not touched).
+    Adopt {
+        /// Bare user unit name, e.g. qwen-coder.service
+        unit: String,
+        /// Workload name to enroll it as.
+        #[arg(long)]
+        name: String,
+        /// Model id the unit's endpoint must serve.
+        #[arg(long)]
+        model: String,
+        /// Port of its OpenAI-compatible endpoint.
+        #[arg(long)]
+        port: u16,
+        /// GPU indices it uses, comma-separated.
+        #[arg(long, value_delimiter = ',', required = true)]
+        gpus: Vec<u32>,
+        /// Digest from the preview: transfer ownership.
+        #[arg(long)]
+        confirm: Option<String>,
+        /// Transfer although served identity could not be checked.
+        #[arg(long)]
+        allow_unverified: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the daemon in the foreground (binds the control socket).
     Daemon {
         #[arg(long)]
@@ -89,7 +118,11 @@ fn exit_code_for_client_error(e: &ClientError) -> u8 {
             | codes::OVERLAPPING_OPERATION
             | codes::IDEMPOTENCY_CONFLICT
             | codes::BLOCKED_NEEDS_ATTENTION
-            | codes::INVALID_STATE => 4,
+            | codes::INVALID_STATE
+            | codes::DEFINITION_DRIFT
+            | codes::STALE_ADOPTION
+            | codes::ADOPTION_REFUSED
+            | codes::ADOPTION_UNVERIFIED => 4,
             _ => 1,
         },
         ClientError::Disconnected(_) | ClientError::BadResponse(_) => 1,
@@ -171,6 +204,28 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Op { id, watch } => cmd_op(cli, &id, watch).await,
         Command::Cancel { id } => cmd_cancel(cli, &id).await,
         Command::Ack { id } => cmd_ack(cli, &id).await,
+        Command::Adopt {
+            unit,
+            name,
+            model,
+            port,
+            gpus,
+            confirm,
+            allow_unverified,
+            json,
+        } => {
+            let req = AdoptRequest {
+                protocol: PROTOCOL_VERSION,
+                unit,
+                workload: name,
+                model,
+                port,
+                gpus,
+                confirm_digest: confirm,
+                allow_unverified,
+            };
+            cmd_adopt(cli, req, json).await
+        }
         Command::Daemon { socket } => {
             llmctl_daemon::run_daemon(cli.data_dir.clone(), socket)
                 .await
@@ -209,7 +264,7 @@ async fn cmd_status(cli: &Cli, json: bool) -> Result<u8, CliError> {
             None => "never".to_string(),
         };
         println!(
-            "{:<10} {:<14} gpus={:<28} {:<8} {:<8} serves={:<18} intent={:<18} seen {}",
+            "{:<10} {:<14} gpus={:<28} {:<8} {:<8} serves={:<18} intent={:<18} {:<8} seen {}",
             w.name,
             w.model,
             w.gpus.join(","),
@@ -217,10 +272,97 @@ async fn cmd_status(cli: &Cli, json: bool) -> Result<u8, CliError> {
             w.readiness,
             serves,
             w.intent,
+            w.ownership,
             observed
         );
     }
     Ok(0)
+}
+
+async fn cmd_adopt(cli: &Cli, req: AdoptRequest, json: bool) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    if req.confirm_digest.is_none() {
+        let preview = client.adoption_preview(&req).await?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&preview).unwrap());
+        } else {
+            print_preview(&preview);
+            if preview.has_failures() {
+                println!("\nnot adoptable: fix the failed check(s) above, then preview again");
+            } else if let Some(digest) = &preview.digest {
+                println!(
+                    "\nto transfer ownership:\n  llmctl-next adopt {} --name {} --model {} --port {} --gpus {} --confirm {}{}",
+                    req.unit,
+                    req.workload,
+                    req.model,
+                    req.port,
+                    req.gpus.iter().map(u32::to_string).collect::<Vec<_>>().join(","),
+                    digest,
+                    if preview.has_unverified() { " --allow-unverified" } else { "" }
+                );
+            }
+        }
+        return Ok(if preview.has_failures() { 4 } else { 0 });
+    }
+    match client.adopt(&req).await {
+        Ok(resp) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+            } else {
+                println!(
+                    "adopted {} as managed workload {} (inventory revision {}, definition {})",
+                    req.unit,
+                    req.workload,
+                    resp.inventory_revision,
+                    resp.preview.digest.as_deref().unwrap_or("?")
+                );
+            }
+            Ok(0)
+        }
+        Err(e) => {
+            if let ClientError::Api {
+                details: Some(details),
+                ..
+            } = &e
+            {
+                if let Ok(preview) =
+                    serde_json::from_value::<AdoptionPreview>(details["preview"].clone())
+                {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&preview).unwrap());
+                    } else {
+                        print_preview(&preview);
+                        println!();
+                    }
+                }
+            }
+            Err(e.into())
+        }
+    }
+}
+
+fn print_preview(p: &AdoptionPreview) {
+    println!("adoption preview: {} → workload {}", p.unit, p.workload);
+    for c in &p.checks {
+        let mark = match c.status {
+            CheckStatus::Pass => "pass",
+            CheckStatus::Fail => "FAIL",
+            CheckStatus::Unverified => "unverified",
+        };
+        println!("  {mark:<10} {:<21} {}", c.name, c.detail);
+    }
+    for f in &p.provenance {
+        println!("  source     {} ({})", f.path, f.content_digest);
+    }
+    if let Some(unit) = &p.generated_unit {
+        println!("\ngenerated service definition:");
+        for line in unit.lines() {
+            println!("  | {line}");
+        }
+    }
+    if let Some(d) = &p.digest {
+        println!("\ndefinition digest: {d}");
+    }
 }
 
 async fn cmd_mutate(

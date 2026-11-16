@@ -53,6 +53,11 @@ pub enum OpsError {
     },
     #[error("operation {existing} needs attention and is unacknowledged; run `llmctl-next op ack {existing}` after reviewing it")]
     NeedsAttentionBlock { existing: String },
+    #[error("{workload}: unit drifted from its adopted definition; differing: {}", diffs.iter().map(|d| d.field.as_str()).collect::<Vec<_>>().join(", "))]
+    DefinitionDrift {
+        workload: String,
+        diffs: Vec<llmctl_core::FieldDiff>,
+    },
     #[error("stale plan: {reason}")]
     StalePlan { reason: String, revised: Box<Plan> },
     #[error("unknown operation: {0}")]
@@ -84,6 +89,7 @@ impl OpsError {
                 (llmctl_client::wire::codes::BLOCKED_NEEDS_ATTENTION, 409)
             }
             OpsError::StalePlan { .. } => (llmctl_client::wire::codes::STALE_PLAN, 409),
+            OpsError::DefinitionDrift { .. } => (llmctl_client::wire::codes::DEFINITION_DRIFT, 409),
             OpsError::UnknownOperation(_) => (llmctl_client::wire::codes::UNKNOWN_OPERATION, 404),
             OpsError::InvalidState(_) => (llmctl_client::wire::codes::INVALID_STATE, 409),
             OpsError::Db(_) | OpsError::Engine(_) => {
@@ -107,6 +113,7 @@ impl OpsError {
                 "status": existing_status,
             })),
             OpsError::ProtocolMismatch { supported, .. } => Some(json!({ "supported": supported })),
+            OpsError::DefinitionDrift { diffs, .. } => Some(json!({ "diffs": diffs })),
             _ => None,
         }
     }
@@ -154,7 +161,40 @@ impl OpManager {
         }
     }
 
+    /// Blockers for any mutation: one active operation at a time, and
+    /// explicit unresolved outcomes must be acknowledged first.
+    async fn check_blockers(&self) -> Result<(), OpsError> {
+        for row in self.db.list_ops(1000).await? {
+            if !row.status.is_terminal() {
+                return Err(OpsError::Overlapping {
+                    existing: row.id.to_string(),
+                    existing_kind: row.kind,
+                    existing_workload: row.workload.to_string(),
+                    existing_status: row.status,
+                });
+            }
+            if matches!(row.status, OpStatus::NeedsAttention | OpStatus::Interrupted)
+                && !row.acknowledged
+            {
+                return Err(OpsError::NeedsAttentionBlock {
+                    existing: row.id.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Hold admission closed while a non-operation mutation (adoption)
+    /// changes the inventory. Fails like admission would when another
+    /// mutation is active or an outcome is unacknowledged.
+    pub async fn quiesce(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, OpsError> {
+        let guard = self.admit_lock.lock().await;
+        self.check_blockers().await?;
+        Ok(guard)
+    }
+
     pub async fn update_inventory(&self, inv: Arc<HostInventory>) {
+        self.engine.reload(&inv);
         *self.inventory.write().await = inv;
     }
 
@@ -170,6 +210,30 @@ impl OpManager {
         &self.engine
     }
 
+    /// Starting a managed workload whose unit drifted from its adopted
+    /// definition is refused before anything is journaled; stopping stays
+    /// allowed (it cannot make drift worse).
+    async fn check_definition(
+        &self,
+        kind: OpKind,
+        def: &llmctl_core::WorkloadDefinition,
+    ) -> Result<(), OpsError> {
+        if !matches!(kind, OpKind::Run | OpKind::Restart) {
+            return Ok(());
+        }
+        match self.engine.verify_definition(def).await {
+            Ok(()) => Ok(()),
+            Err(EngineError::Drift { diffs, .. }) => Err(OpsError::DefinitionDrift {
+                workload: def.name.to_string(),
+                diffs,
+            }),
+            Err(e) => Err(OpsError::Engine(format!(
+                "verifying adopted definition of {}: {e}",
+                def.name
+            ))),
+        }
+    }
+
     /// Fresh observations + a plan for `kind`/`workload` (dry-run path).
     pub async fn build_plan(
         &self,
@@ -178,9 +242,10 @@ impl OpManager {
     ) -> Result<(Plan, Vec<ObservationLite>), OpsError> {
         let inv = self.inventory().await;
         let name = WorkloadName::new(workload).map_err(|e| OpsError::Invalid(e.to_string()))?;
-        if inv.workload(&name).is_none() {
+        let Some(def) = inv.workload(&name) else {
             return Err(OpsError::UnknownWorkload(workload.to_string()));
-        }
+        };
+        self.check_definition(kind, def).await?;
         let observations = self
             .engine
             .observe(&inv)
@@ -227,30 +292,14 @@ impl OpManager {
             });
         }
 
-        // Blockers: one active mutation, and explicit unresolved outcomes.
-        for row in self.db.list_ops(1000).await? {
-            if !row.status.is_terminal() {
-                return Err(OpsError::Overlapping {
-                    existing: row.id.to_string(),
-                    existing_kind: row.kind,
-                    existing_workload: row.workload.to_string(),
-                    existing_status: row.status,
-                });
-            }
-            if matches!(row.status, OpStatus::NeedsAttention | OpStatus::Interrupted)
-                && !row.acknowledged
-            {
-                return Err(OpsError::NeedsAttentionBlock {
-                    existing: row.id.to_string(),
-                });
-            }
-        }
+        self.check_blockers().await?;
 
         // Fresh plan against fresh observations.
         let inv = self.inventory().await;
-        if inv.workload(&name).is_none() {
+        let Some(def) = inv.workload(&name) else {
             return Err(OpsError::UnknownWorkload(params.workload));
-        }
+        };
+        self.check_definition(params.kind, def).await?;
         let observations = self
             .engine
             .observe(&inv)

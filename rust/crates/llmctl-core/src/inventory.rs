@@ -72,6 +72,9 @@ pub struct WorkloadDefinition {
     /// Deterministic service identity for this workload.
     pub unit: UnitName,
     pub authority: ControlAuthority,
+    /// Absent in older inventory files → external.
+    #[serde(default)]
+    pub ownership: crate::launch::Ownership,
 }
 
 /// The enrolled host and everything a plan needs to reason about it.
@@ -187,6 +190,7 @@ mod tests {
                     scope: UnitScope::User,
                     unit: "llmctl-next-fake-qwen3.service".into(),
                 },
+                ownership: Default::default(),
             }],
             revision: 7,
         }

@@ -50,23 +50,45 @@ struct SpikeUnit {
 
 impl SpikeUnit {
     fn create(dir: &Path, exec: &str) -> SpikeUnit {
+        Self::create_with(dir, exec, "")
+    }
+
+    /// `extra` = additional `[Service]` lines.
+    fn create_with(dir: &Path, exec: &str, extra: &str) -> SpikeUnit {
         let name = format!(
             "llmctl-next-spike-{}.service",
             &uuid::Uuid::new_v4().simple().to_string()[..8]
         );
         let unit_dir = PathBuf::from(std::env::var("HOME").unwrap()).join(".config/systemd/user");
         std::fs::create_dir_all(&unit_dir).unwrap();
-        let file = unit_dir.join(&name);
+        let unit = SpikeUnit {
+            file: unit_dir.join(&name),
+            name,
+        };
+        unit.rewrite(dir, exec, extra);
+        unit
+    }
+
+    /// Replace the unit file and reload systemd (simulates someone editing it).
+    fn rewrite(&self, dir: &Path, exec: &str, extra: &str) {
         std::fs::write(
-            &file,
+            &self.file,
             format!(
-                "[Unit]\nDescription=llmctl-next disposable spike ({})\n\n[Service]\nType=simple\nExecStart={exec}\n",
+                "[Unit]\nDescription=llmctl-next disposable spike ({})\n\n[Service]\nType=simple\nExecStart={exec}\n{extra}",
                 dir.display()
             ),
         )
         .unwrap();
         assert!(systemctl(&["daemon-reload"]).status.success());
-        SpikeUnit { name, file }
+    }
+
+    fn start(&self) {
+        let out = systemctl(&["start", &self.name]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     fn active_state(&self) -> String {
@@ -122,6 +144,7 @@ fn write_inventory(dir: &Path, unit: &str, port: u16, model: &str) {
                 scope: UnitScope::User,
                 unit: unit.into(),
             },
+            ownership: Default::default(),
         }],
         revision: 1,
     };
@@ -259,4 +282,239 @@ fn wrong_served_model_fails_verification() {
     );
     assert!(!ok, "{text}");
     assert!(text.contains("other/model"), "{text}");
+}
+
+// ---- adoption ---------------------------------------------------------------
+
+/// Serving spike unit whose argv carries an argument with a space, so the
+/// round trip has to keep exact argument boundaries.
+fn serving_exec(dir: &Path, port: u16, model: &str) -> String {
+    let script = dir.join("server.py");
+    std::fs::write(&script, SERVER_PY).unwrap();
+    format!(
+        "/usr/bin/python3 {} {port} {model} \"--note=two words\"",
+        script.display()
+    )
+}
+
+fn adopt_args<'a>(unit: &'a str, port: &'a str) -> Vec<&'a str> {
+    vec![
+        "adopt",
+        unit,
+        "--name",
+        "adopted",
+        "--model",
+        "spike/model",
+        "--port",
+        port,
+        "--gpus",
+        "1",
+    ]
+}
+
+fn cli_code(socket: &Path, args: &[&str]) -> (Option<i32>, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket")
+        .arg(socket)
+        .args(args)
+        .output()
+        .expect("run llmctl-next");
+    (
+        out.status.code(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+fn preview_digest(socket: &Path, args: &[&str]) -> (serde_json::Value, String) {
+    let mut a = args.to_vec();
+    a.push("--json");
+    let (_, text) = cli_code(socket, &a);
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| panic!("{text}"));
+    let digest = v["digest"].as_str().unwrap_or("").to_string();
+    (v, digest)
+}
+
+fn check_status(preview: &serde_json::Value, name: &str) -> String {
+    preview["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .map(|c| c["status"].as_str().unwrap().to_string())
+        .unwrap_or_else(|| panic!("no check {name}: {preview}"))
+}
+
+#[test]
+#[ignore = "touches the user's systemd: run with --ignored"]
+fn adopt_running_unit_then_stop_and_run_it_as_managed() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let unit = SpikeUnit::create(dir.path(), &serving_exec(dir.path(), port, "spike/model"));
+    unit.start();
+    let d = spawn_daemon(dir.path()); // sample fake inventory; spike not enrolled
+    let port_s = port.to_string();
+    let args = adopt_args(&unit.name, &port_s);
+
+    // Wait for the server to answer, then preview.
+    let mut preview = serde_json::Value::Null;
+    let mut digest = String::new();
+    for _ in 0..50 {
+        (preview, digest) = preview_digest(&d.socket, &args);
+        if check_status(&preview, "served_identity") == "pass" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for check in [
+        "enrollment",
+        "unit_loaded",
+        "no_inline_secrets",
+        "definition_roundtrip",
+        "served_identity",
+    ] {
+        assert_eq!(check_status(&preview, check), "pass", "{check}: {preview}");
+    }
+    let argv = &preview["definition"]["exec_start"][0]["argv"];
+    assert_eq!(argv[4], "--note=two words", "exact argv: {argv}");
+    assert!(digest.starts_with("sha256:"));
+
+    let mut confirm = args.clone();
+    confirm.extend(["--confirm", &digest]);
+    let (code, text) = cli_code(&d.socket, &confirm);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("adopted"), "{text}");
+
+    let status = spike_status_named(&d.socket, "adopted");
+    assert_eq!(status["ownership"], "managed", "{status}");
+    assert_eq!(status["adopted_digest"], digest.as_str());
+    assert_eq!(status["readiness"], "Ready", "{status}");
+
+    let (ok, text) = cli(&d.socket, &["stop", "adopted", "--wait", "--key", "a-stop"]);
+    assert!(ok, "{text}");
+    assert_eq!(unit.active_state(), "inactive");
+    let (ok, text) = cli(&d.socket, &["run", "adopted", "--wait", "--key", "a-run"]);
+    assert!(ok, "{text}");
+    assert_eq!(unit.active_state(), "active");
+
+    // Survives a daemon restart: the inventory file holds the adoption.
+    drop(d);
+    let d = spawn_daemon(dir.path());
+    let status = spike_status_named(&d.socket, "adopted");
+    assert_eq!(status["ownership"], "managed", "{status}");
+}
+
+#[test]
+#[ignore = "touches the user's systemd: run with --ignored"]
+fn confirm_with_a_stale_digest_is_refused_with_a_fresh_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let exec = serving_exec(dir.path(), port, "spike/model");
+    let unit = SpikeUnit::create(dir.path(), &exec);
+    let d = spawn_daemon(dir.path());
+    let port_s = port.to_string();
+    let args = adopt_args(&unit.name, &port_s);
+    let (_, old_digest) = preview_digest(&d.socket, &args);
+
+    unit.rewrite(dir.path(), &exec, "Environment=EXTRA=1\n");
+    let mut confirm = args.clone();
+    confirm.extend(["--confirm", &old_digest, "--allow-unverified"]);
+    let (code, text) = cli_code(&d.socket, &confirm);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("stale_adoption"), "{text}");
+    assert!(
+        text.contains("definition digest: sha256:"),
+        "fresh preview shown: {text}"
+    );
+    assert!(!text.contains(&old_digest), "fresh digest differs: {text}");
+    let (ok, text) = cli(&d.socket, &["status", "--json"]);
+    assert!(ok && !text.contains("\"adopted\""), "not enrolled: {text}");
+}
+
+#[test]
+#[ignore = "touches the user's systemd: run with --ignored"]
+fn drift_after_adoption_blocks_run_without_touching_the_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let exec = serving_exec(dir.path(), port, "spike/model");
+    let unit = SpikeUnit::create(dir.path(), &exec);
+    let d = spawn_daemon(dir.path());
+    let port_s = port.to_string();
+    let args = adopt_args(&unit.name, &port_s);
+    let (preview, digest) = preview_digest(&d.socket, &args);
+    assert_eq!(check_status(&preview, "served_identity"), "unverified");
+
+    // Stopped unit: unverified identity needs the explicit flag.
+    let mut confirm = args.clone();
+    confirm.extend(["--confirm", &digest]);
+    let (code, text) = cli_code(&d.socket, &confirm);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("adoption_unverified"), "{text}");
+    confirm.push("--allow-unverified");
+    let (code, text) = cli_code(&d.socket, &confirm);
+    assert_eq!(code, Some(0), "{text}");
+
+    unit.rewrite(dir.path(), &exec, "Restart=on-failure\n");
+    let (code, text) = cli_code(
+        &d.socket,
+        &["run", "adopted", "--wait", "--key", "drift-run"],
+    );
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("drifted"), "{text}");
+    assert!(
+        text.contains("restart"),
+        "names the differing field: {text}"
+    );
+    assert_eq!(
+        unit.active_state(),
+        "inactive",
+        "no effect on a drifted unit"
+    );
+}
+
+#[test]
+#[ignore = "touches the user's systemd: run with --ignored"]
+fn inline_secret_blocks_adoption_and_is_never_echoed() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let unit = SpikeUnit::create_with(
+        dir.path(),
+        &serving_exec(dir.path(), port, "spike/model"),
+        "Environment=HF_TOKEN=dummy-not-a-real-token-xyz\n",
+    );
+    let d = spawn_daemon(dir.path());
+    let port_s = port.to_string();
+    let args = adopt_args(&unit.name, &port_s);
+    let (code, text) = cli_code(&d.socket, &args);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("FAIL       no_inline_secrets"), "{text}");
+    assert!(text.contains("HF_TOKEN"), "{text}");
+    assert!(
+        !text.contains("dummy-not-a-real-token-xyz"),
+        "secret value leaked: {text}"
+    );
+    let (preview, digest) = preview_digest(&d.socket, &args);
+    assert!(!preview.to_string().contains("dummy-not-a-real-token-xyz"));
+
+    let mut confirm = args.clone();
+    confirm.extend(["--confirm", &digest, "--allow-unverified"]);
+    let (code, text) = cli_code(&d.socket, &confirm);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("adoption_refused"), "{text}");
+}
+
+fn spike_status_named(socket: &Path, name: &str) -> serde_json::Value {
+    let (ok, text) = cli(socket, &["status", "--json"]);
+    assert!(ok, "{text}");
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    json["workloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("no workload {name}: {json}"))
 }
