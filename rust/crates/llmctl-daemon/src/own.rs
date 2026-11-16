@@ -408,11 +408,28 @@ async fn write_and_prove(
     previous: PreviousUnitFile,
 ) -> Result<ServiceFileRecord, OwnError> {
     let timeout = ctx.systemd.show_timeout();
+    // What is there now (through a link: the file it points at). Every
+    // directive must be carried by the definition, or rendering would drop
+    // it silently (the pilot's RestartSec/StartLimit* case): refuse.
+    let source = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| OwnError::Io(format!("reading {}: {e}", path.display())))?;
+    let uncovered = unitdef::uncovered_directives(&source, expected);
+    if !uncovered.is_empty() {
+        return Err(refuse(format!(
+            "{unit} sets directives the pinned definition does not carry ({}); a rendered unit would drop them — re-adopt to pin them, or remove them from the unit",
+            uncovered.join(", ")
+        )));
+    }
     let mut rendered = unitdef::render_unit(expected, header);
     // Test hook: a subtly wrong render must be caught by the prove step.
     let faults = Faults::load(&ctx.paths.faults).await;
     if faults.corrupt_render {
         rendered.push_str("Environment=LLMCTL_FAULT_RENDER=1\n");
+    }
+    if let Some(install) = unitdef::install_section(&source) {
+        rendered.push('\n');
+        rendered.push_str(&install);
     }
 
     // Replace the link/file itself, never write through a symlink.

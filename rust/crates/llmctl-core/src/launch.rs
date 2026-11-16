@@ -34,7 +34,7 @@ pub struct EnvFileRef {
 }
 
 /// The effective launch configuration of one unit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchDefinition {
     pub service_type: String,
     pub exec_start_pre: Vec<ExecCommand>,
@@ -49,6 +49,31 @@ pub struct LaunchDefinition {
     pub restart: String,
     pub timeout_stop_usec: u64,
     pub kill_mode: String,
+    // Coverage added by the 2026-11-16 pilot: the first real unit set
+    // RestartSec/TimeoutStartSec/StartLimit*/SyslogIdentifier/After, which
+    // the import did not read, so a rendered unit silently dropped them.
+    // `None` = not covered by this pin (older pins): the diff ignores the
+    // field, and `own` refuses a source that sets a directive the pin does
+    // not cover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_usec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_start_usec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_limit_burst: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_limit_interval_usec: Option<u64>,
+    /// `Some("")` = covered and unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syslog_identifier: Option<String>,
+    /// Effective ordering/dependency lists as the manager reports them
+    /// (sorted; implicit dependencies included, which render harmlessly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wants: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires: Option<Vec<String>>,
 }
 
 impl LaunchDefinition {
@@ -67,8 +92,10 @@ impl LaunchDefinition {
         let (Some(a), Some(b)) = (a.as_object(), b.as_object()) else {
             return Vec::new();
         };
+        // Only fields both sides carry: a field an older pin does not cover
+        // (absent) is not drift.
         a.iter()
-            .filter(|(k, v)| b.get(*k) != Some(*v))
+            .filter(|(k, v)| matches!(b.get(*k), Some(other) if other != *v))
             .map(|(k, v)| FieldDiff {
                 field: k.clone(),
                 expected: v.clone(),
@@ -213,6 +240,7 @@ mod tests {
             restart: "no".into(),
             timeout_stop_usec: 90_000_000,
             kill_mode: "control-group".into(),
+            ..Default::default()
         }
     }
 
