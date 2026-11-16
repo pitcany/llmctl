@@ -539,8 +539,31 @@ impl LogPrinter {
             LogSource::Unit => "",
         };
         let cut = if e.truncated { " […truncated]" } else { "" };
-        writeln!(out, "{when} {who}{}{cut}", e.message)
+        writeln!(out, "{when} {who}{}{cut}", printable(&e.message))
     }
+}
+
+/// Log text comes from the workload and is untrusted: show C0/C1 control
+/// characters (ESC, CSI, CR, BEL, …) as visible escapes so a log line can
+/// never move the cursor, retitle or rewrite the terminal. Tab is kept.
+/// `--json` needs none of this (serde escapes controls).
+fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(|c| c.is_control() && c != '\t') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    for c in text.chars() {
+        if c.is_control() && c != '\t' {
+            if (c as u32) < 0x100 {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            } else {
+                out.push_str(&c.escape_unicode().to_string());
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 async fn cmd_ops(cli: &Cli, json: bool) -> Result<u8, CliError> {
@@ -729,5 +752,19 @@ fn print_operation(op: &OperationView) {
     }
     if let Some(r) = &op.recovery {
         println!("recovery: {r}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::printable;
+
+    #[test]
+    fn control_characters_in_log_text_are_made_visible() {
+        assert_eq!(printable("plain\ttext é"), "plain\ttext é");
+        assert_eq!(
+            printable("\u{1b}]0;pwned\u{7}\u{1b}[2Jok\rX\u{9b}31m"),
+            "\\x1b]0;pwned\\x07\\x1b[2Jok\\x0dX\\x9b31m"
+        );
     }
 }
