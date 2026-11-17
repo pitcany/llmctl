@@ -1,7 +1,8 @@
 # Rust successor — M4 plan (required engines and coordination)
 
 Status 2026-11-17: plan agreed — all eight owner decisions taken, each as
-recommended (end of this file). Nothing built yet; next is M4a.
+recommended (end of this file). **M4a done 2026-11-17 — see
+[the pilot note](RUST-M4A-PILOT-2026-11-17.md); next is M4b.**
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table,
 M4 row; "Engine support and ownership"). Builds on M2 (one owned Linux
 workload, staged vLLM upgrade — [plan](RUST-M2-PLAN.md)) and M3 (Mac agent,
