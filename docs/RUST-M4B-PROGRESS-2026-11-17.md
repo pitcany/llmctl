@@ -4,9 +4,10 @@ Parent: [RUST-M4-PLAN.md](RUST-M4-PLAN.md), sub-milestone M4b. M4a review
 first ([pilot](RUST-M4A-PILOT-2026-11-17.md)): sound, one regression found
 and fixed (below). Code: `2e9af4d`..`35a3925` on `main`.
 
-**Status: steps 1, 2, 4 and 5 done and proven live (both Macs; workstation
-GPU window 2026-11-17 14:05–14:45). Step 3 (system → user units) needs a
-design pass first — ~40 direct callers; see "Open".**
+**Status: M4b steps 1–5 done and proven live (both Macs; workstation GPU
+windows 2026-11-17 14:05–14:45 and the scope flip at 15:41). Left in
+"Open": LM Studio on the Macs, matrix-row spikes, per-lane recipes, and the
+findings to carry into M4c.**
 
 ## M4a review
 
@@ -115,7 +116,7 @@ re-pins when the pin lacks a per-kind fact.
    `~/.ollama/models`. Recommended split: (3a) one `llm-unit <verb> <unit>`
    wrapper, all callers migrated while still system-scoped (no window);
    (3b) a window flips the wrapper's scope and moves the units; rollback =
-   flip back. Not queued; plan: [RUST-M4B-STEP3-PLAN.md](RUST-M4B-STEP3-PLAN.md).
+   flip back. **Done 2026-11-17 15:41** — both units now run in the user manager and are adopted by llmctl-next; see [RUST-M4B-STEP3-PLAN.md](RUST-M4B-STEP3-PLAN.md).
 4. **LM Studio on the Macs:** no launchd job to adopt (app-run server);
    enroll observe-only and record the console-login limit.
 5. **Capability-matrix rows** per engine × host as disposable spikes

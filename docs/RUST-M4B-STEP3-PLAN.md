@@ -5,13 +5,31 @@ Parent: [RUST-M4-PLAN.md](RUST-M4-PLAN.md) (M4b step 3, owner decision 4:
 llmctl-next; no system-scope adapter, no new sudo path).
 Progress so far: [RUST-M4B-PROGRESS-2026-11-17.md](RUST-M4B-PROGRESS-2026-11-17.md).
 
-**Status (2026-11-17, night): 3a done, 3b prepared — ready for the flip
-window.** 3b prep: user units + `unit-scope-flip.sh` (AI repo `cf570d6a`,
-7 tests, spiked both ways on a disposable real user unit; live preflight
-passes except "units running", as expected outside a window). llm-heal now
-takes the two units' scope from `llm-unit` (`622fe2c3`), so the flip edits
-no llm-heal config (decision 2 superseded: the vLLM lane's scope was
-hard-coded, not a `heal.yaml` field). Runbook: "The window" below.
+**Status: done — flipped 2026-11-17 15:41 PST (longjob `unit-scope-flip`,
+owner `go`).** Both units stopped through `llm-unit`, llm-router restarted,
+`unit-scope-flip.sh user` passed preflight and all steps; longjob started
+both again in user scope: serving after 1m35s (whole job 1m56s). Verified:
+`:8003` serves qwen3.8-27b, `:11434` (ollama as yannik) answered an
+embedding (`qwen3-embedding:0.6b`, 1024 dims), llm-heal lists `vllm-engine`
+and `ollama` ok, llm-router `upstream_ok`, `llm-unit` resolves `vllm-tp`
+→ user. Both adopted into the workstation pilot daemon (`vllm-engine`
+`--engine-kind vllm`, all checks incl. `ownable`; `ollama`
+`--engine-kind ollama`, `own` would refuse `UMask=`). The week of rollback
+readiness runs to 2026-11-24.
+
+Findings of the flip:
+- `systemctl disable vllm-engine` also removed
+  `/etc/systemd/system/vllm-engine.service` — it was a *link* into
+  `~/AI/services/` — so the system manager no longer knows the name. A
+  stray `sudo systemctl start vllm-engine` now fails outright (stronger
+  than planned), but the rollback needs one owner step first:
+  `sudo systemctl link ~/AI/services/vllm-engine.service` (password). The
+  rollback preflight now says so (AI repo `473757d6`). Ollama's
+  system unit is a real file: disabled, still known.
+- llmster claims cards 0,1 and vllm-engine is now enrolled on both, so
+  `llmctl-next run llmster` would plan to stop vllm-engine as a GPU
+  conflict (recovery is off, so only a manual run). Needs the on-demand GPU
+  claim (M4c) before anyone runs llmster through llmctl-next.
 
 ## Why the plan needs this step
 
