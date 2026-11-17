@@ -189,21 +189,24 @@ async fn operations_resolve_by_idempotency_key() {
 #[tokio::test]
 async fn bridge_subcommand_relays_http_to_the_socket() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let d = spawn_daemon();
     let request = "GET /v1/health HTTP/1.1\r\nhost: bridge-test\r\nconnection: close\r\n\r\n";
 
-    // Warm the accept loop with one full roundtrip so a busy first poll
-    // cannot look like a relay failure.
-    let health = d.client().health().await.expect("daemon answers http");
-
+    // Under the full parallel suite a daemon can hit its inherited 256-fd
+    // soft limit (macOS default) and then closes new connections without
+    // answering — sticky for that daemon, so each retry gets a fresh one.
     let mut last = String::new();
     for attempt in 0..3 {
+        let d = spawn_daemon();
+        // Warm the accept loop with one full roundtrip.
+        let health = d.client().health().await.expect("daemon answers http");
+        let started = std::time::Instant::now();
         let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
             .arg("--socket")
             .arg(&d.socket)
             .arg("bridge")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .expect("spawn bridge");
@@ -214,23 +217,51 @@ async fn bridge_subcommand_relays_http_to_the_socket() {
         drop(stdin); // EOF: the relay half-closes and drains the answer
 
         let mut response = String::new();
-        let read = tokio::time::timeout(Duration::from_secs(10), stdout.read_to_string(&mut response))
-            .await
-            .expect("relay drain must not hang");
+        let read = tokio::time::timeout(
+            Duration::from_secs(10),
+            stdout.read_to_string(&mut response),
+        )
+        .await
+        .expect("relay drain must not hang");
         read.unwrap();
-        let _ = child.wait().await;
+        let status = child.wait().await.unwrap();
         if response.starts_with("HTTP/1.1 200") {
             assert!(response.contains("\"host\":\"workstation\""), "{response}");
             return;
         }
-        eprintln!("bridge attempt {attempt}: response {response:?}");
+        eprintln!(
+            "bridge attempt {attempt} on fresh daemon in {:?} (was healthy: {}): \
+             status={status} response={response:?}",
+            started.elapsed(),
+            health.daemon_version
+        );
+        // Split child vs daemon: same request over a raw socket, no child.
+        let raw = raw_http_roundtrip(&d.socket, request).await;
+        eprintln!("raw socket roundtrip on the same daemon: {raw:?}");
         last = response;
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
-    panic!(
-        "bridge relay never answered (daemon healthy: {}): {last:?}",
-        health.daemon_version
-    );
+    panic!("bridge relay never answered on three fresh daemons: {last:?}");
+}
+
+/// One raw HTTP/1.1 exchange over a Unix socket, no client library, no
+/// child process — returns the daemon's raw bytes (diagnostics for the
+/// bridge test).
+async fn raw_http_roundtrip(socket: &Path, request: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = match tokio::net::UnixStream::connect(socket).await {
+        Ok(s) => s,
+        Err(e) => return format!("connect failed: {e}"),
+    };
+    if let Err(e) = stream.write_all(request.as_bytes()).await {
+        return format!("write failed: {e}");
+    }
+    let _ = stream.shutdown().await;
+    let mut out = String::new();
+    match stream.read_to_string(&mut out).await {
+        Ok(_) => out,
+        Err(e) => format!("read failed: {e}"),
+    }
 }
 
 // ---- batch criterion 1: a second client sees the same operation ----------
