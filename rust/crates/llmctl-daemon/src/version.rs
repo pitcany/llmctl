@@ -592,9 +592,11 @@ pub fn rewrite_definition(
 }
 
 /// Swap every `Exec*` path — and every inline `Environment=` value that is
-/// a path under `root` — to the new version directory:
-/// `<root>/<old-id>/<rel>` becomes `<root>/<new-id>/<rel>`, where the new
-/// directory is the first path component of `new_executable` under `root`.
+/// a path under `root` — to the new version directory. The primary
+/// executable maps exactly (old and new installs need not share an
+/// internal layout: the live llama.cpp build dir puts the binary at
+/// `build/bin/llama-server`, a staged checkout at `…/<id>/build/bin/…`);
+/// every other root path swaps its version directory (first component).
 /// The env case is the llama.cpp lanes' shape: `ExecStart` runs the guard
 /// wrapper while `LLAMA_GUARD_REAL_BIN` names the versioned binary.
 fn rewrite_root_paths(next: &mut LaunchDefinition, root: &str, new_executable: &str) {
@@ -605,7 +607,20 @@ fn rewrite_root_paths(next: &mut LaunchDefinition, root: &str, new_executable: &
         .unwrap_or_default();
     // The version directory is the first component under root.
     let new_dir: PathBuf = new_rel.iter().take(1).collect();
+    // The old primary executable, as this definition resolves it.
+    let old_exec: Option<String> = next
+        .exec_start_pre
+        .iter()
+        .chain(next.exec_start.iter())
+        .chain(next.exec_start_post.iter())
+        .map(|c| c.path.as_str())
+        .chain(next.environment.iter().map(|(_, v)| v.as_str()))
+        .find(|p| Path::new(p).starts_with(rootp))
+        .map(str::to_owned);
     let map = |p: &str| -> Option<String> {
+        if old_exec.as_deref() == Some(p) {
+            return Some(new_executable.to_string());
+        }
         let rel = Path::new(p).strip_prefix(rootp).ok()?;
         let tail: PathBuf = rel.iter().skip(1).collect();
         Some(rootp.join(&new_dir).join(tail).display().to_string())
@@ -929,11 +944,11 @@ mod tests {
     fn dir_recipes_swap_every_exec_path_under_the_root() {
         let recipe = InstallRecipe::ReleaseArchive(ReleaseArchiveRecipe {
             name: "llama.cpp".into(),
-            root: "/d/builds".into(),
+            root: "/d/llama.cpp".into(),
             url: "https://x/llama-{version}.tgz".into(),
             checksum: None,
             strip_components: 1,
-            binary: "bin/llama-server".into(),
+            binary: "build/bin/llama-server".into(),
             version_arg: Some("--version".into()),
             version_pattern: None,
         });
@@ -949,28 +964,33 @@ mod tests {
                 ignore_errors: false,
             }],
             // The llama.cpp lanes' shape: the versioned binary rides an
-            // env var (LLAMA_GUARD_REAL_BIN), the wrapper is exec'd.
+            // env var (LLAMA_GUARD_REAL_BIN), the wrapper is exec'd. The
+            // live dir is the bare build output (`build/bin/…`).
             environment: vec![
-                ("LLAMA_GUARD_REAL_BIN".into(), "/d/builds/gpt-oss-120b-b10705-00112233/bin/llama-server".into()),
+                ("LLAMA_GUARD_REAL_BIN".into(), "/d/llama.cpp/build/bin/llama-server".into()),
                 ("LLAMA_GUARD_MIN_FREE_MIB".into(), "29500".into()),
             ],
             ..Default::default()
         };
+        // The staged install is a full checkout: the binary lives one
+        // level deeper. The exact mapping must bridge the layouts.
         let next = rewrite_definition(
             &old,
             &recipe,
-            "/d/builds/gpt-oss-120b-b10800-aabbccdd/bin/llama-server",
+            "/d/llama.cpp/gpt-oss-120b-a9d43ecc3-7bda46f3/build/bin/llama-server",
         )
         .unwrap();
         // The guard wrapper and system paths stay untouched...
         assert_eq!(next.exec_start[0].path, "/usr/bin/llama-server-guarded");
         assert_eq!(next.exec_start_pre[0].path, "/usr/bin/id");
-        // ...the env value under the root swaps to the new version dir.
+        // ...the env value under the root maps exactly to the new
+        // executable, across the differing internal layout.
         assert_eq!(
             next.environment[0],
             (
                 "LLAMA_GUARD_REAL_BIN".to_string(),
-                "/d/builds/gpt-oss-120b-b10800-aabbccdd/bin/llama-server".to_string()
+                "/d/llama.cpp/gpt-oss-120b-a9d43ecc3-7bda46f3/build/bin/llama-server"
+                    .to_string()
             )
         );
         assert_eq!(next.environment[1].1, "29500");
