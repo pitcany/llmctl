@@ -346,7 +346,9 @@ async fn repin_legacy_versions(
                     definition_schema: s,
                     version: v,
                     ..
-                } if *s < 3 && v.is_none()
+                // No pin, or only adoption's program-digest pin (no
+                // per-kind fact): the recipe was attached after adoption.
+                } if *s < 3 && v.as_ref().is_none_or(|v| v.fact.is_none())
             ) && w.engine == manager_engine_name()
                 && matches!(
                     &w.recipe,

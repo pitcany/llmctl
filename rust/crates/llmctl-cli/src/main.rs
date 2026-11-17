@@ -1504,8 +1504,14 @@ async fn cmd_unload(
     let client = connect(cli)?;
     ensure_protocol(&client).await?;
     let idempotency_key = key.unwrap_or_else(|| {
+        // Model tags carry ':' and '/'; keys allow [A-Za-z0-9._-] only.
+        let safe: String = model
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+            .take(64)
+            .collect();
         format!(
-            "unload-{name}-{model}-{}",
+            "unload-{name}-{safe}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis())
