@@ -164,14 +164,18 @@ pub const REMOTE_DATA_DIR: &str = "~/.local/state/llmctl-next";
 /// The agent LaunchAgent plist: KeepAlive + RunAtLoad, its own data dir,
 /// logs under ~/Library/Logs (M3 design decision 2). `home` is the
 /// *remote* user's home as ssh reports it — plist paths must be absolute.
-pub fn agent_plist(home: &str) -> Result<String, String> {
+/// `host_name` is the enrollment name: the agent answers to it as its host
+/// id (before, every agent stayed `workstation`).
+pub fn agent_plist(home: &str, host_name: &str) -> Result<String, String> {
     let dict = serde_json::json!({
         "Label": AGENT_LABEL,
         "ProgramArguments": [
             format!("{home}/.local/bin/llmctl-next"),
             "--data-dir",
             format!("{home}/.local/state/llmctl-next"),
-            "daemon"
+            "daemon",
+            "--host-id",
+            host_name
         ],
         "RunAtLoad": true,
         "KeepAlive": true,
@@ -247,11 +251,11 @@ pub fn build_on_host(alias: &str, source_dir: &Path) -> Result<(), String> {
 }
 
 /// Install the agent's LaunchAgent and wait for its control socket.
-pub fn bootstrap_agent(alias: &str) -> Result<(), String> {
+pub fn bootstrap_agent(alias: &str, host_name: &str) -> Result<(), String> {
     let remote_home = ssh(alias, "echo $HOME")?
         .trim()
         .to_string();
-    let plist = agent_plist(&remote_home)?;
+    let plist = agent_plist(&remote_home, host_name)?;
     let remote_plist = format!("~/Library/LaunchAgents/{AGENT_LABEL}.plist");
     push_bytes(
         alias,
@@ -320,6 +324,8 @@ pub async fn host_add(
         }
     }
     let name = name.unwrap_or_else(|| alias.to_string());
+    llmctl_core::HostId::new(&name)
+        .map_err(|e| format!("host name {name:?} cannot be an agent host id: {e}"))?;
     if let Some(existing) = hosts.hosts.iter().find(|h| h.name == name) {
         if existing.io_platform_uuid != uuid {
             return Err(format!(
@@ -366,7 +372,7 @@ pub async fn host_add(
         }
     }
 
-    bootstrap_agent(alias)?;
+    bootstrap_agent(alias, &name)?;
     let health = bridge_health(alias).await?;
     let record = HostRecord {
         name: name.clone(),
@@ -393,8 +399,8 @@ pub async fn host_upgrade(
     source_dir: Option<PathBuf>,
 ) -> Result<(), String> {
     let mut hosts = load_hosts();
-    let alias = find_host(&hosts, name)
-        .map(|h| h.ssh_alias.clone())
+    let (alias, host_name) = find_host(&hosts, name)
+        .map(|h| (h.ssh_alias.clone(), h.name.clone()))
         .ok_or_else(|| format!("no enrolled host named {name}"))?;
 
     // Before: the current agent must answer (protocol check one).
@@ -419,7 +425,7 @@ pub async fn host_upgrade(
         (None, Some(src)) => build_on_host(&alias, src)?,
         (None, None) => return Err("pass --binary or --source".into()),
     }
-    bootstrap_agent(&alias)?;
+    bootstrap_agent(&alias, &host_name)?;
     // After: health + protocol check two.
     let after = bridge_health(&alias).await?;
     if let Some(h) = hosts.hosts.iter_mut().find(|h| h.ssh_alias == alias) {
@@ -476,13 +482,17 @@ mod tests {
 
     #[test]
     fn agent_plist_renders_canonical_xml() {
-        let xml = agent_plist("/Users/yannik").unwrap();
+        let xml = agent_plist("/Users/yannik", "mbp2").unwrap();
         assert!(
             xml.contains(&format!("<string>{AGENT_LABEL}</string>")),
             "{xml}"
         );
         assert!(xml.contains("<true/>"), "{xml}");
         assert!(xml.contains("<string>daemon</string>"), "{xml}");
+        assert!(
+            xml.contains("<string>--host-id</string>\n\t\t<string>mbp2</string>"),
+            "the agent answers to its enrollment name: {xml}"
+        );
     }
 
     #[test]

@@ -173,6 +173,29 @@ impl HostInventory {
         self.gpus.iter().any(|g| g == gpu)
     }
 
+    /// This inventory under another host name: the host field and every
+    /// GPU id of the old host (host list and each workload's) move to
+    /// `host`; the revision bumps, so plans built under the old name are
+    /// stale. Used when an agent is bound to its enrollment name.
+    pub fn renamed_host(&self, host: &HostId) -> HostInventory {
+        let old = self.host.clone();
+        let move_gpu = |g: &GpuId| {
+            if g.host == old {
+                GpuId::new(host.clone(), g.index)
+            } else {
+                g.clone()
+            }
+        };
+        let mut next = self.clone();
+        next.host = host.clone();
+        next.gpus = self.gpus.iter().map(move_gpu).collect();
+        for w in &mut next.workloads {
+            w.gpus = w.gpus.iter().map(move_gpu).collect();
+        }
+        next.revision += 1;
+        next
+    }
+
     /// Structural validation of deserialized or imported data. Call before
     /// trusting an inventory that did not come from this process.
     pub fn validate(&self) -> CoreResult<()> {
@@ -271,6 +294,22 @@ mod tests {
             }],
             revision: 7,
         }
+    }
+
+    #[test]
+    fn renamed_host_moves_every_gpu_id_and_bumps_the_revision() {
+        let before = inv();
+        let new = HostId::new("mbp2").unwrap();
+        let after = before.renamed_host(&new);
+        assert_eq!(after.host, new);
+        assert!(after.gpus.iter().all(|g| g.host == new));
+        assert!(after
+            .workloads
+            .iter()
+            .all(|w| w.gpus.iter().all(|g| g.host == new)));
+        assert_eq!(after.revision, before.revision + 1);
+        assert_eq!(after.gpus.len(), before.gpus.len());
+        after.validate().expect("renamed inventory stays valid");
     }
 
     #[test]

@@ -1208,3 +1208,92 @@ fn cli_run_after_a_stop_at_the_same_revision_starts_again() {
         .unwrap();
     assert_eq!(coder["process"], "Running");
 }
+
+/// Start a daemon over an existing data dir (kept by the caller) and wait
+/// until it accepts connections.
+fn start_daemon_in(dir: &Path, extra: &[&str]) -> Child {
+    let socket = dir.join("control.sock");
+    let _ = std::fs::remove_file(&socket);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--data-dir")
+        .arg(dir)
+        .arg("daemon")
+        .args(extra)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn daemon");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        if let Ok(Some(st)) = child.try_wait() {
+            panic!("daemon exited before accepting connections: {st}");
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "daemon did not come up"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child
+}
+
+fn stop_daemon(mut child: Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// An enrolled agent answers to its enrollment name: `--host-id` renames
+/// the bound id and the inventory's host and GPU ids once, and the name
+/// sticks without the flag (M3 pilot: mbp2's agent said `workstation`).
+#[test]
+fn host_id_flag_renames_the_bound_host_and_its_inventory_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("control.sock");
+    let host_of = |socket: &Path| -> String {
+        let out = cli(socket, &["status", "--json"]);
+        assert!(out.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        json["host"].as_str().unwrap().to_string()
+    };
+    let inventory = || -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.path().join("inventory.json")).unwrap()).unwrap()
+    };
+
+    let d = start_daemon_in(dir.path(), &[]);
+    assert_eq!(host_of(&socket), "workstation");
+    stop_daemon(d);
+    let before = inventory();
+
+    let d = start_daemon_in(dir.path(), &["--host-id", "mbp2"]);
+    assert_eq!(host_of(&socket), "mbp2");
+    stop_daemon(d);
+    let after = inventory();
+    assert_eq!(after["inventory"]["host"], "mbp2");
+    let gpu_hosts: Vec<&serde_json::Value> = after["inventory"]["gpus"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(
+            after["inventory"]["workloads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|w| w["gpus"].as_array().unwrap().iter()),
+        )
+        .map(|g| &g["host"])
+        .collect();
+    assert!(!gpu_hosts.is_empty());
+    assert!(gpu_hosts.iter().all(|h| *h == "mbp2"), "{after}");
+    assert_eq!(
+        after["inventory"]["revision"].as_u64().unwrap(),
+        before["inventory"]["revision"].as_u64().unwrap() + 1
+    );
+
+    // Bound now: no flag, same name, inventory untouched.
+    let d = start_daemon_in(dir.path(), &[]);
+    assert_eq!(host_of(&socket), "mbp2");
+    stop_daemon(d);
+    assert_eq!(inventory(), after);
+}

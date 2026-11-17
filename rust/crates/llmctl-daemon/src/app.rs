@@ -144,23 +144,32 @@ fn sample_authority(name: &str) -> ControlAuthority {
 impl AppState {
     /// Opens the journal, loads (or bootstraps) the inventory, binds the
     /// host identity, runs startup reconciliation and assembles the state.
-    pub async fn open(paths: DevPaths) -> Result<Arc<Self>, String> {
+    /// `host_id`: the name this agent is enrolled under (`host add` passes
+    /// it). Without it the bound name stays, or `workstation` on first
+    /// start.
+    pub async fn open(paths: DevPaths, host_id: Option<String>) -> Result<Arc<Self>, String> {
         tokio::fs::create_dir_all(&paths.data_dir)
             .await
             .map_err(|e| format!("creating data dir {}: {e}", paths.data_dir.display()))?;
 
         let db = Db::open(&paths.db).map_err(|e| format!("opening journal: {e}"))?;
 
-        // Stable host identity, bound once.
-        let host_str = db
-            .meta_get("host_id")
-            .await
-            .map_err(|e| e.to_string())?
+        // Stable host identity: bound once, renamed only when enrollment
+        // names the agent (every agent used to stay `workstation`).
+        let bound = db.meta_get("host_id").await.map_err(|e| e.to_string())?;
+        let host_str = host_id
+            .clone()
+            .or_else(|| bound.clone())
             .unwrap_or_else(|| "workstation".to_string());
-        db.meta_set("host_id", &host_str)
-            .await
-            .map_err(|e| e.to_string())?;
-        let host = HostId::new(&host_str).map_err(|e| e.to_string())?;
+        let host = HostId::new(&host_str).map_err(|e| format!("host id {host_str:?}: {e}"))?;
+        if bound.as_deref() != Some(host_str.as_str()) {
+            db.meta_set("host_id", &host_str)
+                .await
+                .map_err(|e| e.to_string())?;
+            if let Some(old) = &bound {
+                tracing::info!(from = %old, to = %host_str, "host id renamed");
+            }
+        }
 
         // Inventory: file is authoritative; sample written when absent.
         let inv = match tokio::fs::read_to_string(&paths.inventory).await {
@@ -180,6 +189,26 @@ impl AppState {
                     .map_err(|e| format!("writing {}: {e}", paths.inventory.display()))?;
                 inv
             }
+        };
+        // An explicitly named agent owns its inventory's host name too
+        // (mbp2's carried the drill harness's `drill-mac`).
+        let inv = if host_id.is_some() && inv.host != host {
+            let renamed = inv.renamed_host(&host);
+            renamed
+                .validate()
+                .map_err(|e| format!("inventory invalid after host rename: {e}"))?;
+            crate::engine::write_json_atomic(
+                &paths.inventory,
+                &InventoryFile {
+                    inventory: renamed.clone(),
+                },
+            )
+            .await
+            .map_err(|e| format!("writing {}: {e}", paths.inventory.display()))?;
+            tracing::info!(from = %inv.host, to = %host, revision = renamed.revision, "inventory host renamed");
+            renamed
+        } else {
+            inv
         };
         inv.validate()
             .map_err(|e| format!("inventory invalid: {e}"))?;

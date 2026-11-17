@@ -54,6 +54,7 @@ pub use app::{serve, AppState, DevPaths, DEFAULT_DATA_DIR_SUFFIX};
 pub async fn run_daemon(
     data_dir: Option<std::path::PathBuf>,
     socket: Option<std::path::PathBuf>,
+    host_id: Option<String>,
 ) -> Result<(), String> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -63,6 +64,6 @@ pub async fn run_daemon(
         .init();
     let data = app::DevPaths::resolve(data_dir);
     let paths = app::DevPaths::new(data, socket);
-    let state = AppState::open(paths).await?;
+    let state = AppState::open(paths, host_id).await?;
     serve(state).await
 }

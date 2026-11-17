@@ -162,6 +162,11 @@ enum Command {
     Daemon {
         #[arg(long)]
         socket: Option<PathBuf>,
+        /// Name this host's agent answers to — its enrollment name (`host
+        /// add` sets it). Renames a previously bound id and the inventory's
+        /// host and GPU ids once.
+        #[arg(long)]
+        host_id: Option<String>,
     },
     /// Relay stdin/stdout to the local control socket — the remote half of
     /// the SSH bridge (M3-E.1). The workstation runs `ssh <alias>
@@ -427,8 +432,8 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             };
             cmd_adopt(cli, req, json).await
         }
-        Command::Daemon { socket } => {
-            llmctl_daemon::run_daemon(cli.data_dir.clone(), socket)
+        Command::Daemon { socket, host_id } => {
+            llmctl_daemon::run_daemon(cli.data_dir.clone(), socket, host_id)
                 .await
                 .map_err(CliError::Daemon)?;
             Ok(0)
