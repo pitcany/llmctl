@@ -1127,6 +1127,11 @@ async fn rollback_admit(
     row_id: &str,
 ) -> Result<crate::db::OpRow, UpgradeError> {
     let (expected, binary_check) = expected_version_payload(recipe, old_interpreter, from_version);
+    // A pre-convention install dir (the live `build/`) names no version to
+    // expect; the rollback's own ApplyDefinition + served-model verify are
+    // the restoration proof, and the old binary's `--version` output has
+    // no derivable expect string.
+    let binary_check = (from_version != "?").then_some(binary_check).flatten();
     let inv = state.ops.inventory().await;
     let observations = state
         .ops
