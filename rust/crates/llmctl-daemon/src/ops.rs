@@ -882,8 +882,8 @@ impl OpManager {
         unit: &UnitName,
         timeout_secs: u64,
     ) -> StepOutcome {
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(timeout_secs.min(MAX_POLL_TIMEOUT_SECS));
+        let budget = timeout_secs.min(MAX_POLL_TIMEOUT_SECS);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(budget);
         loop {
             if let Some(canceled) = self.check_cancel(row).await {
                 return StepOutcome::Canceled(canceled);
@@ -906,7 +906,12 @@ impl OpManager {
             }
             if tokio::time::Instant::now() >= deadline {
                 return StepOutcome::Failed(format!(
-                    "readiness timeout after {timeout_secs}s; workload may still be loading"
+                    "readiness timeout after {budget}s{}; workload may still be loading",
+                    if budget < timeout_secs {
+                        format!(" (configured {timeout_secs}s, capped)")
+                    } else {
+                        String::new()
+                    }
                 ));
             }
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -1268,7 +1273,10 @@ enum StepOutcome {
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 /// Readiness polls are bounded even for absurd configured timeouts so a
 /// stuck loop cannot pin a phase forever in dev.
-const MAX_POLL_TIMEOUT_SECS: u64 = 600;
+/// Upper bound on one readiness wait. 600 s (the M1 value) silently cut
+/// real cold starts short: a Strata lane needs ~615 s from NVMe, the
+/// DeepSeek lane's own unit allows 3600 s (M4b window, 2026-11-17).
+const MAX_POLL_TIMEOUT_SECS: u64 = 3600;
 
 fn set_phase(phases: &mut [PhaseRecord], index: usize, f: impl FnOnce(&mut PhaseRecord)) {
     if let Some(p) = phases.get_mut(index) {
