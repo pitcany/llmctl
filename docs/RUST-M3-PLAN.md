@@ -1,9 +1,11 @@
 # Rust successor — M3 plan (remote execution)
 
-Status 2026-11-16: A–F done and verified on mbp2 (74/74 Mac suite, 5/5
-launchd spikes, mbp2 enrolled, 4/4 failure drills); only G, the llama-swap
-pilot with the owner present, remains — see
-[progress note](RUST-M3-PROGRESS-2026-11-16.md). Owner answers below.
+Status 2026-11-17: A–G done on mbp2. The llama-swap pilot passed adopt,
+own, apply, logs, stop/run, release (byte-identical) and the drills on the
+real unit ([pilot report](RUST-M3-PILOT-2026-11-17.md)); the sleep/wake
+drill could not run (Acronis blocks sleep on mbp2) and stays open. A–F
+evidence: [progress note](RUST-M3-PROGRESS-2026-11-16.md). Owner answers
+below.
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md)
 (milestone table, M3 row). Builds on M2 ([M2 plan](RUST-M2-PLAN.md),
 [pilot](RUST-M2-PILOT-2026-11-16.md)) and the answered M0 questions
@@ -197,16 +199,17 @@ workstation:
 
 ## Exit checklist (maps to the parent criterion)
 
-- [ ] Linux-to-Mac management: enroll, adopt, run / stop / restart / logs
+- [x] Linux-to-Mac management: enroll, adopt, run / stop / restart / logs
   from the workstation — disposable and pilot
-- [ ] Disconnect / lost ACK: no duplicate effect, no false success —
-  disposable and pilot
+- [x] Disconnect / lost ACK: no duplicate effect, no false success —
+  disposable and pilot (both branches on the real unit)
 - [ ] Sleep / reconnect: stale while asleep, resolved by key after wake — pilot
-- [ ] Host / agent restart: agent SIGKILL reconciles honestly (disposable and
+  (open: Acronis holds PreventSystemSleep on mbp2; see the pilot report)
+- [x] Host / agent restart: agent SIGKILL reconciles honestly (disposable and
   pilot); login start simulated by bootout + bootstrap of the agent (pilot).
   A real reboot is not exercised (owner decision 3).
-- [ ] Stale plans and protocol mismatch refused before any effect —
-  disposable
+- [x] Stale plans and protocol mismatch refused before any effect —
+  disposable and pilot
 
 Carry-overs from M2 — fixed 2026-11-16 (disposable-unit spike
 `staged_upgrade_promotes_verifies_and_rolls_back`):
