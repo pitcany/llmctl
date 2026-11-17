@@ -33,6 +33,42 @@ pub enum HealthProbe {
     NotHealthy,
 }
 
+/// `GET <path>` on the workload's port and read one JSON string field —
+/// the vendor-app version probe (Ollama `/api/version` → `version`).
+/// `None` for any transport failure, non-2xx, missing field or non-string
+/// value: an app that cannot be observed reports nothing (M4a).
+pub async fn fetch_json_field(port: u16, path: &str, field: &str, timeout: Duration) -> Option<String> {
+    let out = tokio::time::timeout(timeout, fetch_json_body(port, path)).await;
+    match out {
+        Ok(Some(v)) => v.get(field)?.as_str().map(str::to_owned),
+        _ => None,
+    }
+}
+
+async fn fetch_json_body(port: u16, path: &str) -> Option<serde_json::Value> {
+    let stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .ok()?;
+    let conn = tokio::spawn(conn);
+    let req = hyper::Request::get(path)
+        .header(hyper::header::HOST, format!("127.0.0.1:{port}"))
+        .body(Empty::<Bytes>::new())
+        .expect("static request");
+    let resp = sender.send_request(req).await.ok()?;
+    if !(200..300).contains(&resp.status().as_u16()) {
+        conn.abort();
+        return None;
+    }
+    let bytes = Limited::new(resp.into_body(), MAX_MODELS_BODY)
+        .collect()
+        .await
+        .ok()?
+        .to_bytes();
+    conn.abort();
+    serde_json::from_slice(&bytes).ok()
+}
+
 pub async fn probe_models(port: u16, timeout: Duration) -> HttpProbe {
     match tokio::time::timeout(timeout, fetch_models(port)).await {
         Ok(p) => p,

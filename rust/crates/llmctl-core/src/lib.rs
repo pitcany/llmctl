@@ -34,5 +34,5 @@ pub use recipe::{
     SourceBuildRecipe, VendorAppRecipe, VendorProbe,
 };
 pub use observation::{Observation, ProcessState, Readiness, ServedModel};
-pub use plan::{OpKind, Plan, PlanStep};
+pub use plan::{BinaryCheck, OpKind, Plan, PlanStep};
 pub use planner::{plan_restart, plan_run, plan_stop, plan_upgrade};

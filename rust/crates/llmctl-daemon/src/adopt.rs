@@ -324,6 +324,9 @@ pub async fn transfer(state: &AppState, req: AdoptRequest) -> Result<AdoptRespon
     next.workloads.push(WorkloadDefinition {
         name: parsed.workload,
         engine: state.supervisor.engine_name().into(),
+        // The kind is unknown at adoption; the startup migration fills it
+        // from the recipe once the owner adds one.
+        engine_kind: llmctl_core::EngineKind::legacy(),
         model: req.model.clone(),
         gpus: req
             .gpus

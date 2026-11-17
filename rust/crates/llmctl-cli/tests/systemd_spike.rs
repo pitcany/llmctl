@@ -171,6 +171,7 @@ fn write_inventory(dir: &Path, unit: &str, port: u16, model: &str) {
         workloads: vec![WorkloadDefinition {
             name: WorkloadName::new("spike").unwrap(),
             engine: "systemd".into(),
+            engine_kind: llmctl_core::EngineKind::FakeEngine,
             model: model.into(),
             gpus: vec![GpuId::new(host, SPIKE_GPU)],
             port,

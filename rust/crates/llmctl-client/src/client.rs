@@ -271,6 +271,24 @@ impl ControlClient {
         .await
     }
 
+    /// The vendor-app plan: observed/pinned version, drift, owner-run
+    /// backup/reinstall steps (M4a). Never executes anything.
+    pub async fn install_plan(&self, workload: &str) -> Result<serde_json::Value, ClientError> {
+        self.post_json(
+            "/v1/installs/plan",
+            &crate::wire::InstallPlanRequest {
+                workload: workload.into(),
+            },
+        )
+        .await
+    }
+
+    /// Version facts of one workload: pin, live probe, drift (M4a).
+    pub async fn version_report(&self, workload: &str) -> Result<serde_json::Value, ClientError> {
+        self.get_json(&format!("/v1/workloads/{workload}/version"))
+            .await
+    }
+
     pub async fn logs(&self, req: &LogsRequest) -> Result<LogsResponse, ClientError> {
         self.post_json("/v1/logs", req).await
     }

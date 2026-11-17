@@ -721,10 +721,26 @@ impl OpManager {
                 unit,
                 interpreter,
                 packages,
-                ..
-            } => match crate::version::verify_packages(interpreter, packages).await {
-                Ok(()) => match crate::version::verify_running_interpreter(unit, interpreter).await
-                {
+                binary_check,
+            } => {
+                if let Err(e) = crate::version::verify_packages(interpreter, packages).await {
+                    return StepOutcome::Failed(format!("version verification: {e}"));
+                }
+                if let Some(bc) = binary_check {
+                    let checked = crate::version::run_binary_version(&bc.path, &bc.arg)
+                        .await
+                        .and_then(|out| {
+                            if out.contains(&bc.expect) {
+                                Ok(out)
+                            } else {
+                                Err(format!("binary reports {out:?}, expected {}", bc.expect))
+                            }
+                        });
+                    if let Err(e) = checked {
+                        return StepOutcome::Failed(format!("version verification: {e}"));
+                    }
+                }
+                match crate::version::verify_running_interpreter(unit, interpreter).await {
                     Ok(()) => {
                         // The verified env is now the pinned one, or every
                         // later operation reads the upgrade as drift.
@@ -736,9 +752,8 @@ impl OpManager {
                         StepOutcome::Done
                     }
                     Err(e) => StepOutcome::Failed(format!("version verification: {e}")),
-                },
-                Err(e) => StepOutcome::Failed(format!("version verification: {e}")),
-            },
+                }
+            }
         }
     }
 

@@ -96,6 +96,7 @@ pub fn sample_inventory(host: &HostId) -> HostInventory {
     let mk = |name: &str, gpus: &[u32], port: u16| WorkloadDefinition {
         name: WorkloadName::new(name).expect("sample name"),
         engine: "fake".into(),
+        engine_kind: llmctl_core::EngineKind::FakeEngine,
         model: format!("fake/{name}"),
         gpus: gpus.iter().map(|i| GpuId::new(host.clone(), *i)).collect(),
         port,
@@ -189,6 +190,21 @@ impl AppState {
                     .map_err(|e| format!("writing {}: {e}", paths.inventory.display()))?;
                 inv
             }
+        };
+        // M4a migration: fill legacy engine kinds (a structural
+        // normalization — the revision does not move).
+        let inv = if let Some(migrated) = inv.migrated() {
+            crate::engine::write_json_atomic(
+                &paths.inventory,
+                &InventoryFile {
+                    inventory: migrated.clone(),
+                },
+            )
+            .await
+            .map_err(|e| format!("writing {}: {e}", paths.inventory.display()))?;
+            migrated
+        } else {
+            inv
         };
         // An explicitly named agent owns its inventory's host name too
         // (mbp2's carried the drill harness's `drill-mac`).
@@ -299,9 +315,10 @@ fn supervisor_manager_engine(inv: &HostInventory) -> Arc<dyn Engine> {
     Arc::new(crate::launchd::LaunchdEngine::from_inventory(inv))
 }
 
-/// Pin version facts for managed systemd workloads whose pin predates
-/// schema 2, writing the inventory file back (revision unchanged: an
-/// idempotent normalization, not a semantic change).
+/// Pin version facts for managed manager-engine workloads whose pin
+/// predates schema 2 (python-env facts) or schema 3 (per-kind facts for
+/// the M4a recipe kinds), writing the inventory file back (revision
+/// unchanged: an idempotent normalization, not a semantic change).
 async fn repin_legacy_versions(
     ops: &Arc<OpManager>,
     inventory_path: &std::path::Path,
@@ -321,14 +338,32 @@ async fn repin_legacy_versions(
                 } if *s < 2 && v.is_none()
             ) && w.engine == manager_engine_name() && w.recipe.is_some()
         };
-        if !needs {
+        let needs_m4 = {
+            let w = &next.workloads[i];
+            matches!(
+                &w.ownership,
+                llmctl_core::Ownership::Managed {
+                    definition_schema: s,
+                    version: v,
+                    ..
+                } if *s < 3 && v.is_none()
+            ) && w.engine == manager_engine_name()
+                && matches!(
+                    &w.recipe,
+                    Some(llmctl_core::InstallRecipe::ReleaseArchive(_))
+                        | Some(llmctl_core::InstallRecipe::SourceBuild(_))
+                        | Some(llmctl_core::InstallRecipe::VendorApp(_))
+                )
+        };
+        if !needs && !needs_m4 {
             continue;
         }
+        let schema = if needs_m4 { 3 } else { 2 };
         let recipe = next.workloads[i].recipe.clone().expect("checked");
         match crate::version::probe(&recipe, &next.workloads[i]).await {
             Ok(v) => {
                 let w = &mut next.workloads[i];
-                tracing::info!(workload = %w.name, packages = ?v.packages, "pinned version facts (schema 2)");
+                tracing::info!(workload = %w.name, packages = ?v.packages, fact = ?v.fact, "pinned version facts (schema {schema})");
                 if let llmctl_core::Ownership::Managed {
                     version,
                     definition_schema,
@@ -336,15 +371,15 @@ async fn repin_legacy_versions(
                 } = &mut w.ownership
                 {
                     *version = Some(v);
-                    *definition_schema = 2;
+                    *definition_schema = schema;
                 }
                 changed = true;
             }
             Err(e) => {
-                // No baseline possible: stay schema 1 rather than pin
-                // something unprobed.
+                // No baseline possible: stay at the old schema rather
+                // than pin something unprobed.
                 let name = next.workloads[i].name.to_string();
-                tracing::warn!(workload = %name, error = %e, "version probe failed; pin stays schema 1");
+                tracing::warn!(workload = %name, error = %e, "version probe failed; pin stays unmigrated");
             }
         }
     }

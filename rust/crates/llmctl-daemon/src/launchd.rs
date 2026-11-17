@@ -749,5 +749,6 @@ pub fn program_digest_pin(def: &llmctl_core::LaunchDefinition) -> Option<llmctl_
             program,
             format!("sha256:{:x}", sha2::Sha256::digest(bytes)),
         )],
+        fact: None,
     })
 }

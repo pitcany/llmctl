@@ -45,6 +45,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/upgrades/rollback", post(upgrade_rollback))
         .route("/v1/upgrades/gc", post(upgrade_gc))
         .route("/v1/upgrades", post(upgrade_list))
+        .route("/v1/installs/plan", post(install_plan))
+        .route("/v1/workloads/{name}/version", get(workload_version))
         .route("/v1/logs", post(logs))
         .with_state(state)
 }
@@ -551,6 +553,72 @@ async fn upgrade_list(
             })
             .collect(),
     }))
+}
+
+/// The vendor-app plan (M4a step 4): observed/pinned version, drift, and
+/// the owner-run backup/reinstall path. Never executes anything.
+async fn install_plan(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::InstallPlanRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    let plan = crate::upgrade::vendor_plan(&state, &req.workload)
+        .await
+        .map_err(ApiError::from_upgrade)?;
+    Ok(Json(plan))
+}
+
+/// Version facts of one workload: the pin, the live probe, and the drift
+/// between them (a mismatch is a finding, never auto-corrected).
+async fn workload_version(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let wl = llmctl_core::WorkloadName::new(&name)
+        .map_err(|e| OpsError::Invalid(e.to_string()))?;
+    let inv = state.ops.inventory().await;
+    let Some(def) = inv.workload(&wl) else {
+        return Err(OpsError::UnknownWorkload(name).into());
+    };
+    let report = match &def.recipe {
+        Some(recipe) => {
+            let live = crate::version::probe(recipe, def)
+                .await
+                .map_err(|e| OpsError::Engine(format!("probing {name}: {e}")))?;
+            let pinned = match &def.ownership {
+                llmctl_core::Ownership::Managed { version, .. } => version.clone(),
+                _ => None,
+            };
+            let drift = match (&pinned, def.ownership.clone()) {
+                (Some(p), _) => crate::version::version_drift(p, &live),
+                (None, _) => Vec::new(),
+            };
+            json!({
+                "workload": name,
+                "engine_kind": def.engine_kind.to_string(),
+                "recipe_kind": match recipe {
+                    llmctl_core::InstallRecipe::PythonEnv(_) => "python_env",
+                    llmctl_core::InstallRecipe::ReleaseArchive(_) => "release_archive",
+                    llmctl_core::InstallRecipe::SourceBuild(_) => "source_build",
+                    llmctl_core::InstallRecipe::VendorApp(_) => "vendor_app",
+                    llmctl_core::InstallRecipe::External(_) => "external",
+                },
+                "pinned": pinned,
+                "live": live,
+                "drift": drift,
+            })
+        }
+        None => json!({
+            "workload": name,
+            "engine_kind": def.engine_kind.to_string(),
+            "recipe_kind": null,
+            "pinned": null,
+            "live": null,
+            "drift": [],
+            "note": "no recipe; version pinning is off",
+        }),
+    };
+    Ok(Json(report))
 }
 
 pub struct ApiError {

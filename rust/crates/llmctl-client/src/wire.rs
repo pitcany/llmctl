@@ -227,6 +227,21 @@ pub struct GcResponse {
     pub kept: Vec<String>,
 }
 
+// ---- installs and version reports (M4a) -------------------------------------
+
+/// The vendor-app plan request: what runs, what is pinned, the drift
+/// between them, and the owner-run backup/reinstall steps. llmctl never
+/// executes any of it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallPlanRequest {
+    pub workload: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionReportRequest {
+    pub workload: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub host: String,

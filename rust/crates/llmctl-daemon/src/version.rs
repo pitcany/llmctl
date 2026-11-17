@@ -1,18 +1,25 @@
-//! Version facts and offline validation for staged environments (plan D).
+//! Version facts and offline validation for staged installs (plan D,
+//! generalized by M4a to every recipe kind).
 //!
-//! The drift guard pins *what the interpreter reports* (package versions,
-//! CUDA, a `pip freeze` digest) plus content digests of non-system `Exec*`
-//! files (the launcher script), so an in-place `pip install -U` or a
-//! launcher edit is drift even though the unit file never changed.
+//! The drift guard pins *what the install reports*: package versions,
+//! CUDA and a `pip freeze` digest for python-env recipes; the versioned
+//! directory, archive checksum and the binary's own version output for
+//! release-archive and source-build recipes; the running server's
+//! reported version for vendor apps. Plus, for every kind, content
+//! digests of non-system `Exec*` files (the launcher script), so an
+//! in-place change is drift even though the unit file never changed.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
 
-use llmctl_core::{LaunchDefinition, RecipeConfig, VersionRef, WorkloadDefinition};
+use llmctl_core::{
+    InstallRecipe, LaunchDefinition, PythonEnvRecipe, VendorProbe, VersionFact, VersionRef,
+    WorkloadDefinition,
+};
 
 use crate::engine::EngineError;
 
@@ -20,9 +27,22 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 /// `pip freeze` on a big env is slow; give it room.
 const FREEZE_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// The interpreter this workload runs, per its recipe (explicit override,
-/// else the first `Exec*` path that is a python).
-pub fn interpreter_for(recipe: &RecipeConfig, def: &WorkloadDefinition) -> Option<String> {
+/// The executable a workload's recipe resolves: the interpreter for
+/// python-env recipes, the engine binary inside the versioned directory
+/// for release-archive and source-build recipes, nothing for vendor apps
+/// and external recipes.
+pub fn primary_executable_for(recipe: &InstallRecipe, def: &WorkloadDefinition) -> Option<String> {
+    match recipe {
+        InstallRecipe::PythonEnv(r) => python_interpreter_for(r, def),
+        InstallRecipe::ReleaseArchive(r) => exec_under_root(&r.root, def),
+        InstallRecipe::SourceBuild(r) => exec_under_root(&r.root, def),
+        InstallRecipe::VendorApp(_) | InstallRecipe::External(_) => None,
+    }
+}
+
+/// The interpreter this workload runs, per its python-env recipe (explicit
+/// override, else the first `Exec*` path that is a python).
+fn python_interpreter_for(recipe: &PythonEnvRecipe, def: &WorkloadDefinition) -> Option<String> {
     if let Some(explicit) = &recipe.interpreter {
         return Some(explicit.clone());
     }
@@ -58,12 +78,81 @@ pub fn interpreter_for(recipe: &RecipeConfig, def: &WorkloadDefinition) -> Optio
         .map(str::to_owned)
 }
 
-/// Probe the environment's version facts.
+/// The first `Exec*` path of the managed definition that lives under
+/// `root` — the engine binary a versioned-directory recipe runs.
+fn exec_under_root(root: &str, def: &WorkloadDefinition) -> Option<String> {
+    let root = Path::new(root);
+    let llmctl_core::Ownership::Managed { definition, .. } = &def.ownership else {
+        return None;
+    };
+    definition
+        .exec_start_pre
+        .iter()
+        .chain(definition.exec_start.iter())
+        .chain(definition.exec_start_post.iter())
+        .map(|c| c.path.as_str())
+        .find(|p| Path::new(p).starts_with(root))
+        .map(str::to_owned)
+}
+
+/// Probe the install's version facts, per recipe kind.
 pub async fn probe(
-    recipe: &RecipeConfig,
+    recipe: &InstallRecipe,
     def: &WorkloadDefinition,
 ) -> Result<VersionRef, EngineError> {
-    let interpreter = interpreter_for(recipe, def)
+    let exec_digests = exec_digests_of(def).await;
+    match recipe {
+        InstallRecipe::PythonEnv(py) => {
+            probe_python(py, def, exec_digests).await
+        }
+        InstallRecipe::ReleaseArchive(r) => Ok(VersionRef {
+            interpreter: exec_under_root(&r.root, def),
+            packages: Vec::new(),
+            cuda: None,
+            lock_digest: String::new(),
+            exec_digests,
+            fact: Some(dir_fact(&r.root, r.version_arg.as_deref(), def).await),
+        }),
+        InstallRecipe::SourceBuild(r) => Ok(VersionRef {
+            interpreter: exec_under_root(&r.root, def),
+            packages: Vec::new(),
+            cuda: None,
+            lock_digest: String::new(),
+            exec_digests,
+            fact: Some(dir_fact(&r.root, r.version_arg.as_deref(), def).await),
+        }),
+        InstallRecipe::VendorApp(r) => {
+            let (running, probe_desc) = probe_vendor(&r.probe, def).await;
+            Ok(VersionRef {
+                interpreter: None,
+                packages: Vec::new(),
+                cuda: None,
+                lock_digest: String::new(),
+                exec_digests,
+                fact: Some(VersionFact::VendorApp {
+                    running,
+                    probe: probe_desc,
+                }),
+            })
+        }
+        InstallRecipe::External(_) => Ok(VersionRef {
+            interpreter: None,
+            packages: Vec::new(),
+            cuda: None,
+            lock_digest: String::new(),
+            exec_digests,
+            fact: None,
+        }),
+    }
+}
+
+/// The python-env probe: package versions, CUDA, `pip freeze` digest.
+async fn probe_python(
+    recipe: &PythonEnvRecipe,
+    def: &WorkloadDefinition,
+    exec_digests: Vec<(String, String)>,
+) -> Result<VersionRef, EngineError> {
+    let interpreter = python_interpreter_for(recipe, def)
         .ok_or_else(|| EngineError::Io("recipe has no interpreter to probe".into()))?;
 
     // Package versions as the env reports them.
@@ -111,16 +200,130 @@ pub async fn probe(
     lines.sort();
     let lock_digest = sha256_hex_string(lines.join("\n").as_bytes());
 
-    // Non-system Exec* file digests (the launcher script).
-    let exec_digests = exec_digests_of(def).await;
-
     Ok(VersionRef {
         interpreter: Some(interpreter),
         packages,
         cuda,
         lock_digest,
         exec_digests,
+        fact: None,
     })
+}
+
+/// The versioned-directory fact for release-archive and source-build
+/// recipes: the dir the definition's Exec* runs from, its binary digest
+/// and the binary's own version output when the recipe declares one.
+/// The commit/archive checksum live in the dir's staged manifest; the
+/// probe reads them when present.
+async fn dir_fact(root: &str, version_arg: Option<&str>, def: &WorkloadDefinition) -> VersionFact {
+    let rootp = Path::new(root);
+    let none = || VersionFact::SourceBuild {
+        dir: String::new(),
+        commit: None,
+        binary_digest: "missing".into(),
+        reported: None,
+    };
+    let Some(exe) = exec_under_root(root, def) else {
+        return none();
+    };
+    let rel = match Path::new(&exe).strip_prefix(rootp) {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => return none(),
+    };
+    let dir_rel: PathBuf = rel.iter().take(1).collect();
+    let dir_abs = rootp.join(&dir_rel);
+    let binary_digest = match tokio::fs::read(&exe).await {
+        Ok(bytes) => format!("sha256:{:x}", Sha256::digest(bytes)),
+        Err(_) => "missing".into(),
+    };
+    let reported = match version_arg {
+        Some(arg) => run_binary_version(&exe, arg).await.ok(),
+        None => None,
+    };
+    // The staged manifest carries provenance: which commit was built or
+    // which archive was unpacked into this dir.
+    let manifest: Option<serde_json::Value> = tokio::fs::read(dir_abs.join("staged.json"))
+        .await
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    let commit = manifest
+        .as_ref()
+        .and_then(|m| m.get("commit"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let archive_sha256 = manifest
+        .as_ref()
+        .and_then(|m| m.get("archive_sha256"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    // A build dir (staged from git) names a commit in its manifest; an
+    // unpacked archive does not. Both carry the same dir/digest identity.
+    match commit {
+        Some(commit) => VersionFact::SourceBuild {
+            dir: dir_abs.display().to_string(),
+            commit: Some(commit),
+            binary_digest,
+            reported,
+        },
+        None => VersionFact::ReleaseArchive {
+            dir: dir_abs.display().to_string(),
+            archive_sha256,
+            binary_digest,
+            reported,
+        },
+    }
+}
+
+/// The running version of a vendor app, per its declared probe. An app
+/// that cannot be observed reports `None` — itself a finding.
+async fn probe_vendor(probe: &VendorProbe, def: &WorkloadDefinition) -> (Option<String>, String) {
+    match probe {
+        VendorProbe::HttpJson { path, field } => {
+            let desc = format!("http_json {path}");
+            match crate::probe_http::fetch_json_field(def.port, path, field, PROBE_TIMEOUT).await {
+                Some(v) => (Some(v), desc),
+                None => (None, desc),
+            }
+        }
+        VendorProbe::Command { argv } => {
+            let desc = argv.join(" ");
+            if argv.is_empty() {
+                return (None, desc);
+            }
+            let mut cmd = Command::new(&argv[0]);
+            cmd.args(&argv[1..]).kill_on_drop(true);
+            match tokio::time::timeout(PROBE_TIMEOUT, cmd.output()).await {
+                Ok(Ok(out)) if out.status.success() => {
+                    let first = String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                    let version = (!first.is_empty()).then_some(first);
+                    (version, desc)
+                }
+                _ => (None, desc),
+            }
+        }
+        VendorProbe::DirName { path } => {
+            let desc = format!("dir_name {path}");
+            let mut best: Option<String> = None;
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for e in entries.flatten() {
+                    if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        if best.as_deref().map(|b| name.as_str() > b).unwrap_or(true) {
+                            best = Some(name);
+                        }
+                    }
+                }
+            }
+            (best, desc)
+        }
+    }
 }
 
 fn sha256_hex_string(bytes: &[u8]) -> String {
@@ -164,26 +367,114 @@ fn is_system_path(path: &str) -> bool {
         .any(|p| path == *p || path.starts_with(&format!("{p}/")))
 }
 
-/// Offline validation of a staged environment (plan D.4): the package
-/// imports, reports the expected version, and the served model's config
-/// loads under the new version. Never touches the serving env.
+/// Offline validation of a staged install (plan D.4, M4a-generalized):
+/// python-env recipes import, report the expected version and load the
+/// served model's config; release-archive and source-build recipes prove
+/// the binary exists, is executable and — when the recipe declares a
+/// version argument — prints the expected version. Vendor apps and
+/// external recipes have nothing to validate offline. Never touches the
+/// serving install.
 pub async fn validate_offline(
-    recipe: &RecipeConfig,
-    interpreter: &str,
+    recipe: &InstallRecipe,
+    executable: &str,
+    version: &str,
     model: &str,
 ) -> Result<Value, String> {
-    let code = match recipe.name.as_str() {
-        "vllm" => format!(
+    match recipe {
+        InstallRecipe::PythonEnv(py) => {
+            let code = match py.name.as_str() {
+                "vllm" => format!(
             "import json, torch, vllm\nfrom transformers import AutoConfig\nc = AutoConfig.from_pretrained({model:?})\nprint(json.dumps({{'vllm': vllm.__version__, 'torch': torch.__version__, 'cuda': torch.version.cuda, 'model_type': c.model_type}}))"
         ),
-        other => format!(
-            "import json\nimport {other} as pkg\nprint(json.dumps(pkg.validate({model:?})))"
-        ),
-    };
-    let out = run_python(interpreter, &["-c", &code], PROBE_TIMEOUT)
+                other => format!(
+                    "import json\nimport {other} as pkg\nprint(json.dumps(pkg.validate({model:?})))"
+                ),
+            };
+            let out = run_python(executable, &["-c", &code], PROBE_TIMEOUT)
+                .await
+                .map_err(|e| format!("validation command failed: {e}"))?;
+            serde_json::from_str(out.trim()).map_err(|e| format!("validation output not JSON: {e}"))
+        }
+        InstallRecipe::ReleaseArchive(r) => {
+            validate_dir_binary(executable, version, r.version_arg.as_deref(), r.version_pattern.as_deref())
+                .await
+        }
+        InstallRecipe::SourceBuild(r) => {
+            validate_dir_binary(executable, version, r.version_arg.as_deref(), r.version_pattern.as_deref())
+                .await
+        }
+        InstallRecipe::VendorApp(_) | InstallRecipe::External(_) => Ok(serde_json::json!({
+            "note": "vendor-app/external recipes observe; nothing to validate offline"
+        })),
+    }
+}
+
+/// Binary checks for versioned-directory recipes: exists, executable, and
+/// its version output matches when the recipe declares an argument.
+async fn validate_dir_binary(
+    executable: &str,
+    version: &str,
+    version_arg: Option<&str>,
+    version_pattern: Option<&str>,
+) -> Result<Value, String> {
+    let meta = tokio::fs::metadata(executable)
         .await
-        .map_err(|e| format!("validation command failed: {e}"))?;
-    serde_json::from_str(out.trim()).map_err(|e| format!("validation output not JSON: {e}"))
+        .map_err(|e| format!("binary {executable}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{executable} is not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return Err(format!("{executable} is not executable"));
+        }
+    }
+    let expect = version_pattern.unwrap_or(version);
+    let reported = match version_arg {
+        Some(arg) => {
+            let out = run_binary_version(executable, arg)
+                .await
+                .map_err(|e| format!("binary version check: {e}"))?;
+            if !out.contains(expect) {
+                return Err(format!(
+                    "binary reports {out:?}, expected it to contain {expect:?}"
+                ));
+            }
+            Some(out)
+        }
+        None => None,
+    };
+    Ok(serde_json::json!({
+        "binary": executable,
+        "reported": reported,
+        "expected": expect,
+    }))
+}
+
+/// Run `<binary> <arg>` and return its combined version-ish output (first
+/// line, trimmed).
+pub async fn run_binary_version(binary: &str, arg: &str) -> Result<String, String> {
+    let mut cmd = Command::new(binary);
+    cmd.arg(arg).kill_on_drop(true);
+    let out = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| format!("{binary} {arg} timed out"))?
+        .map_err(|e| format!("spawning {binary}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "{binary} {arg} exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let first = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    Ok(first)
 }
 
 /// File name of the env file `apply: "env"` adds, inside the staged env.
@@ -202,9 +493,15 @@ pub fn override_env(interpreter: &str, prefix: &str) -> (std::path::PathBuf, Str
     )
 }
 
-/// The definition for the staged interpreter: `exec` recipes run the
-/// interpreter directly (rewrite `ExecStart`), `env` recipes keep a
-/// launcher and point its env var at the new interpreter.
+/// The definition for the staged executable (M4a-generalized):
+///
+/// - python-env `exec` recipes run the interpreter directly (rewrite
+///   `ExecStart`); `env` recipes keep a launcher and point its env var at
+///   the new interpreter.
+/// - release-archive and source-build recipes swap every `Exec*` path that
+///   lives under the recipe root to the new version directory — one path
+///   swap in the unit, the M2 staged-upgrade flow generalized (owner
+///   decision 3).
 ///
 /// `env` adds an `EnvironmentFile=` *last* rather than an inline
 /// `Environment=`: systemd lets `EnvironmentFile=` override `Environment=`,
@@ -212,36 +509,90 @@ pub fn override_env(interpreter: &str, prefix: &str) -> (std::path::PathBuf, Str
 /// variable (the M2 pilot's `vllm-engine2.env` sets `VLLM_PYTHON`). A later
 /// env file overrides earlier ones. The caller writes the file
 /// (`override_env`); its content digest is pinned here.
+///
+/// Fails when an `env`-apply recipe names no prefix — the `VLLM` default
+/// applies to the vllm recipe only (M4a: no `VLLM` defaults outside the
+/// vLLM recipe).
 pub fn rewrite_definition(
     old: &LaunchDefinition,
-    recipe: &RecipeConfig,
-    interpreter: &str,
-) -> LaunchDefinition {
+    recipe: &InstallRecipe,
+    executable: &str,
+) -> Result<LaunchDefinition, String> {
     let mut next = old.clone();
-    match recipe.apply.as_str() {
-        "exec" => {
-            for cmd in &mut next.exec_start {
-                if !is_system_path(&cmd.path) || cmd.path.contains("python") {
-                    cmd.path = interpreter.to_string();
-                    if !cmd.argv.is_empty() {
-                        cmd.argv[0] = interpreter.to_string();
+    match recipe {
+        InstallRecipe::PythonEnv(py) => match py.apply.as_str() {
+            "exec" => {
+                for cmd in &mut next.exec_start {
+                    if !is_system_path(&cmd.path) || cmd.path.contains("python") {
+                        cmd.path = executable.to_string();
+                        if !cmd.argv.is_empty() {
+                            cmd.argv[0] = executable.to_string();
+                        }
                     }
                 }
             }
-        }
-        _ => {
-            let prefix = recipe.env_prefix.clone().unwrap_or_else(|| "VLLM".into());
-            let (path, content) = override_env(interpreter, &prefix);
-            next.environment_files
-                .retain(|f| !f.path.ends_with(&format!("/{OVERRIDE_ENV_FILE}")));
-            next.environment_files.push(llmctl_core::EnvFileRef {
-                path: path.display().to_string(),
-                optional: false,
-                content_digest: format!("sha256:{:x}", Sha256::digest(content.as_bytes())),
-            });
+            _ => {
+                let prefix = match py.env_prefix.clone() {
+                    Some(p) => p,
+                    None if py.name == "vllm" => "VLLM".into(),
+                    None => {
+                        return Err(format!(
+                            "recipe {} applies env but names no env_prefix",
+                            py.name
+                        ))
+                    }
+                };
+                let (path, content) = override_env(executable, &prefix);
+                next.environment_files
+                    .retain(|f| !f.path.ends_with(&format!("/{OVERRIDE_ENV_FILE}")));
+                next.environment_files.push(llmctl_core::EnvFileRef {
+                    path: path.display().to_string(),
+                    optional: false,
+                    content_digest: format!("sha256:{:x}", Sha256::digest(content.as_bytes())),
+                });
+            }
+        },
+        InstallRecipe::ReleaseArchive(r) => rewrite_root_paths(&mut next, &r.root, executable),
+        InstallRecipe::SourceBuild(r) => rewrite_root_paths(&mut next, &r.root, executable),
+        InstallRecipe::VendorApp(_) | InstallRecipe::External(_) => {
+            return Err("vendor-app and external recipes promote nothing".into());
         }
     }
-    next
+    Ok(next)
+}
+
+/// Swap every `Exec*` path under `root` to the new version directory:
+/// `<root>/<old-id>/<rel>` becomes `<root>/<new-id>/<rel>`, where the new
+/// directory is the first path component of `new_executable` under `root`.
+fn rewrite_root_paths(next: &mut LaunchDefinition, root: &str, new_executable: &str) {
+    let rootp = Path::new(root);
+    let new_rel = Path::new(new_executable)
+        .strip_prefix(rootp)
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    // The version directory is the first component under root.
+    let new_dir: PathBuf = new_rel.iter().take(1).collect();
+    let map = |p: &str| -> Option<String> {
+        let rel = Path::new(p).strip_prefix(rootp).ok()?;
+        let tail: PathBuf = rel.iter().skip(1).collect();
+        Some(rootp.join(&new_dir).join(tail).display().to_string())
+    };
+    for cmd in next
+        .exec_start_pre
+        .iter_mut()
+        .chain(next.exec_start.iter_mut())
+        .chain(next.exec_start_post.iter_mut())
+        .chain(next.exec_stop.iter_mut())
+    {
+        if let Some(mapped) = map(&cmd.path) {
+            cmd.path = mapped;
+        }
+        if !cmd.argv.is_empty() {
+            if let Some(mapped) = map(&cmd.argv[0]) {
+                cmd.argv[0] = mapped;
+            }
+        }
+    }
 }
 
 /// The unit's processes must actually run `interpreter`: some process in
@@ -399,7 +750,10 @@ async fn run_python(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// True when the recomputed version facts differ from the pin.
+/// True when the recomputed version facts differ from the pin. The
+/// per-kind fact is compared only when the pin carries one (a pre-M4a pin
+/// of a new-kind recipe declares nothing to compare — the daemon re-pins
+/// it at startup).
 pub fn version_drift(pinned: &VersionRef, live: &VersionRef) -> Vec<llmctl_core::FieldDiff> {
     let mut diffs = Vec::new();
     let mut push = |field: &str, expected: Value, actual: Value| {
@@ -436,17 +790,23 @@ pub fn version_drift(pinned: &VersionRef, live: &VersionRef) -> Vec<llmctl_core:
         serde_json::to_value(&pinned.exec_digests).unwrap_or(Value::Null),
         serde_json::to_value(&live.exec_digests).unwrap_or(Value::Null),
     );
-    let _ = Path::new("");
+    if pinned.fact.is_some() {
+        push(
+            "version.fact",
+            serde_json::to_value(&pinned.fact).unwrap_or(Value::Null),
+            serde_json::to_value(&live.fact).unwrap_or(Value::Null),
+        );
+    }
     diffs
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llmctl_core::EnvFileRef;
+    use llmctl_core::{EnvFileRef, ReleaseArchiveRecipe};
 
-    fn recipe(apply: &str) -> RecipeConfig {
-        RecipeConfig {
+    fn recipe(apply: &str) -> InstallRecipe {
+        InstallRecipe::PythonEnv(PythonEnvRecipe {
             name: "vllm".into(),
             interpreter: None,
             packages: vec!["vllm".into()],
@@ -455,7 +815,7 @@ mod tests {
             find_links: None,
             model_config: None,
             index_url: None,
-        }
+        })
     }
 
     #[test]
@@ -470,7 +830,7 @@ mod tests {
             ..Default::default()
         };
         let py = "/d/envs/engine2-0.32.0-abc/bin/python";
-        let next = rewrite_definition(&old, &recipe("env"), py);
+        let next = rewrite_definition(&old, &recipe("env"), py).unwrap();
         assert!(next.environment.is_empty(), "no inline override");
         assert_eq!(next.environment_files.len(), 2);
         assert_eq!(next.environment_files[0], unit_env);
@@ -488,11 +848,116 @@ mod tests {
         );
 
         // Re-applying (another promote) replaces the override, never stacks.
-        let again = rewrite_definition(&next, &recipe("env"), "/d/envs/x/bin/python");
+        let again = rewrite_definition(&next, &recipe("env"), "/d/envs/x/bin/python").unwrap();
         assert_eq!(again.environment_files.len(), 2);
         assert_eq!(
             again.environment_files[1].path,
             "/d/envs/x/llmctl-next-override.env"
         );
+    }
+
+    #[test]
+    fn env_apply_without_a_prefix_is_refused_outside_the_vllm_recipe() {
+        let mut py = match recipe("env") {
+            InstallRecipe::PythonEnv(r) => r,
+            _ => unreachable!(),
+        };
+        py.env_prefix = None;
+        py.name = "mtplx".into();
+        let err = rewrite_definition(
+            &LaunchDefinition::default(),
+            &InstallRecipe::PythonEnv(py.clone()),
+            "/d/envs/x/bin/python",
+        )
+        .unwrap_err();
+        assert!(err.contains("env_prefix"), "{err}");
+        // The vllm recipe's historical default still applies.
+        py.name = "vllm".into();
+        assert!(rewrite_definition(
+            &LaunchDefinition::default(),
+            &InstallRecipe::PythonEnv(py),
+            "/d/envs/x/bin/python"
+        )
+        .is_ok());
+    }
+
+    /// A definition whose Exec* live under a recipe root swaps to the new
+    /// version directory — one path swap, argv[0] included (M4a).
+    #[test]
+    fn dir_recipes_swap_every_exec_path_under_the_root() {
+        let recipe = InstallRecipe::ReleaseArchive(ReleaseArchiveRecipe {
+            name: "llama.cpp".into(),
+            root: "/d/builds".into(),
+            url: "https://x/llama-{version}.tgz".into(),
+            checksum: None,
+            strip_components: 1,
+            binary: "bin/llama-server".into(),
+            version_arg: Some("--version".into()),
+            version_pattern: None,
+        });
+        let old = LaunchDefinition {
+            exec_start: vec![llmctl_core::ExecCommand {
+                path: "/d/builds/gpt-oss-120b-b10705-00112233/bin/llama-server".into(),
+                argv: vec![
+                    "/d/builds/gpt-oss-120b-b10705-00112233/bin/llama-server".into(),
+                    "--host".into(),
+                ],
+                ignore_errors: false,
+            }],
+            exec_start_pre: vec![llmctl_core::ExecCommand {
+                path: "/usr/bin/id".into(),
+                argv: vec!["/usr/bin/id".into()],
+                ignore_errors: false,
+            }],
+            ..Default::default()
+        };
+        let next = rewrite_definition(
+            &old,
+            &recipe,
+            "/d/builds/gpt-oss-120b-b10800-aabbccdd/bin/llama-server",
+        )
+        .unwrap();
+        assert_eq!(
+            next.exec_start[0].path,
+            "/d/builds/gpt-oss-120b-b10800-aabbccdd/bin/llama-server"
+        );
+        assert_eq!(
+            next.exec_start[0].argv[0],
+            "/d/builds/gpt-oss-120b-b10800-aabbccdd/bin/llama-server"
+        );
+        // System paths stay untouched.
+        assert_eq!(next.exec_start_pre[0].path, "/usr/bin/id");
+    }
+
+    /// Drift: a changed per-kind fact is a finding; a pin without a fact
+    /// (pre-M4a) never reads as false drift.
+    #[test]
+    fn version_drift_compares_the_per_kind_fact_when_the_pin_carries_one() {
+        let base = || VersionRef {
+            interpreter: None,
+            packages: vec![],
+            cuda: None,
+            lock_digest: String::new(),
+            exec_digests: vec![],
+            fact: Some(VersionFact::VendorApp {
+                running: Some("0.34.3".into()),
+                probe: "http_json /api/version".into(),
+            }),
+        };
+        let pinned = base();
+        let same = base();
+        assert!(version_drift(&pinned, &same).is_empty());
+
+        let mut drifted = base();
+        if let Some(VersionFact::VendorApp { running, .. }) = &mut drifted.fact {
+            *running = Some("0.40.16".into());
+        }
+        let diffs = version_drift(&pinned, &drifted);
+        assert_eq!(diffs.len(), 1, "{diffs:?}");
+        assert_eq!(diffs[0].field, "version.fact");
+
+        let mut legacy_pin = base();
+        legacy_pin.fact = None;
+        assert!(version_drift(&legacy_pin, &drifted).is_empty());
     }
 }

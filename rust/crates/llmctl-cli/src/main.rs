@@ -156,7 +156,15 @@ enum Command {
         #[command(subcommand)]
         cmd: UpgradeCmd,
     },
-    /// Version facts of a managed workload's environment.
+    /// Installs per recipe kind (M4a): stage fetches/builds a new
+    /// versioned dir; plan prints the vendor-app plan (owner-run steps,
+    /// never executed by llmctl).
+    Install {
+        #[command(subcommand)]
+        cmd: InstallCmd,
+    },
+    /// Version facts of a managed workload's install: pin, live probe,
+    /// drift. A mismatch is a finding, never auto-corrected.
     Version { name: String },
     /// Run the daemon in the foreground (binds the control socket).
     Daemon {
@@ -243,6 +251,17 @@ enum UpgradeCmd {
     List { name: String },
     /// Remove envs no upgrade row or the live interpreter needs.
     Gc { name: String },
+}
+
+#[derive(Subcommand, Clone)]
+enum InstallCmd {
+    /// Stage a new version per the workload's recipe kind: uv env
+    /// (python-env), fetch+unpack (release-archive), git+build
+    /// (source-build). Vendor apps refuse with a pointer to `plan`.
+    Stage { name: String, version: String },
+    /// The vendor-app plan: observed/pinned version, drift, and the
+    /// owner-run backup/reinstall steps. Nothing is executed.
+    Plan { name: String },
 }
 
 fn exit_code_for_client_error(e: &ClientError) -> u8 {
@@ -409,6 +428,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Own { name } => cmd_own(cli, &name).await,
         Command::Release { name } => cmd_release(cli, &name).await,
         Command::Upgrade { cmd } => cmd_upgrade(cli, cmd).await,
+        Command::Install { cmd } => cmd_install(cli, cmd).await,
         Command::Version { name } => cmd_version(cli, &name).await,
         Command::Adopt {
             unit,
@@ -1078,16 +1098,31 @@ async fn cmd_release(cli: &Cli, name: &str) -> Result<u8, CliError> {
 
 async fn cmd_version(cli: &Cli, name: &str) -> Result<u8, CliError> {
     let client = connect(cli)?;
-    let status = client.status().await?;
-    let Some(w) = status.workloads.iter().find(|w| w.name == name) else {
-        eprintln!("error: unknown workload {name}");
-        return Ok(5);
-    };
-    match &w.adopted_digest {
-        Some(d) => println!("{name}: {d}"),
-        None => println!("{name}: not managed (no pinned definition)"),
+    let report = client.version_report(name).await?;
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    let drifting = report["drift"].as_array().is_some_and(|d| !d.is_empty());
+    Ok(if drifting { 4 } else { 0 })
+}
+
+async fn cmd_install(cli: &Cli, cmd: InstallCmd) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    ensure_protocol(&client).await?;
+    match cmd {
+        InstallCmd::Stage { name, version } => {
+            let resp = client.stage(&name, &version).await?;
+            println!(
+                "staged {} {} at {}\n  executable: {}\n  status: {}\n  validation: {}",
+                name, version, resp.env, resp.interpreter, resp.status, resp.validation
+            );
+            Ok(0)
+        }
+        InstallCmd::Plan { name } => {
+            let plan = client.install_plan(&name).await?;
+            println!("{}", serde_json::to_string_pretty(&plan).unwrap());
+            let drifting = plan["drift"].as_array().is_some_and(|d| !d.is_empty());
+            Ok(if drifting { 4 } else { 0 })
+        }
     }
-    Ok(0)
 }
 
 async fn cmd_upgrade(cli: &Cli, cmd: UpgradeCmd) -> Result<u8, CliError> {

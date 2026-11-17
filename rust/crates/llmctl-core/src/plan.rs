@@ -74,13 +74,27 @@ pub enum PlanStep {
         definition: crate::launch::LaunchDefinition,
     },
     /// External observation: the running environment must report exactly
-    /// these package versions through `interpreter` (importlib metadata).
+    /// these package versions through `interpreter` (importlib metadata),
+    /// and/or the staged binary must print its own version (M4a: the
+    /// dir-recipe kinds). `interpreter` names the primary executable of
+    /// whatever recipe kind the workload pins.
     VerifyVersion {
         workload: WorkloadName,
         unit: UnitName,
         interpreter: String,
         packages: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binary_check: Option<BinaryCheck>,
     },
+}
+
+/// A binary's own version self-check (M4a): run `path arg`, the first
+/// output line must contain `expect`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryCheck {
+    pub path: String,
+    pub arg: String,
+    pub expect: String,
 }
 
 impl PlanStep {
@@ -118,14 +132,19 @@ impl PlanStep {
                 format!("apply new definition to {workload}")
             }
             PlanStep::VerifyVersion {
-                workload, packages, ..
+                workload,
+                packages,
+                binary_check,
+                ..
             } => {
-                let pkgs = packages
+                let mut what = packages
                     .iter()
                     .map(|(n, v)| format!("{n}={v}"))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!("verify {workload} runs {pkgs}")
+                    .collect::<Vec<_>>();
+                if let Some(bc) = binary_check {
+                    what.push(format!("{} {}~{}", bc.path, bc.arg, bc.expect));
+                }
+                format!("verify {workload} runs {}", what.join(","))
             }
         }
     }

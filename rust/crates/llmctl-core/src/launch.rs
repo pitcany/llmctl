@@ -291,8 +291,9 @@ pub enum VersionFact {
         /// The versioned build directory (absolute).
         dir: String,
         /// The git commit built (the identity when the binary has no
-        /// `--version`, e.g. ds4).
-        commit: String,
+        /// `--version`, e.g. ds4). Absent for imported dirs whose name
+        /// does not encode one.
+        commit: Option<String>,
         binary_digest: String,
         reported: Option<String>,
     },

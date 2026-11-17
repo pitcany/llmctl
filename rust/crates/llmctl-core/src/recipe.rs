@@ -200,6 +200,14 @@ pub struct VendorAppRecipe {
     /// server's reported version is the fact — which is how the stale m5
     /// Ollama gets caught).
     pub probe: VendorProbe,
+    /// The tested backup path the owner recorded (what to copy/run before
+    /// a vendor upgrade). Reported by the plan; never executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_path: Option<String>,
+    /// The tested reinstall command/path the owner recorded. Reported by
+    /// the plan; never executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reinstall_cmd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

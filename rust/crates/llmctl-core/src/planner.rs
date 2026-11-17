@@ -240,6 +240,7 @@ pub fn plan_upgrade(
     next: &crate::launch::LaunchDefinition,
     interpreter: &str,
     packages: &[(String, String)],
+    binary_check: Option<crate::plan::BinaryCheck>,
 ) -> CoreResult<Plan> {
     let def = inventory
         .workload(target)
@@ -287,6 +288,7 @@ pub fn plan_upgrade(
         unit: def.unit.clone(),
         interpreter: interpreter.to_string(),
         packages: packages.to_vec(),
+        binary_check,
     });
 
     // One card means downtime; the rollback is the old definition back,
