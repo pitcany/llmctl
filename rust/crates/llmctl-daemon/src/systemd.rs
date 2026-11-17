@@ -168,7 +168,17 @@ impl SystemdEngine {
         if verb == "start" && before.active_state == "failed" {
             let _ = systemctl(unit.scope, &["reset-failed", &unit.name], self.show_timeout).await;
         }
-        let out = match systemctl(unit.scope, &[verb, &unit.name], self.effect_timeout).await {
+        // `--no-block` on start: a queued start job is the effect. Waiting
+        // for it to complete would also wait for `ExecStartPost=` — the
+        // llama.cpp lanes' ds4-sync hook polls readiness for up to 20 min —
+        // far past any effect timeout, and the daemon's own AwaitReadiness
+        // phase is the authority on "came up" anyway. Stop stays blocking:
+        // its timeout is the kill budget.
+        let mut argv: Vec<&str> = vec![verb, &unit.name];
+        if verb == "start" {
+            argv.insert(0, "--no-block");
+        }
+        let out = match systemctl(unit.scope, &argv, self.effect_timeout).await {
             Ok(out) => out,
             Err(EngineError::Timeout(msg)) => {
                 return Err(EngineError::Unconfirmed(format!(
