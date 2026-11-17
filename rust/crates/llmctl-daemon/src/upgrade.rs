@@ -175,6 +175,40 @@ pub async fn stage(
         )));
     }
 
+    // Restaging rebuilds the env dir from scratch: never the env the
+    // workload runs now, nor the one the last promote would roll back to.
+    let live = crate::version::interpreter_for(&recipe, &inv_def_for(state, &wl).await);
+    if live
+        .as_deref()
+        .is_some_and(|p| Path::new(p).starts_with(&env))
+    {
+        return Err(refuse(format!(
+            "{name} is running {version} from {}; restaging would delete the live env (roll back or promote another version first)",
+            env.display()
+        )));
+    }
+    let rows = settle(state, name).await?;
+    let rollback_target = rows
+        .iter()
+        .rev()
+        .find(|r| r.status == "promoted")
+        .and_then(|r| {
+            r.detail
+                .as_ref()?
+                .get("old_interpreter")?
+                .as_str()
+                .map(String::from)
+        });
+    if rollback_target
+        .as_deref()
+        .is_some_and(|p| Path::new(p).starts_with(&env))
+    {
+        return Err(refuse(format!(
+            "{} is the rollback target of {name}'s last promote; restaging would delete it",
+            env.display()
+        )));
+    }
+
     let _ = tokio::fs::remove_file(env.join("staged.json")).await;
     let _ = tokio::fs::remove_dir_all(&env).await;
     let _ = tokio::fs::remove_file(&log).await;
@@ -289,11 +323,14 @@ async fn record_row(
         .await
         .unwrap_or_else(|| "?".into());
     let now = Utc::now();
+    let env_name = env
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let row = UpgradeRow {
-        id: env
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        // One row per stage attempt: restaging a version adds a row and
+        // keeps the earlier promote/rollback record (M2 pilot gap).
+        id: format!("{env_name}-{}", unique_suffix()),
         workload: workload.to_string(),
         from_version,
         to_version: to_version.to_string(),
@@ -305,12 +342,72 @@ async fn record_row(
         created_at: now,
         updated_at: now,
     };
-    // Idempotent re-staging replaces the row's status via a fresh id? The
-    // id is the env dir name, so re-staging the same version hits the same
-    // id: upsert by delete+insert.
-    let _ = state.ops.db().delete_upgrade(&row.id).await;
+    // An earlier, never-promoted stage of this env was just rebuilt over:
+    // its row no longer describes what is on disk.
+    for old in state.ops.db().list_upgrades(workload).await? {
+        if old.env_path == row.env_path && old.status == "validated" {
+            state
+                .ops
+                .db()
+                .set_upgrade_status_if(&old.id, "validated", "superseded", None)
+                .await?;
+        }
+    }
     state.ops.db().insert_upgrade(row.clone()).await?;
     Ok(row)
+}
+
+/// Bring rows whose operation has finished to their final status, then
+/// return the history. Done on every read, so a caller that waited for
+/// the operation (`promote --wait`) sees the outcome at once — a background
+/// poller lagged up to 2 s behind it (M2 pilot gap).
+async fn settle(state: &AppState, name: &str) -> Result<Vec<UpgradeRow>, UpgradeError> {
+    let rows = state.ops.db().list_upgrades(name).await?;
+    let mut changed = false;
+    for r in &rows {
+        let (op_id, done, failed) = match r.status.as_str() {
+            "promoting" => (r.operation_id.clone(), "promoted", "failed"),
+            "rolling_back" => (
+                r.detail
+                    .as_ref()
+                    .and_then(|d| d.get("rollback_operation_id")?.as_str().map(String::from)),
+                "rolled_back",
+                "failed",
+            ),
+            _ => continue,
+        };
+        let Some(op_id) = op_id else { continue };
+        let Some(op) = state.ops.db().get_op(&op_id).await? else {
+            continue;
+        };
+        if !op.status.is_terminal() {
+            continue;
+        }
+        let to = if op.status == llmctl_client::wire::OpStatus::Succeeded {
+            done
+        } else {
+            failed
+        };
+        changed |= state
+            .ops
+            .db()
+            .set_upgrade_status_if(&r.id, &r.status, to, None)
+            .await?;
+    }
+    if changed {
+        Ok(state.ops.db().list_upgrades(name).await?)
+    } else {
+        Ok(rows)
+    }
+}
+
+/// `detail` with one key added (detail is replaced as a whole on write).
+fn detail_with(detail: &Option<serde_json::Value>, key: &str, value: &str) -> serde_json::Value {
+    let mut d = detail.clone().unwrap_or_else(|| json!({}));
+    if let Some(obj) = d.as_object_mut() {
+        obj.insert(key.into(), json!(value));
+    }
+    d
 }
 
 async fn pinned_version_of(state: &AppState, workload: &str) -> Option<String> {
@@ -370,8 +467,8 @@ pub async fn promote(
             )))
         }
     };
-    let rows = state.ops.db().list_upgrades(name).await?;
-    let Some(row) = rows.iter().find(|r| r.to_version == version) else {
+    let rows = settle(state, name).await?;
+    let Some(row) = rows.iter().rev().find(|r| r.to_version == version) else {
         return Err(refuse(format!("no upgrade record for {name} at {version}")));
     };
     if row.status != "validated" {
@@ -407,6 +504,11 @@ pub async fn promote(
     // stash it in the row's detail.
     let old_interpreter = crate::version::interpreter_for(&recipe, &inv_def_for(state, &wl).await)
         .unwrap_or_default();
+    // The version being replaced is the one pinned now, not the one pinned
+    // when this env was staged: another promote may have run in between.
+    let from_version = pinned_version_of(state, name)
+        .await
+        .unwrap_or_else(|| row.from_version.clone());
     state
         .ops
         .db()
@@ -416,7 +518,7 @@ pub async fn promote(
             Some(json!({
                 "old_definition": old_def,
                 "old_interpreter": old_interpreter,
-                "from_version": row.from_version,
+                "from_version": from_version,
             })),
             None,
         )
@@ -456,37 +558,8 @@ pub async fn promote(
         .await;
     match admitted {
         Ok(AdmitOutcome::Admitted(row_op)) | Ok(AdmitOutcome::Replayed(row_op)) => {
-            let row_id = row.id.clone();
-            let op_id = row_op.id.to_string();
-            let ops = state.ops.clone();
-            tokio::spawn(async move {
-                // Record the outcome once the operation terminalizes, so
-                // `upgrade list` and the history stay truthful.
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(60 * 30);
-                loop {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    let Ok(Some(op)) = ops.db().get_op(&op_id).await else {
-                        continue;
-                    };
-                    if !op.status.is_terminal() {
-                        if tokio::time::Instant::now() >= deadline {
-                            break;
-                        }
-                        continue;
-                    }
-                    let status = match op.status {
-                        llmctl_client::wire::OpStatus::Succeeded => "promoted",
-                        _ => "failed",
-                    };
-                    // Detail stays (it holds the N stash for rollback); the
-                    // operation id links to the full outcome.
-                    let _ = ops
-                        .db()
-                        .update_upgrade_status(&row_id, status, None, None)
-                        .await;
-                    break;
-                }
-            });
+            // The outcome is settled from this operation on the next read.
+            // Detail stays: it holds the N stash for rollback.
             state
                 .ops
                 .db()
@@ -518,7 +591,7 @@ pub async fn rollback(
     name: &str,
 ) -> Result<llmctl_client::wire::OperationView, UpgradeError> {
     let (wl, current_def, recipe) = managed_parts(state, name).await?;
-    let rows = state.ops.db().list_upgrades(name).await?;
+    let rows = settle(state, name).await?;
     let Some(last) = rows.iter().rev().find(|r| r.status == "promoted") else {
         return Err(refuse(format!(
             "no promoted upgrade to roll {name} back to"
@@ -549,17 +622,78 @@ pub async fn rollback(
             "the pre-upgrade interpreter or version was never pinned",
         ));
     }
+
+    // Claim the row; a concurrent rollback of the same promote loses here.
+    if !state
+        .ops
+        .db()
+        .set_upgrade_status_if(&last.id, "promoted", "rolling_back", None)
+        .await?
+    {
+        return Err(refuse(format!(
+            "the last promote of {name} is already being rolled back"
+        )));
+    }
+    let admitted = rollback_admit(
+        state,
+        name,
+        &wl,
+        &current_def,
+        &old_def,
+        &old_interpreter,
+        &recipe,
+        &from_version,
+        &last.id,
+    )
+    .await;
+    match admitted {
+        Ok(row_op) => {
+            // Settled from this operation on the next read.
+            state
+                .ops
+                .db()
+                .set_upgrade_status_if(
+                    &last.id,
+                    "rolling_back",
+                    "rolling_back",
+                    Some(detail_with(
+                        &last.detail,
+                        "rollback_operation_id",
+                        &row_op.id.to_string(),
+                    )),
+                )
+                .await?;
+            Ok(crate::api::operation_view(&row_op))
+        }
+        Err(e) => {
+            // A refused rollback changed nothing: the promote still stands.
+            state
+                .ops
+                .db()
+                .set_upgrade_status_if(&last.id, "rolling_back", "promoted", None)
+                .await?;
+            Err(e)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn rollback_admit(
+    state: &AppState,
+    name: &str,
+    wl: &WorkloadName,
+    current_def: &LaunchDefinition,
+    old_def: &LaunchDefinition,
+    old_interpreter: &str,
+    recipe: &llmctl_core::RecipeConfig,
+    from_version: &str,
+    row_id: &str,
+) -> Result<crate::db::OpRow, UpgradeError> {
     let expected: Vec<(String, String)> = recipe
         .packages
         .iter()
-        .map(|p| (p.clone(), from_version.clone()))
+        .map(|p| (p.clone(), from_version.to_string()))
         .collect();
-
-    state
-        .ops
-        .db()
-        .update_upgrade_status(&last.id, "promoting", None, None)
-        .await?;
     let inv = state.ops.inventory().await;
     let observations = state
         .ops
@@ -572,10 +706,10 @@ pub async fn rollback(
     let plan = llmctl_core::plan_upgrade(
         &inv,
         &observations,
-        &wl,
-        &current_def,
-        &old_def,
-        &old_interpreter,
+        wl,
+        current_def,
+        old_def,
+        old_interpreter,
         &expected,
     )
     .map_err(|e| OpsError::Invalid(e.to_string()))?;
@@ -583,7 +717,7 @@ pub async fn rollback(
         .ops
         .admit(AdmitParams {
             protocol: PROTOCOL_VERSION,
-            idempotency_key: format!("upgrade-rollback-{name}-{}-{}", last.id, unique_suffix()),
+            idempotency_key: format!("upgrade-rollback-{name}-{row_id}-{}", unique_suffix()),
             kind: OpKind::Upgrade,
             workload: name.to_string(),
             expected_revision: None,
@@ -592,54 +726,13 @@ pub async fn rollback(
         })
         .await;
     match admitted {
-        Ok(AdmitOutcome::Admitted(row_op)) | Ok(AdmitOutcome::Replayed(row_op)) => {
-            let ops = state.ops.clone();
-            let row_id = last.id.clone();
-            let op_id = row_op.id.to_string();
-            tokio::spawn(async move {
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(60 * 30);
-                loop {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    let Ok(Some(op)) = ops.db().get_op(&op_id).await else {
-                        continue;
-                    };
-                    if !op.status.is_terminal() {
-                        if tokio::time::Instant::now() >= deadline {
-                            break;
-                        }
-                        continue;
-                    }
-                    let status = match op.status {
-                        llmctl_client::wire::OpStatus::Succeeded => "rolled_back",
-                        _ => "failed",
-                    };
-                    let _ = ops
-                        .db()
-                        .update_upgrade_status(&row_id, status, None, None)
-                        .await;
-                    break;
-                }
-            });
-            Ok(crate::api::operation_view(&row_op))
-        }
-        Err(e) => {
-            state
-                .ops
-                .db()
-                .update_upgrade_status(
-                    &last.id,
-                    "failed",
-                    Some(json!({"error": e.to_string()})),
-                    None,
-                )
-                .await?;
-            Err(e.into())
-        }
+        Ok(AdmitOutcome::Admitted(row_op)) | Ok(AdmitOutcome::Replayed(row_op)) => Ok(row_op),
+        Err(e) => Err(e.into()),
     }
 }
 
 pub async fn list(state: &AppState, name: &str) -> Result<Vec<UpgradeRow>, UpgradeError> {
-    Ok(state.ops.db().list_upgrades(name).await?)
+    settle(state, name).await
 }
 
 /// Drop envs not in use: not the current interpreter's env, and not any

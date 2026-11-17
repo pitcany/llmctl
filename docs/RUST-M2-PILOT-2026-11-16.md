@@ -167,11 +167,11 @@ positional); the interrupted-stage marker was named `engine2-0.32.staging`
 
 ## Gaps (not fixed)
 
-- `promote --wait` can return before the completion poller marks the
+- ~~`promote --wait` can return before the completion poller marks the
   history row; an immediate `rollback` is refused ("no promoted upgrade")
-  for a moment.
-- History keeps one row per staged env id: restaging the same version
-  overwrites the earlier promote/rollback record.
+  for a moment.~~ Fixed during M3 (see the M3 plan's carry-overs).
+- ~~History keeps one row per staged env id: restaging the same version
+  overwrites the earlier promote/rollback record.~~ Fixed during M3.
 - Release after an upgrade is proven on the disposable unit only; on the
   real unit the hand-back in this window was the manual relink (exactly the
   recorded target).

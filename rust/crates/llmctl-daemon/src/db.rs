@@ -93,7 +93,14 @@ enum DbMsg {
         oneshot::Sender<Result<(), DbError>>,
     ),
     ListUpgrades(String, oneshot::Sender<Result<Vec<UpgradeRow>, DbError>>),
-    DeleteUpgrade(String, oneshot::Sender<Result<(), DbError>>),
+    /// Compare-and-set: (id, expected status, new status, detail).
+    SetUpgradeStatusIf(
+        String,
+        String,
+        String,
+        Option<String>,
+        oneshot::Sender<Result<bool, DbError>>,
+    ),
 }
 
 /// One staged/promoted upgrade of one workload (plan D.6: history).
@@ -255,9 +262,27 @@ impl Db {
         rx.await.map_err(|_| DbError::Closed)?
     }
 
-    pub async fn delete_upgrade(&self, id: &str) -> Result<(), DbError> {
+    /// Move a row from `from` to `to` only if it is still in `from`
+    /// (replacing `detail` when given). Returns whether the row moved, so
+    /// concurrent settlers and late writers never overwrite a newer state.
+    pub async fn set_upgrade_status_if(
+        &self,
+        id: &str,
+        from: &str,
+        to: &str,
+        detail: Option<serde_json::Value>,
+    ) -> Result<bool, DbError> {
         let (tx, rx) = oneshot::channel();
-        self.send(DbMsg::DeleteUpgrade(id.into(), tx))?;
+        let detail_str = detail
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        self.send(DbMsg::SetUpgradeStatusIf(
+            id.into(),
+            from.into(),
+            to.into(),
+            detail_str,
+            tx,
+        ))?;
         rx.await.map_err(|_| DbError::Closed)?
     }
 }
@@ -543,7 +568,7 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
             let mut stmt = conn.prepare(
                 "SELECT id, workload, from_version, to_version, env_path, interpreter,
                         status, detail, operation_id, created_at, updated_at
-                 FROM upgrades WHERE workload = ?1 ORDER BY created_at",
+                 FROM upgrades WHERE workload = ?1 ORDER BY created_at, rowid",
             )?;
             let out = stmt
                 .query_map(params![workload], upgrade_row_from)
@@ -552,10 +577,14 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
                 .map_err(DbError::from);
             let _ = tx.send(out);
         }
-        DbMsg::DeleteUpgrade(id, tx) => {
+        DbMsg::SetUpgradeStatusIf(id, from, to, detail, tx) => {
             let out = conn
-                .execute("DELETE FROM upgrades WHERE id = ?1", params![id])
-                .map(|_| ())
+                .execute(
+                    "UPDATE upgrades SET status=?3, detail=COALESCE(?4, detail), updated_at=?5
+                     WHERE id = ?1 AND status = ?2",
+                    params![id, from, to, detail, Utc::now().to_rfc3339()],
+                )
+                .map(|n| n == 1)
                 .map_err(DbError::from);
             let _ = tx.send(out);
         }

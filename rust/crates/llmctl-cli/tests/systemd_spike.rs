@@ -1334,18 +1334,27 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
         "2.0",
         "the promoted env must be serving"
     );
-    let mut promoted = false;
-    for _ in 0..20 {
-        let rows = cli(&d.socket, &["upgrade", "list", "adopted"]);
-        if rows.1.contains("promoted") {
-            promoted = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    assert!(promoted, "history must record the promotion");
+    // History is settled on read: no wait between `promote --wait` and
+    // `list` or `rollback` (M2 carry-over: a 2 s poller lagged behind).
+    let rows = cli(&d.socket, &["upgrade", "list", "adopted"]).1;
+    assert_eq!(upgrade_rows(&rows, "promoted", "2.0"), 1, "{rows}");
 
-    // Explicit rollback to N: definition and env back to 1.0.
+    // A promoted workload stays operable: its version pin moved with the
+    // promote, so a restart is not refused as version drift.
+    let (code, text) = cli_code(
+        &d.socket,
+        &[
+            "restart",
+            "adopted",
+            "--wait",
+            "--key",
+            "restart-after-promote",
+        ],
+    );
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(http_get_json(port, "/v1/version")["version"], "2.0");
+
+    // Explicit rollback to N, straight away: definition and env back to 1.0.
     let (ok, text) = cli(&d.socket, &["upgrade", "rollback", "adopted", "--wait"]);
     assert!(ok, "{text}");
     assert_eq!(http_get_json(port, "/v1/version")["version"], "1.0");
@@ -1355,6 +1364,11 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
     // replayed the first promote's success and served nothing new.
     let (ok, text) = cli(&d.socket, &["upgrade", "stage", "adopted", "2.0"]);
     assert!(ok, "{text}");
+    // Restaging adds a row; the first promote/rollback record stays (M2
+    // carry-over: one row per env id was overwritten).
+    let rows = cli(&d.socket, &["upgrade", "list", "adopted"]).1;
+    assert_eq!(upgrade_rows(&rows, "rolled_back", "2.0"), 1, "{rows}");
+    assert_eq!(upgrade_rows(&rows, "validated", "2.0"), 1, "{rows}");
     let (ok, text) = cli(
         &d.socket,
         &["upgrade", "promote", "adopted", "2.0", "--wait"],
@@ -1362,20 +1376,42 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
     assert!(ok, "{text}");
     assert!(!text.contains("replaying"), "{text}");
     assert_eq!(http_get_json(port, "/v1/version")["version"], "2.0");
-    // History is marked by a completion poller after the op finishes
-    // (known gap: `promote --wait` can return before it).
-    for _ in 0..20 {
-        if cli(&d.socket, &["upgrade", "list", "adopted"])
-            .1
-            .contains("promoted")
-        {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
     let (ok, text) = cli(&d.socket, &["upgrade", "rollback", "adopted", "--wait"]);
     assert!(ok, "{text}");
     assert!(!text.contains("replaying"), "{text}");
+    assert_eq!(http_get_json(port, "/v1/version")["version"], "1.0");
+    let rows = cli(&d.socket, &["upgrade", "list", "adopted"]).1;
+    assert_eq!(upgrade_rows(&rows, "rolled_back", "2.0"), 2, "{rows}");
+
+    // Restaging rebuilds the env dir: refused for the env that is serving
+    // and for the env the last promote would roll back to.
+    let (ok, text) = cli(&d.socket, &["upgrade", "stage", "adopted", "2.0"]);
+    assert!(ok, "{text}");
+    let (ok, text) = cli(
+        &d.socket,
+        &["upgrade", "promote", "adopted", "2.0", "--wait"],
+    );
+    assert!(ok, "{text}");
+    let (code, text) = cli_code(&d.socket, &["upgrade", "stage", "adopted", "2.0"]);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("live env"), "{text}");
+    assert_eq!(http_get_json(port, "/v1/version")["version"], "2.0");
+    let (ok, text) = cli(&d.socket, &["upgrade", "stage", "adopted", "1.0"]);
+    assert!(ok, "{text}");
+    let (ok, text) = cli(
+        &d.socket,
+        &["upgrade", "promote", "adopted", "1.0", "--wait"],
+    );
+    assert!(ok, "{text}");
+    let (code, text) = cli_code(&d.socket, &["upgrade", "stage", "adopted", "2.0"]);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("rollback target"), "{text}");
+    // Unwind both promotes: staged 1.0 → staged 2.0 → the original env.
+    let (ok, text) = cli(&d.socket, &["upgrade", "rollback", "adopted", "--wait"]);
+    assert!(ok, "{text}");
+    assert_eq!(http_get_json(port, "/v1/version")["version"], "2.0");
+    let (ok, text) = cli(&d.socket, &["upgrade", "rollback", "adopted", "--wait"]);
+    assert!(ok, "{text}");
     assert_eq!(http_get_json(port, "/v1/version")["version"], "1.0");
 
     // A broken version fails offline validation and is never promotable.
@@ -1429,6 +1465,17 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
         original_unit,
         "release must restore the original unit file"
     );
+}
+
+/// Rows of `upgrade list` output with this status and target version.
+fn upgrade_rows(list: &str, status: &str, to_version: &str) -> usize {
+    list.lines()
+        .filter(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            // date time status from → to env op=
+            f.len() >= 6 && f[2] == status && f[5] == to_version
+        })
+        .count()
 }
 
 /// Add a fakeengine recipe to the adopted workload in inventory.json.

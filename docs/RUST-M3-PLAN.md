@@ -208,9 +208,19 @@ workstation:
 - [ ] Stale plans and protocol mismatch refused before any effect —
   disposable
 
-Carry-overs from M2 (small, fix during M3): a `rollback` straight after
-`promote --wait` can be refused until the history poller catches up;
-restaging a version overwrites its history row.
+Carry-overs from M2 — fixed 2026-11-16 (disposable-unit spike
+`staged_upgrade_promotes_verifies_and_rolls_back`):
+- `rollback` straight after `promote --wait` was refused until a 2 s
+  history poller caught up. History rows now settle from their operation on
+  every read (compare-and-set, no poller).
+- Restaging a version overwrote its history row. Each stage now adds its
+  own row; restaging the env that is serving, or the env the last promote
+  would roll back to, is refused (it would delete that env).
+- Found while testing: after a successful promote the version pin stayed
+  on the old env, so the next `restart` was refused as version drift, and
+  a rollback could expect the wrong version. The executor now re-pins the
+  version facts once `VerifyVersion` passes; promote records the version
+  it replaces at promote time.
 
 ## Owner decisions (2026-11-16)
 
