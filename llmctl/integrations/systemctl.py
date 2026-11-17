@@ -18,6 +18,7 @@ verbatim, so the sudoers entries keep matching.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -48,6 +49,28 @@ class SystemctlResult:
     def ok(self) -> bool:
         """``True`` when the command exited with status 0."""
         return self.returncode == 0
+
+
+#: Units that move between the system and the user manager (llmctl M4b
+#: step 3); always driven through ``llm-unit`` when it is installed.
+LLM_UNIT_MANAGED = frozenset({"vllm-engine", "vllm-tp", "ollama"})
+
+
+def llm_unit_for(unit: str) -> str | None:
+    """Path of ``llm-unit`` when ``unit`` is one it manages and it is
+    installed; ``None`` otherwise. ``LLM_UNIT_BIN=none`` disables it."""
+    if unit.removesuffix(".service") not in LLM_UNIT_MANAGED:
+        return None
+    env = os.environ.get("LLM_UNIT_BIN")
+    if env == "none":
+        return None
+    if env:
+        return env
+    found = shutil.which("llm-unit")
+    if found:
+        return found
+    home = os.path.expanduser("~/AI/bin/llm-unit")
+    return home if os.access(home, os.X_OK) else None
 
 
 class SystemctlRunner:
@@ -102,12 +125,19 @@ class SystemctlRunner:
         text. Never raises on non-zero exit — caller inspects ``.ok``.
         """
         argv: list[str] = []
-        if verb not in self._READ_ONLY and not user:
+        lu = None if user else llm_unit_for(unit)
+        if lu is not None:
+            # The shared engine units go through llm-unit (llmctl M4b step 3):
+            # it resolves their scope (system today, user after the flip),
+            # keeps the sudoers-exact form, and refuses a second copy.
+            argv = [lu, verb.value, unit, *extra]
+        elif verb not in self._READ_ONLY and not user:
             argv.append(self.sudo_bin)
-        argv.append(self.systemctl_bin)
-        if user:
-            argv.append("--user")
-        argv.extend([verb.value, unit, *extra])
+        if lu is None:
+            argv.append(self.systemctl_bin)
+            if user:
+                argv.append("--user")
+            argv.extend([verb.value, unit, *extra])
         if self._runner is not None:
             completed = self._runner(argv)  # type: ignore[misc]
         else:

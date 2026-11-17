@@ -93,3 +93,10 @@ def _no_live_router(monkeypatch) -> None:
     monkeypatch.delenv("ROUTER_API_KEY", raising=False)
     monkeypatch.setattr(cli_swap, "router_key", lambda env_file: None)
     monkeypatch.setattr(cli_swap, "router_up", lambda url: False)
+
+
+@pytest.fixture(autouse=True)
+def _plain_systemctl_for_engine_units(monkeypatch):
+    """Tests assert the plain systemctl/sudo argv for vllm-engine/vllm-tp/
+    ollama unless they opt into llm-unit (llmctl M4b step 3)."""
+    monkeypatch.setenv("LLM_UNIT_BIN", "none")
