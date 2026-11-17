@@ -3,6 +3,7 @@
 //! the daemon (which depends on these DTOs) and the CLI (which depends on
 //! the daemon) never form a dependency cycle.
 
+pub mod bridge;
 pub mod client;
 pub mod wire;
 

@@ -93,6 +93,7 @@ impl Service<Uri> for UnixConnector {
 #[derive(Clone)]
 pub struct ControlClient {
     http: Client<UnixConnector, Full<Bytes>>,
+    bridge: Option<Client<crate::bridge::BridgeConnector, Full<Bytes>>>,
     path: Arc<PathBuf>,
 }
 
@@ -113,12 +114,52 @@ impl ControlClient {
         });
         Ok(Self {
             http,
+            bridge: None,
             path: Arc::new(path),
         })
     }
 
+    /// A client whose transport is an SSH stdio bridge to a remote host's
+    /// agent (M3-E.1). No local socket is required or checked; the first
+    /// request spawns `ssh`, and a dead pipe re-dials on the next request.
+    pub fn connect_bridge(alias: &str) -> Self {
+        let bridge = Client::builder(TokioExecutor::new())
+            .build(crate::bridge::BridgeConnector {
+                alias: Arc::new(alias.to_string()),
+            });
+        Self {
+            http: Client::builder(TokioExecutor::new()).build(UnixConnector {
+                path: Arc::new(PathBuf::from(format!("bridge:{alias}"))),
+            }),
+            bridge: Some(bridge),
+            path: Arc::new(PathBuf::from(format!("bridge:{alias}"))),
+        }
+    }
+
+    /// True when this client talks to a remote agent over the bridge.
+    pub fn is_bridge(&self) -> bool {
+        self.bridge.is_some()
+    }
+
     pub fn socket_path(&self) -> &Path {
         &self.path
+    }
+
+    async fn request(
+        &self,
+        request: hyper::Request<Full<Bytes>>,
+    ) -> Result<hyper::Response<hyper::body::Incoming>, ClientError> {
+        match &self.bridge {
+            Some(bridge) => bridge
+                .request(request)
+                .await
+                .map_err(|e| classify_transport(&self.path, &e)),
+            None => self
+                .http
+                .request(request)
+                .await
+                .map_err(|e| classify_transport(&self.path, &e)),
+        }
     }
 
     pub async fn health(&self) -> Result<HealthResponse, ClientError> {
@@ -127,6 +168,11 @@ impl ControlClient {
 
     pub async fn status(&self) -> Result<StatusResponse, ClientError> {
         self.get_json("/v1/status").await
+    }
+
+    /// The raw inventory (read-only; adoption/ownership state included).
+    pub async fn inventory(&self) -> Result<serde_json::Value, ClientError> {
+        self.get_json("/v1/inventory").await
     }
 
     pub async fn plan(&self, req: PlanRequest) -> Result<PlanResponse, ClientError> {
@@ -237,6 +283,14 @@ impl ControlClient {
         self.get_json(&format!("/v1/operations/{id}")).await
     }
 
+    /// Resolve an idempotency key to its operation — the lost-ACK check
+    /// (M3 decision 4): after a transport error, this answers whether the
+    /// admit landed without issuing anything.
+    pub async fn operation_by_key(&self, key: &str) -> Result<OperationView, ClientError> {
+        // Keys are validated to [A-Za-z0-9._-] — URI-path safe by construction.
+        self.get_json(&format!("/v1/operations/by-key/{key}")).await
+    }
+
     pub async fn cancel(
         &self,
         id: &str,
@@ -283,11 +337,7 @@ impl ControlClient {
                 .body(Full::default())
                 .map_err(|e| ClientError::BadResponse(format!("request build failed: {e}")))?,
         };
-        let response = self
-            .http
-            .request(request)
-            .await
-            .map_err(|e| classify_transport(&self.path, &e))?;
+        let response = self.request(request).await?;
         let status = response.status();
         let bytes = response
             .into_body()

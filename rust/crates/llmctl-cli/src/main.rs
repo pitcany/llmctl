@@ -15,6 +15,8 @@ use llmctl_client::wire::{
 use llmctl_client::{ClientError, ControlClient};
 use llmctl_core::{OpKind, Plan};
 
+mod enroll;
+
 #[derive(Parser)]
 #[command(
     name = "llmctl-next",
@@ -28,6 +30,10 @@ struct Cli {
     /// Dev data directory (default: $LLMCTL_NEXT_DATA_DIR or ~/.local/state/llmctl-next-dev)
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
+    /// Route every verb to this enrolled host's agent over the SSH bridge
+    /// (M3-E.2). `host add` records enrollments.
+    #[arg(long, global = true)]
+    host: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -38,6 +44,11 @@ enum Command {
     Status {
         #[arg(long)]
         json: bool,
+        /// Every enrolled host too: local first, then each remote with
+        /// freshness (`seen 12 s ago` / `unreachable since ...` —
+        /// observations shown stale, never "stopped").
+        #[arg(long)]
+        all: bool,
     },
     /// Plan (and by default execute) running a workload. --dry-run only previews.
     Run {
@@ -152,6 +163,54 @@ enum Command {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    /// Relay stdin/stdout to the local control socket — the remote half of
+    /// the SSH bridge (M3-E.1). The workstation runs `ssh <alias>
+    /// llmctl-next bridge`; the same HTTP/1.1 API flows through the pipe.
+    Bridge,
+    /// Enrolled-host management (M3-D): install/upgrade/remove the agent
+    /// on a Mac over ssh and record the enrollment on this workstation.
+    Host {
+        #[command(subcommand)]
+        cmd: HostCmd,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum HostCmd {
+    /// Enroll a host: probe UUID/arch over ssh, provision the agent
+    /// binary (reuse / --binary / --source), bootstrap its LaunchAgent,
+    /// verify through the bridge, record it.
+    Add {
+        /// ssh alias (from ~/.ssh/config; WireGuard/LAN routes first).
+        alias: String,
+        /// Enrolled host name (default: the alias).
+        #[arg(long)]
+        name: Option<String>,
+        /// Local path to a matching agent binary to install.
+        #[arg(long)]
+        binary: Option<PathBuf>,
+        /// Local rust workspace dir: rsync + `cargo build --release` on
+        /// the host itself (M3 build strategy).
+        #[arg(long)]
+        source: Option<PathBuf>,
+    },
+    /// Swap the agent binary and restart its LaunchAgent, with a protocol
+    /// check before and after.
+    Upgrade {
+        name: String,
+        #[arg(long)]
+        binary: Option<PathBuf>,
+        #[arg(long)]
+        source: Option<PathBuf>,
+    },
+    /// Remove the agent (LaunchAgent, binary; data dir kept unless --purge).
+    Remove {
+        name: String,
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Show enrolled hosts with agent version, protocol and last-seen.
+    List,
 }
 
 #[derive(Subcommand, Clone)]
@@ -219,7 +278,40 @@ fn socket_path(cli: &Cli) -> PathBuf {
 }
 
 fn connect(cli: &Cli) -> Result<ControlClient, ClientError> {
+    if let Some(name) = &cli.host {
+        let hosts = enroll::load_hosts();
+        let record = enroll::find_host(&hosts, name).ok_or_else(|| {
+            ClientError::Unreachable {
+                path: name.clone().into(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("no enrolled host {name:?}; `llmctl-next host add` first"),
+                ),
+            }
+        })?;
+        return Ok(ControlClient::connect_bridge(&record.ssh_alias));
+    }
     ControlClient::connect(socket_path(cli))
+}
+
+/// Mutations require a protocol match; reads (status, logs, ops) still
+/// work across versions (M3-E.3). The named error is PROTOCOL_MISMATCH.
+async fn ensure_protocol(client: &ControlClient) -> Result<(), ClientError> {
+    let health = client.health().await?;
+    if !health.supported_protocols.contains(&PROTOCOL_VERSION) {
+        return Err(ClientError::Api {
+            status: 409,
+            code: codes::PROTOCOL_MISMATCH.into(),
+            message: format!(
+                "agent {} speaks protocol {} (supported: {:?}); this client speaks \
+                 {PROTOCOL_VERSION}. Mutations refused — status/logs still work. \
+                 `llmctl-next host upgrade` the agent.",
+                health.daemon_version, health.protocol, health.supported_protocols
+            ),
+            details: None,
+        });
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -277,7 +369,13 @@ impl From<ClientError> for CliError {
 
 async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
     match command {
-        Command::Status { json } => cmd_status(cli, json).await,
+        Command::Status { json, all } => {
+            if all {
+                cmd_status_all(cli, json).await
+            } else {
+                cmd_status(cli, json).await
+            }
+        }
         Command::Run {
             name,
             dry_run,
@@ -333,6 +431,108 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             llmctl_daemon::run_daemon(cli.data_dir.clone(), socket)
                 .await
                 .map_err(CliError::Daemon)?;
+            Ok(0)
+        }
+        Command::Bridge => cmd_bridge(cli).await,
+        Command::Host { cmd } => cmd_host(cli, cmd).await,
+    }
+}
+
+/// The agent-side relay: local stdin/stdout <-> the control socket. Pure
+/// byte pipe; HTTP framing stays with the client and daemon (decision 1).
+async fn cmd_bridge(cli: &Cli) -> Result<u8, CliError> {
+    use tokio::io::AsyncWriteExt as _;
+    let path = socket_path(cli);
+    let mut socket = tokio::net::UnixStream::connect(&path).await.map_err(|e| {
+        CliError::Daemon(format!(
+            "bridge: no agent socket at {}: {e}",
+            path.display()
+        ))
+    })?;
+    let (mut socket_rd, mut socket_wr) = socket.split();
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+    // EOF on stdin (client gone) half-closes the socket; the daemon then
+    // finishes its answer and closes, which ends the reader. Only a
+    // *reader* error fails the relay — an EOF on either side is the
+    // normal end.
+    let to_socket = async {
+        let copied = tokio::io::copy(&mut stdin, &mut socket_wr).await;
+        let _ = socket_wr.shutdown().await;
+        copied
+    };
+    let (to_res, from_res) = tokio::join!(to_socket, tokio::io::copy(&mut socket_rd, &mut stdout));
+    if let Err(e) = from_res {
+        eprintln!("bridge: socket -> stdout: {e}");
+        return Ok(1);
+    }
+    if let Err(e) = to_res {
+        eprintln!("bridge: stdin -> socket: {e}");
+        return Ok(1);
+    }
+    let _ = stdout.flush().await;
+    Ok(0)
+}
+
+async fn cmd_host(cli: &Cli, cmd: HostCmd) -> Result<u8, CliError> {
+    let _ = cli;
+    match cmd {
+        HostCmd::Add {
+            alias,
+            name,
+            binary,
+            source,
+        } => {
+            let record = enroll::host_add(&alias, name, binary, source)
+                .await
+                .map_err(CliError::Daemon)?;
+            println!(
+                "enrolled {} (uuid {}, {} via {}): agent {} protocol {} — bridge OK",
+                record.name,
+                &record.io_platform_uuid[..8.min(record.io_platform_uuid.len())],
+                record.arch,
+                record.ssh_alias,
+                record.agent_version.as_deref().unwrap_or("?"),
+                record
+                    .protocol
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".into()),
+            );
+            Ok(0)
+        }
+        HostCmd::Upgrade {
+            name,
+            binary,
+            source,
+        } => {
+            enroll::host_upgrade(&name, binary, source)
+                .await
+                .map_err(CliError::Daemon)?;
+            Ok(0)
+        }
+        HostCmd::Remove { name, purge } => {
+            enroll::host_remove(&name, purge).map_err(CliError::Daemon)?;
+            Ok(0)
+        }
+        HostCmd::List => {
+            let hosts = enroll::load_hosts();
+            if hosts.hosts.is_empty() {
+                println!("no enrolled hosts (see `llmctl-next host add`)");
+                return Ok(0);
+            }
+            for h in &hosts.hosts {
+                println!(
+                    "{:<12} {:<8} alias {:<14} agent {:<8} protocol {:<3} seen {}",
+                    h.name,
+                    h.arch,
+                    h.ssh_alias,
+                    h.agent_version.as_deref().unwrap_or("?"),
+                    h.protocol.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
+                    h.last_seen
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "never".into()),
+                );
+            }
             Ok(0)
         }
     }
@@ -422,8 +622,117 @@ async fn cmd_status(cli: &Cli, json: bool) -> Result<u8, CliError> {
     Ok(0)
 }
 
+/// `status --all`: local host first, then every enrolled host, each with
+/// freshness. An unreachable host shows its last cached observations
+/// marked STALE — never as "stopped" (M3-E.2).
+async fn cmd_status_all(cli: &Cli, json: bool) -> Result<u8, CliError> {
+    use llmctl_client::wire::StatusResponse;
+
+    fn ago(t: chrono::DateTime<chrono::Utc>) -> String {
+        let secs = (chrono::Utc::now() - t).num_seconds().max(0);
+        if secs < 60 {
+            format!("{secs} s ago")
+        } else if secs < 3600 {
+            format!("{} min ago", secs / 60)
+        } else {
+            format!("{} h ago", secs / 3600)
+        }
+    }
+
+    fn block(label: &str, fresh: Option<&StatusResponse>, cached: Option<StatusResponse>, unreachable_since: Option<chrono::DateTime<chrono::Utc>>) {
+        match (fresh, cached) {
+            (Some(s), _) => {
+                println!("host {label} ({}) · revision {} · seen {}", s.platform, s.inventory_revision, ago(s.generated_at));
+                for w in &s.workloads {
+                    println!(
+                        "  {:<12} {:<8} {:<8} serves={:<24} intent={:<12} {}",
+                        w.name,
+                        w.process,
+                        w.readiness,
+                        w.served_model.as_deref().unwrap_or("-"),
+                        w.intent,
+                        w.observed_at.map(|t| ago(t)).unwrap_or_else(|| "never".into())
+                    );
+                }
+            }
+            (None, Some(s)) => {
+                println!(
+                    "host {label} UNREACHABLE since {} — last observations (STALE):",
+                    unreachable_since
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                        .unwrap_or_else(|| "?".into())
+                );
+                for w in &s.workloads {
+                    println!(
+                    "  {:<12} {:<8} {:<8} serves={:<24} intent={:<12} {}  [stale]",
+                    w.name,
+                    w.process,
+                    w.readiness,
+                    w.served_model.as_deref().unwrap_or("-"),
+                    w.intent,
+                    w.observed_at.map(|t| ago(t)).unwrap_or_else(|| "never".into())
+                );
+                }
+            }
+            (None, None) => {
+                println!("host {label} UNREACHABLE (no cached observations)");
+            }
+        }
+    }
+
+    // Local first (a missing local daemon is reported, not fatal).
+    let local = match ControlClient::connect(socket_path(cli)) {
+        Ok(c) => c.status().await.ok(),
+        Err(_) => None,
+    };
+    let local_label = local
+        .as_ref()
+        .map(|s| s.host.clone())
+        .unwrap_or_else(|| "local (daemon down)".into());
+    block(&local_label, local.as_ref(), None, None);
+
+    let mut hosts = enroll::load_hosts();
+    let mut dirty = false;
+    for h in &mut hosts.hosts {
+        let client = ControlClient::connect_bridge(&h.ssh_alias);
+        match client.status().await {
+            Ok(status) => {
+                h.last_seen = Some(chrono::Utc::now());
+                dirty = true;
+                if let Some(parent) = enroll::status_cache_path(&h.name).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(
+                    enroll::status_cache_path(&h.name),
+                    serde_json::to_string(&status).unwrap_or_default(),
+                );
+                block(&h.name, Some(&status), None, None);
+            }
+            Err(e) => {
+                let cached = std::fs::read_to_string(enroll::status_cache_path(&h.name))
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<StatusResponse>(&t).ok());
+                block(&h.name, None, cached, h.last_seen);
+                eprintln!("  ({e})");
+            }
+        }
+    }
+    if dirty {
+        let _ = enroll::save_hosts(&hosts);
+    }
+    if json {
+        // JSON mode: one object per host is printed above as text; a
+        // machine-readable --all lands with the remote-status tooling.
+        eprintln!("note: --all --json is not implemented yet");
+    }
+    Ok(0)
+}
+
 async fn cmd_adopt(cli: &Cli, req: AdoptRequest, json: bool) -> Result<u8, CliError> {
     let client = connect(cli)?;
+    if req.confirm_digest.is_some() {
+        ensure_protocol(&client).await?;
+    }
     if req.confirm_digest.is_none() {
         let preview = client.adoption_preview(&req).await?;
         if json {
@@ -517,6 +826,7 @@ async fn cmd_mutate(
     key: Option<String>,
 ) -> Result<u8, CliError> {
     let client = connect(cli)?;
+    ensure_protocol(&client).await?;
     // Build the plan against fresh observations; the printed plan is what a
     // confirmation would refer to.
     let plan_resp = client
@@ -545,16 +855,62 @@ async fn cmd_mutate(
                 .unwrap_or_default()
         )
     });
-    let admit = client
+    let admit = match client
         .admit(AdmitRequest {
             protocol: PROTOCOL_VERSION,
-            idempotency_key,
+            idempotency_key: idempotency_key.clone(),
             kind,
             workload: name.to_string(),
             expected_revision: Some(plan_resp.revision),
             expected_stop_targets: Some(plan_resp.stop_targets.clone()),
         })
-        .await?;
+        .await
+    {
+        Ok(admit) => admit,
+        // Lost-ACK rule (M3 decision 4): a transport error after the
+        // request was written is ambiguous, never "failed". Ask the agent
+        // for the key before concluding anything; if the admit landed we
+        // resume that operation; if the agent never saw it we retry once
+        // with the same key (idempotency makes that safe).
+        Err(e @ (ClientError::Disconnected(_) | ClientError::Unreachable { .. })) => {
+            eprintln!("transport error during admit ({e}); resolving by key {idempotency_key}");
+            let retry_client = connect(cli)?;
+            match retry_client.operation_by_key(&idempotency_key).await {
+                Ok(op) => {
+                    println!(
+                        "the admit landed: operation {} ({}) — no second effect",
+                        op.id, op.idempotency_key
+                    );
+                    llmctl_client::wire::AdmitResponse {
+                        operation: op,
+                        replayed: true,
+                    }
+                }
+                Err(ClientError::Api { code, .. }) if code == codes::UNKNOWN_OPERATION => {
+                    println!("the admit never reached the agent; retrying with the same key");
+                    retry_client
+                        .admit(AdmitRequest {
+                            protocol: PROTOCOL_VERSION,
+                            idempotency_key: idempotency_key.clone(),
+                            kind,
+                            workload: name.to_string(),
+                            expected_revision: Some(plan_resp.revision),
+                            expected_stop_targets: Some(plan_resp.stop_targets.clone()),
+                        })
+                        .await?
+                }
+                Err(e2) => {
+                    return Err(CliError::Client(ClientError::Disconnected(format!(
+                        "cannot resolve whether the operation landed (key \
+                         {idempotency_key}): first {e}; then {e2}. The effect is \
+                         ambiguous — re-run with `--key {idempotency_key}` once \
+                         the host is reachable."
+                    ))));
+                }
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
     let op = admit.operation;
     if admit.replayed {
         println!(
@@ -670,6 +1026,7 @@ fn printable(text: &str) -> std::borrow::Cow<'_, str> {
 
 async fn cmd_own(cli: &Cli, name: &str) -> Result<u8, CliError> {
     let client = connect(cli)?;
+    ensure_protocol(&client).await?;
     let resp = client.own(name).await?;
     println!(
         "own: {} → {} (previous: {}, digest {})",
@@ -690,6 +1047,7 @@ async fn cmd_own(cli: &Cli, name: &str) -> Result<u8, CliError> {
 
 async fn cmd_release(cli: &Cli, name: &str) -> Result<u8, CliError> {
     let client = connect(cli)?;
+    ensure_protocol(&client).await?;
     let resp = client.release(name).await?;
     println!(
         "release: {} back to {} (revision {})",
@@ -714,6 +1072,7 @@ async fn cmd_version(cli: &Cli, name: &str) -> Result<u8, CliError> {
 
 async fn cmd_upgrade(cli: &Cli, cmd: UpgradeCmd) -> Result<u8, CliError> {
     let client = connect(cli)?;
+    ensure_protocol(&client).await?;
     match cmd {
         UpgradeCmd::Stage { name, version } => {
             let resp = client.stage(&name, &version).await?;
