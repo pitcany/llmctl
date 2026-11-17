@@ -160,6 +160,73 @@ async fn run_to_success(d: &DaemonGuard, workload: &str, key: &str) {
     assert_eq!(op.status, OpStatus::Succeeded, "{op:?}");
 }
 
+// ---- M3: remote transport primitives ----------------------------------------
+
+/// The idempotency-key lookup closes the lost-ACK window: a client that
+/// lost the admit response finds the operation by key, and an unknown key
+/// is a clean 404 (the admit never landed — safe to retry).
+#[tokio::test]
+async fn operations_resolve_by_idempotency_key() {
+    let d = spawn_daemon();
+    let client = d.client();
+    run_to_success(&d, "coder", "lost-ack-1").await;
+
+    let found = client.operation_by_key("lost-ack-1").await.expect("by key");
+    assert_eq!(found.idempotency_key, "lost-ack-1");
+    assert_eq!(found.status, OpStatus::Succeeded);
+
+    let err = client.operation_by_key("never-admitted").await.unwrap_err();
+    match &err {
+        ClientError::Api { code, .. } => assert_eq!(code, codes::UNKNOWN_OPERATION),
+        other => panic!("expected UNKNOWN_OPERATION, got {other:?}"),
+    }
+}
+
+/// The agent-side `bridge` subcommand relays its stdin/stdout to the
+/// control socket verbatim: a raw HTTP request through the pipe gets the
+/// daemon's real answer (the ssh half of the transport is exercised on
+/// the real Mac in the M3 drills).
+#[tokio::test]
+async fn bridge_subcommand_relays_http_to_the_socket() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let d = spawn_daemon();
+    let request = "GET /v1/health HTTP/1.1\r\nhost: bridge-test\r\nconnection: close\r\n\r\n";
+
+    // A fresh relay per attempt; under full-suite load the daemon can be
+    // momentarily slow, which must surface as a retry, not a flake.
+    let mut last = String::new();
+    for _ in 0..3 {
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+            .arg("--socket")
+            .arg(&d.socket)
+            .arg("bridge")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn bridge");
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        stdin.write_all(request.as_bytes()).await.unwrap();
+        stdin.flush().await.unwrap();
+        drop(stdin); // EOF: the relay half-closes and drains the answer
+
+        let mut response = String::new();
+        stdout.read_to_string(&mut response).await.unwrap();
+        let _ = child.wait().await;
+        if response.starts_with("HTTP/1.1 200") {
+            assert!(
+                response.contains("\"host\":\"workstation\""),
+                "{response}"
+            );
+            return;
+        }
+        last = response;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!("bridge relay never answered: {last:?}");
+}
+
 // ---- batch criterion 1: a second client sees the same operation ----------
 
 #[tokio::test]
