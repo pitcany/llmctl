@@ -5,10 +5,17 @@ Parent: [RUST-M4-PLAN.md](RUST-M4-PLAN.md) (M4b step 3, owner decision 4:
 llmctl-next; no system-scope adapter, no new sudo path).
 Progress so far: [RUST-M4B-PROGRESS-2026-11-17.md](RUST-M4B-PROGRESS-2026-11-17.md).
 
-**Status: decisions taken 2026-11-17 (all as recommended; 5 = mask).
-Phase 3a in progress — `llm-unit` installed (AI repo `c9009f7c`, 10 tests,
-scopes file at system); audit baseline 136 raw calls in ~40 files + the five
-variable-unit programs.**
+**Status (2026-11-17, evening): phase 3a code done — `llm-unit audit`
+clean.** Wrapper: AI repo `c9009f7c` + `c03d0c1d` (12 tests; symlinked into
+`~/.local/bin` so user services find it). Programs: llm-router `0c103ac`
+(+ notes `cb34c62`), longjob `e32e188`, hf2local `d161ba59`, Python llmctl
+`dd24bcb`, llmctl-stack `f194910e`. Scripts: 41 files rewritten
+(`c03d0c1d`; `~/.local/bin/llm-verify` edited in place, not in a repo); the
+three system-unit installers carry `llm-unit: system-only`. Not yet live:
+the running llm-router (reads `router.yaml` at start) and the deployed
+Python llmctl (`~/AI/.venv`) — both behaviour-identical, activated at the
+start of the 3b window (or earlier on request). Next: 3b prep — user unit
+files + `unit-scope-flip.sh`, tested without a window.
 
 ## Why the plan needs this step
 
