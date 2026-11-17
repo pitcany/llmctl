@@ -227,6 +227,73 @@ pub fn plan_stop(
     })
 }
 
+/// Build an unload plan (M4b step 1): one engine-level unload of `model`
+/// from a running vendor service. No intent change (the service stays up)
+/// and no rollback (restoring would mean reloading the model, which is
+/// not what anyone asked for). Refused for engines without an unload, for
+/// the service identity itself, and for a target not observed running.
+pub fn plan_unload(
+    inventory: &crate::inventory::HostInventory,
+    observations: &[Observation],
+    target: &WorkloadName,
+    model: &str,
+) -> CoreResult<Plan> {
+    let def = inventory
+        .workload(target)
+        .ok_or_else(|| CoreError::UnknownWorkload(target.to_string()))?;
+    if !def.authority.supports_lifecycle() {
+        return Err(CoreError::InvalidConfig {
+            workload: target.to_string(),
+            reason: "control authority is observe-only; lifecycle ownership not proven".into(),
+        });
+    }
+    if !def.engine_kind.has_engine_unload() {
+        return Err(CoreError::InvalidConfig {
+            workload: target.to_string(),
+            reason: format!(
+                "engine kind {} has no engine-level unload; stop the workload instead",
+                def.engine_kind
+            ),
+        });
+    }
+    let model = model.trim();
+    if model.is_empty() || model == "ollama" || model == "lmstudio" {
+        return Err(CoreError::InvalidConfig {
+            workload: target.to_string(),
+            reason: format!("unload needs one model name, not {model:?}"),
+        });
+    }
+    let state = observations
+        .iter()
+        .find(|o| &o.workload == target)
+        .map(|o| o.process);
+    if state != Some(ProcessState::Running) {
+        return Err(CoreError::NotRunning {
+            workload: target.to_string(),
+            state: match state {
+                Some(ProcessState::Stopped) => "stopped",
+                Some(ProcessState::Unknown) => "state unknown",
+                Some(ProcessState::Running) | None => "not observed",
+            }
+            .into(),
+        });
+    }
+    Ok(Plan {
+        id: OperationId::generate(),
+        kind: OpKind::Unload,
+        target: target.clone(),
+        revision: inventory.revision,
+        expected_model: def.model.clone(),
+        affected_gpus: Vec::new(),
+        steps: vec![PlanStep::UnloadModel {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+            model: model.to_string(),
+        }],
+        rollback: Vec::new(),
+    })
+}
+
 /// Build an upgrade (promote) plan (plan D.5): stop, swap the owned
 /// definition to `next`, start, await readiness, verify the served model,
 /// then verify the environment itself reports the target versions. Failure

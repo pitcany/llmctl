@@ -70,12 +70,20 @@ pub enum Effect {
         model: String,
         gpus: Vec<GpuId>,
     },
+    /// Engine-level unload of one model (vendor services, M4b).
+    UnloadModel {
+        workload: WorkloadName,
+        unit: UnitName,
+        model: String,
+    },
 }
 
 impl Effect {
     pub fn unit(&self) -> &UnitName {
         match self {
-            Effect::StopUnit { unit, .. } | Effect::StartUnit { unit, .. } => unit,
+            Effect::StopUnit { unit, .. }
+            | Effect::StartUnit { unit, .. }
+            | Effect::UnloadModel { unit, .. } => unit,
         }
     }
 }
@@ -317,6 +325,7 @@ impl FakeEngine {
                     let actual = match effect {
                         Effect::StopUnit { .. } => "stop",
                         Effect::StartUnit { .. } => "start",
+                        Effect::UnloadModel { .. } => "unload",
                     };
                     k == actual
                 })
@@ -399,6 +408,11 @@ impl Engine for FakeEngine {
             dir: self.dir.clone(),
         };
         Box::pin(async move {
+            if matches!(effect, Effect::UnloadModel { .. }) {
+                return Err(EngineError::Unsupported(
+                    "the fake engine has no engine-level unload".into(),
+                ));
+            }
             let faults = this.take_faults().await.unwrap_or_default();
             let fail_mode = Self::matching_rule(&faults, &effect)
                 .map(|idx| (idx, faults.fail_effects[idx].mode.clone()));
@@ -440,6 +454,7 @@ impl Engine for FakeEngine {
                     entry.model = Some(model.clone());
                     format!("started:{}:{}:{}", effect.unit(), workload, world.next_pid)
                 }
+                Effect::UnloadModel { .. } => unreachable!("refused above"),
             };
             this.write_world(&world).await?;
             // The effect is durable in the world now. If the fault wanted to

@@ -35,6 +35,12 @@ pub enum EngineKind {
 }
 
 impl EngineKind {
+    /// Vendor services that host many models and can unload one without
+    /// stopping (M4b): the planner refuses `unload` for every other kind.
+    pub fn has_engine_unload(&self) -> bool {
+        matches!(self, EngineKind::Ollama | EngineKind::LmStudio)
+    }
+
     /// The placeholder stored when an inventory predates `engine_kind`.
     pub fn legacy() -> Self {
         EngineKind::Other("legacy".into())

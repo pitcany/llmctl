@@ -296,6 +296,11 @@ impl OpManager {
                     "upgrade plans are built by `upgrade promote`".into(),
                 ))
             }
+            OpKind::Unload => {
+                return Err(OpsError::Unsupported(
+                    "unload plans name a model; use `unload <workload> <model>`".into(),
+                ))
+            }
         }
         .map_err(plan_error)?;
         self.guard_gpus(&inv, &plan).await?;
@@ -404,16 +409,27 @@ impl OpManager {
             .map_err(|e| OpsError::Engine(e.to_string()))?;
         let plan = match (&params.kind, params.plan_override) {
             (OpKind::Upgrade, Some(prebuilt)) => prebuilt,
-            (OpKind::Upgrade, None) => {
-                return Err(OpsError::Invalid(
-                    "upgrade admission requires its prebuilt plan".into(),
-                ))
+            // Re-planned against the observations taken under the admission
+            // lock: a service that stopped since the caller planned refuses.
+            (OpKind::Unload, Some(prebuilt)) => {
+                let model = match prebuilt.steps.as_slice() {
+                    [PlanStep::UnloadModel { model, .. }] => model.clone(),
+                    _ => return Err(OpsError::Invalid("malformed unload plan".into())),
+                };
+                llmctl_core::plan_unload(&inv, &observations, &name, &model)
+                    .map_err(plan_error)?
+            }
+            (OpKind::Upgrade | OpKind::Unload, None) => {
+                return Err(OpsError::Invalid(format!(
+                    "{} admission requires its prebuilt plan",
+                    params.kind
+                )))
             }
             (kind, _) => match kind {
                 OpKind::Run => llmctl_core::plan_run(&inv, &observations, &name),
                 OpKind::Stop => llmctl_core::plan_stop(&inv, &observations, &name),
                 OpKind::Restart => llmctl_core::plan_restart(&inv, &observations, &name),
-                OpKind::Upgrade => unreachable!(),
+                OpKind::Upgrade | OpKind::Unload => unreachable!(),
             }
             .map_err(plan_error)?,
         };
@@ -678,6 +694,23 @@ impl OpManager {
                         unit: unit.clone(),
                         model,
                         gpus,
+                    },
+                    applied,
+                )
+                .await
+            }
+            PlanStep::UnloadModel {
+                workload,
+                unit,
+                model,
+            } => {
+                self.apply_effect(
+                    row,
+                    index,
+                    Effect::UnloadModel {
+                        workload: workload.clone(),
+                        unit: unit.clone(),
+                        model: model.clone(),
                     },
                     applied,
                 )
@@ -982,6 +1015,11 @@ impl OpManager {
                 // Restoring the *version* is what ApplyDefinition in this
                 // rollback already did; no separate action.
                 PlanStep::VerifyVersion { .. } => Ok(None),
+                // Never planned as a restoration step (an unload has no
+                // rollback); refuse rather than guess.
+                PlanStep::UnloadModel { .. } => {
+                    Err("an unload is not a restoration step".to_string())
+                }
             };
             match outcome {
                 Ok(identity) => recovery_steps.push(json!({

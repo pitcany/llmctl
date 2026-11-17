@@ -17,6 +17,9 @@ pub enum OpKind {
     /// Staged version promotion: stop, swap the definition, start, verify
     /// readiness, served identity and the version itself (plan D).
     Upgrade,
+    /// Engine-level unload of one model from a vendor service (Ollama, LM
+    /// Studio): the process keeps running (M4b step 1).
+    Unload,
 }
 
 impl std::fmt::Display for OpKind {
@@ -26,6 +29,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Stop => "stop",
             OpKind::Restart => "restart",
             OpKind::Upgrade => "upgrade",
+            OpKind::Unload => "unload",
         })
     }
 }
@@ -86,6 +90,13 @@ pub enum PlanStep {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         binary_check: Option<BinaryCheck>,
     },
+    /// External: ask the engine to unload one model and confirm through its
+    /// loaded list (vendor services only).
+    UnloadModel {
+        workload: WorkloadName,
+        unit: UnitName,
+        model: String,
+    },
 }
 
 /// A binary's own version self-check (M4a): run `path arg`, the first
@@ -106,7 +117,8 @@ impl PlanStep {
             | PlanStep::AwaitReadiness { workload, .. }
             | PlanStep::VerifyServedModel { workload, .. }
             | PlanStep::ApplyDefinition { workload, .. }
-            | PlanStep::VerifyVersion { workload, .. } => workload,
+            | PlanStep::VerifyVersion { workload, .. }
+            | PlanStep::UnloadModel { workload, .. } => workload,
         }
     }
 
@@ -146,6 +158,9 @@ impl PlanStep {
                 }
                 format!("verify {workload} runs {}", what.join(","))
             }
+            PlanStep::UnloadModel {
+                workload, model, ..
+            } => format!("unload {model} from {workload}"),
         }
     }
 }

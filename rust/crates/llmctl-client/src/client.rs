@@ -183,6 +183,20 @@ impl ControlClient {
         self.post_json("/v1/operations", &req).await
     }
 
+    pub async fn unload(
+        &self,
+        req: &crate::wire::UnloadRequest,
+    ) -> Result<AdmitResponse, ClientError> {
+        self.post_json("/v1/unloads", req).await
+    }
+
+    pub async fn engine_report(
+        &self,
+        workload: &str,
+    ) -> Result<crate::wire::EngineReport, ClientError> {
+        self.get_json(&format!("/v1/workloads/{workload}/engine")).await
+    }
+
     pub async fn adoption_preview(
         &self,
         req: &AdoptRequest,

@@ -279,6 +279,27 @@ impl Engine for SystemdEngine {
                         identity: format!("stopped:{unit}:{workload}"),
                     })
                 }
+                Effect::UnloadModel { workload, model, .. } => {
+                    let ep = this.endpoint(&unit)?;
+                    crate::engine_api::unload(
+                        ep.protocol,
+                        ep.port,
+                        model,
+                        this.effect_timeout,
+                        Duration::from_secs(30),
+                    )
+                    .await
+                    .map_err(|e| match e {
+                        crate::engine_api::UnloadError::Unsupported(_)
+                        | crate::engine_api::UnloadError::ServiceIdentity(_) => {
+                            EngineError::Unsupported(e.to_string())
+                        }
+                        other => EngineError::Io(other.to_string()),
+                    })?;
+                    Ok(EffectOutcome {
+                        identity: format!("unloaded:{unit}:{workload}:{model}"),
+                    })
+                }
             }
         })
     }

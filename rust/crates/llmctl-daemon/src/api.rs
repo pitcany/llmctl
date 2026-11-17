@@ -47,6 +47,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/upgrades", post(upgrade_list))
         .route("/v1/installs/plan", post(install_plan))
         .route("/v1/workloads/{name}/version", get(workload_version))
+        .route("/v1/workloads/{name}/engine", get(workload_engine))
+        .route("/v1/unloads", post(admit_unload))
         .route("/v1/logs", post(logs))
         .with_state(state)
 }
@@ -289,6 +291,94 @@ async fn admit_operation(
         replayed,
     };
     Ok((status, Json(body)).into_response())
+}
+
+async fn admit_unload(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::UnloadRequest>,
+) -> Result<Response, ApiError> {
+    // A provisional plan carries the model; admission re-plans it against
+    // observations taken under its lock (a stopped service refuses).
+    let name = llmctl_core::WorkloadName::new(&req.workload)
+        .map_err(|e| crate::ops::OpsError::Invalid(e.to_string()))?;
+    let inv = state.ops.inventory().await;
+    let def = inv
+        .workload(&name)
+        .ok_or_else(|| crate::ops::OpsError::UnknownWorkload(req.workload.clone()))?;
+    let provisional = llmctl_core::Plan {
+        id: llmctl_core::OperationId::generate(),
+        kind: llmctl_core::OpKind::Unload,
+        target: name.clone(),
+        revision: inv.revision,
+        expected_model: def.model.clone(),
+        affected_gpus: Vec::new(),
+        steps: vec![llmctl_core::PlanStep::UnloadModel {
+            workload: name.clone(),
+            unit: def.unit.clone(),
+            model: req.model.clone(),
+        }],
+        rollback: Vec::new(),
+    };
+    let outcome = state
+        .ops
+        .admit(crate::ops::AdmitParams {
+            protocol: req.protocol,
+            idempotency_key: req.idempotency_key,
+            kind: llmctl_core::OpKind::Unload,
+            workload: req.workload,
+            expected_revision: None,
+            expected_stop_targets: None,
+            plan_override: Some(provisional),
+        })
+        .await?;
+    let (row, replayed, status) = match outcome {
+        AdmitOutcome::Admitted(row) => (row, false, StatusCode::ACCEPTED),
+        AdmitOutcome::Replayed(row) => (row, true, StatusCode::OK),
+    };
+    Ok((
+        status,
+        Json(AdmitResponse {
+            operation: operation_view(&row),
+            replayed,
+        }),
+    )
+        .into_response())
+}
+
+/// Engine-level view of one workload: readiness, servable and loaded
+/// models (M4b step 1). Read-only.
+async fn workload_engine(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<llmctl_client::wire::EngineReport>, ApiError> {
+    use crate::engine_api::EngineProtocol;
+    use crate::probe_http::HttpProbe;
+    let wl = llmctl_core::WorkloadName::new(&name)
+        .map_err(|e| crate::ops::OpsError::Invalid(e.to_string()))?;
+    let inv = state.ops.inventory().await;
+    let def = inv
+        .workload(&wl)
+        .ok_or_else(|| crate::ops::OpsError::UnknownWorkload(name.clone()))?;
+    let protocol = EngineProtocol::for_kind(&def.engine_kind);
+    let ans = crate::engine_api::probe(protocol, def.port, std::time::Duration::from_secs(3)).await;
+    let (state_s, servable) = match ans.probe {
+        HttpProbe::Models(ids) => ("ready".to_string(), ids),
+        HttpProbe::Unreachable => ("unreachable".to_string(), Vec::new()),
+        HttpProbe::Status(c) => (format!("status {c}"), Vec::new()),
+        HttpProbe::Garbled => ("garbled".to_string(), Vec::new()),
+    };
+    Ok(Json(llmctl_client::wire::EngineReport {
+        workload: name,
+        engine_kind: def.engine_kind.to_string(),
+        protocol: protocol.name().into(),
+        state: state_s,
+        servable: servable
+            .into_iter()
+            .filter(|m| Some(m.as_str()) != protocol.service_identity())
+            .collect(),
+        loaded: ans.loaded,
+        supports_unload: def.engine_kind.has_engine_unload(),
+    }))
 }
 
 async fn list_operations(

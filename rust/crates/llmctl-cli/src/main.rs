@@ -70,6 +70,23 @@ enum Command {
         #[arg(long)]
         key: Option<String>,
     },
+    /// Unload one model from a running vendor service (Ollama, LM Studio)
+    /// without stopping it; confirmed through the engine's loaded list.
+    Unload {
+        name: String,
+        model: String,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// What a workload's engine reports: readiness, servable and loaded
+    /// models.
+    Engine {
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Restart a running workload: stop, start, await readiness and
     /// re-verify the served model. Refused when it is not running.
     Restart {
@@ -414,6 +431,13 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Stop { name, wait, key } => {
             cmd_mutate(cli, OpKind::Stop, &name, false, wait, key).await
         }
+        Command::Unload {
+            name,
+            model,
+            wait,
+            key,
+        } => cmd_unload(cli, &name, &model, wait, key).await,
+        Command::Engine { name, json } => cmd_engine(cli, &name, json).await,
         Command::Restart {
             name,
             dry_run,
@@ -1254,6 +1278,84 @@ async fn cmd_ack(cli: &Cli, id: &str) -> Result<u8, CliError> {
     let op = client.acknowledge(id, None).await?;
     println!("acknowledged {} ({:?})", op.id, op.status);
     Ok(0)
+}
+
+async fn cmd_unload(
+    cli: &Cli,
+    name: &str,
+    model: &str,
+    wait: bool,
+    key: Option<String>,
+) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    ensure_protocol(&client).await?;
+    let idempotency_key = key.unwrap_or_else(|| {
+        format!(
+            "unload-{name}-{model}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or_default()
+        )
+    });
+    let req = llmctl_client::wire::UnloadRequest {
+        protocol: PROTOCOL_VERSION,
+        idempotency_key: idempotency_key.clone(),
+        workload: name.to_string(),
+        model: model.to_string(),
+    };
+    let admit = match client.unload(&req).await {
+        Ok(a) => a,
+        // Lost-ACK rule, as for run/stop: resolve by key before retrying.
+        Err(e @ (ClientError::Disconnected(_) | ClientError::Unreachable { .. })) => {
+            eprintln!("transport error during admit ({e}); resolving by key {idempotency_key}");
+            let retry = connect(cli)?;
+            match retry.operation_by_key(&idempotency_key).await {
+                Ok(op) => llmctl_client::wire::AdmitResponse {
+                    operation: op,
+                    replayed: true,
+                },
+                Err(ClientError::Api { code, .. }) if code == codes::UNKNOWN_OPERATION => {
+                    retry.unload(&req).await?
+                }
+                Err(e2) => return Err(CliError::Client(e2)),
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let op = admit.operation;
+    if admit.replayed {
+        println!("replaying existing operation {} (same idempotency key)", op.id);
+    } else {
+        println!("admitted operation {} ({})", op.id, op.idempotency_key);
+    }
+    if !wait {
+        println!("progress: llmctl-next op {} --watch", op.id);
+        return Ok(0);
+    }
+    watch_and_report(&client, &op.id).await
+}
+
+async fn cmd_engine(cli: &Cli, name: &str, json: bool) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    let r = client.engine_report(name).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+        return Ok(0);
+    }
+    println!("{} ({}, {} protocol): {}", r.workload, r.engine_kind, r.protocol, r.state);
+    if !r.servable.is_empty() {
+        println!("  servable: {}", r.servable.join(", "));
+    }
+    match &r.loaded {
+        Some(l) if l.is_empty() => println!("  loaded:   (none)"),
+        Some(l) => println!("  loaded:   {}", l.join(", ")),
+        None => {}
+    }
+    if r.supports_unload {
+        println!("  unload:   llmctl-next unload {} <model>", r.workload);
+    }
+    Ok(if r.state == "ready" { 0 } else { 1 })
 }
 
 async fn watch_and_report(client: &ControlClient, id: &str) -> Result<u8, CliError> {

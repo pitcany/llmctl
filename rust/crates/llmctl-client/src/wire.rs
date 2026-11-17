@@ -319,6 +319,32 @@ pub struct AdmitRequest {
     pub expected_stop_targets: Option<Vec<String>>,
 }
 
+/// Engine-level unload of one model from a vendor service (M4b step 1).
+/// Admitted like any operation; the key makes a retry safe.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnloadRequest {
+    pub protocol: u32,
+    pub idempotency_key: String,
+    pub workload: String,
+    pub model: String,
+}
+
+/// What a workload's engine reports right now (M4b step 1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineReport {
+    pub workload: String,
+    pub engine_kind: String,
+    /// `openai`, `ollama` or `lmstudio`.
+    pub protocol: String,
+    /// `ready`, `unreachable`, `status <code>` or `garbled`.
+    pub state: String,
+    /// Models the engine can serve (vendor services: pulled/downloaded).
+    pub servable: Vec<String>,
+    /// Models in memory now; `None` when the protocol cannot say.
+    pub loaded: Option<Vec<String>>,
+    pub supports_unload: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdmitResponse {
     pub operation: OperationView,

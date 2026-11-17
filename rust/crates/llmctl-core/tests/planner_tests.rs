@@ -309,3 +309,39 @@ fn readiness_wait_comes_from_the_workload_with_a_default() {
     let plan = plan_restart(&inv, &[obs("coder", &[0], true)], &target).unwrap();
     assert_eq!(readiness(&plan), 600);
 }
+
+// ---- M4b: engine-level unload ------------------------------------------------
+
+#[test]
+fn unload_is_planned_only_for_a_running_vendor_service() {
+    let mut inv = inventory();
+    // An OpenAI-style engine: the model is the process — refused by kind.
+    let err = llmctl_core::plan_unload(&inv, &[obs("coder", &[0], true)], &wn("coder"), "m")
+        .unwrap_err();
+    assert!(matches!(err, CoreError::InvalidConfig { .. }), "{err:?}");
+
+    inv.workloads[0].engine_kind = EngineKind::Ollama;
+    inv.workloads[0].model = "ollama".into();
+    // Running Ollama: one external step, no intent change, no rollback.
+    let plan =
+        llmctl_core::plan_unload(&inv, &[obs("coder", &[0], true)], &wn("coder"), "qwen3:8b")
+            .unwrap();
+    assert_eq!(plan.kind, llmctl_core::OpKind::Unload);
+    assert!(plan.rollback.is_empty() && plan.affected_gpus.is_empty());
+    assert!(matches!(
+        plan.steps.as_slice(),
+        [PlanStep::UnloadModel { model, .. }] if model == "qwen3:8b"
+    ));
+    // The service identity, an empty name, or a stopped service: refused.
+    for bad in ["ollama", "", "  "] {
+        assert!(llmctl_core::plan_unload(&inv, &[obs("coder", &[0], true)], &wn("coder"), bad)
+            .is_err());
+    }
+    let err = llmctl_core::plan_unload(&inv, &[obs("coder", &[0], false)], &wn("coder"), "qwen3:8b")
+        .unwrap_err();
+    assert!(matches!(err, CoreError::NotRunning { .. }), "{err:?}");
+}
+
+fn wn(s: &str) -> WorkloadName {
+    WorkloadName::new(s).unwrap()
+}

@@ -842,6 +842,27 @@ fn cli_logs_is_an_explicit_capability_error_on_the_fake_engine() {
     assert_eq!(out.status.code(), Some(6));
 }
 
+#[test]
+fn unload_on_a_single_model_engine_is_refused_before_anything_is_journaled() {
+    let d = spawn_daemon();
+    let before = cli(&d.socket, &["status", "--json"]);
+    assert!(before.status.success());
+    let out = cli(&d.socket, &["unload", "coder", "some-model", "--wait"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("no engine-level unload"), "{err}");
+    // Nothing admitted: the operation list is still empty.
+    let ops = cli(&d.socket, &["ops", "--json"]);
+    let text = String::from_utf8(ops.stdout).unwrap();
+    assert!(!text.contains("unload"), "{text}");
+
+    // The engine report names the protocol and the missing unload.
+    let out = cli(&d.socket, &["engine", "coder", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["protocol"], "openai");
+    assert_eq!(v["supports_unload"], false);
+}
+
 // ---- A: foreign GPU occupancy guard ----------------------------------------
 
 /// `gpus.json` (fake-engine world): occupants per card.
