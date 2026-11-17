@@ -336,18 +336,7 @@ async fn stage_python_env(
     run_logged(&mut install, &log, "uv pip install").await?;
 
     // Offline validation before anything is promotable (plan D.4).
-    let inv = state.ops.inventory().await;
-    let wl_def = inv.workload(wl).cloned();
-    let model = wl_def
-        .as_ref()
-        .and_then(|d| {
-            d.recipe.as_ref().and_then(|r| match r {
-                InstallRecipe::PythonEnv(py) => py.model_config.clone(),
-                _ => None,
-            })
-        })
-        .or_else(|| wl_def.as_ref().map(|d| d.model.clone()))
-        .unwrap_or_default();
+    let model = validation_model(state, wl).await;
     let validation = match crate::version::validate_offline(
         &full_recipe,
         &interpreter.display().to_string(),
@@ -800,6 +789,23 @@ async fn pinned_version_of(state: &AppState, workload: &str) -> Option<String> {
     }
 }
 
+/// The model config offline validation loads: the python-env recipe's
+/// `model_config` when set, else the workload's model.
+async fn validation_model(state: &AppState, wl: &WorkloadName) -> String {
+    let inv = state.ops.inventory().await;
+    let wl_def = inv.workload(wl).cloned();
+    wl_def
+        .as_ref()
+        .and_then(|d| {
+            d.recipe.as_ref().and_then(|r| match r {
+                InstallRecipe::PythonEnv(py) => py.model_config.clone(),
+                _ => None,
+            })
+        })
+        .or_else(|| wl_def.as_ref().map(|d| d.model.clone()))
+        .unwrap_or_default()
+}
+
 async fn inv_def_for(state: &AppState, wl: &WorkloadName) -> llmctl_core::WorkloadDefinition {
     state
         .ops
@@ -879,8 +885,11 @@ pub async fn promote(
             "staged executable {executable} is gone; restage {version}"
         )));
     }
+    // Same model config the stage validated against: an empty one makes a
+    // python-env validate (vLLM's config load) fail on every promote.
+    let model = validation_model(state, &wl).await;
     if let Err(e) =
-        crate::version::validate_offline(&recipe, &executable, version, "").await
+        crate::version::validate_offline(&recipe, &executable, version, &model).await
     {
         return Err(refuse(format!(
             "staged {version} no longer validates ({e}); restage it"
