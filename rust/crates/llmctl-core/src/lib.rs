@@ -14,6 +14,7 @@ pub mod launch;
 pub mod observation;
 pub mod plan;
 pub mod planner;
+pub mod recipe;
 
 pub use error::CoreError;
 pub use identity::{
@@ -21,13 +22,16 @@ pub use identity::{
 };
 pub use intent::DesiredIntent;
 pub use inventory::{
-    ControlAuthority, HostInventory, Platform, RecipeConfig, RecoveryPolicy, UnitScope,
-    WorkloadDefinition,
+    ControlAuthority, HostInventory, Platform, RecoveryPolicy, UnitScope, WorkloadDefinition,
 };
 pub use launch::{
     looks_secret, EnvFileRef, ExecCommand, FieldDiff, FileProvenance, KeepAliveValue,
     LaunchDefinition, LaunchdExtras, Ownership, PendingApply, PreviousUnitFile, ServiceFileRecord,
-    VersionRef,
+    VersionFact, VersionRef,
+};
+pub use recipe::{
+    EngineKind, ExternalRecipe, InstallRecipe, PythonEnvRecipe, ReleaseArchiveRecipe,
+    SourceBuildRecipe, VendorAppRecipe, VendorProbe,
 };
 pub use observation::{Observation, ProcessState, Readiness, ServedModel};
 pub use plan::{OpKind, Plan, PlanStep};

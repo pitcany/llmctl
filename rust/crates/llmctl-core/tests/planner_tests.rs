@@ -5,9 +5,9 @@
 use chrono::{TimeZone, Utc};
 use llmctl_core::identity;
 use llmctl_core::{
-    plan_restart, plan_run, plan_stop, ControlAuthority, CoreError, DesiredIntent, GpuId, HostId,
-    HostInventory, Observation, Plan, PlanStep, Platform, ProcessState, Readiness, ServedModel,
-    UnitName, UnitScope, WorkloadDefinition, WorkloadName,
+    plan_restart, plan_run, plan_stop, ControlAuthority, CoreError, DesiredIntent, EngineKind,
+    GpuId, HostId, HostInventory, Observation, Plan, PlanStep, Platform, ProcessState, Readiness,
+    ServedModel, UnitName, UnitScope, WorkloadDefinition, WorkloadName,
 };
 
 fn host() -> HostId {
@@ -22,6 +22,7 @@ fn workload(name: &str, gpus: &[u32], port: u16) -> WorkloadDefinition {
     WorkloadDefinition {
         name: WorkloadName::new(name).unwrap(),
         engine: "fake".into(),
+        engine_kind: EngineKind::FakeEngine,
         model: format!("fake/{name}"),
         gpus: gpus.iter().map(|i| gpu(*i)).collect(),
         port,

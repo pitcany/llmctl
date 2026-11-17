@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, CoreResult};
 use crate::identity::{GpuId, HostId, UnitName, WorkloadName};
+use crate::recipe::{EngineKind, InstallRecipe};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,41 +78,14 @@ fn default_min_interval() -> u64 {
     30
 }
 
-/// How to observe and stage a workload's software environment (plan D).
+/// How to observe and stage a workload's software environment (plan D,
+/// generalized by M4a): one installer model, five recipe kinds — see
+/// [`InstallRecipe`]. Pre-M4 inventories carry the flat python-env shape,
+/// which deserialization maps to [`InstallRecipe::PythonEnv`].
+///
 /// The recipe says which interpreter to watch, which packages pin the
 /// version, how a new environment is staged, and how promote rewrites the
 /// definition to use it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecipeConfig {
-    /// `vllm` or `fakeengine`.
-    pub name: String,
-    /// Explicit interpreter; when absent it is derived from `ExecStart`
-    /// (the first exec path that is a python).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interpreter: Option<String>,
-    /// Package names whose versions are pinned and verified.
-    #[serde(default)]
-    pub packages: Vec<String>,
-    /// How promote switches the definition to the staged interpreter:
-    /// `exec` rewrites `ExecStart` (the interpreter *is* the command);
-    /// `env` sets `Environment=<NAME>_PYTHON=<interpreter>` (a launcher
-    /// script resolves it).
-    pub apply: String,
-    /// Name of the env var for `apply: "env"` (e.g. `VLLM`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env_prefix: Option<String>,
-    /// Local wheel directory for staging (`--find-links`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub find_links: Option<String>,
-    /// Absolute path to the served model's config, for offline validation
-    /// (`transformers.AutoConfig.from_pretrained` for vllm; the recipe's
-    /// `validate()` for others). Absent → the workload's model id is used.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_config: Option<String>,
-    /// Package index URL for staging.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index_url: Option<String>,
-}
 
 /// One workload definition: stable identity plus effective launch
 /// configuration. GPU ids are host-qualified and must exist in the host
@@ -119,8 +93,14 @@ pub struct RecipeConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkloadDefinition {
     pub name: WorkloadName,
-    /// Engine adapter name (`fake` for the M1 fake engine).
+    /// Engine adapter name (`fake` for the M1 fake engine) — names the
+    /// *supervisor* adapter, not the engine.
     pub engine: String,
+    /// What the workload runs (M4a). Absent in pre-M4 inventories →
+    /// `EngineKind::Other("legacy")`; the daemon migrates it from the
+    /// recipe/engine name on load.
+    #[serde(default = "EngineKind::legacy")]
+    pub engine_kind: EngineKind,
     pub model: String,
     pub gpus: Vec<GpuId>,
     pub port: u16,
@@ -133,10 +113,10 @@ pub struct WorkloadDefinition {
     /// Absent → automatic recovery is off for this workload.
     #[serde(default)]
     pub recovery: Option<RecoveryPolicy>,
-    /// Software-environment recipe: enables version pinning and staged
-    /// upgrades (plan D). Absent → no version facts are pinned.
+    /// Install recipe: enables version pinning and staged upgrades (plan
+    /// D; M4a kinds). Absent → no version facts are pinned.
     #[serde(default)]
-    pub recipe: Option<RecipeConfig>,
+    pub recipe: Option<InstallRecipe>,
     /// Seconds an `AwaitReadiness` step waits for this workload. Absent →
     /// `DEFAULT_READINESS_TIMEOUT_SECS`. Real model loads (vLLM) can take
     /// minutes; a fake or tiny server is ready in seconds.
@@ -194,6 +174,32 @@ impl HostInventory {
         }
         next.revision += 1;
         next
+    }
+
+    /// M4a normalization of a loaded inventory: fill each workload's
+    /// `engine_kind` when it still carries the pre-M4 placeholder, inferred
+    /// from the recipe (preferred) or the adapter engine name. Purely
+    /// structural — the revision does not move (an idempotent
+    /// normalization, like the daemon's version re-pin, not a semantic
+    /// change). Returns `None` when nothing needed filling.
+    pub fn migrated(&self) -> Option<HostInventory> {
+        let mut changed = false;
+        let mut next = self.clone();
+        for w in &mut next.workloads {
+            if !w.engine_kind.is_legacy() {
+                continue;
+            }
+            let inferred = w
+                .recipe
+                .as_ref()
+                .map(|r| EngineKind::infer(r.name()))
+                .unwrap_or_else(|| EngineKind::infer(&w.engine));
+            if !matches!(&inferred, EngineKind::Other(s) if s == "legacy") {
+                w.engine_kind = inferred;
+                changed = true;
+            }
+        }
+        changed.then_some(next)
     }
 
     /// Structural validation of deserialized or imported data. Call before
@@ -259,6 +265,14 @@ impl HostInventory {
                     reason: "empty model".into(),
                 });
             }
+            if let Some(recipe) = &w.recipe {
+                if let Err(e) = recipe.validate() {
+                    return Err(CoreError::InvalidConfig {
+                        workload: w.name.to_string(),
+                        reason: e.to_string(),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -278,6 +292,7 @@ mod tests {
             workloads: vec![WorkloadDefinition {
                 name: WorkloadName::new("qwen3").unwrap(),
                 engine: "fake".into(),
+                engine_kind: crate::recipe::EngineKind::FakeEngine,
                 model: "fake/qwen3".into(),
                 gpus: vec![GpuId::new(HostId::new("workstation").unwrap(), 0)],
                 port: 8100,
@@ -343,5 +358,155 @@ mod tests {
         i.workloads.push(w);
         let err = i.validate().unwrap_err();
         assert!(err.to_string().contains("duplicate unit"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_an_invalid_recipe() {
+        let mut i = inv();
+        i.workloads[0].recipe = Some(crate::recipe::InstallRecipe::PythonEnv(
+            crate::recipe::PythonEnvRecipe {
+                name: "mtplx".into(),
+                interpreter: None,
+                packages: vec!["mtplx".into()],
+                apply: "env".into(),
+                // apply=env without env_prefix (only vllm may default)
+                env_prefix: None,
+                find_links: None,
+                model_config: None,
+                index_url: None,
+            },
+        ));
+        let err = i.validate().unwrap_err();
+        assert!(err.to_string().contains("env_prefix"), "{err}");
+    }
+
+    // ---- M4a inventory migration -------------------------------------------
+
+    /// A pre-M4 inventory file: flat recipe, no `engine_kind`, no version
+    /// `fact`. Synthetic values throughout.
+    const LEGACY_INVENTORY_JSON: &str = r#"{
+        "host": "workstation",
+        "platform": "linux",
+        "gpus": [
+            {"host": "workstation", "index": 0},
+            {"host": "workstation", "index": 1}
+        ],
+        "workloads": [
+            {
+                "name": "engine2",
+                "engine": "systemd",
+                "model": "qwen/qwen3.8-27b",
+                "gpus": [{"host": "workstation", "index": 0}],
+                "port": 8010,
+                "unit": {"scope": "user", "name": "vllm-engine2.service"},
+                "authority": {"kind": "systemd_unit", "scope": "user", "unit": "vllm-engine2.service"},
+                "ownership": {
+                    "kind": "managed",
+                    "definition": {"service_type": "simple", "exec_start": [{"path": "/home/u/launcher.sh", "argv": ["/home/u/launcher.sh"], "ignore_errors": false}], "exec_start_pre": [], "exec_start_post": [], "exec_stop": [], "environment": [], "environment_files": [], "restart": "no", "timeout_stop_usec": 90000000, "kill_mode": "control-group"},
+                    "digest": "sha256:0000",
+                    "adopted_at": "2026-11-16T10:00:00Z",
+                    "provenance": [],
+                    "version": {
+                        "interpreter": "/d/envs/engine2-0.30.0-abc/bin/python",
+                        "packages": [["vllm", "0.30.0"]],
+                        "cuda": "12.8",
+                        "lock_digest": "sha256:1111",
+                        "exec_digests": [["/home/u/launcher.sh", "sha256:2222"]]
+                    },
+                    "definition_schema": 2
+                },
+                "recipe": {
+                    "name": "vllm",
+                    "packages": ["vllm"],
+                    "apply": "env",
+                    "env_prefix": "VLLM"
+                }
+            }
+        ],
+        "revision": 4
+    }"#;
+
+    /// The M4a schema bump: a pre-M4 file loads (flat recipe →
+    /// `PythonEnv`, no `engine_kind` → placeholder, pins without `fact`
+    /// stay pins), validates, and migration fills the engine kind from the
+    /// recipe without moving the revision.
+    #[test]
+    fn legacy_inventory_loads_validates_and_migrates() {
+        let inv: HostInventory = serde_json::from_str(LEGACY_INVENTORY_JSON).unwrap();
+        inv.validate().expect("legacy inventory is valid");
+
+        let wl = &inv.workloads[0];
+        assert_eq!(wl.engine_kind, crate::recipe::EngineKind::legacy());
+        match &wl.recipe {
+            Some(crate::recipe::InstallRecipe::PythonEnv(r)) => {
+                assert_eq!(r.name, "vllm");
+                assert_eq!(r.apply, "env");
+            }
+            other => panic!("legacy recipe must load as python_env, got {other:?}"),
+        }
+        if let crate::launch::Ownership::Managed { version, .. } = &wl.ownership {
+            let v = version.as_ref().expect("version pin survives");
+            assert_eq!(v.fact, None, "python-env pins carry no fact");
+        } else {
+            panic!("ownership lost");
+        }
+
+        // Migration fills the kind and leaves everything else — including
+        // the revision — alone.
+        let migrated = inv.migrated().expect("engine kind needs filling");
+        assert_eq!(
+            migrated.workloads[0].engine_kind,
+            crate::recipe::EngineKind::Vllm
+        );
+        assert_eq!(migrated.revision, inv.revision);
+        migrated.validate().expect("migrated inventory valid");
+        // Idempotent: a second pass changes nothing.
+        assert!(migrated.migrated().is_none());
+    }
+
+    /// An M4a inventory with a non-python recipe and a fact-carrying pin
+    /// round-trips exactly.
+    #[test]
+    fn m4_inventory_round_trips_new_kinds() {
+        let inv: HostInventory = serde_json::from_str(LEGACY_INVENTORY_JSON).unwrap();
+        let mut inv = inv.migrated().unwrap();
+        inv.workloads[0].recipe = Some(crate::recipe::InstallRecipe::ReleaseArchive(
+            crate::recipe::ReleaseArchiveRecipe {
+                name: "llama.cpp".into(),
+                root: "/home/u/llama-builds".into(),
+                url: "https://github.com/ggml-org/llama.cpp/releases/download/b{version}/llama-{version}-bin-ubuntu-x64.tar.gz".into(),
+                checksum: Some("sha256:abcd".into()),
+                strip_components: 1,
+                binary: "bin/llama-server".into(),
+                version_arg: Some("--version".into()),
+                version_pattern: None,
+            },
+        ));
+        if let crate::launch::Ownership::Managed { version, .. } =
+            &mut inv.workloads[0].ownership
+        {
+            *version = Some(crate::launch::VersionRef {
+                interpreter: None,
+                packages: vec![],
+                cuda: None,
+                lock_digest: String::new(),
+                exec_digests: vec![],
+                fact: Some(crate::launch::VersionFact::ReleaseArchive {
+                    dir: "/home/u/llama-builds/gpt-oss-120b-b1234-00112233".into(),
+                    archive_sha256: Some("sha256:abcd".into()),
+                    binary_digest: "sha256:beef".into(),
+                    reported: Some("b1234".into()),
+                }),
+            });
+        }
+        inv.validate().expect("m4 shape valid");
+        let out = serde_json::to_string(&inv).unwrap();
+        let back: HostInventory = serde_json::from_str(&out).unwrap();
+        assert_eq!(inv, back);
+        assert_eq!(
+            back.workloads[0].engine_kind,
+            crate::recipe::EngineKind::Vllm,
+            "explicit kind is kept as written"
+        );
     }
 }

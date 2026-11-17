@@ -245,6 +245,13 @@ pub struct PendingApply {
 /// D): what the interpreter reports, plus content digests of the non-system
 /// `Exec*` files (the launcher script). The drift guard recomputes these;
 /// an in-place `pip install -U` or a launcher edit is `definition_drift`.
+///
+/// M4a extends the pin with one per-kind fact (owner decision 2): the
+/// archive's version + checksum (release-archive), the git SHA plus the
+/// binary's own `--version` where it has one (source-build; ds4 has none,
+/// so its SHA is the identity), or the running server's reported version
+/// (vendor-app). `fact` is absent on python-env pins and on pins made
+/// before M4a; the drift guard only compares what the pin carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionRef {
     /// The interpreter the recipe resolves (absolute path).
@@ -257,6 +264,46 @@ pub struct VersionRef {
     pub lock_digest: String,
     /// Content digests of non-system `Exec*` paths.
     pub exec_digests: Vec<(String, String)>,
+    /// Per-kind version fact for the non-python recipe kinds (M4a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fact: Option<VersionFact>,
+}
+
+/// The per-kind identity of a non-python-env install (M4a, decision 2).
+/// A mismatch between the pin and the live fact is a drift finding,
+/// never auto-corrected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VersionFact {
+    /// A released archive unpacked into a versioned directory.
+    ReleaseArchive {
+        /// The versioned install directory (absolute).
+        dir: String,
+        /// Digest of the downloaded archive, when one was used.
+        archive_sha256: Option<String>,
+        /// Digest of the engine binary inside the dir.
+        binary_digest: String,
+        /// What the binary's version argument printed, when probed.
+        reported: Option<String>,
+    },
+    /// A source checkout built into a versioned directory.
+    SourceBuild {
+        /// The versioned build directory (absolute).
+        dir: String,
+        /// The git commit built (the identity when the binary has no
+        /// `--version`, e.g. ds4).
+        commit: String,
+        binary_digest: String,
+        reported: Option<String>,
+    },
+    /// A vendor-installed app, observed through its own interface.
+    VendorApp {
+        /// The version the running server/app reports (absent when it
+        /// could not be observed — itself a finding).
+        running: Option<String>,
+        /// How it was probed (`http_json /api/version`, `lms version`, ...).
+        probe: String,
+    },
 }
 
 /// What `own` replaced — everything `release` needs to restore exactly.
