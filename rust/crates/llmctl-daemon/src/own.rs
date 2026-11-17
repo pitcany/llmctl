@@ -554,6 +554,47 @@ async fn bump_revision(
     Ok(())
 }
 
+/// Re-pin a workload's version facts from the env it now runs. Called by
+/// the operation executor once an upgrade (promote or rollback) has
+/// verified the new env: the definition moved with ApplyDefinition, and a
+/// pin left on the old env made every later lifecycle operation fail as
+/// version drift. No-op when nothing changed or version pinning is off.
+pub async fn repin_version(
+    ctx: &OwnCtx,
+    ops: &crate::ops::OpManager,
+    workload: &llmctl_core::WorkloadName,
+) -> Result<(), OwnError> {
+    let inv = ops.inventory().await;
+    let Some(def) = inv.workload(workload) else {
+        return Ok(());
+    };
+    let (
+        Some(recipe),
+        Ownership::Managed {
+            version: Some(pinned),
+            ..
+        },
+    ) = (&def.recipe, &def.ownership)
+    else {
+        return Ok(());
+    };
+    let live = crate::version::probe(recipe, def)
+        .await
+        .map_err(|e| OwnError::Io(format!("probing version facts of {workload}: {e}")))?;
+    if &live == pinned {
+        return Ok(());
+    }
+    let mut next = (*inv).clone();
+    for w in &mut next.workloads {
+        if &w.name == workload {
+            if let Ownership::Managed { version, .. } = &mut w.ownership {
+                *version = Some(live.clone());
+            }
+        }
+    }
+    bump_revision(ctx, ops, next).await
+}
+
 /// Clear a workload's `pending_apply` marker after an effect that loaded
 /// the file it points at (launchd's bootstrap-in-`run`/`restart`). Called
 /// by the operation executor after a successful start effect on a

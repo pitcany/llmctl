@@ -717,6 +717,7 @@ impl OpManager {
                 }
             }
             PlanStep::VerifyVersion {
+                workload,
                 unit,
                 interpreter,
                 packages,
@@ -724,7 +725,16 @@ impl OpManager {
             } => match crate::version::verify_packages(interpreter, packages).await {
                 Ok(()) => match crate::version::verify_running_interpreter(unit, interpreter).await
                 {
-                    Ok(()) => StepOutcome::Done,
+                    Ok(()) => {
+                        // The verified env is now the pinned one, or every
+                        // later operation reads the upgrade as drift.
+                        if let Some(ctx) = self.own_ctx.clone() {
+                            if let Err(e) = crate::own::repin_version(&ctx, self, workload).await {
+                                tracing::warn!(error = %e, "re-pinning version facts failed");
+                            }
+                        }
+                        StepOutcome::Done
+                    }
                     Err(e) => StepOutcome::Failed(format!("version verification: {e}")),
                 },
                 Err(e) => StepOutcome::Failed(format!("version verification: {e}")),
