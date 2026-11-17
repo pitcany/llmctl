@@ -4,9 +4,9 @@ Parent: [RUST-M4-PLAN.md](RUST-M4-PLAN.md), sub-milestone M4b. M4a review
 first ([pilot](RUST-M4A-PILOT-2026-11-17.md)): sound, one regression found
 and fixed (below). Code: `2e9af4d`..`35a3925` on `main`.
 
-**Status: code for steps 1, 4 and 5 done and proven live on both Macs;
-steps 2 and 3 (Linux units, system → user unit move) wait for GPU windows
-and owner decisions — see "Open".**
+**Status: steps 1, 2, 4 and 5 done and proven live (both Macs; workstation
+GPU window 2026-11-17 14:05–14:45). Step 3 (system → user units) needs a
+design pass first — ~40 direct callers; see "Open".**
 
 ## M4a review
 
@@ -71,13 +71,51 @@ re-pins when the pin lacks a per-kind fact.
    `2a476af`, 1-line diff; the reload restarted both running lanes, no
    traffic at the time). Swap back = the same `lanes macro` command with
    the 26.10.1 path.
-2. **Step 2, Linux units:** Strata (one lane) and `ollama-gpu1` need the
-   cards (vLLM TP=2 holds both; the GPU guard refuses rightly) → a longjob
-   `--stop-engine` window. `llmster` under a new user unit stops the
-   unsupervised process on :1234 first.
-3. **Step 3, system → user units** (`vllm-engine`, main `ollama`): sudo,
-   one GPU window, llm-router restart command + llm-heal targets + sudoers
-   changed together; system units disabled (not deleted) for a week.
+2. ~~Step 2, Linux units~~ — **done in GPU window `m4b-step2-window`**
+   (longjob `--stop-engine`, owner `go`, 14:05–14:45 PST), driven through
+   the workstation pilot daemon (`~/.local/state/llmctl-next-m4a`, restarted
+   on the M4b build):
+   - `ollama-gpu1` adopted (`--engine-kind ollama --model ollama`); engine
+     report; loaded `llama3.2:3b` (GPU1 17.6 GB) → `unload` op → 18 MiB;
+     stop / run (identity verified) / logs.
+   - `strata-fast` (`qwen3.8-flash-next-fast-strata`) adopted
+     (`--engine-kind strata`); chat request answered `ok`; stop; the first
+     run **rolled back 13 s short of ready** — an M1-era 600 s cap clamped
+     the 1200 s budget while reporting 1200 s (fixed `14c3673`: cap 3600,
+     message names the used budget); rerun succeeded (readiness + identity),
+     then stop. Cold start from NVMe ≈ 10–13 min.
+   - `llmster` moved under the new `~/AI/services/llmster.service` (AI repo
+     `5b7c155e`; `lms daemon down`, link, start — foreground, :1234 served),
+     adopted (`--engine-kind lm_studio --model lmstudio`, all checks incl.
+     `ownable`); stop / run / logs; JIT-loaded the nomic embedding model →
+     `unload` op (`lms unload`) succeeded. Left running.
+   - End state = pre-window state (ollama-gpu1 and Strata stopped, llmster
+     running); window released, vllm-engine restarted by longjob.
+
+   Findings from the window:
+   - **GPU claim of JIT vendor services:** llmster (gpus 0,1) is refused by
+     the GPU guard whenever an unenrolled process holds a card — i.e. always
+     while vllm-engine (system unit) runs — and `run` of a GPU workload
+     would evict it as a conflict although it holds no VRAM until a model
+     loads. Needs an on-demand claim (M4c fit/placement).
+   - **LM Studio's loaded list spans linked devices:** `/api/v0/models`
+     showed a 36.9 GB model loaded on `macbookpro.lan` (LM Link to mbp2);
+     `unload` would act on mbp2. The protocol needs a device filter.
+   - `own` would refuse `ollama-gpu1` (`[Unit] Conflicts`) and `strata-fast`
+     (`Conflicts`, `MemoryMax`, `OOMScoreAdjust`, `ManagedOOMPreference`):
+     those directives need pin coverage before ownership.
+3. **Step 3, system → user units** (`vllm-engine`, main `ollama`) — **larger
+   than planned.** A sweep (2026-11-17) found ~40 live scripts calling
+   `sudo systemctl … vllm-engine|ollama` directly (lanes scripts, glm53-*,
+   `ccl`, switch-vllm-profile, mesh-health, gfx-mode, finetune/RAG windows,
+   llm-heal) plus variable-unit callers (longjob, llm-router, Python
+   llmctl, hf2local, llmctl-stack). Moving the units alone would break them
+   or start the disabled system unit next to the user unit (two vLLMs on
+   the same cards). The system `ollama` runs as user `ollama` and owns
+   `~/.ollama/models`. Recommended split: (3a) one `llm-unit <verb> <unit>`
+   wrapper, all callers migrated while still system-scoped (no window);
+   (3b) a window flips the wrapper's scope and moves the units; rollback =
+   flip back. Not queued; owner decision.
 4. **LM Studio on the Macs:** no launchd job to adopt (app-run server);
    enroll observe-only and record the console-login limit.
 5. **Capability-matrix rows** per engine × host as disposable spikes
