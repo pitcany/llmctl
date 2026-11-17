@@ -720,7 +720,13 @@ async fn settle(state: &AppState, name: &str) -> Result<Vec<UpgradeRow>, Upgrade
                     .as_ref()
                     .and_then(|d| d.get("rollback_operation_id")?.as_str().map(String::from)),
                 "rolled_back",
-                "failed",
+                // A rollback operation that failed *but restored the
+                // world* leaves the promote standing: the row returns to
+                // `promoted` with its N stash intact, so the rollback is
+                // retryable instead of burning the recovery target. Only
+                // a failed restoration (world left different) fails the
+                // row — a human decides from the needs_attention op.
+                "restored-promoted-or-failed",
             ),
             _ => continue,
         };
@@ -732,14 +738,26 @@ async fn settle(state: &AppState, name: &str) -> Result<Vec<UpgradeRow>, Upgrade
             continue;
         }
         let to = if op.status == llmctl_client::wire::OpStatus::Succeeded {
-            done
+            done.to_string()
+        } else if failed == "restored-promoted-or-failed" {
+            let restored = op
+                .recovery
+                .as_ref()
+                .and_then(|rec| rec.get("outcome"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|o| o == "restored");
+            if restored {
+                "promoted".to_string()
+            } else {
+                "failed".to_string()
+            }
         } else {
-            failed
+            failed.to_string()
         };
         changed |= state
             .ops
             .db()
-            .set_upgrade_status_if(&r.id, &r.status, to, None)
+            .set_upgrade_status_if(&r.id, &r.status, &to, None)
             .await?;
     }
     if changed {
@@ -882,6 +900,17 @@ pub async fn promote(
         .await
         .or_else(|| version_of_dir(name, &old_executable))
         .unwrap_or_else(|| row.from_version.clone());
+    // What the old binary itself prints (dir recipes with a version
+    // argument): stashed so a rollback to a pre-convention install still
+    // has a fail-closed expect string (its dir name encodes no version).
+    let old_version_output = match (&recipe, old_version_arg(&recipe)) {
+        (InstallRecipe::ReleaseArchive(_) | InstallRecipe::SourceBuild(_), Some(arg)) => {
+            crate::version::run_binary_version(&old_executable, arg)
+                .await
+                .ok()
+        }
+        _ => None,
+    };
     state
         .ops
         .db()
@@ -893,6 +922,7 @@ pub async fn promote(
                 "old_executable": old_executable,
                 "old_interpreter": old_executable,
                 "from_version": from_version,
+                "old_version_output": old_version_output,
             })),
             None,
         )
@@ -996,6 +1026,15 @@ fn recipe_kind_name(recipe: &InstallRecipe) -> &'static str {
     }
 }
 
+/// The version argument a dir recipe's binary answers, if it has one.
+fn old_version_arg(recipe: &InstallRecipe) -> Option<&str> {
+    match recipe {
+        InstallRecipe::ReleaseArchive(r) => r.version_arg.as_deref(),
+        InstallRecipe::SourceBuild(r) => r.version_arg.as_deref(),
+        _ => None,
+    }
+}
+
 /// The version an install dir's id names, when the executable lives in a
 /// conventionally named `<root>/<workload>-<version>-<hash8>/` dir. The
 /// executable may sit deeper inside (e.g. `<id>/bin/server`), so every
@@ -1054,6 +1093,13 @@ pub async fn rollback(
         .and_then(|v| v.as_str())
         .unwrap_or("?")
         .to_string();
+    // What N's binary printed when the promote stashed it (dir recipes
+    // with a version argument): the fail-closed expect for rolling back
+    // to a pre-convention install.
+    let old_version_output = detail
+        .get("old_version_output")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     if old_interpreter.is_empty() {
         return Err(refuse(
             "the pre-upgrade executable was never pinned",
@@ -1080,6 +1126,7 @@ pub async fn rollback(
         &old_interpreter,
         &recipe,
         &from_version,
+        old_version_output.as_deref(),
         &last.id,
     )
     .await;
@@ -1124,14 +1171,29 @@ async fn rollback_admit(
     old_interpreter: &str,
     recipe: &InstallRecipe,
     from_version: &str,
+    old_version_output: Option<&str>,
     row_id: &str,
 ) -> Result<crate::db::OpRow, UpgradeError> {
-    let (expected, binary_check) = expected_version_payload(recipe, old_interpreter, from_version);
-    // A pre-convention install dir (the live `build/`) names no version to
-    // expect; the rollback's own ApplyDefinition + served-model verify are
-    // the restoration proof, and the old binary's `--version` output has
-    // no derivable expect string.
-    let binary_check = (from_version != "?").then_some(binary_check).flatten();
+    // The expect strings for the restored N. A derivable from_version
+    // yields the usual payload; an underivable one (a pre-convention
+    // install dir such as llama.cpp's live `build/`) falls back to the
+    // old binary's stashed `--version` output — recorded by the promote —
+    // so the rollback stays fail-closed. With neither (a recipe whose
+    // binary has no version argument, e.g. ds4), there is no binary check
+    // by design; the ApplyDefinition swap and the served-model verify are
+    // the restoration proof.
+    let (expected, binary_check) = if from_version != "?" {
+        expected_version_payload(recipe, old_interpreter, from_version)
+    } else {
+        let binary_check = old_version_output.and_then(|out| {
+            old_version_arg(recipe).map(|arg| llmctl_core::BinaryCheck {
+                path: old_interpreter.to_string(),
+                arg: arg.to_string(),
+                expect: out.to_string(),
+            })
+        });
+        (Vec::new(), binary_check)
+    };
     let inv = state.ops.inventory().await;
     let observations = state
         .ops
