@@ -423,6 +423,10 @@ pub struct LanePlanResponse {
     pub validation: Vec<String>,
     /// Lanes running now: llama-swap's reload restarts them.
     pub reload_restarts: Vec<String>,
+    /// Lanes the new config preloads (`hooks.on_startup.preload`): a
+    /// reload starts loading them.
+    #[serde(default)]
+    pub reload_preloads: Vec<String>,
     pub plan_digest: String,
     /// False when the render equals the live file (nothing to write).
     pub bytes_changed: bool,

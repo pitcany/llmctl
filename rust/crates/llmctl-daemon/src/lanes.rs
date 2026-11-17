@@ -343,6 +343,15 @@ async fn plan_inner(
         changes,
         validation,
         reload_restarts: running,
+        reload_preloads: next
+            .globals
+            .iter()
+            .find(|(k, _)| k == "hooks")
+            .and_then(|(_, h)| h.get("on_startup"))
+            .and_then(|o| o.get("preload"))
+            .and_then(serde_yaml::Value::as_sequence)
+            .map(|s| s.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default(),
         plan_digest,
         bytes_changed: rendered.as_bytes() != current_bytes.as_slice(),
     };

@@ -1477,6 +1477,9 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
         } else {
             println!("  reload restarts running lanes: {}", p.reload_restarts.join(", "));
         }
+        if !p.reload_preloads.is_empty() {
+            println!("  reload preloads: {}", p.reload_preloads.join(", "));
+        }
         println!("to write it: add --confirm {}", p.plan_digest);
         return Ok(0);
     };
