@@ -502,6 +502,9 @@ async fn upgrade_gc(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+    // Never alongside a stage (it would delete the env being built) or a
+    // promote/rollback deciding which env to use.
+    let _one_at_a_time = state.adopt_lock.lock().await;
     let out = crate::upgrade::gc(&state, &workload)
         .await
         .map_err(ApiError::from_upgrade)?;

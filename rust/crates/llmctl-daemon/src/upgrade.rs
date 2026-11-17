@@ -735,57 +735,135 @@ pub async fn list(state: &AppState, name: &str) -> Result<Vec<UpgradeRow>, Upgra
     settle(state, name).await
 }
 
-/// Drop envs not in use: not the current interpreter's env, and not any
-/// non-discarded upgrade row's env. Their rows become `discarded`.
+/// Statuses whose env may still be used: promotable, live, a rollback
+/// target down the promote chain, or mid-operation.
+const ENV_IN_USE: [&str; 4] = ["validated", "promoted", "promoting", "rolling_back"];
+
+/// The env id an entry under `envs/` belongs to, if it is `name`'s:
+/// `{name}-{version}-{hash8}` (plus `.staging`/`.log` for the markers),
+/// with the hash recomputed so `engine` never claims `engine2`'s envs —
+/// the envs dir is shared by every workload.
+fn owned_env_id(name: &str, file_name: &str) -> Option<String> {
+    let id = file_name
+        .strip_suffix(".staging")
+        .or_else(|| file_name.strip_suffix(".log"))
+        .unwrap_or(file_name);
+    let (version, _hash) = id.strip_prefix(&format!("{name}-"))?.rsplit_once('-')?;
+    (env_id(name, version) == id).then(|| id.to_string())
+}
+
+/// Remove `name`'s envs that nothing can use any more: rolled back, failed,
+/// superseded, or left by an interrupted stage. Kept: the live env, every
+/// env a row in [`ENV_IN_USE`] points at (its own and its rollback
+/// target), and anything that is not this workload's. Rows whose env is
+/// gone become `discarded`.
 pub async fn gc(state: &AppState, name: &str) -> Result<serde_json::Value, UpgradeError> {
-    let (wl, ..) = managed_parts(state, name).await?;
-    let inv = state.ops.inventory().await;
-    let current_interpreter = inv.workload(&wl).and_then(|d| match &d.ownership {
-        Ownership::Managed { version, .. } => version.as_ref().and_then(|v| v.interpreter.clone()),
-        _ => None,
-    });
-    let rows = state.ops.db().list_upgrades(name).await?;
-    let keep: std::collections::BTreeSet<String> = rows
+    let (wl, _definition, recipe) = managed_parts(state, name).await?;
+    let def = inv_def_for(state, &wl).await;
+    let rows = settle(state, name).await?;
+
+    // Interpreter paths whose env must survive; an env dir is kept when
+    // one of them lies inside it.
+    let mut in_use: Vec<String> = Vec::new();
+    in_use.extend(crate::version::interpreter_for(&recipe, &def));
+    if let Ownership::Managed { version, .. } = &def.ownership {
+        in_use.extend(version.as_ref().and_then(|v| v.interpreter.clone()));
+    }
+    for r in rows
         .iter()
-        .filter(|r| r.status != "discarded")
-        .map(|r| r.env_path.clone())
-        .chain(current_interpreter.map(|p| {
-            // The env dir containing the live interpreter.
-            Path::new(&p)
-                .ancestors()
-                .nth(2)
-                .map(|a| a.display().to_string())
-                .unwrap_or_default()
-        }))
-        .collect();
+        .filter(|r| ENV_IN_USE.contains(&r.status.as_str()))
+    {
+        in_use.push(r.interpreter.clone());
+        in_use.push(r.env_path.clone());
+        in_use.extend(
+            r.detail
+                .as_ref()
+                .and_then(|d| d.get("old_interpreter")?.as_str().map(String::from)),
+        );
+    }
+    let used = |env: &Path| in_use.iter().any(|p| Path::new(p).starts_with(env));
+
     let root = envs_root(state);
     let mut removed = Vec::new();
-    let mut entries = tokio::fs::read_dir(&root).await?;
-    while let Some(entry) = entries.next_entry().await? {
+    let mut kept = std::collections::BTreeSet::new();
+    let mut entries = match tokio::fs::read_dir(&root).await {
+        Ok(e) => Some(e),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    while let Some(entry) = match entries.as_mut() {
+        Some(e) => e.next_entry().await?,
+        None => None,
+    } {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        let Some(id) = owned_env_id(name, &file_name) else {
+            continue;
+        };
+        let env = root.join(&id);
         let path = entry.path();
-        if path
-            .extension()
-            .is_some_and(|e| e == "staging" || e == "log")
-        {
-            if path.extension().is_some_and(|e| e == "staging") {
-                let _ = tokio::fs::remove_file(&path).await;
-                removed.push(path.display().to_string());
+        if used(&env) {
+            if path == env {
+                kept.insert(path.display().to_string());
             }
             continue;
         }
-        let ps = path.display().to_string();
-        if keep.contains(&ps) {
-            continue;
+        if entry.file_type().await?.is_dir() {
+            tokio::fs::remove_dir_all(&path).await?;
+        } else {
+            tokio::fs::remove_file(&path).await?;
         }
-        tokio::fs::remove_dir_all(&path).await?;
-        removed.push(ps);
+        removed.push(path.display().to_string());
     }
-    for r in rows.iter().filter(|r| r.status == "discarded") {
-        let _ = state
-            .ops
-            .db()
-            .update_upgrade_status(&r.id, "discarded", None, None)
-            .await;
+
+    // History stays; a row whose env no longer exists says so.
+    for r in rows.iter().filter(|r| r.status != "discarded") {
+        if !ENV_IN_USE.contains(&r.status.as_str())
+            && !Path::new(&r.env_path).exists()
+            && owned_env_id(
+                name,
+                &Path::new(&r.env_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            )
+            .is_some()
+        {
+            state
+                .ops
+                .db()
+                .set_upgrade_status_if(&r.id, &r.status, "discarded", None)
+                .await?;
+        }
     }
-    Ok(json!({"removed": removed, "kept": keep.into_iter().collect::<Vec<_>>()}))
+    Ok(json!({"removed": removed, "kept": kept.into_iter().collect::<Vec<_>>()}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_env_id_claims_only_this_workloads_entries() {
+        let id = env_id("engine", "0.32.0");
+        assert_eq!(owned_env_id("engine", &id), Some(id.clone()));
+        assert_eq!(
+            owned_env_id("engine", &format!("{id}.staging")),
+            Some(id.clone())
+        );
+        assert_eq!(
+            owned_env_id("engine", &format!("{id}.log")),
+            Some(id.clone())
+        );
+        // Another workload whose name extends ours, a forged hash, a
+        // different workload's version, and unrelated names.
+        let other = env_id("engine2", "0.32.0");
+        assert_eq!(owned_env_id("engine", &other), None);
+        assert_eq!(owned_env_id("engine", "engine-0.32.0-00000000"), None);
+        assert_eq!(owned_env_id("engine2", &id), None);
+        assert_eq!(owned_env_id("engine", "engine"), None);
+        assert_eq!(owned_env_id("engine", "README"), None);
+        // Versions with dashes still round-trip.
+        let dashed = env_id("engine", "1.0-rc1");
+        assert_eq!(owned_env_id("engine", &dashed), Some(dashed.clone()));
+    }
 }

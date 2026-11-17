@@ -1406,6 +1406,44 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
     let (code, text) = cli_code(&d.socket, &["upgrade", "stage", "adopted", "2.0"]);
     assert_eq!(code, Some(4), "{text}");
     assert!(text.contains("rollback target"), "{text}");
+
+    // gc keeps every env the promote chain can still use (live 1.0, its
+    // rollback target 2.0) and removes an interrupted stage; entries that
+    // are not this workload's — another workload, a name that only looks
+    // like ours — are never touched (the envs dir is shared).
+    let envs = dir.path().join("envs");
+    let orphan = envs.join(env_id("adopted", "9.9"));
+    std::fs::create_dir_all(orphan.join("bin")).unwrap();
+    std::fs::write(
+        envs.join(format!("{}.staging", env_id("adopted", "9.9"))),
+        "x",
+    )
+    .unwrap();
+    std::fs::write(envs.join(format!("{}.log", env_id("adopted", "9.9"))), "x").unwrap();
+    let foreign = [
+        envs.join(env_id("adopted2", "1.0")),
+        envs.join("adopted-1.0-00000000"),
+    ];
+    for f in &foreign {
+        std::fs::create_dir_all(f).unwrap();
+    }
+    let (ok, text) = cli(&d.socket, &["upgrade", "gc", "adopted"]);
+    assert!(ok, "{text}");
+    let removed: Vec<&str> = text.lines().filter(|l| l.starts_with("removed ")).collect();
+    assert_eq!(removed.len(), 3, "only the interrupted stage goes: {text}");
+    assert!(!orphan.exists(), "{text}");
+    assert!(
+        envs.join(env_id("adopted", "1.0")).exists(),
+        "live env kept: {text}"
+    );
+    assert!(
+        envs.join(env_id("adopted", "2.0")).exists(),
+        "rollback target kept: {text}"
+    );
+    for f in &foreign {
+        assert!(f.exists(), "{} is not adopted's: {text}", f.display());
+    }
+
     // Unwind both promotes: staged 1.0 → staged 2.0 → the original env.
     let (ok, text) = cli(&d.socket, &["upgrade", "rollback", "adopted", "--wait"]);
     assert!(ok, "{text}");
@@ -1424,7 +1462,7 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
 
     // An interrupted stage (no manifest) is not promotable either.
     let staged = dir.path().join("envs");
-    let manifest = find_env_dir(&staged, "2.0").join("staged.json");
+    let manifest = staged.join(env_id("adopted", "2.0")).join("staged.json");
     std::fs::remove_file(&manifest).unwrap();
     let (code, text) = cli_code(&d.socket, &["upgrade", "promote", "adopted", "2.0"]);
     assert_eq!(code, Some(4), "{text}");
@@ -1454,6 +1492,29 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
         text.contains("drifted"),
         "an in-place env change is definition drift: {text}"
     );
+
+    // Everything is rolled back or failed now: gc removes those envs, keeps
+    // their history rows as `discarded`, and leaves foreign entries alone.
+    let (ok, text) = cli(&d.socket, &["upgrade", "gc", "adopted"]);
+    assert!(ok, "{text}");
+    for v in ["1.0", "2.0", "2.0.1"] {
+        let gone = !std::fs::read_dir(&envs)
+            .unwrap()
+            .any(|e| e.unwrap().file_name().to_string_lossy() == env_id("adopted", v));
+        assert!(gone, "{v} env must be removed: {text}");
+    }
+    for f in &foreign {
+        assert!(f.exists(), "{} is not adopted's: {text}", f.display());
+    }
+    let (ok, rows) = cli(&d.socket, &["upgrade", "list", "adopted"]);
+    assert!(ok, "{rows}");
+    let discarded = rows.lines().filter(|l| l.contains(" discarded ")).count();
+    let total = rows.lines().filter(|l| l.contains(" → ")).count();
+    assert!(discarded > 0 && discarded == total, "{rows}");
+    // A second gc has nothing left to do.
+    let (ok, text) = cli(&d.socket, &["upgrade", "gc", "adopted"]);
+    assert!(ok, "{text}");
+    assert!(!text.contains("removed "), "{text}");
 
     // Hand back after several definition changes: release restores what
     // `own` replaced, byte for byte — not an llmctl render from a promote
@@ -1492,13 +1553,12 @@ fn patch_inventory_recipe(dir: &Path, wheelhouse: &Path) {
     std::fs::write(dir.join("inventory.json"), inv.to_string()).unwrap();
 }
 
-fn find_env_dir(root: &Path, version: &str) -> PathBuf {
-    for entry in std::fs::read_dir(root).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.contains(version) && name.starts_with("adopted") && !name.ends_with(".log") {
-            return entry.path();
-        }
-    }
-    panic!("no env dir for {version} under {}", root.display());
+/// The daemon's env dir name for a workload and version (upgrade.rs).
+fn env_id(workload: &str, version: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let hex = format!(
+        "{:x}",
+        Sha256::digest(format!("{workload}:{version}").as_bytes())
+    );
+    format!("{workload}-{version}-{}", &hex[..8])
 }

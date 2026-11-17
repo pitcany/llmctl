@@ -221,6 +221,16 @@ Carry-overs from M2 — fixed 2026-11-16 (disposable-unit spike
   a rollback could expect the wrong version. The executor now re-pins the
   version facts once `VerifyVersion` passes; promote records the version
   it replaces at promote time.
+- `upgrade gc` (fixed 2026-11-17) never removed anything: it kept the env
+  of every row it had not discarded, and no row was ever discarded. Worse,
+  `envs/` is shared by every workload and gc deleted any entry it did not
+  keep, so a gc of one workload removed another workload's envs (the spike
+  shows the old code deleting `adopted2-1.0-…`). gc now touches only this
+  workload's entries (name and hash recomputed), keeps the live env and
+  every env a validated, promoted or in-flight row points at (including
+  each promote's rollback target), removes rolled-back, failed, superseded
+  and interrupted stages, marks their rows `discarded`, and runs under the
+  same lock as stage, promote and rollback.
 
 ## Owner decisions (2026-11-16)
 
