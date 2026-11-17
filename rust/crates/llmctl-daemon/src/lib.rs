@@ -19,6 +19,7 @@ pub mod api;
 pub mod app;
 pub mod db;
 pub mod engine;
+pub mod engine_api;
 pub mod gpu;
 pub mod logfile;
 pub mod ops;

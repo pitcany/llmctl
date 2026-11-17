@@ -26,7 +26,8 @@ use llmctl_core::{
 };
 
 use crate::engine::{BoxFut, Effect, EffectOutcome, Engine, EngineError, UnitProbe};
-use crate::probe_http::{probe_models, HttpProbe};
+use crate::engine_api::{self, EngineProtocol};
+use crate::probe_http::HttpProbe;
 
 /// Inventory engine name that routes a workload to this adapter.
 pub const ENGINE_NAME: &str = "systemd";
@@ -35,6 +36,7 @@ pub const ENGINE_NAME: &str = "systemd";
 struct Endpoint {
     port: u16,
     model: String,
+    protocol: EngineProtocol,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +74,7 @@ impl SystemdEngine {
                     Endpoint {
                         port: w.port,
                         model: w.model.clone(),
+                        protocol: EngineProtocol::for_kind(&w.engine_kind),
                     },
                 )
             })
@@ -85,10 +88,17 @@ impl SystemdEngine {
 
     /// Probe a unit that is not (yet) enrolled — adoption's served-identity
     /// check. Read-only: no effect is ever applied to an unenrolled unit.
-    pub async fn probe_unenrolled(&self, unit: &UnitName, port: u16, model: &str) -> UnitProbe {
+    pub async fn probe_unenrolled(
+        &self,
+        unit: &UnitName,
+        port: u16,
+        model: &str,
+        kind: &llmctl_core::EngineKind,
+    ) -> UnitProbe {
         let ep = Endpoint {
             port,
             model: model.to_string(),
+            protocol: EngineProtocol::for_kind(kind),
         };
         self.probe_endpoint(unit, &ep).await
     }
@@ -143,7 +153,7 @@ impl SystemdEngine {
             }
         };
         let http = if status.process() == ProcessState::Running {
-            Some(probe_models(ep.port, self.http_timeout).await)
+            Some(engine_api::probe(ep.protocol, ep.port, self.http_timeout).await.probe)
         } else {
             None
         };
@@ -227,6 +237,7 @@ impl Engine for SystemdEngine {
                 let ep = Endpoint {
                     port: def.port,
                     model: def.model.clone(),
+                    protocol: EngineProtocol::for_kind(&def.engine_kind),
                 };
                 let probe = this.probe_endpoint(&def.unit, &ep).await;
                 out.push(Observation {

@@ -69,6 +69,50 @@ async fn fetch_json_body(port: u16, path: &str) -> Option<serde_json::Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// One HTTP/1.1 request to `127.0.0.1:<port>` with an optional JSON body:
+/// the response status and (size-capped) body, or `Err(())` for any
+/// transport failure. The engine protocols (M4b) build on this.
+pub async fn request(
+    port: u16,
+    method: hyper::Method,
+    path: &str,
+    json_body: Option<&serde_json::Value>,
+    timeout: Duration,
+) -> Result<(u16, Bytes), ()> {
+    let fut = async {
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .map_err(|_| ())?;
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .map_err(|_| ())?;
+        let conn = tokio::spawn(conn);
+        let body = json_body
+            .map(|v| Bytes::from(serde_json::to_vec(v).expect("json serializes")))
+            .unwrap_or_default();
+        let mut req = hyper::Request::builder()
+            .method(method)
+            .uri(path)
+            .header(hyper::header::HOST, format!("127.0.0.1:{port}"));
+        if json_body.is_some() {
+            req = req.header(hyper::header::CONTENT_TYPE, "application/json");
+        }
+        let req = req
+            .body(http_body_util::Full::new(body))
+            .map_err(|_| ())?;
+        let resp = sender.send_request(req).await.map_err(|_| ())?;
+        let status = resp.status().as_u16();
+        let bytes = Limited::new(resp.into_body(), MAX_MODELS_BODY)
+            .collect()
+            .await
+            .map_err(|_| ())?
+            .to_bytes();
+        conn.abort();
+        Ok((status, bytes))
+    };
+    tokio::time::timeout(timeout, fut).await.unwrap_or(Err(()))
+}
+
 pub async fn probe_models(port: u16, timeout: Duration) -> HttpProbe {
     match tokio::time::timeout(timeout, fetch_models(port)).await {
         Ok(p) => p,

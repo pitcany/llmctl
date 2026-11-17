@@ -181,7 +181,7 @@ pub async fn preview(state: &AppState, req: &AdoptRequest) -> Result<AdoptionPre
 
     let probe = state
         .supervisor
-        .probe_unenrolled(&parsed.unit, req.port, &req.model)
+        .probe_unenrolled(&parsed.unit, req.port, &req.model, &requested_kind(req))
         .await;
     checks.push(
         match (probe.process, probe.readiness, &probe.served_model) {
@@ -324,9 +324,9 @@ pub async fn transfer(state: &AppState, req: AdoptRequest) -> Result<AdoptRespon
     next.workloads.push(WorkloadDefinition {
         name: parsed.workload,
         engine: state.supervisor.engine_name().into(),
-        // The kind is unknown at adoption; the startup migration fills it
-        // from the recipe once the owner adds one.
-        engine_kind: llmctl_core::EngineKind::legacy(),
+        // Named at adoption (M4b) or unknown: the startup migration fills
+        // a legacy kind from the recipe once the owner adds one.
+        engine_kind: requested_kind(&req),
         model: req.model.clone(),
         gpus: req
             .gpus
@@ -378,4 +378,12 @@ pub async fn transfer(state: &AppState, req: AdoptRequest) -> Result<AdoptRespon
         preview,
         inventory_revision: revision,
     })
+}
+
+/// The engine kind the adoption request names, or legacy.
+fn requested_kind(req: &AdoptRequest) -> llmctl_core::EngineKind {
+    req.engine_kind
+        .as_deref()
+        .map(llmctl_core::EngineKind::infer)
+        .unwrap_or_else(llmctl_core::EngineKind::legacy)
 }

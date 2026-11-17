@@ -27,7 +27,8 @@ use llmctl_core::{
 
 use crate::engine::{BoxFut, Effect, EffectOutcome, Engine, EngineError, LogPage, RecoveryState, UnitProbe};
 use crate::plistdef::{self, PrintState};
-use crate::probe_http::{probe_health, probe_models, HealthProbe, HttpProbe};
+use crate::engine_api::{self, EngineProtocol};
+use crate::probe_http::{probe_health, HealthProbe, HttpProbe};
 
 /// Inventory engine name that routes a workload to this adapter.
 pub const ENGINE_NAME: &str = "launchd";
@@ -40,6 +41,9 @@ struct Target {
     /// Plist path from the pinned definition when managed; the convention
     /// otherwise.
     plist_path: String,
+    /// Readiness protocol (M4b): vendor services (Ollama, LM Studio) answer
+    /// their own API, not `/health`/`/v1/models`.
+    protocol: EngineProtocol,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +103,7 @@ impl LaunchdEngine {
                         port: w.port,
                         model: w.model.clone(),
                         plist_path,
+                        protocol: EngineProtocol::for_kind(&w.engine_kind),
                     },
                 )
             })
@@ -127,7 +132,14 @@ impl LaunchdEngine {
     }
 
     /// Probe a job that is not (yet) enrolled (adoption's identity check).
-    pub async fn probe_unenrolled(&self, unit: &UnitName, port: u16, model: &str) -> UnitProbe {
+    pub async fn probe_unenrolled(
+        &self,
+        unit: &UnitName,
+        port: u16,
+        model: &str,
+        kind: &llmctl_core::EngineKind,
+    ) -> UnitProbe {
+        let protocol = EngineProtocol::for_kind(kind);
         let ps = match print_job(&unit.name, self.show_timeout).await {
             Ok(p) => p,
             Err(_) => {
@@ -142,7 +154,7 @@ impl LaunchdEngine {
         let (health, models) = if running {
             (
                 probe_health(port, self.http_timeout).await,
-                Some(probe_models(port, self.http_timeout).await),
+                Some(engine_api::probe(protocol, port, self.http_timeout).await.probe),
             )
         } else {
             (HealthProbe::NotHealthy, None)
@@ -166,7 +178,11 @@ impl LaunchdEngine {
         let (health, models) = if running {
             (
                 probe_health(target.port, self.http_timeout).await,
-                Some(probe_models(target.port, self.http_timeout).await),
+                Some(
+                    engine_api::probe(target.protocol, target.port, self.http_timeout)
+                        .await
+                        .probe,
+                ),
             )
         } else {
             (HealthProbe::NotHealthy, None)

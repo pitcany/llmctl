@@ -124,6 +124,11 @@ enum Command {
         /// Transfer although served identity could not be checked.
         #[arg(long)]
         allow_unverified: bool,
+        /// What the unit runs (ollama, lm_studio, llama_cpp, vllm, mtplx,
+        /// ...): picks the readiness protocol. A vendor service may pass
+        /// --model ollama / --model lmstudio for the service itself.
+        #[arg(long)]
+        engine_kind: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -438,6 +443,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             gpus,
             confirm,
             allow_unverified,
+            engine_kind,
             json,
         } => {
             let req = AdoptRequest {
@@ -449,6 +455,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
                 gpus,
                 confirm_digest: confirm,
                 allow_unverified,
+                engine_kind,
             };
             cmd_adopt(cli, req, json).await
         }

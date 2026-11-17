@@ -82,6 +82,11 @@ pub struct AdoptRequest {
     /// Transfer even if served identity could not be checked (unit stopped).
     #[serde(default)]
     pub allow_unverified: bool,
+    /// What the unit runs (`ollama`, `lm_studio`, `llama_cpp`, ...): picks
+    /// the readiness/identity protocol (M4b). Absent → legacy, inferred
+    /// later from a recipe; probed as an OpenAI-style server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

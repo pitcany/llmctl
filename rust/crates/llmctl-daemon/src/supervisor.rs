@@ -71,7 +71,13 @@ pub trait Supervisor: Send + Sync {
     ) -> BoxFut<Result<Vec<FieldDiff>, EngineError>>;
 
     /// Read-only probe of an unenrolled job (adoption's identity check).
-    fn probe_unenrolled(&self, unit: &UnitName, port: u16, model: &str) -> BoxFut<UnitProbe>;
+    fn probe_unenrolled(
+        &self,
+        unit: &UnitName,
+        port: u16,
+        model: &str,
+        kind: &llmctl_core::EngineKind,
+    ) -> BoxFut<UnitProbe>;
 
     /// Make the manager re-read files after llmctl wrote one. systemd:
     /// `daemon-reload`. launchd: nothing — a plist is applied by the next
@@ -198,11 +204,18 @@ mod linux {
             Box::pin(async move { unitdef::roundtrip(&def, &rendered, timeout).await })
         }
 
-        fn probe_unenrolled(&self, unit: &UnitName, port: u16, model: &str) -> BoxFut<UnitProbe> {
+        fn probe_unenrolled(
+            &self,
+            unit: &UnitName,
+            port: u16,
+            model: &str,
+            kind: &llmctl_core::EngineKind,
+        ) -> BoxFut<UnitProbe> {
             let engine = self.engine.clone();
             let unit = unit.clone();
             let model = model.to_string();
-            Box::pin(async move { engine.probe_unenrolled(&unit, port, &model).await })
+            let kind = kind.clone();
+            Box::pin(async move { engine.probe_unenrolled(&unit, port, &model, &kind).await })
         }
 
         fn reload_manager(&self) -> BoxFut<Result<(), EngineError>> {
@@ -300,11 +313,18 @@ mod macos {
             Box::pin(async move { crate::plistdef::roundtrip(&def, &rendered, timeout).await })
         }
 
-        fn probe_unenrolled(&self, unit: &UnitName, port: u16, model: &str) -> BoxFut<UnitProbe> {
+        fn probe_unenrolled(
+            &self,
+            unit: &UnitName,
+            port: u16,
+            model: &str,
+            kind: &llmctl_core::EngineKind,
+        ) -> BoxFut<UnitProbe> {
             let engine = self.engine.clone();
             let unit = unit.clone();
             let model = model.to_string();
-            Box::pin(async move { engine.probe_unenrolled(&unit, port, &model).await })
+            let kind = kind.clone();
+            Box::pin(async move { engine.probe_unenrolled(&unit, port, &model, &kind).await })
         }
 
         fn reload_manager(&self) -> BoxFut<Result<(), EngineError>> {
