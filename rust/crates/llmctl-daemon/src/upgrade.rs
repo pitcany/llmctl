@@ -943,16 +943,11 @@ pub async fn promote(
             Ok(crate::api::operation_view(&row_op))
         }
         Err(e) => {
-            state
-                .ops
-                .db()
-                .update_upgrade_status(
-                    &row.id,
-                    "failed",
-                    Some(json!({"error": e.to_string()})),
-                    None,
-                )
-                .await?;
+            // A refused admission journaled nothing and changed no state —
+            // the stage stays validated and promotable (the pilot's window-1
+            // GPU refusal used to poison the row into `failed`, forcing a
+            // pointless full restage). The outcome of an *admitted*
+            // operation is settled by `settle` from the journal.
             Err(e.into())
         }
     }
