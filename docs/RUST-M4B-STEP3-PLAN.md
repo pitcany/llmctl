@@ -5,7 +5,10 @@ Parent: [RUST-M4-PLAN.md](RUST-M4-PLAN.md) (M4b step 3, owner decision 4:
 llmctl-next; no system-scope adapter, no new sudo path).
 Progress so far: [RUST-M4B-PROGRESS-2026-11-17.md](RUST-M4B-PROGRESS-2026-11-17.md).
 
-**Status: draft for the owner. Nothing changed yet.**
+**Status: decisions taken 2026-11-17 (all as recommended; 5 = mask).
+Phase 3a in progress — `llm-unit` installed (AI repo `c9009f7c`, 10 tests,
+scopes file at system); audit baseline 136 raw calls in ~40 files + the five
+variable-unit programs.**
 
 ## Why the plan needs this step
 
@@ -159,3 +162,7 @@ units' sudoers lines and masks or deletes the system units.
 4. Which llmctl-next daemon adopts the moved units in 3b: the workstation
    pilot daemon (as for step 2, recommended until M6) or the main agent.
 5. After the week: mask (keeps the file) or delete the system units.
+
+Taken 2026-11-17: 1 `~/AI/bin/llm-unit` · 2 flip llm-heal's `scope:`
+field · 3 rename `vllm-tp` callers in the 3a pass · 4 the workstation pilot
+daemon adopts the moved units · 5 mask the system units after the week.
