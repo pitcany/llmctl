@@ -20,14 +20,33 @@ pub mod app;
 pub mod db;
 pub mod engine;
 pub mod gpu;
-pub mod journal;
+pub mod logfile;
 pub mod ops;
 pub mod own;
+pub mod plistdef;
+pub mod probe_http;
 pub mod recover;
-pub mod systemd;
-pub mod unitdef;
+pub mod supervisor;
 pub mod upgrade;
 pub mod version;
+
+// Platform managers (RUST-M3-PLAN A.2): systemd/journald exist only on
+// Linux, launchd only on macOS. The fake engine, journal DB, API, CLI,
+// plist mapping, log-file reader and HTTP probes are platform-neutral.
+//
+// `llmctl_macos` is a build-time cfg (declared in Cargo.toml) that selects
+// the macOS code paths *on a Linux host* so they can be type-checked here
+// (cross-compiling is impossible: bundled SQLite needs a Mac toolchain):
+//     RUSTFLAGS='--cfg=llmctl_macos' cargo check -p llmctl-daemon
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+pub mod journal;
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+pub mod systemd;
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+pub mod unitdef;
+
+#[cfg(any(target_os = "macos", llmctl_macos))]
+pub mod launchd;
 
 pub use app::{serve, AppState, DevPaths, DEFAULT_DATA_DIR_SUFFIX};
 

@@ -9,15 +9,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use llmctl_core::{
-    ControlAuthority, GpuId, HostId, HostInventory, Platform, UnitName, UnitScope, UnitScopeMarker,
-    WorkloadDefinition, WorkloadName,
+    ControlAuthority, GpuId, HostId, HostInventory, Platform, UnitName, WorkloadDefinition,
+    WorkloadName,
 };
 
 use crate::api;
 use crate::db::Db;
 use crate::engine::{Engine, FakeEngine, RoutedEngine};
 use crate::ops::OpManager;
-use crate::systemd::SystemdEngine;
+use crate::supervisor::Supervisor;
 
 pub const DEFAULT_DATA_DIR_SUFFIX: &str = "llmctl-next-dev";
 
@@ -72,8 +72,9 @@ pub struct AppState {
     pub paths: DevPaths,
     pub started_at: DateTime<Utc>,
     pub ops: Arc<OpManager>,
-    /// The systemd adapter, also reachable for adoption's read-only probes.
-    pub systemd: SystemdEngine,
+    /// The platform supervisor (systemd on Linux, launchd on macOS),
+    /// reachable for adoption's read-only probes and ownership flows.
+    pub supervisor: Arc<dyn Supervisor>,
     /// Serializes adoption previews' scratch-unit round trips with transfers.
     pub adopt_lock: tokio::sync::Mutex<()>,
 }
@@ -87,17 +88,17 @@ pub struct InventoryFile {
 }
 
 pub fn sample_inventory(host: &HostId) -> HostInventory {
+    // Fake workloads carry platform-appropriate identities only so their
+    // unit display strings look right in status output; the fake engine
+    // keys on that string and never talks to a manager.
     let mk = |name: &str, gpus: &[u32], port: u16, label: String| WorkloadDefinition {
         name: WorkloadName::new(name).expect("sample name"),
         engine: "fake".into(),
         model: format!("fake/{name}"),
         gpus: gpus.iter().map(|i| GpuId::new(host.clone(), *i)).collect(),
         port,
-        unit: UnitName::systemd(UnitScopeMarker::User, label).expect("sample unit"),
-        authority: ControlAuthority::SystemdUnit {
-            scope: UnitScope::User,
-            unit: format!("llmctl-next-fake-{name}.service"),
-        },
+        unit: sample_unit(&label),
+        authority: sample_authority(name),
         ownership: Default::default(),
         recovery: None,
         recipe: None,
@@ -108,14 +109,9 @@ pub fn sample_inventory(host: &HostId) -> HostInventory {
         platform: Platform::Linux,
         gpus: vec![GpuId::new(host.clone(), 0), GpuId::new(host.clone(), 1)],
         workloads: vec![
-            mk("coder", &[0], 8100, "llmctl-next-fake-coder.service".into()),
-            mk(
-                "helper",
-                &[1],
-                8101,
-                "llmctl-next-fake-helper.service".into(),
-            ),
-            mk("big", &[0, 1], 8102, "llmctl-next-fake-big.service".into()),
+            mk("coder", &[0], 8100, sample_label("coder")),
+            mk("helper", &[1], 8101, sample_label("helper")),
+            mk("big", &[0, 1], 8102, sample_label("big")),
         ],
         revision: 1,
     };
@@ -124,6 +120,43 @@ pub fn sample_inventory(host: &HostId) -> HostInventory {
         inv.platform = platform;
     }
     inv
+}
+
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+fn sample_label(name: &str) -> String {
+    format!("llmctl-next-fake-{name}.service")
+}
+
+#[cfg(any(target_os = "macos", llmctl_macos))]
+fn sample_label(name: &str) -> String {
+    format!("com.pitcany.llmctl-next-fake-{name}")
+}
+
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+fn sample_unit(label: &str) -> UnitName {
+    use llmctl_core::UnitScopeMarker;
+    UnitName::systemd(UnitScopeMarker::User, label).expect("sample unit")
+}
+
+#[cfg(any(target_os = "macos", llmctl_macos))]
+fn sample_unit(label: &str) -> UnitName {
+    UnitName::launchd(label).expect("sample unit")
+}
+
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+fn sample_authority(name: &str) -> ControlAuthority {
+    use llmctl_core::UnitScope;
+    ControlAuthority::SystemdUnit {
+        scope: UnitScope::User,
+        unit: format!("llmctl-next-fake-{name}.service"),
+    }
+}
+
+#[cfg(any(target_os = "macos", llmctl_macos))]
+fn sample_authority(name: &str) -> ControlAuthority {
+    ControlAuthority::LaunchdService {
+        label: format!("com.pitcany.llmctl-next-fake-{name}"),
+    }
 }
 
 impl AppState {
@@ -169,21 +202,19 @@ impl AppState {
         inv.validate()
             .map_err(|e| format!("inventory invalid: {e}"))?;
 
-        // Each workload names its adapter; only `systemd` workloads reach a
-        // real service manager, and only their own enrolled units.
+        // Each workload names its adapter; only the platform manager's
+        // workloads reach a real service manager, and only their own
+        // enrolled units.
         let mut engines: std::collections::BTreeMap<String, Arc<dyn Engine>> = Default::default();
         engines.insert("fake".into(), Arc::new(FakeEngine::new(&paths.data_dir)));
-        let systemd = SystemdEngine::from_inventory(&inv);
-        engines.insert(
-            crate::systemd::ENGINE_NAME.into(),
-            Arc::new(systemd.clone()),
-        );
+        let supervisor: Arc<dyn Supervisor> = platform_supervisor(&inv);
+        engines.insert(supervisor.engine_name().into(), supervisor_manager_engine(&inv));
         let engine: Arc<dyn Engine> = Arc::new(RoutedEngine::new(&inv, engines)?);
         let ops = Arc::new(
             OpManager::new(db, engine, Arc::new(inv), Some(paths.faults.clone())).with_own_ctx(
                 crate::own::OwnCtx {
                     paths: paths.clone(),
-                    systemd: systemd.clone(),
+                    supervisor: supervisor.clone(),
                 },
             ),
         );
@@ -214,10 +245,47 @@ impl AppState {
             paths,
             started_at: Utc::now(),
             ops,
-            systemd,
+            supervisor,
             adopt_lock: tokio::sync::Mutex::new(()),
         }))
     }
+}
+
+/// The platform's supervisor + manager engine: systemd on Linux, launchd on
+/// macOS. The sample inventory only enrolls fake workloads, so either
+/// platform starts green without touching the real stack.
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+pub fn manager_engine_name() -> &'static str {
+    crate::systemd::ENGINE_NAME
+}
+
+#[cfg(any(target_os = "macos", llmctl_macos))]
+pub fn manager_engine_name() -> &'static str {
+    crate::launchd::ENGINE_NAME
+}
+
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+fn platform_supervisor(inv: &HostInventory) -> Arc<dyn Supervisor> {
+    Arc::new(crate::supervisor::SystemdSupervisor::new(
+        crate::systemd::SystemdEngine::from_inventory(inv),
+    ))
+}
+
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+fn supervisor_manager_engine(inv: &HostInventory) -> Arc<dyn Engine> {
+    Arc::new(crate::systemd::SystemdEngine::from_inventory(inv))
+}
+
+#[cfg(any(target_os = "macos", llmctl_macos))]
+fn platform_supervisor(inv: &HostInventory) -> Arc<dyn Supervisor> {
+    Arc::new(crate::supervisor::LaunchdSupervisor::new(
+        crate::launchd::LaunchdEngine::from_inventory(inv),
+    ))
+}
+
+#[cfg(any(target_os = "macos", llmctl_macos))]
+fn supervisor_manager_engine(inv: &HostInventory) -> Arc<dyn Engine> {
+    Arc::new(crate::launchd::LaunchdEngine::from_inventory(inv))
 }
 
 /// Pin version facts for managed systemd workloads whose pin predates
@@ -240,8 +308,7 @@ async fn repin_legacy_versions(
                     version: v,
                     ..
                 } if *s < 2 && v.is_none()
-            ) && w.engine == crate::systemd::ENGINE_NAME
-                && w.recipe.is_some()
+            ) && w.engine == manager_engine_name() && w.recipe.is_some()
         };
         if !needs {
             continue;

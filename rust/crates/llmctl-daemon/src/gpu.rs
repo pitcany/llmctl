@@ -4,11 +4,6 @@
 //! operation.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
-
-use tokio::process::Command;
-
-use crate::engine::EngineError;
 
 /// One compute process on one card, as the driver reports it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -116,9 +111,10 @@ pub fn unit_from_cgroup(cgroup: &str) -> Option<String> {
 }
 
 /// Probe the cards through nvidia-smi and map pids to their units through
-/// `/proc/<pid>/cgroup`. Any probe failure is an error: callers must refuse
-/// rather than treat an unobservable card as free.
-pub async fn probe_nvidia(timeout: Duration) -> Result<Vec<GpuOccupant>, EngineError> {
+/// `/proc/<pid>/cgroup` (Linux only). Any probe failure is an error:
+/// callers must refuse rather than treat an unobservable card as free.
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+pub async fn probe_nvidia(timeout: std::time::Duration) -> Result<Vec<GpuOccupant>, EngineError> {
     let uuids = run_nvidia(
         &["--query-gpu=index,uuid", "--format=csv,noheader"],
         timeout,
@@ -140,7 +136,8 @@ pub async fn probe_nvidia(timeout: Duration) -> Result<Vec<GpuOccupant>, EngineE
     Ok(occupants)
 }
 
-async fn run_nvidia(args: &[&str], timeout: Duration) -> Result<String, EngineError> {
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+async fn run_nvidia(args: &[&str], timeout: std::time::Duration) -> Result<String, EngineError> {
     let mut cmd = Command::new("nvidia-smi");
     cmd.args(args).kill_on_drop(true);
     match tokio::time::timeout(timeout, cmd.output()).await {
@@ -157,12 +154,19 @@ async fn run_nvidia(args: &[&str], timeout: Duration) -> Result<String, EngineEr
     }
 }
 
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
 async fn cgroup_unit_of(pid: u32) -> Option<String> {
     let text = tokio::fs::read_to_string(format!("/proc/{pid}/cgroup"))
         .await
         .ok()?;
     unit_from_cgroup(&text)
 }
+
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+use tokio::process::Command;
+
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+use crate::engine::EngineError;
 
 #[cfg(test)]
 mod tests {

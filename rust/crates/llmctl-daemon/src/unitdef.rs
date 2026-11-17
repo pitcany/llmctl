@@ -230,6 +230,7 @@ pub async fn import_unit(unit: &UnitName, timeout: Duration) -> Result<ImportedU
         after: Some(names(2)),
         wants: Some(names(3)),
         requires: Some(names(4)),
+        launchd: None,
     };
     Ok(ImportedUnit {
         load_state,

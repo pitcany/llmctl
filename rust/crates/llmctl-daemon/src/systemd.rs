@@ -19,9 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use http_body_util::{BodyExt, Empty, Limited};
-use hyper::body::Bytes;
-use hyper_util::rt::TokioIo;
 use tokio::process::Command;
 
 use llmctl_core::{
@@ -29,11 +26,10 @@ use llmctl_core::{
 };
 
 use crate::engine::{BoxFut, Effect, EffectOutcome, Engine, EngineError, UnitProbe};
+use crate::probe_http::{probe_models, HttpProbe};
 
 /// Inventory engine name that routes a workload to this adapter.
 pub const ENGINE_NAME: &str = "systemd";
-
-const MAX_MODELS_BODY: usize = 1 << 20;
 
 #[derive(Debug, Clone)]
 struct Endpoint {
@@ -291,7 +287,7 @@ impl Engine for SystemdEngine {
         };
         let unit = workload.unit.clone();
         let timeout = self.show_timeout;
-        let mut wl = workload.clone();
+        let wl = workload.clone();
         Box::pin(async move {
             // Cheap short circuit first: once llmctl owns the file, its
             // digest alone answers "did anything touch it".
@@ -511,68 +507,7 @@ impl UnitStatus {
     }
 }
 
-// ---- readiness over HTTP ---------------------------------------------------
-
-/// What `GET /v1/models` said.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HttpProbe {
-    /// Nothing listening (or connect timed out): the server is not up yet.
-    Unreachable,
-    /// Answered with a non-success status (503 while loading, …).
-    Status(u16),
-    /// 2xx with an OpenAI-style model list.
-    Models(Vec<String>),
-    /// 2xx but the body is not a model list.
-    Garbled,
-}
-
-async fn probe_models(port: u16, timeout: Duration) -> HttpProbe {
-    match tokio::time::timeout(timeout, fetch_models(port)).await {
-        Ok(p) => p,
-        Err(_) => HttpProbe::Unreachable,
-    }
-}
-
-async fn fetch_models(port: u16) -> HttpProbe {
-    let Ok(stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else {
-        return HttpProbe::Unreachable;
-    };
-    let Ok((mut sender, conn)) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await
-    else {
-        return HttpProbe::Unreachable;
-    };
-    let conn = tokio::spawn(conn);
-    let req = hyper::Request::get("/v1/models")
-        .header(hyper::header::HOST, format!("127.0.0.1:{port}"))
-        .body(Empty::<Bytes>::new())
-        .expect("static request");
-    let result = match sender.send_request(req).await {
-        Err(_) => HttpProbe::Unreachable,
-        Ok(resp) if !resp.status().is_success() => HttpProbe::Status(resp.status().as_u16()),
-        Ok(resp) => match Limited::new(resp.into_body(), MAX_MODELS_BODY)
-            .collect()
-            .await
-        {
-            Ok(body) => parse_models(&body.to_bytes())
-                .map(HttpProbe::Models)
-                .unwrap_or(HttpProbe::Garbled),
-            Err(_) => HttpProbe::Garbled,
-        },
-    };
-    conn.abort();
-    result
-}
-
-/// Model ids from an OpenAI-style `{"data":[{"id":…}]}` body.
-pub fn parse_models(body: &[u8]) -> Option<Vec<String>> {
-    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let data = v.get("data")?.as_array()?;
-    Some(
-        data.iter()
-            .filter_map(|m| m.get("id")?.as_str().map(str::to_owned))
-            .collect(),
-    )
-}
+// ---- readiness over HTTP (shared: crate::probe_http) ------------------------
 
 /// Fold manager state and the HTTP answer into one probe.
 pub fn combine(status: &UnitStatus, http: Option<&HttpProbe>, expected: &str) -> UnitProbe {
@@ -682,13 +617,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_models_reads_openai_list() {
-        let body = br#"{"object":"list","data":[{"id":"qwen/a"},{"id":"qwen/b"}]}"#;
-        assert_eq!(parse_models(body).unwrap(), vec!["qwen/a", "qwen/b"]);
-        assert!(parse_models(b"<html>").is_none());
-        assert!(parse_models(br#"{"models":[]}"#).is_none());
-    }
+    // parse_models / probe_models coverage lives in probe_http.rs.
 
     #[test]
     fn combine_verifies_identity_and_separates_loading() {
@@ -750,35 +679,5 @@ mod tests {
             engine.probe(&unit).await,
             Err(EngineError::UnknownUnit(_))
         ));
-    }
-
-    #[tokio::test]
-    async fn probe_models_against_local_listener() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 1024];
-            let _ = sock.read(&mut buf).await;
-            let body = br#"{"data":[{"id":"spike/model"}]}"#;
-            let head = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
-                body.len()
-            );
-            sock.write_all(head.as_bytes()).await.unwrap();
-            sock.write_all(body).await.unwrap();
-        });
-        let got = probe_models(port, Duration::from_secs(2)).await;
-        assert_eq!(got, HttpProbe::Models(vec!["spike/model".into()]));
-
-        // Nothing listening on a freshly released port → unreachable.
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let dead_port = free.local_addr().unwrap().port();
-        drop(free);
-        assert_eq!(
-            probe_models(dead_port, Duration::from_millis(500)).await,
-            HttpProbe::Unreachable
-        );
     }
 }
