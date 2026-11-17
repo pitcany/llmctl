@@ -105,21 +105,29 @@ pub fn parse_print(text: &str) -> PrintState {
 
 /// Collect the `arguments` block (`arguments = {` … `}` or `( … )`), one
 /// word per line, unquoted (modern launchd) or quoted-with-comma (older).
+/// The block sits at job level (one tab); two tabs kept for tolerance.
 fn parse_arguments_block(text: &str) -> Option<Vec<String>> {
-    for (open, close) in [("\t\targuments = {\n", "\t\t}\n"), ("\t\targuments = (\n", "\t\t)\n")] {
-        if let Some(start) = text.find(open) {
-            let rest = &text[start + open.len()..];
-            if let Some(end) = rest.find(close) {
-                return Some(
-                    rest[..end]
-                        .lines()
-                        .filter_map(|l| {
-                            let t = l.trim().trim_end_matches(',');
-                            let t = t.strip_prefix('"').and_then(|s| s.strip_suffix('"'));
-                            t.filter(|s| !s.is_empty()).map(str::to_owned)
-                        })
-                        .collect(),
-                );
+    for indent in ["\t", "\t\t"] {
+        for (brace, paren) in [("{", "}"), ("(", ")")] {
+            let open = format!("{indent}arguments = {brace}\n");
+            let close = format!("{indent}{paren}\n");
+            if let Some(start) = text.find(&open) {
+                let rest = &text[start + open.len()..];
+                if let Some(end) = rest.find(&close) {
+                    return Some(
+                        rest[..end]
+                            .lines()
+                            .filter_map(|l| {
+                                let t = l.trim().trim_end_matches(',');
+                                let t = t
+                                    .strip_prefix('"')
+                                    .and_then(|s| s.strip_suffix('"'))
+                                    .unwrap_or(t);
+                                (!t.is_empty()).then(|| t.to_owned())
+                            })
+                            .collect(),
+                    );
+                }
             }
         }
     }
