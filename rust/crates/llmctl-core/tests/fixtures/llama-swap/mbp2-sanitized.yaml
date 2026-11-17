@@ -1,0 +1,25 @@
+healthCheckTimeout: 300
+startPort: 11001
+logLevel: info
+
+macros:
+  mtplx: "/Users/owner/Work/mtplx-serve/.venv/bin/mtplx"
+
+models:
+  qwen35b-m1:
+    name: "Qwen3.6-35B-A3B (hf2local 8-bit, native MTP via MTPLX, depth 2)"
+    cmd: |
+      bash -lc "/Users/owner/AI/llama-swap/lms-free-llms.sh ; exec ${mtplx} serve --model /Users/owner/Models/mlx/pitcany/Qwen3.6-35B-A3B-MLX-8bit --model-id qwen3.6-35b-mtplx --host 127.0.0.1 --port ${PORT} --no-auth --no-stats-footer --profile sustained --context-window 32768 --depth 2 --reasoning off"
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "qwen3.6-35b-mtplx"
+    checkEndpoint: /v1/models
+    ttl: 900
+
+  qwen4b-m1:
+    name: "Qwen3.5-4B (MTPLX Optimized Speed, tiny tier)"
+    cmd: |
+      bash -lc "exec ${mtplx} serve --model /Users/owner/Models/huggingface/Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed --model-id qwen3.5-4b-mtplx --host 127.0.0.1 --port ${PORT} --no-auth --no-stats-footer --profile sustained --context-window 65536 --reasoning off"
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "qwen3.5-4b-mtplx"
+    checkEndpoint: /v1/models
+    ttl: 3600

@@ -1,0 +1,165 @@
+healthCheckTimeout: 300
+startPort: 11001
+logLevel: info
+includeAliasesInList: true
+
+macros:
+  mlxvlm: "/Users/owner/Work/mlx-vlm-serve/.venv/bin/mlx_vlm.server"
+  mtplx: "/Users/owner/Work/mtplx-serve/.venv/bin/mtplx"
+  mtplx212: "/Users/owner/Work/mtplx-serve-212/.venv/bin/mtplx"
+  mlxserve: "/Users/owner/local-llm/runtimes/mlx-serve-26.10.1/mlx-serve-macos-arm64/mlx-serve"
+
+matrix:
+  vars:
+    dsx: deepseek41-1017-mxfp4-m5
+    mimo: mimo9b-m5
+    q35: qwen35b-m5
+    q27: qwen27b-m5
+    q27u: qwen27b-uncensored-m5
+    q27v: qwen27b-vision-m5
+    q4: qwen4b-m5
+    fn: flash-m5
+    fnu: flash-uncensored-m5
+    glm: glm53-m5
+    r35: qwen35b-m1
+    r4: qwen4b-m1
+    remb: nomicembed-m1
+  evict_costs:
+    mimo: 100
+  sets:
+    m1: "r35 & r4 & remb"
+    coding: "mimo & q35 & q4 & +m1"
+    single: "mimo & q4 & (q27 | q27v) & +m1"
+    risky_smart: "(fn | fnu) & mimo & +m1"
+    risky_long: "q27u & mimo & +m1"
+    deep: "glm & +m1"
+    deepseek41: "dsx & +m1"
+
+hooks:
+  on_startup:
+    preload:
+      - mimo9b-m5
+      - qwen35b-m5
+
+models:
+
+  deepseek41-1017-mxfp4-m5:
+    name: "DeepSeek V4.1 Flash 1017 MXFP4 (Metal SSD, 16K context)"
+    cmd: /bin/sh /Users/owner/Work/ds41-1017/mac-local/serve.sh --cache 48 --ctx 16384 --no-expert-readahead --model /Users/owner/Models/gguf/deepseek/v4.1-1017-mxfp4/DeepSeek-V4.1-Flash-1017-MXFP4-experts.gguf --kv-dir /Users/owner/Work/ds41-1017/local/kv-1017-mxfp4
+    proxy: http://127.0.0.1:18147
+    useModelName: deepseek-v4.1-flash
+    checkEndpoint: /v1/models
+    ttl: 1800
+    capabilities:
+      in: [text]
+      out: [text]
+      tools: true
+      context: 16384
+
+  flash-m5:
+    name: "Qwen3.8-Flash-Next (125B-A6B, MTPLX 4/8-bit mixed, native MTP, vision)"
+    cmd: |
+      bash -lc '/Users/owner/AI/llama-swap/lms-free-llms.sh ; export MTPLX_MEMORY_LIMIT_BYTES=100G MTPLX_WIRED_LIMIT_BYTES=96G MTPLX_SESSION_BANK_MAX_BYTES=6G MTPLX_SESSION_BANK_PER_SESSION_BYTES=4G MTPLX_DEBUG_PREFIX_DIVERGENCE=1 ; exec ${mtplx212} serve --model /Users/owner/Models/huggingface/Youssofal/Qwen3.8-Flash-Next-MTPLX-Optimized-Speed --model-id qwen3.8-flash-next --host 127.0.0.1 --port ${PORT} --no-auth --no-stats-footer --profile sustained --context-window 131072 --reasoning-effort medium --ssd-session-cache on --ssd-session-cache-dir /tmp/mtplx-session-cache --ssd-session-cache-max-size 16G'
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "qwen3.8-flash-next"
+    checkEndpoint: /v1/models
+    ttl: 1800
+
+  flash-uncensored-m5:
+    name: "Qwen3.8-Flash-Next Uncensored (orcarouter abliterated, 125B-A6B, MTPLX 4/8-bit mixed, native MTP, vision)"
+    cmd: |
+      bash -lc '/Users/owner/AI/llama-swap/lms-free-llms.sh ; export MTPLX_MEMORY_LIMIT_BYTES=100G MTPLX_WIRED_LIMIT_BYTES=96G MTPLX_SESSION_BANK_MAX_BYTES=6G MTPLX_SESSION_BANK_PER_SESSION_BYTES=4G MTPLX_DEBUG_PREFIX_DIVERGENCE=1 ; exec ${mtplx212} serve --model /Users/owner/Models/huggingface/pitcany/Qwen3.8-Flash-Next-Uncensored-MTPLX-Optimized-Speed --model-id qwen3.8-flash-next-uncensored --host 127.0.0.1 --port ${PORT} --no-auth --no-stats-footer --profile sustained --context-window 131072 --reasoning-effort medium --ssd-session-cache on --ssd-session-cache-dir /tmp/mtplx-session-cache-uncensored --ssd-session-cache-max-size 16G'
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "qwen3.8-flash-next-uncensored"
+    checkEndpoint: /v1/models
+    ttl: 1800
+
+  qwen35b-m5:
+    name: "Qwen3.6-35B-A3B (hf2local 8-bit, native MTP via MTPLX, depth 3)"
+    cmd: |
+      bash -lc '/Users/owner/AI/llama-swap/lms-free-llms.sh ; exec ${mtplx212} serve --model /Users/owner/Models/huggingface/pitcany/Qwen3.6-35B-A3B-MLX-8bit --model-id qwen3.6-35b-mtplx --host 127.0.0.1 --port ${PORT} --no-auth --no-stats-footer --profile sustained --context-window 131072 --depth 3 --reasoning off'
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "qwen3.6-35b-mtplx"
+    checkEndpoint: /v1/models
+    ttl: 0
+
+  qwen27b-vision-m5:
+    name: "Qwen3.8-27B (dense, 8-bit, VISION via mlx-vlm)"
+    cmd: |
+      bash -lc '/Users/owner/AI/llama-swap/lms-free-llms.sh ; /Users/owner/AI/llama-swap/wait-port-free.sh ${PORT} 30 ; exec ${mlxvlm} --model /Users/owner/Models/huggingface/pitcany/Qwen3.8-27B-MLX-8bit --host 127.0.0.1 --port ${PORT} --max-kv-size 131072'
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "/Users/owner/Models/huggingface/pitcany/Qwen3.8-27B-MLX-8bit"
+    checkEndpoint: /v1/models
+    ttl: 3600
+
+  qwen27b-m5:
+    name: "Qwen3.8-27B (hf2local 8-bit, native MTP via MTPLX, depth 3)"
+    cmd: |
+      bash -lc '/Users/owner/AI/llama-swap/lms-free-llms.sh ; exec ${mtplx212} serve --model /Users/owner/Models/huggingface/pitcany/Qwen3.8-27B-MLX-8bit --model-id qwen3.8-27b-mtplx --host 127.0.0.1 --port ${PORT} --no-auth --no-stats-footer --profile sustained --context-window 131072 --depth 3 --allow-swap --max-active-requests 1'
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "qwen3.8-27b-mtplx"
+    checkEndpoint: /v1/models
+    ttl: 3600
+
+  qwen27b-uncensored-m5:
+    name: "Qwen3.8-27B Uncensored (hf2local 8-bit, native MTP via MTPLX, depth 3)"
+    cmd: |
+      bash -lc '/Users/owner/AI/llama-swap/lms-free-llms.sh ; exec ${mtplx212} serve --model /Users/owner/Models/huggingface/pitcany/Qwen3.8-27B-Uncensored-MLX-8bit --model-id qwen3.8-27b-uncensored-mtplx --host 127.0.0.1 --port ${PORT} --no-auth --no-stats-footer --profile sustained --context-window 196608 --depth 3'
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "qwen3.8-27b-uncensored-mtplx"
+    checkEndpoint: /v1/models
+    ttl: 3600
+
+  mimo9b-m5:
+    name: "MiMo-V2.6-Distill-Qwen-9B (mlx-serve 26.10.1, 8-bit, grafted MTP, vision)"
+    cmd: |
+      bash -lc '/Users/owner/AI/llama-swap/wait-port-free.sh ${PORT} 30 ; exec ${mlxserve} --serve --host 127.0.0.1 --port ${PORT} --model /Users/owner/Models/huggingface/ddalcu/MiMo-V2.6-Distill-Qwen-9B-MLX-Serve-8bit --ctx-size 131072 --max-concurrent 4 --prefix-cache-mem 8GB --kv-quant 8 --no-prevent-sleep'
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "MiMo-V2.6-Distill-Qwen-9B-MLX-Serve-8bit"
+    checkEndpoint: /v1/models
+    ttl: 0
+
+  qwen4b-m5:
+    name: "Qwen3.5-4B (MTPLX Optimized Speed, tiny tier)"
+    cmd: |
+      bash -lc "exec ${mtplx} serve --model /Users/owner/Models/huggingface/Youssofal/Qwen3.5-4B-MTPLX-Optimized-Speed --model-id qwen3.5-4b-mtplx --host 127.0.0.1 --port ${PORT} --no-auth --no-stats-footer --profile sustained --context-window 65536"
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "qwen3.5-4b-mtplx"
+    checkEndpoint: /v1/models
+    ttl: 3600
+
+  glm53-m5:
+    name: "GLM 5.3 Flash (320B-A18B, ds4 imatrix Q2, Metal resident, vision)"
+    cmd: |
+      bash -lc 'cd /Users/owner/Work/ds41-1017 && /Users/owner/AI/llama-swap/lms-free-llms.sh ; curl -s -m 20 -X POST http://127.0.0.1:8099/api/models/unload/mimo9b-m5 >/dev/null 2>&1 ; exec /Users/owner/Work/ds41-1017/ds4-server -m /Users/owner/Models/gguf/glm/q2/GLM-5.3-Flash-Q2.gguf --vision /Users/owner/Models/gguf/glm/q2/GLM-5.3-Flash-Vision-Encoder.gguf --ctx 131072 --kv-disk-dir /Users/owner/Work/ds41-1017/local/kv-glm53 --kv-disk-space-mb 8192 --kv-cache-cold-max-tokens 131072 --host 127.0.0.1 --port ${PORT}'
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "glm-5.3-flash"
+    checkEndpoint: /v1/models
+    ttl: 1800
+
+  qwen35b-m1:
+    name: "M1 worker: Qwen3.6-35B-A3B on macbook-pro-2 (its llama-swap lane qwen35b-m1: MTPLX 8-bit, depth 2, ctx 32768, no thinking)"
+    cmd: |
+      bash -lc 'exec /Users/owner/AI/llama-swap/m1-worker.sh forward --port ${PORT} --service router'
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "qwen35b-m1"
+    checkEndpoint: /v1/models
+    ttl: 600
+
+  qwen4b-m1:
+    name: "M1 worker: Qwen3.5-4B on macbook-pro-2 (its llama-swap lane qwen4b-m1, ctx 65536, no thinking)"
+    cmd: |
+      bash -lc 'exec /Users/owner/AI/llama-swap/m1-worker.sh forward --port ${PORT} --service router'
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "qwen4b-m1"
+    checkEndpoint: /v1/models
+    ttl: 600
+
+  nomicembed-m1:
+    name: "M1 worker: nomic-embed-text-v1.5 embeddings on macbook-pro-2 (LM Studio :1234, JIT load, 768 dims)"
+    cmd: |
+      bash -lc 'exec /Users/owner/AI/llama-swap/m1-worker.sh forward --port ${PORT} --service lmstudio'
+    proxy: http://127.0.0.1:${PORT}
+    useModelName: "text-embedding-nomic-embed-text-v1.5"
+    checkEndpoint: /v1/models
+    ttl: 600

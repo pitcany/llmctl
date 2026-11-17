@@ -15,6 +15,7 @@ pub mod observation;
 pub mod plan;
 pub mod planner;
 pub mod recipe;
+pub mod swap;
 
 pub use error::CoreError;
 pub use identity::{
