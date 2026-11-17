@@ -79,6 +79,41 @@ pub struct LaunchDefinition {
     /// other field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launchd: Option<LaunchdExtras>,
+    // M4a: coverage for hardened real units (the llama.cpp lanes set all
+    // of these; `own` refused until the pin carried them). Same `None` =
+    // not covered convention as the fields above.
+    /// `[Unit] Documentation=` URIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<Vec<String>>,
+    /// `ExecStopPost=` commands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec_stop_post: Vec<ExecCommand>,
+    /// `KillSignal=` (numeric).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kill_signal: Option<u32>,
+    /// `StandardOutput=` / `StandardError=` (`journal`, `append:…`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standard_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standard_error: Option<String>,
+    /// `StateDirectory=` / `CacheDirectory=` entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_directory: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_directory: Option<Vec<String>>,
+    /// Sandbox booleans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_new_privileges: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_tmp: Option<bool>,
+    /// Sandbox scopes as systemd reports them (`read-only`, `strict`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protect_home: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protect_system: Option<String>,
+    /// `ReadWritePaths=` entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_write_paths: Option<Vec<String>>,
 }
 
 /// The subset of a launchd plist the launch adapter pins. launchd has no

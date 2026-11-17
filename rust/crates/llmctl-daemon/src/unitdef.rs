@@ -23,7 +23,7 @@ use crate::engine::EngineError;
 
 const SERVICE_IFACE: &str = "org.freedesktop.systemd1.Service";
 const UNIT_IFACE: &str = "org.freedesktop.systemd1.Unit";
-const SERVICE_PROPS: [&str; 14] = [
+const SERVICE_PROPS: [&str; 25] = [
     "Type",
     "ExecStartPre",
     "ExecStart",
@@ -38,9 +38,22 @@ const SERVICE_PROPS: [&str; 14] = [
     "RestartUSec",
     "TimeoutStartUSec",
     "SyslogIdentifier",
+    // M4a: hardened real units (the llama.cpp lanes) set all of these.
+    "ExecStopPost",
+    "KillSignal",
+    "StandardOutput",
+    "StandardError",
+    "StateDirectory",
+    "CacheDirectory",
+    "NoNewPrivileges",
+    "PrivateTmp",
+    "ProtectHome",
+    "ProtectSystem",
+    "ReadWritePaths",
 ];
 /// Unit-interface settings a service definition carries.
-const UNIT_DEF_PROPS: [&str; 5] = [
+const UNIT_DEF_PROPS: [&str; 6] = [
+    "Documentation",
     "StartLimitBurst",
     "StartLimitIntervalUSec",
     "After",
@@ -180,6 +193,27 @@ pub async fn import_unit(unit: &UnitName, timeout: Duration) -> Result<ImportedU
         v.sort();
         v
     };
+    // Non-empty string-list property → Some(sorted); empty → None (not
+    // covered, renders nothing).
+    let str_list = |i: usize| -> Option<Vec<String>> {
+        let mut v: Vec<String> = data(i)
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.as_str().map(str::to_owned))
+            .collect();
+        if v.is_empty() {
+            None
+        } else {
+            v.sort();
+            Some(v)
+        }
+    };
+    // Same, for the unit-interface property list (Documentation=).
+    let names_opt = |i: usize| -> Option<Vec<String>> {
+        let v = names(i);
+        (!v.is_empty()).then_some(v)
+    };
 
     let mut environment = Vec::new();
     let mut secret_env_names = Vec::new();
@@ -223,13 +257,25 @@ pub async fn import_unit(unit: &UnitName, timeout: Duration) -> Result<ImportedU
         restart_usec: data(11).as_u64(),
         timeout_start_usec: data(12).as_u64(),
         syslog_identifier: Some(data(13).as_str().unwrap_or("").to_string()),
-        start_limit_burst: uprops[0]["data"]
+        exec_stop_post: parse_exec(data(14)),
+        kill_signal: data(15).as_u64().and_then(|v| u32::try_from(v).ok()),
+        standard_output: data(16).as_str().map(str::to_owned),
+        standard_error: data(17).as_str().map(str::to_owned),
+        state_directory: str_list(18),
+        cache_directory: str_list(19),
+        no_new_privileges: data(20).as_bool(),
+        private_tmp: data(21).as_bool(),
+        protect_home: data(22).as_str().map(str::to_owned),
+        protect_system: data(23).as_str().map(str::to_owned),
+        read_write_paths: str_list(24),
+        start_limit_burst: uprops[1]["data"]
             .as_u64()
             .and_then(|v| u32::try_from(v).ok()),
-        start_limit_interval_usec: uprops[1]["data"].as_u64(),
-        after: Some(names(2)),
-        wants: Some(names(3)),
-        requires: Some(names(4)),
+        start_limit_interval_usec: uprops[2]["data"].as_u64(),
+        documentation: names_opt(0),
+        after: Some(names(3)),
+        wants: Some(names(4)),
+        requires: Some(names(5)),
         launchd: None,
     };
     Ok(ImportedUnit {
@@ -326,6 +372,12 @@ pub fn render_unit(def: &LaunchDefinition, description: &str) -> String {
     let mut out = String::new();
     out.push_str("[Unit]\n");
     out.push_str(&format!("Description={}\n", escape_percent(description)));
+    if let Some(docs) = def.documentation.as_ref().filter(|d| !d.is_empty()) {
+        out.push_str(&format!(
+            "Documentation={}\n",
+            escape_percent(&docs.join(" "))
+        ));
+    }
     for (key, list) in [
         ("After", &def.after),
         ("Wants", &def.wants),
@@ -349,6 +401,7 @@ pub fn render_unit(def: &LaunchDefinition, description: &str) -> String {
         ("ExecStart", &def.exec_start),
         ("ExecStartPost", &def.exec_start_post),
         ("ExecStop", &def.exec_stop),
+        ("ExecStopPost", &def.exec_stop_post),
     ] {
         for cmd in cmds {
             out.push_str(&format!("{key}={}\n", render_exec(cmd)));
@@ -387,6 +440,41 @@ pub fn render_unit(def: &LaunchDefinition, description: &str) -> String {
     if let Some(id) = def.syslog_identifier.as_deref().filter(|s| !s.is_empty()) {
         out.push_str(&format!("SyslogIdentifier={}\n", escape_percent(id)));
     }
+    // M4a hardened-unit coverage. Booleans render as true/false; scopes
+    // and streams as systemd reports them; lists space-joined.
+    if let Some(v) = def.kill_signal {
+        out.push_str(&format!("KillSignal={v}\n"));
+    }
+    if let Some(v) = &def.standard_output {
+        out.push_str(&format!("StandardOutput={}\n", escape_percent(v)));
+    }
+    if let Some(v) = &def.standard_error {
+        out.push_str(&format!("StandardError={}\n", escape_percent(v)));
+    }
+    if let Some(v) = def.state_directory.as_ref().filter(|l| !l.is_empty()) {
+        out.push_str(&format!("StateDirectory={}\n", escape_percent(&v.join(" "))));
+    }
+    if let Some(v) = def.cache_directory.as_ref().filter(|l| !l.is_empty()) {
+        out.push_str(&format!("CacheDirectory={}\n", escape_percent(&v.join(" "))));
+    }
+    if let Some(v) = def.read_write_paths.as_ref().filter(|l| !l.is_empty()) {
+        out.push_str(&format!(
+            "ReadWritePaths={}\n",
+            escape_percent(&v.join(" "))
+        ));
+    }
+    if let Some(v) = def.no_new_privileges {
+        out.push_str(&format!("NoNewPrivileges={v}\n"));
+    }
+    if let Some(v) = def.private_tmp {
+        out.push_str(&format!("PrivateTmp={v}\n"));
+    }
+    if let Some(v) = &def.protect_home {
+        out.push_str(&format!("ProtectHome={}\n", escape_percent(v)));
+    }
+    if let Some(v) = &def.protect_system {
+        out.push_str(&format!("ProtectSystem={}\n", escape_percent(v)));
+    }
     out
 }
 
@@ -410,6 +498,7 @@ pub fn uncovered_directives(source: &str, def: &LaunchDefinition) -> Vec<String>
         let covered = match (section.as_str(), key.as_str()) {
             ("Install", _) => true,
             ("Unit", "Description") => true,
+            ("Unit", "Documentation") => def.documentation.is_some(),
             ("Unit", "After") => def.after.is_some(),
             ("Unit", "Wants") => def.wants.is_some(),
             ("Unit", "Requires") => def.requires.is_some(),
@@ -423,6 +512,17 @@ pub fn uncovered_directives(source: &str, def: &LaunchDefinition) -> Vec<String>
                 "TimeoutStartSec" => def.timeout_start_usec.is_some(),
                 "TimeoutSec" => def.timeout_start_usec.is_some(),
                 "SyslogIdentifier" => def.syslog_identifier.is_some(),
+                "ExecStopPost" => !def.exec_stop_post.is_empty(),
+                "KillSignal" => def.kill_signal.is_some(),
+                "StandardOutput" => def.standard_output.is_some(),
+                "StandardError" => def.standard_error.is_some(),
+                "StateDirectory" => def.state_directory.is_some(),
+                "CacheDirectory" => def.cache_directory.is_some(),
+                "ReadWritePaths" => def.read_write_paths.is_some(),
+                "NoNewPrivileges" => def.no_new_privileges.is_some(),
+                "PrivateTmp" => def.private_tmp.is_some(),
+                "ProtectHome" => def.protect_home.is_some(),
+                "ProtectSystem" => def.protect_system.is_some(),
                 _ => false,
             },
             _ => false,

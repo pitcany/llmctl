@@ -456,29 +456,55 @@ async fn validate_dir_binary(
     }))
 }
 
-/// Run `<binary> <arg>` and return its combined version-ish output (first
-/// line, trimmed).
+/// Run `<binary> <arg>` and return its version-ish output: the first
+/// non-empty line, stdout preferred (server binaries — llama-server —
+/// print `--version` to stderr).
 pub async fn run_binary_version(binary: &str, arg: &str) -> Result<String, String> {
-    let mut cmd = Command::new(binary);
-    cmd.arg(arg).kill_on_drop(true);
-    let out = tokio::time::timeout(PROBE_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| format!("{binary} {arg} timed out"))?
-        .map_err(|e| format!("spawning {binary}: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "{binary} {arg} exited {}: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    let body = async {
+        use tokio::io::AsyncReadExt;
+        let mut cmd = Command::new(binary);
+        cmd.arg(arg)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("spawning {binary}: {e}"))?;
+        let mut out_buf = Vec::new();
+        let mut err_buf = Vec::new();
+        if let Some(mut s) = child.stdout.take() {
+            let _ = s.read_to_end(&mut out_buf).await;
+        }
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_end(&mut err_buf).await;
+        }
+        let status = child.wait().await.map_err(|e| format!("{binary}: {e}"))?;
+        if !status.success() {
+            return Err(format!(
+                "{binary} {arg} exited {}: {}",
+                status,
+                String::from_utf8_lossy(&err_buf).trim()
+            ));
+        }
+        let from = |buf: &[u8]| {
+            String::from_utf8_lossy(buf)
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("")
+                .to_string()
+        };
+        let stdout_line = from(&out_buf);
+        Ok(if stdout_line.is_empty() {
+            from(&err_buf)
+        } else {
+            stdout_line
+        })
+    };
+    match tokio::time::timeout(PROBE_TIMEOUT, body).await {
+        Ok(r) => r,
+        Err(_) => Err(format!("{binary} {arg} timed out")),
     }
-    let first = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    Ok(first)
 }
 
 /// File name of the env file `apply: "env"` adds, inside the staged env.
