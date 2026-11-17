@@ -60,10 +60,15 @@ re-pins when the pin lacks a per-kind fact.
 
 ## Open (needs the owner or a GPU window)
 
-1. **m5 mlx-serve 26.10.1 → 26.9.5 swap** (the M4a carry-over):
-   `lanes macro llama-swap mlxserve <26.9.5 path>`. The reload starts the
-   preload hooks (`mimo9b-m5`, `qwen35b-m5`, about 50 GB); nothing is
-   loaded on m5 now, possibly on purpose.
+1. ~~m5 mlx-serve 26.10.1 → 26.9.5 swap~~ — **done 13:55 PST** (owner
+   go-ahead): `lanes macro llama-swap mlxserve <26.9.5 path>` → plan = one
+   macro change, reload preloads `mimo9b-m5`, `qwen35b-m5`; op succeeded
+   (`configuration reloaded`, 13 lanes listed), config repo commit
+   `2c6d705` (18 lines: the macro plus the render's whitespace/comment
+   normalisation). mimo9b-m5 runs `mlx-serve-26.9.5`, health check passed,
+   a chat request answered `ok`; qwen35b-m5 healthy. The lane's `name`
+   still says "mlx-serve 26.10.1" (a label, not the binary) — update it or
+   swap back with the same command and the 26.10.1 path.
 2. **Step 2, Linux units:** Strata (one lane) and `ollama-gpu1` need the
    cards (vLLM TP=2 holds both; the GPU guard refuses rightly) → a longjob
    `--stop-engine` window. `llmster` under a new user unit stops the
