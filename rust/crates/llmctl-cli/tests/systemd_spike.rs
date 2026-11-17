@@ -1441,7 +1441,7 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
     assert!(ok, "{text}");
     let (code, text) = cli_code(&d.socket, &["upgrade", "stage", "adopted", "2.0"]);
     assert_eq!(code, Some(4), "{text}");
-    assert!(text.contains("live env"), "{text}");
+    assert!(text.contains("live install"), "{text}");
     assert_eq!(http_get_json(port, "/v1/version")["version"], "2.0");
     let (ok, text) = cli(&d.socket, &["upgrade", "stage", "adopted", "1.0"]);
     assert!(ok, "{text}");
@@ -1608,4 +1608,527 @@ fn env_id(workload: &str, version: &str) -> String {
         Sha256::digest(format!("{workload}:{version}").as_bytes())
     );
     format!("{workload}-{version}-{}", &hex[..8])
+}
+
+// ---- M4a: installs and versions per recipe kind ------------------------------
+
+/// A tiny python "engine binary": serves /v1/models and /v1/version, and
+/// answers `--version` on the command line. The version is baked in per
+/// archive, exactly like a released build.
+const TINYSERVE_PY: &str = r#"#!/usr/bin/env python3
+import json, sys
+VERSION = "{VERSION}"
+if len(sys.argv) > 1 and sys.argv[1] == "--version":
+    print(f"tinyserve {VERSION}")
+    sys.exit(0)
+from http.server import BaseHTTPRequestHandler, HTTPServer
+port, model = int(sys.argv[1]), sys.argv[2]
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/v1/version":
+            body = json.dumps({"version": VERSION}).encode()
+        elif self.path == "/v1/models":
+            body = json.dumps({"object": "list", "data": [{"id": model}]}).encode()
+        else:
+            self.send_response(404); self.end_headers(); return
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+HTTPServer(("127.0.0.1", port), H).serve_forever()
+"#;
+
+/// Build a tiny release archive for `version` into `root`: one wrapper
+/// directory (the recipes' default strip) containing `bin/tinyserve`.
+/// Returns (archive_path, sha256_hex).
+fn make_tiny_archive(root: &Path, version: &str) -> (PathBuf, String) {
+    let staging = root.join(format!("mk-{version}"));
+    let bin = staging.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = staging.join("bin").join("tinyserve");
+    std::fs::write(&script, TINYSERVE_PY.replace("{VERSION}", version)).unwrap();
+    make_executable(&script);
+    let archive = root.join(format!("tinyserve-{version}.tar.gz"));
+    let out = Command::new("tar")
+        .args(["-czf"])
+        .arg(&archive)
+        .arg("-C")
+        .arg(root)
+        .arg(format!("mk-{version}"))
+        .output()
+        .expect("tar czf");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(&staging);
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(std::fs::read(&archive).unwrap());
+    (archive, format!("{:x}", digest))
+}
+
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perm = std::fs::metadata(path).unwrap().permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(path, perm).unwrap();
+}
+
+/// A tiny C "engine binary" (the plan's disposable source-build spike):
+/// /v1/models, /v1/version and `--version`, version baked per commit.
+const TINYSERVE_C: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#define VER "{VERSION}"
+int main(int argc, char **argv) {{
+    if (argc > 1 && strcmp(argv[1], "--version") == 0) {{
+        printf("tinyserve-c %s\n", VER);
+        return 0;
+    }}
+    int port = atoi(argv[1]);
+    const char *model = argv[2];
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return 1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons((unsigned short)port);
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0) return 1;
+    if (listen(s, 8) < 0) return 1;
+    for (;;) {{
+        int c = accept(s, 0, 0);
+        if (c < 0) continue;
+        char buf[2048];
+        memset(buf, 0, sizeof buf);
+        ssize_t n = read(c, buf, sizeof buf - 1);
+        (void)n;
+        char body[512];
+        int len;
+        if (strncmp(buf, "GET /v1/version", 15) == 0) {{
+            len = snprintf(body, sizeof body, "{{\"version\":\"%s\"}}", VER);
+        }} else {{
+            len = snprintf(body, sizeof body,
+                "{{\"object\":\"list\",\"data\":[{{\"id\":\"%s\"}}]}}", model);
+        }}
+        dprintf(c,
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n"
+            "content-length: %d\r\nconnection: close\r\n\r\n%s", len, body);
+        close(c);
+    }}
+}}
+"#;
+
+/// A git repo with two commits, each a tiny C server printing its own
+/// version, tagged `v1` and `v2`.
+fn make_tiny_git_repo(root: &Path) -> PathBuf {
+    let repo = root.join("tinysrc");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "spike")
+            .env("GIT_AUTHOR_EMAIL", "spike@example.invalid")
+            .env("GIT_COMMITTER_NAME", "spike")
+            .env("GIT_COMMITTER_EMAIL", "spike@example.invalid")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {:?}: {}{}",
+            args,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    for (tag, version) in [("1.0.0", "1.0.0"), ("2.0.0", "2.0.0")] {
+        // Un-double the brace escapes (the raw C template keeps them
+        // literal for format!-free templating).
+        std::fs::write(
+            repo.join("main.c"),
+            TINYSERVE_C
+                .replace("{VERSION}", version)
+                .replace("{{", "{")
+                .replace("}}", "}"),
+        )
+        .unwrap();
+        git(&["add", "main.c"]);
+        git(&["commit", "-q", "-m", &format!("tinyserve {version}")]);
+        git(&["tag", tag]);
+    }
+    repo
+}
+
+/// Patch the adopted workload's recipe in inventory.json (any kind).
+fn patch_inventory_recipe_json(dir: &Path, recipe: serde_json::Value) {
+    let mut inv: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("inventory.json")).unwrap()).unwrap();
+    inv["inventory"]["workloads"][0]["recipe"] = recipe;
+    std::fs::write(dir.join("inventory.json"), inv.to_string()).unwrap();
+}
+
+/// M4a, release-archive kind: stage (fetch a local archive, checksum,
+/// unpack, binary check), promote through the admitted operation, verify
+/// the served version, roll back to N, refuse an interrupted stage, refuse
+/// a checksum mismatch, gc the unused dir.
+#[test]
+#[ignore = "touches the user's systemd: run with --ignored"]
+fn release_archive_stages_promotes_verifies_and_rolls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let builds = dir.path().join("builds");
+    std::fs::create_dir_all(&builds).unwrap();
+    let (archive1, _sha1) = make_tiny_archive(dir.path(), "1.0");
+    let (archive2, _sha2) = make_tiny_archive(dir.path(), "2.0");
+    let port = free_port();
+    let model = "spike/model";
+
+    // A pre-existing versioned install the unit starts from (the dir the
+    // recipe's root owns, id-named like a stage would name it).
+    let seed = builds.join(env_id("adopted", "1.0"));
+    std::fs::create_dir_all(seed.join("bin")).unwrap();
+    // Unpack archive1's payload into the seed dir via the same tar rules.
+    let out = Command::new("tar")
+        .args(["-xzf"])
+        .arg(&archive1)
+        .arg("-C")
+        .arg(&seed)
+        .arg("--strip-components")
+        .arg("1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let unit = SpikeUnit::create(
+        dir.path(),
+        &format!(
+            "{} {} {model}",
+            seed.join("bin").join("tinyserve").display(),
+            port
+        ),
+    );
+    unit.start();
+    write_empty_inventory(dir.path());
+    let d = spawn_daemon(dir.path());
+    adopt_running(&d.socket, &unit.name, port);
+    let (ok, text) = cli(&d.socket, &["own", "adopted"]);
+    assert!(ok, "{text}");
+
+    // The owner adds a release-archive recipe; the restart re-pins the
+    // version facts (schema 3: dir, binary digest, reported version).
+    drop(d);
+    patch_inventory_recipe_json(
+        dir.path(),
+        serde_json::json!({
+            "kind": "release_archive",
+            "name": "tinyserve",
+            "root": builds.display().to_string(),
+            "url": archive2.display().to_string(),
+            "binary": "bin/tinyserve",
+            "version_arg": "--version"
+        }),
+    );
+    let d = spawn_daemon(dir.path());
+    let inv = std::fs::read_to_string(dir.path().join("inventory.json")).unwrap();
+    assert!(
+        inv.contains("\"definition_schema\": 3") && inv.contains("release_archive"),
+        "re-pin must record the per-kind fact: {inv}"
+    );
+
+    // Stage 2.0: fetch (copy), unpack, binary check → validated.
+    let (ok, text) = cli(&d.socket, &["install", "stage", "adopted", "2.0"]);
+    assert!(ok, "{text}");
+    assert!(text.contains("validated"), "{text}");
+    let dir2 = builds.join(env_id("adopted", "2.0"));
+    assert!(dir2.join("staged.json").exists(), "{text}");
+    assert!(dir2.join("bin").join("tinyserve").exists(), "{text}");
+
+    // Promote: stop, swap the definition's path to the new dir, start,
+    // verify served identity and the binary's own version.
+    let (ok, text) = cli(
+        &d.socket,
+        &["upgrade", "promote", "adopted", "2.0", "--wait"],
+    );
+    assert!(ok, "{text}");
+    assert!(text.contains("verify adopted runs"), "{text}");
+    assert_eq!(
+        http_get_json(port, "/v1/version")["version"],
+        "2.0",
+        "the promoted dir must be serving"
+    );
+    assert!(
+        std::fs::read_to_string(&unit.file)
+            .unwrap()
+            .contains(dir2.display().to_string().as_str()),
+        "the unit file must point at the new version dir"
+    );
+
+    // Roll back to N: the seed dir serves again.
+    let (ok, text) = cli(&d.socket, &["upgrade", "rollback", "adopted", "--wait"]);
+    assert!(ok, "{text}");
+    assert_eq!(http_get_json(port, "/v1/version")["version"], "1.0");
+
+    // An interrupted stage (manifest removed) is never promotable.
+    std::fs::remove_file(dir2.join("staged.json")).unwrap();
+    let (code, text) = cli_code(&d.socket, &["upgrade", "promote", "adopted", "2.0"]);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("never promotable"), "{text}");
+
+    // A declared checksum that does not match refuses the stage.
+    drop(d);
+    patch_inventory_recipe_json(
+        dir.path(),
+        serde_json::json!({
+            "kind": "release_archive",
+            "name": "tinyserve",
+            "root": builds.display().to_string(),
+            "url": dir.path().join("tinyserve-3.0.tar.gz").display().to_string(),
+            "checksum": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "binary": "bin/tinyserve",
+            "version_arg": "--version"
+        }),
+    );
+    let (archive3, _sha3) = make_tiny_archive(dir.path(), "3.0");
+    let d = spawn_daemon(dir.path());
+    let (code, text) = cli_code(&d.socket, &["install", "stage", "adopted", "3.0"]);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("checksum mismatch"), "{text}");
+    assert!(
+        !builds.join(env_id("adopted", "3.0")).exists(),
+        "a failed stage promotes nothing: {text}"
+    );
+    let _ = archive3;
+
+    // gc removes the rolled-back 2.0 dir, keeps the live seed dir.
+    let (ok, text) = cli(&d.socket, &["upgrade", "gc", "adopted"]);
+    assert!(ok, "{text}");
+    assert!(!dir2.exists(), "rolled-back dir must go: {text}");
+    assert!(
+        builds.join(env_id("adopted", "1.0")).exists(),
+        "the live dir stays: {text}"
+    );
+}
+
+/// M4a, source-build kind: a tiny C program built from a git checkout —
+/// stage two tags, promote, verify the served version, roll back. The
+/// binary's own `--version` is the verify step.
+#[test]
+#[ignore = "touches the user's systemd and builds C: run with --ignored"]
+fn source_build_stages_promotes_and_rolls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let builds = dir.path().join("cbuilds");
+    std::fs::create_dir_all(&builds).unwrap();
+    let repo = make_tiny_git_repo(dir.path());
+    let port = free_port();
+    let model = "spike/model";
+
+    // Bootstrap: the unit initially runs the v1 binary built by hand into
+    // a versioned dir (as an adopted pre-llmctl install would be).
+    let seed = builds.join(env_id("adopted", "1.0.0"));
+    std::fs::create_dir_all(seed.join("bin")).unwrap();
+    let out = Command::new("cc")
+        .arg(dir.path().join(&repo).join("main.c"))
+        .arg("-o")
+        .arg(seed.join("bin").join("tinyserve"))
+        .output()
+        .expect("cc");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // v1 is the current HEAD~1 source; rebuild from the tag explicitly.
+    let out = Command::new("git")
+        .args(["-C", repo.to_str().unwrap(), "show", "1.0.0:main.c"])
+        .output()
+        .unwrap();
+    std::fs::write(dir.path().join("main-v1.c"), out.stdout).unwrap();
+    let out = Command::new("cc")
+        .arg(dir.path().join("main-v1.c"))
+        .arg("-o")
+        .arg(seed.join("bin").join("tinyserve"))
+        .output()
+        .expect("cc");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let unit = SpikeUnit::create(
+        dir.path(),
+        &format!(
+            "{} {} {model}",
+            seed.join("bin").join("tinyserve").display(),
+            port
+        ),
+    );
+    unit.start();
+    write_empty_inventory(dir.path());
+    let d = spawn_daemon(dir.path());
+    adopt_running(&d.socket, &unit.name, port);
+    let (ok, text) = cli(&d.socket, &["own", "adopted"]);
+    assert!(ok, "{text}");
+    drop(d);
+
+    patch_inventory_recipe_json(
+        dir.path(),
+        serde_json::json!({
+            "kind": "source_build",
+            "name": "tinyserve-c",
+            "root": builds.display().to_string(),
+            "git": repo.display().to_string(),
+            "build": "mkdir -p bin && cc main.c -o bin/tinyserve",
+            "binary": "bin/tinyserve",
+            "version_arg": "--version"
+        }),
+    );
+    let d = spawn_daemon(dir.path());
+    let inv = std::fs::read_to_string(dir.path().join("inventory.json")).unwrap();
+    assert!(
+        inv.contains("\"definition_schema\": 3") && inv.contains("source_build"),
+        "re-pin must record the per-kind fact: {inv}"
+    );
+
+    // Stage v2: clone, checkout, build, binary check.
+    let (ok, text) = cli(&d.socket, &["install", "stage", "adopted", "2.0.0"]);
+    assert!(ok, "{text}");
+    assert!(text.contains("validated"), "{text}");
+    let dir2 = builds.join(env_id("adopted", "2.0.0"));
+    assert!(dir2.join("staged.json").exists(), "{text}");
+
+    // The manifest records the commit — the identity for SHA-pinned builds.
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir2.join("staged.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        manifest["commit"].as_str().is_some_and(|c| c.len() == 40),
+        "the git SHA is the version identity: {manifest}"
+    );
+
+    let (ok, text) = cli(
+        &d.socket,
+        &["upgrade", "promote", "adopted", "2.0.0", "--wait"],
+    );
+    assert!(ok, "{text}");
+    assert_eq!(
+        http_get_json(port, "/v1/version")["version"],
+        "2.0.0",
+        "the promoted build must be serving"
+    );
+
+    let (ok, text) = cli(&d.socket, &["upgrade", "rollback", "adopted", "--wait"]);
+    assert!(ok, "{text}");
+    assert_eq!(http_get_json(port, "/v1/version")["version"], "1.0.0");
+}
+
+/// M4a, vendor-app kind: the running version is observed through the
+/// declared probe, pinned at startup, drift is a finding (never
+/// auto-corrected), the plan prints owner-run steps only, and stage
+/// refuses.
+#[test]
+#[ignore = "touches the user's systemd: run with --ignored"]
+fn vendor_app_version_is_observed_pinned_and_drifts() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let model = "spike/model";
+    // The "vendor app": a server whose /api/version reads a file the test
+    // can flip — exactly what a silent vendor auto-update looks like.
+    let version_file = dir.path().join("vendor-version");
+    std::fs::write(&version_file, "0.1\n").unwrap();
+    let script = dir.path().join("vendor-server.py");
+    std::fs::write(
+        &script,
+        format!(
+            r#"
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+port, model, vfile = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/api/version":
+            body = json.dumps({{"version": open(vfile).read().strip()}}).encode()
+        elif self.path == "/v1/models":
+            body = json.dumps({{"object": "list", "data": [{{"id": model}}]}}).encode()
+        else:
+            self.send_response(404); self.end_headers(); return
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+HTTPServer(("127.0.0.1", port), H).serve_forever()
+"#
+        ),
+    )
+    .unwrap();
+
+    let unit = SpikeUnit::create(
+        dir.path(),
+        &format!(
+            "/usr/bin/python3 {} {port} {model} {}",
+            script.display(),
+            version_file.display()
+        ),
+    );
+    unit.start();
+    write_empty_inventory(dir.path());
+    let d = spawn_daemon(dir.path());
+    adopt_running(&d.socket, &unit.name, port);
+    let (ok, text) = cli(&d.socket, &["own", "adopted"]);
+    assert!(ok, "{text}");
+    drop(d);
+
+    patch_inventory_recipe_json(
+        dir.path(),
+        serde_json::json!({
+            "kind": "vendor_app",
+            "name": "fake-vendor",
+            "probe": {"probe": "http_json", "path": "/api/version", "field": "version"},
+            "backup_path": "/var/backups/fake-vendor.tar.gz",
+            "reinstall_cmd": "vendor-installer --restore /var/backups/fake-vendor.tar.gz"
+        }),
+    );
+    let d = spawn_daemon(dir.path());
+    let inv = std::fs::read_to_string(dir.path().join("inventory.json")).unwrap();
+    assert!(
+        inv.contains("\"definition_schema\": 3") && inv.contains("vendor_app"),
+        "the running version is pinned at startup: {inv}"
+    );
+
+    // No drift while the app reports the pinned version.
+    let (code, text) = cli_code(&d.socket, &["version", "adopted"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(
+        text.contains("\"running\": \"0.1\"") && text.contains("0.1"),
+        "{text}"
+    );
+
+    // The vendor "auto-updates": the running version moves off the pin.
+    std::fs::write(&version_file, "0.2\n").unwrap();
+    let (code, text) = cli_code(&d.socket, &["version", "adopted"]);
+    assert_eq!(code, Some(4), "drift must be a finding: {text}");
+    assert!(text.contains("version.fact"), "{text}");
+
+    // The plan reports both, the drift, and the owner-run steps — and
+    // nothing is ever executed.
+    let (code, text) = cli_code(&d.socket, &["install", "plan", "adopted"]);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("\"running\": \"0.2\""), "{text}");
+    assert!(text.contains("/var/backups/fake-vendor.tar.gz"), "{text}");
+    assert!(text.contains("vendor-installer --restore"), "{text}");
+
+    // Stage refuses: vendor apps are never installed by llmctl.
+    let (code, text) = cli_code(&d.socket, &["install", "stage", "adopted", "0.3"]);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("vendor app"), "{text}");
 }

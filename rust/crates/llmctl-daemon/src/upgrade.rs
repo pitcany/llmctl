@@ -80,6 +80,27 @@ fn envs_root(state: &AppState) -> PathBuf {
     state.paths.data_dir.join("envs")
 }
 
+/// `sha256:<hex>` of a file, streamed in 1 MiB chunks.
+async fn hash_file(path: &Path) -> Result<String, UpgradeError> {
+    use tokio::io::AsyncReadExt;
+    let mut f = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| UpgradeError::Io(format!("opening {}: {e}", path.display())))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .await
+            .map_err(|e| UpgradeError::Io(format!("reading {}: {e}", path.display())))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
 /// The directory versioned installs of this recipe live under (M4a: the
 /// recipe's declared root; python-env keeps the daemon's envs dir).
 fn installs_root(state: &AppState, recipe: &InstallRecipe) -> PathBuf {
@@ -436,8 +457,8 @@ async fn stage_release_archive(
     }
 
     // Checksum: recorded always, verified when the recipe declares one.
-    let bytes = tokio::fs::read(&archive).await?;
-    let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+    // Streamed — llama.cpp archives run to gigabytes.
+    let digest = hash_file(&archive).await?;
     if let Some(expected) = &r.checksum {
         let expected = expected.replace("{version}", version);
         if expected != digest {
@@ -855,8 +876,10 @@ pub async fn promote(
             .unwrap_or_default();
     // The version being replaced is the one pinned now, not the one pinned
     // when this env was staged: another promote may have run in between.
+    // Dir recipes have no package pin — their version is the dir's id.
     let from_version = pinned_version_of(state, name)
         .await
+        .or_else(|| version_of_dir(name, &old_executable))
         .unwrap_or_else(|| row.from_version.clone());
     state
         .ops
@@ -977,6 +1000,27 @@ fn recipe_kind_name(recipe: &InstallRecipe) -> &'static str {
     }
 }
 
+/// The version an install dir's id names, when the executable lives in a
+/// conventionally named `<root>/<workload>-<version>-<hash8>/` dir. The
+/// executable may sit deeper inside (e.g. `<id>/bin/server`), so every
+/// ancestor is tried.
+fn version_of_dir(workload: &str, executable: &str) -> Option<String> {
+    let mut dir = Path::new(executable).parent()?;
+    loop {
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some(id) = owned_env_id(workload, &name) {
+            return id
+                .strip_prefix(&format!("{workload}-"))?
+                .rsplit_once('-')
+                .map(|(version, _)| version.to_string());
+        }
+        dir = dir.parent()?;
+    }
+}
+
 /// Explicit rollback to N: the definition and env stashed when the last
 /// promoted upgrade ran. An upgrade operation in its own right; the old
 /// env is never touched by a promote, so it is still there.
@@ -1014,9 +1058,9 @@ pub async fn rollback(
         .and_then(|v| v.as_str())
         .unwrap_or("?")
         .to_string();
-    if old_interpreter.is_empty() || from_version == "?" {
+    if old_interpreter.is_empty() {
         return Err(refuse(
-            "the pre-upgrade interpreter or version was never pinned",
+            "the pre-upgrade executable was never pinned",
         ));
     }
 

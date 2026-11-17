@@ -632,23 +632,27 @@ pub async fn verify_running_interpreter(
         .unwrap_or_default();
     let mut seen = Vec::new();
     for pid in &pids {
-        let argv0 = std::fs::read(format!("/proc/{pid}/cmdline"))
+        let argv: Vec<String> = std::fs::read(format!("/proc/{pid}/cmdline"))
             .ok()
-            .and_then(|b| {
+            .map(|b| {
                 b.split(|c| *c == 0)
-                    .next()
+                    .filter(|a| !a.is_empty())
                     .map(|a| String::from_utf8_lossy(a).into_owned())
+                    .collect()
             })
             .unwrap_or_default();
-        if argv0 == interpreter {
+        // argv[0] for an ELF the unit execs directly; a later element for
+        // a shebang script (the interpreter runs `python3 <script>`), and
+        // for `<venv>/bin/python -m pkg` styles.
+        if argv.iter().any(|a| a == interpreter) {
             return Ok(());
         }
         let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).unwrap_or_default();
         if !env_prefix.is_empty() && maps.contains(&env_prefix) {
             return Ok(());
         }
-        if !argv0.is_empty() {
-            seen.push(argv0);
+        if let Some(argv0) = argv.first() {
+            seen.push(argv0.clone());
         }
     }
     seen.sort();
