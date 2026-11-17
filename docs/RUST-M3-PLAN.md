@@ -1,6 +1,9 @@
 # Rust successor — M3 plan (remote execution)
 
-Status 2026-11-16, decided (owner answers below); not started. Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md)
+Status 2026-11-16: code-complete for A.2/B/C/D/E and F's drills; Mac-side
+execution (A.1, A.3, D on mbp2, F, G) staged but not run — see
+[progress note](RUST-M3-PROGRESS-2026-11-16.md). Owner answers below.
+Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md)
 (milestone table, M3 row). Builds on M2 ([M2 plan](RUST-M2-PLAN.md),
 [pilot](RUST-M2-PILOT-2026-11-16.md)) and the answered M0 questions
 ([capability matrix](RUST-M0-CAPABILITY-MATRIX.md)).
