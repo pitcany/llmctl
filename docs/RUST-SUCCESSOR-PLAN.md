@@ -1,6 +1,6 @@
 # Rust successor for llmctl
 
-Status: proposed implementation plan, November 15, 2026. Progress: M2 done 2026-11-16 (pilot on `vllm-engine2`; [M2 plan](RUST-M2-PLAN.md)); next is M3 ([M3 plan](RUST-M3-PLAN.md)).
+Status: proposed implementation plan, November 15, 2026. Progress: M2 done 2026-11-16 (pilot on `vllm-engine2`; [M2 plan](RUST-M2-PLAN.md)); M3 A–F done 2026-11-16 on mbp2, only the G pilot on llama-swap remains ([M3 plan](RUST-M3-PLAN.md), [progress](RUST-M3-PROGRESS-2026-11-16.md)).
 
 User priority: **daily use first, broader distribution later**. Rust is the
 working language choice following the C++/Rust discussion. This document plans

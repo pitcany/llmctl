@@ -1,10 +1,10 @@
 # M3 implementation progress — 2026-11-16
 
-Companion to [RUST-M3-PLAN.md](RUST-M3-PLAN.md). Code-complete for parts
-A.2, B, C, D, E and most of F; every Mac-touching step (A.1, A.3, D
-against mbp2, F drills, G pilot) is staged and ready but **could not be
-executed from this session** — its permission mode denied every `ssh` and
-`git` command. The commands are listed below.
+Companion to [RUST-M3-PLAN.md](RUST-M3-PLAN.md). Parts A–F are done:
+implemented and verified on the workstation first (ssh and git were denied
+there), then executed on mbp2 in a later session — Mac suite, launchd
+spikes, enrollment and failure drills (see "Verified on mbp2"). Only G,
+the llama-swap pilot with the owner present, remains.
 
 ## What is implemented (all in `rust/`)
 
@@ -121,14 +121,13 @@ design). The agent stays enrolled (`hosts.json` on the workstation).
 What remains of M3: **G, the real pilot on llama-swap — owner present**
 (pre-checks, adopt/own/restart/logs/stop on `com.pitcany.llama-swap`,
 drills on the real unit, `release`, resume healers), plus the sleep/wake
-drill during that window. All commits are local on `main`
-(`439497e..cecb21d`), nothing pushed.
+drill during that window. Pushed 2026-11-16 (`21649e2..ea023e2` on
+`origin/main`); the m5 and mbp2 clones are synced.
 
-## Blocked this session and exact next commands
+## Execution commands (steps 1–5 done 2026-11-16; step 6 open)
 
-This Claude session's auto-mode deny rules blocked **all `ssh` and `git`
-commands**. Once ssh is available again (same shell as usual, or re-run
-with those commands permitted):
+Written while ssh and git were denied; kept as the reproducible command
+list. Steps 1–5 ran in the later session with the results above.
 
 1. **A.1 rustup on mbp2 — already done** (installed user-local,
    stable 1.100.0, earlier today; verify with
@@ -151,5 +150,5 @@ with those commands permitted):
    wake first (`ssh mbp2 'pmset schedule wake "<+2min>"'`), then
    `pmset sleepnow`, wake by network or owner.
 
-Git: all changes are uncommitted in the working tree (git was denied);
-commit as one M3 feature batch or split along A/B-C/D/E-F lines.
+Git: committed in A/B-C/D/E-F batches (`439497e..cecb21d`, docs
+`ea023e2`) and pushed.
