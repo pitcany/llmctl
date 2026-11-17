@@ -1,7 +1,7 @@
 # Rust successor — M4 plan (required engines and coordination)
 
-Status 2026-11-17: draft, owner decisions open (end of this file). Nothing
-built yet.
+Status 2026-11-17: plan agreed — all eight owner decisions taken, each as
+recommended (end of this file). Nothing built yet; next is M4a.
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table,
 M4 row; "Engine support and ownership"). Builds on M2 (one owned Linux
 workload, staged vLLM upgrade — [plan](RUST-M2-PLAN.md)) and M3 (Mac agent,
@@ -19,7 +19,7 @@ protection pass.*
 ## Scope
 
 M4 is larger than M2 and M3 together, so it runs as three sub-milestones,
-each with its own pilot and exit rows (owner decision 1):
+each with its own pilot and exit rows (owner decision 1, decided):
 
 - **M4a — installs and versions.** One installer model for every engine
   kind; version facts, pins, staged upgrade and rollback per kind.
@@ -147,7 +147,7 @@ taking over hand edits, not replacing a generator.
    (port the matrix rules from `swapmatrix.py`), write atomically, then
    confirm llama-swap accepted it (`/running` + its log), and keep the
    previous file for rollback. The git commit to the config repo stays as
-   history (owner decision 3).
+   history (owner decision 3, decided).
 5. **Shared model stores are separate records** from engine installs, with
    an owner per root (HF cache, `~/models`, `/mnt/storage/*`, `~/Models`,
    `~/.ollama/models`, `~/.lmstudio/models`). Removing an engine never
@@ -187,14 +187,20 @@ already on disk); record ds4's pin (fork SHA) without rebuilding.
    model identity (vLLM/llama-server/MTPLX/mlx-serve `/v1/models`; Ollama
    `/api/ps`; LM Studio `lms ps`/`/v1/models`), logs, engine-level unload
    where the engine has one (Ollama, LM Studio).
-2. Linux units: llama.cpp (`gpt-oss-120b`), Strata (one lane), ds4 (a new
-   user unit for `ds4-server`, owner decision 5), `llmster` under a user unit
-   (owner decision 6), Ollama (`ollama-gpu1` user unit first; the system
-   unit needs owner decision 4).
-3. Mac lanes: import llama-swap lanes as records (decision 4 above),
+2. Linux units: llama.cpp (`gpt-oss-120b`), Strata (one lane), `llmster`
+   under a new user unit (decision 6), Ollama (`ollama-gpu1` first). ds4
+   stays Mac-only in M4 (decision 5); the workstation build is untouched.
+3. Move the two system units to user units (decision 4): `vllm-engine`
+   (TP=2, :8003) and the main `ollama.service`, in one GPU window queued
+   through `longjob --stop-engine`. Same env file and launcher; update
+   llm-router's restart command, llm-heal's targets and the sudoers rule
+   together; keep the system units disabled (not deleted) as the rollback
+   path for one week.
+4. Mac lanes: import llama-swap lanes as records (decision 4 above),
    round-trip both configs, then one managed lane per engine kind on m5
    (MTPLX, mlx-vlm, mlx-serve, ds4) and the two lanes on mbp2.
-4. Mac vendor services: Ollama (m5 brew plist; mbp2 app agent) and LM
+5. Mac vendor services: Ollama (m5 brew plist; mbp2 app agent — both kept,
+   decision 8) and LM
    Studio — observe + start/stop through their own controls; record the
    console-login limit.
 
@@ -206,7 +212,7 @@ from both Macs (sanitised); a rejected matrix never reaches the file.
 
 1. **Model acquisition:** HF snapshot into a declared store, `ollama pull`,
    `lms get`; adopt hf2local outputs as existing weights rather than
-   re-implementing conversion (owner decision 7). Download progress through
+   re-implementing conversion (decision 7). Download progress through
    the operation journal; disk-space check first (mbp2 is at 93 %).
 2. **Fit and placement:** port the Python VRAM fit (`fits`,
    `free_mib_now`, recorded VRAM per preset) into the planner; on Macs a
@@ -216,7 +222,7 @@ from both Macs (sanitised); a rejected matrix never reaches the file.
    target, wait ready, roll back to the previous set on failure — the same
    shape as llm-router's swap and `plan_run`'s eviction, extended to
    profiles (env-file sets) and llama-swap groups.
-4. **Router handoff** (owner decision 2): llm-router keeps its
+4. **Router handoff** (decision 2): llm-router keeps its
    `/admin/switch` front door in M4; for workloads llmctl-next owns, the
    router calls the llmctl-next API instead of `systemctl`, under the
    shared flock. llmctl-next reports in-flight counts from the router
@@ -262,23 +268,18 @@ rollback forced, and one Mac lane swap that evicts by matrix.
 4. `llmster` on the workstation has no supervisor; a logout or crash leaves
    it down with nothing to restart it.
 
-## Owner decisions (open)
+## Owner decisions (2026-11-17, all as recommended)
 
-1. **Split M4 into M4a/M4b/M4c** with a pilot each (recommended).
+1. **Split M4 into M4a/M4b/M4c**, a pilot each.
 2. **Router:** llm-router stays the swap front door through M4 and calls
-   llmctl-next for owned workloads (recommended), or llmctl-next replaces
-   the router's swap logic now.
-3. **llama-swap config:** llmctl-next renders it from lane records and still
-   commits each change to the config repo (recommended), or it stays
-   hand-edited and llmctl-next owns only engine versions.
-4. **System units** (`vllm-engine`, main `ollama`): move them to user units
-   (removes the sudo path; recommended), or add a system-scope adapter with
-   a narrow sudoers rule.
-5. **ds4 on the workstation:** give `ds4-server` a user unit and a lane, or
-   keep it Mac-only for M4.
-6. **`llmster` on Linux:** run it under a user unit owned by llmctl-next
-   (recommended), or leave LM Studio observe-only on Linux.
-7. **Model acquisition:** treat hf2local as the converter and adopt its
-   outputs (recommended), or have llmctl-next drive hf2local.
-8. **Ollama install path on the Macs:** keep brew on m5 and the app on mbp2
-   (two vendor-app paths), or standardise both on one.
+   llmctl-next for the workloads llmctl-next owns, under the shared flock.
+3. **llama-swap config:** llmctl-next renders it from lane records after a
+   round-trip import, and still commits each change to the config repo.
+4. **System units:** `vllm-engine` and the main `ollama` move to user units
+   (M4b step 3); no system-scope adapter, no new sudo path.
+5. **ds4:** Mac-only for M4 (pin and manage it on m5).
+6. **`llmster` on Linux:** runs under a user unit owned by llmctl-next.
+7. **Model acquisition:** hf2local stays the converter; llmctl-next adopts
+   its finished outputs as weights in a store.
+8. **Ollama on the Macs:** keep brew + plist on m5 and the app on mbp2, as
+   two vendor-app paths.
