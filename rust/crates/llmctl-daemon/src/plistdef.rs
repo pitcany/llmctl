@@ -64,13 +64,23 @@ pub struct PrintState {
     pub disabled: bool,
 }
 
-/// Parse `launchctl print` text output. Recognizes the key = value lines
-/// the adapter needs and ignores everything else (services, domain info).
+/// Parse `launchctl print` text output. Only TOP-LEVEL job keys count:
+/// the print also lists per-service sections whose `state = active` lines
+/// would otherwise overwrite the job's own `state = running` (found on the
+/// first real run on mbp2 — a healthy job read as stopped). The
+/// `arguments` block appears either brace- or paren-delimited, entries
+/// unquoted or quoted with a trailing comma.
 pub fn parse_print(text: &str) -> PrintState {
     let mut out = PrintState::default();
     for line in text.lines() {
-        let trimmed = line.trim_start();
-        let Some((key, value)) = trimmed.split_once(" = ") else {
+        // Exactly one tab of indentation = a job-level property.
+        let Some(rest) = line.strip_prefix('\t') else {
+            continue;
+        };
+        if rest.starts_with('\t') || rest.starts_with(' ') {
+            continue; // nested section (services, endpoints, ...)
+        }
+        let Some((key, value)) = rest.split_once(" = ") else {
             continue;
         };
         let value = value.trim();
@@ -89,24 +99,31 @@ pub fn parse_print(text: &str) -> PrintState {
             _ => {}
         }
     }
-    // `arguments = (...)` is a multi-line block; collect quoted words
-    // (entries carry a trailing comma except the last).
-    if let Some(args_start) = text.find("\t\targuments = (\n") {
-        let rest = &text[args_start..];
-        if let Some(end) = rest.find("\t\t)\n") {
-            out.arguments = Some(
-                rest[..end]
-                    .lines()
-                    .filter_map(|l| {
-                        let t = l.trim().trim_end_matches(',');
-                        let unquoted = t.strip_prefix('"').and_then(|s| s.strip_suffix('"'));
-                        unquoted.map(str::to_owned)
-                    })
-                    .collect(),
-            );
+    out.arguments = parse_arguments_block(text);
+    out
+}
+
+/// Collect the `arguments` block (`arguments = {` … `}` or `( … )`), one
+/// word per line, unquoted (modern launchd) or quoted-with-comma (older).
+fn parse_arguments_block(text: &str) -> Option<Vec<String>> {
+    for (open, close) in [("\t\targuments = {\n", "\t\t}\n"), ("\t\targuments = (\n", "\t\t)\n")] {
+        if let Some(start) = text.find(open) {
+            let rest = &text[start + open.len()..];
+            if let Some(end) = rest.find(close) {
+                return Some(
+                    rest[..end]
+                        .lines()
+                        .filter_map(|l| {
+                            let t = l.trim().trim_end_matches(',');
+                            let t = t.strip_prefix('"').and_then(|s| s.strip_suffix('"'));
+                            t.filter(|s| !s.is_empty()).map(str::to_owned)
+                        })
+                        .collect(),
+                );
+            }
         }
     }
-    out
+    None
 }
 
 /// Import a plist JSON dictionary (plutil-converted) into a definition.
@@ -762,38 +779,46 @@ mod tests {
         assert_eq!(uncovered, vec!["MachServices", "Nice"]);
     }
 
-    const PRINT_SAMPLE: &str = r#"
-	com.pitcany.llama-swap = {
-		active count = 1
-		path = /Users/yannik/Library/LaunchAgents/com.pitcany.llama-swap.plist
-		state = running
-		program = /Users/yannik/local-llm/bin/llama-swap
-		arguments = (
-			"/Users/yannik/local-llm/bin/llama-swap",
-			"--config",
-			"/Users/yannik/local-llm/llama-swap/config.yaml"
-		)
+    const PRINT_SAMPLE: &str = r#"gui/501/com.pitcany.llama-swap = {
+	active count = 1
+	path = /Users/yannik/Library/LaunchAgents/com.pitcany.llama-swap.plist
+	state = running
+	program = /Users/yannik/local-llm/bin/llama-swap
+	arguments = {
+		/Users/yannik/local-llm/bin/llama-swap
+		--config
+		/Users/yannik/local-llm/llama-swap/config.yaml
+	}
 
-		stdout path = /Users/yannik/Library/Logs/llama-swap/llama-swap.out.log
-		stderr path = /Users/yannik/Library/Logs/llama-swap/llama-swap.err.log
+	stdout path = /Users/yannik/Library/Logs/llama-swap/llama-swap.out.log
+	stderr path = /Users/yannik/Library/Logs/llama-swap/llama-swap.err.log
 
-		inactive count = 2
-		run count = 4
-		pid = 48121
-		runs = 4
-		last exit code = 78
-		disabled = false
-	};
+	inactive count = 2
+	run count = 4
+	pid = 48121
+	runs = 4
+	last exit code = 78
+	disabled = false
+
+	services = {
+			state = active
+			state = active
+	}
+};
 "#;
 
     #[test]
     fn print_parser_reads_state_pid_runs_program() {
         let p = parse_print(PRINT_SAMPLE);
         assert!(p.loaded);
+        // The nested per-service `state = active` lines must not win.
         assert_eq!(p.state, "running");
         assert_eq!(p.pid, Some(48121));
         assert_eq!(p.runs, Some(4));
-        assert_eq!(p.program.as_deref(), Some("/Users/yannik/local-llm/bin/llama-swap"));
+        assert_eq!(
+            p.program.as_deref(),
+            Some("/Users/yannik/local-llm/bin/llama-swap")
+        );
         assert!(!p.disabled);
         assert_eq!(
             p.arguments.as_deref(),
@@ -806,9 +831,18 @@ mod tests {
             )
         );
         // "run count" must not shadow "runs".
-        assert_eq!(parse_print("runs = 7\n").runs, Some(7));
+        assert_eq!(parse_print("\truns = 7\n").runs, Some(7));
         // A manager that cannot be asked yields nothing (not loaded).
         let empty = parse_print("Could not find service \"x\" in domain for system");
         assert!(!empty.loaded);
+    }
+
+    #[test]
+    fn print_parser_also_accepts_the_quoted_paren_form() {
+        let legacy = "\t\targuments = (\n\t\t\t\"/bin/echo\",\n\t\t\t\"two words\"\n\t\t)\n";
+        assert_eq!(
+            parse_arguments_block(legacy).as_deref(),
+            Some(&["/bin/echo".to_string(), "two words".to_string()][..])
+        );
     }
 }

@@ -260,7 +260,9 @@ pub fn bootstrap_agent(alias: &str) -> Result<(), String> {
     );
     ssh(
         alias,
-        &format!("launchctl bootstrap gui/$(id -u) {remote_plist}"),
+        // env -i: a bootstrap inherits the caller's exported variables
+        // (the ssh login shell exports secrets); the agent gets none.
+        &format!("env -i launchctl bootstrap gui/$(id -u) {remote_plist}"),
     )?;
     // Wait for the socket (the agent binds it on start).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);

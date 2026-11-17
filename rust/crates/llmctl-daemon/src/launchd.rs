@@ -603,6 +603,12 @@ async fn launchctl(
     }
 }
 
+/// `bootstrap` with an empty environment: launchd otherwise inherits the
+/// *caller's* exported variables into the job (found live on mbp2: an
+/// ssh-launched bootstrap carried every login-shell secret into the
+/// job's environment). The plist's own `EnvironmentVariables` still
+/// apply; nothing else does.
+
 /// `launchctl print gui/<uid>/<label>`. A clean non-zero exit (job not
 /// loaded) yields `loaded: false`; only spawn/timeout failures are errors,
 /// so a manager that answered is never mistaken for a stopped job.
@@ -620,7 +626,26 @@ pub async fn print_job(label: &str, timeout: Duration) -> Result<PrintState, Eng
 
 pub async fn bootstrap(plist: &std::path::Path, timeout: Duration) -> Result<(), EngineError> {
     let domain = format!("gui/{}", uid());
-    let out = launchctl(&["bootstrap", &domain, &plist.display().to_string()], timeout).await?;
+    // `env -i`: a bootstrap inherits the *caller's* environment into the
+    // job (found live on mbp2: an ssh-launched bootstrap inherited every
+    // exported secret from the login shell). Jobs we load get none of it;
+    // the plist's own EnvironmentVariables still apply.
+    let mut cmd = Command::new("env");
+    cmd.arg("-i")
+        .arg("launchctl")
+        .arg("bootstrap")
+        .arg(&domain)
+        .arg(plist.display().to_string())
+        .kill_on_drop(true);
+    let out = match tokio::time::timeout(timeout, cmd.output()).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => return Err(EngineError::Io(format!("spawning launchctl: {e}"))),
+        Err(_) => {
+            return Err(EngineError::Timeout(
+                "launchctl bootstrap timed out".into(),
+            ))
+        }
+    };
     if out.status.success() {
         return Ok(());
     }

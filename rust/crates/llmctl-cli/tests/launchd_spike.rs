@@ -132,6 +132,22 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// A pid existing is not the port listening (python binds after exec):
+/// adoption's served-identity check probes HTTP, so wait for it.
+fn wait_port(port: u16) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "spike server never listened on {port}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Notional card no real occupant can collide with (see systemd spike).
 const SPIKE_GPU: u32 = 9;
 
@@ -361,11 +377,7 @@ fn adopt_own_release_byte_identical_and_drift_detected() {
     ])
     .status
     .success());
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    while job.pid().is_none() {
-        assert!(std::time::Instant::now() < deadline, "spike never ran");
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    wait_port(port);
     let original = job.original_bytes();
 
     // Adopt: preview, then confirm with the digest.
@@ -426,10 +438,21 @@ fn adopt_own_release_byte_identical_and_drift_detected() {
     );
 
     // An edited (hand-written) owned plist is drift before any effect.
+    // The render sorts keys (KeepAlive first), so anchor on the dict open.
     let owned_now = std::fs::read(&job.plist).unwrap();
-    let with_env = String::from_utf8_lossy(&owned_now).replace(
-        "<dict>\n\t<key>Label</key>",
-        "<dict>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>SPIKE_EXTRA</key>\n\t\t<string>1</string>\n\t</dict>\n\t<key>Label</key>",
+    assert!(
+        String::from_utf8_lossy(&owned_now).starts_with("<?xml"),
+        "owned plist is our render"
+    );
+    let with_env = String::from_utf8_lossy(&owned_now).replacen(
+        "<dict>\n",
+        "<dict>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>SPIKE_EXTRA</key>\n\t\t<string>1</string>\n\t</dict>\n",
+        1,
+    );
+    assert_ne!(
+        with_env,
+        String::from_utf8_lossy(&owned_now),
+        "the hand edit must change the file"
     );
     std::fs::write(&job.plist, with_env).unwrap();
     let (code, text) = cli_code(&d.socket, &["run", "spike", "--wait", "--key", "spike-drift"]);
@@ -494,10 +517,14 @@ fn logs_follow_a_restart_and_a_truncation() {
 
     let (ok, text) = cli(&d.socket, &["run", "spike", "--wait", "--key", "spike-run"]);
     assert!(ok, "{text}");
-    let first_run = job.runs().unwrap_or(0);
+    let pid_before = job.pid().expect("pid after run");
     let (ok, text) = cli(&d.socket, &["restart", "spike", "--wait", "--key", "spike-restart"]);
     assert!(ok, "{text}");
-    assert!(job.runs().unwrap_or(0) > first_run, "restart must rerun");
+    // restart = bootout + bootstrap, and bootout RESETS launchd's `runs`
+    // counter, so the observable rerun is the new pid (not the counter).
+    wait_port(port);
+    let pid_after = job.pid().expect("pid after restart");
+    assert_ne!(pid_before, pid_after, "restart must rerun the process");
     let up = spike_status(&d.socket);
     assert_eq!(up["readiness"], "Ready", "{up}");
 
