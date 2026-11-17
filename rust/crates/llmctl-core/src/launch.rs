@@ -108,6 +108,10 @@ pub struct LaunchdExtras {
     /// `ThrottleInterval` (seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub throttle_interval_secs: Option<u64>,
+    /// `ProcessType` (`Interactive`, `Standard`, `Background`, `Adaptive`):
+    /// launchd's CPU/IO scheduling class. Dropping it demotes the job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_type: Option<String>,
     /// `Disabled` as written in the plist (the launchd override database is
     /// separate state the adapter manages through enable/disable).
     #[serde(default, skip_serializing_if = "Option::is_none")]

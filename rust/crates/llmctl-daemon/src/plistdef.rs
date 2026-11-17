@@ -32,6 +32,7 @@ pub const CARRIED_KEYS: &[&str] = &[
     "StandardOutPath",
     "StandardErrorPath",
     "ThrottleInterval",
+    "ProcessType",
     "Disabled",
 ];
 
@@ -244,6 +245,7 @@ pub fn definition_from_plist(
                 .get("ThrottleInterval")
                 .and_then(Value::as_u64)
                 .filter(|s| *s > 0),
+            process_type: opt_str("ProcessType"),
             disabled: obj.get("Disabled").and_then(Value::as_bool),
         }),
     };
@@ -308,6 +310,9 @@ pub fn plist_from_definition(def: &LaunchDefinition) -> Result<Value, String> {
     }
     if let Some(secs) = extras.throttle_interval_secs {
         obj.insert("ThrottleInterval".into(), Value::from(secs));
+    }
+    if let Some(t) = &extras.process_type {
+        obj.insert("ProcessType".into(), Value::String(t.clone()));
     }
     if let Some(d) = extras.disabled {
         obj.insert("Disabled".into(), Value::Bool(d));
@@ -683,7 +688,8 @@ mod tests {
             "RunAtLoad": true,
             "StandardOutPath": "/Users/yannik/Library/Logs/llama-swap/llama-swap.out.log",
             "StandardErrorPath": "/Users/yannik/Library/Logs/llama-swap/llama-swap.err.log",
-            "ThrottleInterval": 10
+            "ThrottleInterval": 10,
+            "ProcessType": "Interactive"
         })
     }
 
@@ -709,6 +715,7 @@ mod tests {
         assert!(extras.run_at_load);
         assert!(extras.keep_alive.is_always());
         assert_eq!(extras.throttle_interval_secs, Some(10));
+        assert_eq!(extras.process_type.as_deref(), Some("Interactive"));
         assert_eq!(
             extras.stdout_path.as_deref(),
             Some("/Users/yannik/Library/Logs/llama-swap/llama-swap.out.log")
