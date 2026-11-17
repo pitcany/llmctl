@@ -84,6 +84,6 @@ seconds (no model was loaded, so no engine reload cost). Whole window
 
 - llama-swap: original plist (byte-identical), running, enabled,
   external to llmctl-next (adopted record kept at inventory revision 5).
-- mbp2 agent: `com.pitcany.llmctl-next` at `9ae22f3`'s tree minus the test
-  file, `--data-dir ~/.local/state/llmctl-next`.
+- mbp2 agent: `com.pitcany.llmctl-next` built from `76fe3a0`,
+  `--data-dir ~/.local/state/llmctl-next`.
 - Healers resumed; `llmctl-warm` not involved (M5 only).
