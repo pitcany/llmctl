@@ -39,9 +39,12 @@ version `a9d43ecc3` (upstream master 2026-11-17).
   model `gpt-oss-120b` ✓, binary version `a9d43ecc3` ✓; curl :8005
   confirmed serving. Version report showed the fact pin move with the
   promote.
-- **Rollback** (window 6): definition back to `build/`, old version
-  serving, then a daemon `stop` restores the pre-pilot inactive state.
-  Result recorded below once window 6 closed.
+- **Rollback** (window 6): Succeeded — definition back to `build/`,
+  served model re-verified, the running binary reported
+  `0.3.0-dev (build 10705, commit 257813839)` (the original), then a
+  daemon `stop` restored the pre-pilot inactive state. Full chain:
+  **stage → promote → rollback → stop**, each an admitted operation
+  with its journal row.
 - GPU refusal evidence: window 1 refused the promote while vllm held
   the cards (`gpu_occupied`, nothing journaled) — the never-free guard
   doing its job on a real engine.
