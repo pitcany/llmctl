@@ -154,6 +154,13 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", sha2::Sha256::digest(bytes))
 }
 
+/// The agent's data dir on an enrolled host (explicit everywhere: the
+/// plist and the remote bridge command both pin it, so the agent never
+/// silently binds the dev default `llmctl-next-dev`). Kept as a constant
+/// for documentation; both users spell it out with the remote home.
+#[allow(dead_code)]
+pub const REMOTE_DATA_DIR: &str = "~/.local/state/llmctl-next";
+
 /// The agent LaunchAgent plist: KeepAlive + RunAtLoad, its own data dir,
 /// logs under ~/Library/Logs (M3 design decision 2). `home` is the
 /// *remote* user's home as ssh reports it — plist paths must be absolute.
@@ -162,6 +169,8 @@ pub fn agent_plist(home: &str) -> Result<String, String> {
         "Label": AGENT_LABEL,
         "ProgramArguments": [
             format!("{home}/.local/bin/llmctl-next"),
+            "--data-dir",
+            format!("{home}/.local/state/llmctl-next"),
             "daemon"
         ],
         "RunAtLoad": true,

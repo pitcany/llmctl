@@ -15,10 +15,14 @@ use tokio::io::{AsyncRead, AsyncWrite, Join};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tower::Service;
 
-/// Where the agent binary lives on an enrolled host (M3-D.1), overridable
-/// for drills.
+/// The remote command prefix that starts the bridge on an enrolled host
+/// (M3-D.1). The data dir is pinned so the bridge always reaches the
+/// *agent's* socket, never a dev-default one; `~` expands in the remote
+/// login shell. Overridable for drills.
 pub fn remote_bin() -> String {
-    std::env::var("LLMCTL_NEXT_REMOTE_BIN").unwrap_or_else(|_| "~/.local/bin/llmctl-next".into())
+    std::env::var("LLMCTL_NEXT_REMOTE_BIN").unwrap_or_else(|_| {
+        "~/.local/bin/llmctl-next --data-dir ~/.local/state/llmctl-next".into()
+    })
 }
 
 /// One spawned `ssh` carrying the bridge protocol on its stdio. Killing

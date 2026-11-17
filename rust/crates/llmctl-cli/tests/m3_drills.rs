@@ -37,6 +37,29 @@ fn ssh(alias: &str, cmd: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Never-panicking ssh (destructors must not assert: a panic during
+/// unwinding aborts the whole test binary).
+fn ssh_quiet(alias: &str, cmd: &str) {
+    let _ = StdCommand::new("ssh").arg(alias).arg(cmd).output();
+}
+
+/// The agent answers over the bridge (a SIGKILLed agent leaves a stale
+/// socket FILE behind — `test -S` says nothing about a live listener).
+async fn wait_agent_alive(alias: &str, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let client = ControlClient::connect_bridge(alias);
+        if client.health().await.is_ok() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "agent on {alias} never answered again"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
 /// Push a file's bytes to the host through `ssh cat >`.
 fn push(alias: &str, remote_path: &str, bytes: &[u8]) {
     let mut child = StdCommand::new("ssh")
@@ -163,24 +186,57 @@ print(json.dumps({{"port": port}}))
     }
 
     fn restart_agent(&self) {
+        // Two-phase with a gap: a bootstrap that races the dying daemon's
+        // socket cleanup makes the new agent refuse to start ("another
+        // daemon is already listening"), and launchd's 10 s spawn throttle
+        // stretches the recovery. Let the old socket file fully disappear
+        // (unless a SIGKILLed agent left it stale — then remove it) before
+        // bootstrapping, then wait generously. Polls must always exit 0 or
+        // the ssh helper asserts on the first miss.
         ssh(
             &self.alias,
-            "launchctl bootout gui/$(id -u)/com.pitcany.llmctl-next 2>/dev/null; \
-             launchctl bootstrap gui/$(id -u) \
+            "launchctl bootout gui/$(id -u)/com.pitcany.llmctl-next 2>/dev/null",
+        );
+        let gone = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let left = ssh(
+                &self.alias,
+                "pgrep -x llmctl-next >/dev/null && echo busy || echo dead",
+            );
+            if left.trim() == "dead" {
+                break; // old daemon fully exited (a stale socket file is
+                       // fine: the new agent removes it at startup)
+            }
+            assert!(
+                std::time::Instant::now() < gone,
+                "old agent process never exited"
+            );
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        ssh(
+            &self.alias,
+            "launchctl bootstrap gui/$(id -u) \
              ~/Library/LaunchAgents/com.pitcany.llmctl-next.plist",
         );
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + Duration::from_secs(45);
         loop {
             let up = ssh(
                 &self.alias,
-                "test -S ~/.local/state/llmctl-next/control.sock && echo up",
+                "test -S ~/.local/state/llmctl-next/control.sock && echo up || echo down",
             );
             if up.trim() == "up" {
                 return;
             }
             assert!(std::time::Instant::now() < deadline, "agent never came back");
-            std::thread::sleep(Duration::from_millis(300));
+            std::thread::sleep(Duration::from_millis(500));
         }
+    }
+
+    /// restart_agent, then prove the listener (not just the socket file)
+    /// is back.
+    async fn restart_agent_alive(&self) {
+        self.restart_agent();
+        wait_agent_alive(&self.alias, Duration::from_secs(30)).await;
     }
 
     fn runs(&self) -> u64 {
@@ -201,7 +257,8 @@ print(json.dumps({{"port": port}}))
 
 impl Drop for DrillEnv {
     fn drop(&mut self) {
-        let _ = ssh(
+        // Never panic here: a panic during another panic aborts the binary.
+        ssh_quiet(
             &self.alias,
             &format!(
                 "launchctl bootout gui/$(id -u)/{} 2>/dev/null; rm -f \
@@ -220,14 +277,20 @@ impl Drop for DrillEnv {
                 "revision": 1
             }
         });
-        let _ = serde_json::to_vec_pretty(&empty).map(|bytes| {
-            push(
-                &self.alias,
-                "~/.local/state/llmctl-next/inventory.json",
-                bytes.as_slice(),
-            )
-        });
-        self.restart_agent();
+        if let Ok(bytes) = serde_json::to_vec_pretty(&empty) {
+            push(&self.alias, "~/.local/state/llmctl-next/inventory.json", &bytes);
+        }
+        // Two-phase, quiet version of restart_agent (see its comment).
+        ssh_quiet(
+            &self.alias,
+            "launchctl bootout gui/$(id -u)/com.pitcany.llmctl-next 2>/dev/null",
+        );
+        std::thread::sleep(Duration::from_secs(2));
+        ssh_quiet(
+            &self.alias,
+            "launchctl bootstrap gui/$(id -u) \
+             ~/Library/LaunchAgents/com.pitcany.llmctl-next.plist",
+        );
     }
 }
 
@@ -288,13 +351,41 @@ async fn drill_lost_ack_resolves_by_key_without_duplicate_effect() {
     process.kill();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Reconnect and resolve by key: exactly one operation, one effect.
+    // The outcome is genuinely ambiguous — the kill can land before OR
+    // after delivery. Both branches are honest; what must hold either
+    // way: exactly ONE operation under this key, ever, and a replay that
+    // does not produce a second effect.
     let client = ControlClient::connect_bridge(&alias);
-    let op = client.operation_by_key(&key).await.expect("by key after kill");
-    assert_eq!(op.idempotency_key, key);
-    let op = wait_terminal(&client, &op.id).await;
-    assert_eq!(op.status, OpStatus::Succeeded, "{op:?}");
-    // Retrying the same key replays the same operation, never a second run.
+    let op = match client.operation_by_key(&key).await {
+        Ok(op) => {
+            println!("admit had landed: operation {}", op.id);
+            let op = wait_terminal(&client, &op.id).await;
+            assert_eq!(op.status, OpStatus::Succeeded, "{op:?}");
+            op
+        }
+        Err(err) => {
+            let msg = err.to_string();
+            assert!(msg.contains("unknown_operation"), "unexpected: {msg}");
+            println!("admit never reached the agent (delivery lost too)");
+            let resp = client
+                .admit(AdmitRequest {
+                    protocol: PROTOCOL_VERSION,
+                    idempotency_key: key.clone(),
+                    kind: OpKind::Run,
+                    workload: "drill".into(),
+                    expected_revision: Some(plan.revision),
+                    expected_stop_targets: Some(plan.stop_targets.clone()),
+                })
+                .await
+                .expect("first real admit");
+            assert!(!resp.replayed);
+            let op = wait_terminal(&client, &resp.operation.id).await;
+            assert_eq!(op.status, OpStatus::Succeeded, "{op:?}");
+            op
+        }
+    };
+    // Retrying the same key replays the same operation, never a second
+    // effect.
     let replay = client
         .admit(AdmitRequest {
             protocol: PROTOCOL_VERSION,
@@ -322,20 +413,11 @@ async fn drill_agent_kill_reconciles_and_workload_survives() {
     let env = DrillEnv::create(&alias);
     assert!(env.runs() >= 1, "drill job running before the kill");
 
-    // SIGKILL the agent (not the workload's job).
+    // SIGKILL the agent (not the workload's job). Its own KeepAlive
+    // revives it; the stale socket file proves nothing, so wait for a
+    // live answer.
     ssh(&alias, "pkill -9 -x llmctl-next || true");
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let up = ssh(
-            &alias,
-            "test -S ~/.local/state/llmctl-next/control.sock && echo up",
-        );
-        if up.trim() == "up" {
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "agent never revived");
-        std::thread::sleep(Duration::from_millis(300));
-    }
+    wait_agent_alive(&alias, Duration::from_secs(30)).await;
     let client = ControlClient::connect_bridge(&alias);
     let health = client.health().await.expect("agent answers after revive");
     println!(
@@ -363,7 +445,7 @@ async fn drill_simulated_login_restart_of_agent() {
         return;
     };
     let env = DrillEnv::create(&alias);
-    env.restart_agent();
+    env.restart_agent_alive().await;
     let client = ControlClient::connect_bridge(&alias);
     let status = client.status().await.expect("status after simulated login");
     assert!(
