@@ -33,6 +33,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/operations", post(admit_operation))
         .route("/v1/operations", get(list_operations))
         .route("/v1/operations/{id}", get(get_operation))
+        .route("/v1/operations/by-key/{key}", get(get_operation_by_key))
         .route("/v1/operations/{id}/cancel", post(cancel_operation))
         .route("/v1/operations/{id}/acknowledge", post(ack_operation))
         .route("/v1/adoptions/preview", post(adoption_preview))
@@ -314,6 +315,30 @@ async fn get_operation(
         .map_err(|e| ApiError::from_ops(&OpsError::Db(e)))?
         .ok_or_else(|| {
             ApiError::not_found(codes::UNKNOWN_OPERATION, format!("no operation {id}"))
+        })?;
+    Ok(Json(operation_view(&row)))
+}
+
+/// Resolve an idempotency key to its operation — how a client closes the
+/// lost-ACK window after a transport error (M3 decision 4): the key
+/// answers "did my admit land?" without issuing anything new.
+async fn get_operation_by_key(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> Result<Json<OperationView>, ApiError> {
+    let parsed = llmctl_core::IdempotencyKey::try_from(key.clone())
+        .map_err(|e| OpsError::Invalid(e.to_string()))?;
+    let row = state
+        .ops
+        .db()
+        .find_by_key(parsed.as_str())
+        .await
+        .map_err(|e| ApiError::from_ops(&OpsError::Db(e)))?
+        .ok_or_else(|| {
+            ApiError::not_found(
+                codes::UNKNOWN_OPERATION,
+                format!("no operation with idempotency key {key}"),
+            )
         })?;
     Ok(Json(operation_view(&row)))
 }

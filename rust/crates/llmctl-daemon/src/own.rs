@@ -17,15 +17,18 @@
 //!   file-digest short circuit once llmctl owns the file.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use llmctl_core::{LaunchDefinition, Ownership, PreviousUnitFile, ServiceFileRecord, UnitName};
+use llmctl_core::{
+    LaunchDefinition, Ownership, PendingApply, PreviousUnitFile, ServiceFileRecord, UnitName,
+};
 
 use crate::app::{AppState, InventoryFile};
 use crate::engine::{write_json_atomic, EngineError, Faults};
 use crate::ops::OpsError;
-use crate::unitdef;
+use crate::supervisor::{ImportedJob, Supervisor};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OwnError {
@@ -71,31 +74,27 @@ pub async fn own(state: &AppState, name: &str) -> Result<OwnOutcome, OwnError> {
             "{name} is not an adopted (managed) workload; own applies after adopt"
         )));
     };
-    if def.engine != crate::systemd::ENGINE_NAME {
-        return Err(refuse(format!("{name} is not a systemd workload")));
+    if def.engine != state.supervisor.engine_name() {
+        return Err(refuse(format!(
+            "{name} is not a {} workload",
+            state.supervisor.engine_name()
+        )));
     }
 
-    let timeout = state.systemd.show_timeout();
-    let imported = unitdef::import_unit(&def.unit, timeout).await?;
+    let imported = state.supervisor.import(&def.unit).await?;
     preconditions(&imported, &pinned, name)?;
 
     let path = PathBuf::from(&imported.fragment_path);
     let previous = record_previous(&state.paths.data_dir, &wl_name, &path).await?;
-    let header = format!(
-        "llmctl-next managed workload {} (definition {}; owned {})",
-        name,
-        pinned.digest(),
-        chrono::Utc::now().to_rfc3339()
-    );
     let ctx = OwnCtx {
         paths: state.paths.clone(),
-        systemd: state.systemd.clone(),
+        supervisor: state.supervisor.clone(),
     };
     let record = write_and_prove(
         &ctx,
         &def.unit,
+        &wl_name,
         &pinned,
-        &header,
         &path,
         previous.clone(),
         previous,
@@ -104,11 +103,24 @@ pub async fn own(state: &AppState, name: &str) -> Result<OwnOutcome, OwnError> {
 
     // Inventory: the ownership gains the service file record. Revision
     // moves, so stale plans cannot confirm against a changed world.
+    // launchd: writing the plist does not take effect until the next
+    // bootstrap, so the change is recorded as pending apply (decision 6).
+    let deferred = state.supervisor.deferred_apply();
     let mut next = (*inv).clone();
     for w in &mut next.workloads {
         if w.name == wl_name {
-            if let Ownership::Managed { service_file, .. } = &mut w.ownership {
+            if let Ownership::Managed {
+                service_file,
+                pending_apply,
+                ..
+            } = &mut w.ownership
+            {
                 *service_file = Some(record.clone());
+                *pending_apply = deferred.then(|| PendingApply {
+                    reason: "own wrote the rendered plist; the next admitted restart applies it"
+                        .into(),
+                    since: chrono::Utc::now(),
+                });
             }
         }
     }
@@ -139,34 +151,33 @@ pub async fn release(state: &AppState, name: &str) -> Result<(), OwnError> {
         )));
     };
 
-    let timeout = state.systemd.show_timeout();
     let path = Path::new(&record.path);
     restore_previous(&record.previous, path).await?;
-    unitdef::daemon_reload(timeout).await?;
+    state.supervisor.reload_manager().await?;
 
     // The restored original must still be the same effective definition as
     // pinned — otherwise the world changed under us and a human decides.
-    let imported = unitdef::import_unit(&def.unit, timeout).await?;
+    // (launchd: the loaded job is compared; the restored plist itself is
+    // applied by the next bootstrap, recorded as pending before we go
+    // external below.)
+    let imported = state.supervisor.import(&def.unit).await?;
     match &imported.definition {
         Some(live) if live.diff(pinned).is_empty() => {}
         other => {
             // Put the owned file back; refuse rather than release something
             // that no longer matches what llmctl pinned.
-            let header = format!(
-                "llmctl-next managed workload {} (definition {}; re-owned {})",
-                name,
-                pinned.digest(),
-                chrono::Utc::now().to_rfc3339()
-            );
-            let mut rendered = unitdef::render_unit(pinned, &header);
+            let mut rendered = state
+                .supervisor
+                .render(pinned, &wl_name, false)
+                .map_err(refuse)?;
             // Keep the unit enable-able: the restored original's [Install].
             let source = tokio::fs::read_to_string(path).await.unwrap_or_default();
-            if let Some(install) = unitdef::install_section(&source) {
+            if let Some(install) = state.supervisor.carried_verbatim(&source) {
                 rendered.push('\n');
                 rendered.push_str(&install);
             }
             write_file_atomic(path, rendered.as_bytes()).await?;
-            unitdef::daemon_reload(timeout).await?;
+            state.supervisor.reload_manager().await?;
             return Err(refuse(format!(
                 "restored original no longer matches the pinned definition ({:?} vs pinned); kept the llmctl file",
                 other.as_ref().map(|d| d.digest())
@@ -183,7 +194,7 @@ pub async fn release(state: &AppState, name: &str) -> Result<(), OwnError> {
     bump_revision(
         &OwnCtx {
             paths: state.paths.clone(),
-            systemd: state.systemd.clone(),
+            supervisor: state.supervisor.clone(),
         },
         state.ops.as_ref(),
         next,
@@ -202,7 +213,7 @@ pub async fn release(state: &AppState, name: &str) -> Result<(), OwnError> {
 #[derive(Clone)]
 pub struct OwnCtx {
     pub paths: crate::app::DevPaths,
-    pub systemd: crate::systemd::SystemdEngine,
+    pub supervisor: Arc<dyn Supervisor>,
 }
 
 /// The staged-upgrade primitive (plan item D): write `next` with the same
@@ -218,7 +229,7 @@ pub async fn apply_definition(
     apply_definition_ctx(
         &OwnCtx {
             paths: state.paths.clone(),
-            systemd: state.systemd.clone(),
+            supervisor: state.supervisor.clone(),
         },
         &inv,
         name,
@@ -254,8 +265,7 @@ pub async fn apply_definition_ctx(
             "{name} has no owned service file; own it before changing its definition"
         )));
     };
-    let timeout = ctx.systemd.show_timeout();
-    let imported = unitdef::import_unit(&def.unit, timeout).await?;
+    let imported = ctx.supervisor.import(&def.unit).await?;
     // Drift is measured against the *pin* (the definition being replaced),
     // not the candidate: an upgrade's whole point is that `next` differs.
     preconditions(&imported, pinned, name)?;
@@ -281,23 +291,19 @@ pub async fn apply_definition_ctx(
         backup_path: backup.display().to_string(),
     };
 
-    let header = format!(
-        "llmctl-next managed workload {} (definition {}; updated {})",
-        name,
-        next.digest(),
-        chrono::Utc::now().to_rfc3339()
-    );
     let new_record = write_and_prove(
         ctx,
         &def.unit,
+        &wl_name,
         next,
-        &header,
         &path,
         undo,
         record.previous.clone(),
     )
     .await?;
 
+    // launchd: the written plist is pending until the next bootstrap.
+    let deferred = ctx.supervisor.deferred_apply();
     let mut next_inv = inv.clone();
     for w in &mut next_inv.workloads {
         if w.name == wl_name {
@@ -305,12 +311,18 @@ pub async fn apply_definition_ctx(
                 definition,
                 digest,
                 service_file,
+                pending_apply,
                 ..
             } = &mut w.ownership
             {
                 **definition = next.clone();
                 *digest = next.digest();
                 *service_file = Some(new_record.clone());
+                *pending_apply = deferred.then(|| PendingApply {
+                    reason: "definition change wrote the plist; the next admitted restart applies it"
+                        .into(),
+                    since: chrono::Utc::now(),
+                });
             }
         }
     }
@@ -321,7 +333,7 @@ pub async fn apply_definition_ctx(
 // ---- shared steps -----------------------------------------------------------
 
 fn preconditions(
-    imported: &unitdef::ImportedUnit,
+    imported: &ImportedJob,
     pinned: &LaunchDefinition,
     name: &str,
 ) -> Result<(), OwnError> {
@@ -333,7 +345,7 @@ fn preconditions(
     }
     if imported.fragment_path.is_empty() {
         return Err(refuse(format!(
-            "{name} has no unit file of its own (loaded from elsewhere)"
+            "{name} has no definition file of its own (loaded from elsewhere)"
         )));
     }
     match &imported.definition {
@@ -433,41 +445,46 @@ fn backup_path(data_dir: &Path, workload: &llmctl_core::WorkloadName) -> PathBuf
 }
 
 /// Render, write (replacing the link/file itself, never writing through a
-/// symlink), reload, re-import and compare. Any mismatch puts the recorded
-/// original back and refuses.
+/// symlink), prove, and compare. Any mismatch puts the recorded original
+/// back and refuses.
+///
+/// The prove is platform-appropriate: systemd reloads the manager and
+/// re-imports the real unit; launchd proves the render in a scratch job
+/// (bootstrap under a throwaway label, import, compare, boot out) because
+/// proving on the live label would restart the workload — the one thing
+/// `own` must never do (decision 6).
 #[allow(clippy::too_many_arguments)]
 async fn write_and_prove(
     ctx: &OwnCtx,
     unit: &UnitName,
+    workload: &llmctl_core::WorkloadName,
     expected: &LaunchDefinition,
-    header: &str,
     path: &Path,
     // Put back if the prove fails.
     undo: PreviousUnitFile,
     // Recorded for `release` (what `own` replaced; never an llmctl render).
     release_target: PreviousUnitFile,
 ) -> Result<ServiceFileRecord, OwnError> {
-    let timeout = ctx.systemd.show_timeout();
     // What is there now (through a link: the file it points at). Every
     // directive must be carried by the definition, or rendering would drop
     // it silently (the pilot's RestartSec/StartLimit* case): refuse.
     let source = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| OwnError::Io(format!("reading {}: {e}", path.display())))?;
-    let uncovered = unitdef::uncovered_directives(&source, expected);
+    let uncovered = ctx.supervisor.uncovered(path, expected);
     if !uncovered.is_empty() {
         return Err(refuse(format!(
             "{unit} sets directives the pinned definition does not carry ({}); a rendered unit would drop them — re-adopt to pin them, or remove them from the unit",
             uncovered.join(", ")
         )));
     }
-    let mut rendered = unitdef::render_unit(expected, header);
     // Test hook: a subtly wrong render must be caught by the prove step.
     let faults = Faults::load(&ctx.paths.faults).await;
-    if faults.corrupt_render {
-        rendered.push_str("Environment=LLMCTL_FAULT_RENDER=1\n");
-    }
-    if let Some(install) = unitdef::install_section(&source) {
+    let mut rendered = ctx
+        .supervisor
+        .render(expected, workload, faults.corrupt_render)
+        .map_err(refuse)?;
+    if let Some(install) = ctx.supervisor.carried_verbatim(&source) {
         rendered.push('\n');
         rendered.push_str(&install);
     }
@@ -477,12 +494,21 @@ async fn write_and_prove(
     write_file_atomic(path, rendered.as_bytes()).await?;
     let digest = sha256_hex(rendered.as_bytes());
 
-    unitdef::daemon_reload(timeout).await?;
-    let imported = unitdef::import_unit(unit, timeout).await?;
-    let equivalent = matches!(&imported.definition, Some(live) if live.diff(expected).is_empty());
+    let equivalent = if ctx.supervisor.deferred_apply() {
+        // launchd: prove in a scratch job; the live job is not touched.
+        match ctx.supervisor.roundtrip(expected, &rendered).await {
+            Ok(diffs) if diffs.is_empty() => true,
+            Ok(_) => false,
+            Err(_) => false,
+        }
+    } else {
+        ctx.supervisor.reload_manager().await?;
+        let imported = ctx.supervisor.import(unit).await?;
+        matches!(&imported.definition, Some(live) if live.diff(expected).is_empty())
+    };
     if !equivalent {
         restore_previous(&undo, path).await?;
-        unitdef::daemon_reload(timeout).await?;
+        ctx.supervisor.reload_manager().await?;
         return Err(refuse(format!(
             "the rendered unit for {unit} did not load to the identical effective definition; original restored"
         )));
@@ -526,4 +552,32 @@ async fn bump_revision(
     .map_err(|e| OpsError::Engine(e.to_string()))?;
     ops.update_inventory(std::sync::Arc::new(bumped)).await;
     Ok(())
+}
+
+/// Clear a workload's `pending_apply` marker after an effect that loaded
+/// the file it points at (launchd's bootstrap-in-`run`/`restart`). Called
+/// by the operation executor after a successful start effect on a
+/// deferred-apply platform. No-op elsewhere.
+pub async fn clear_pending(
+    ctx: &OwnCtx,
+    ops: &crate::ops::OpManager,
+    workload: &llmctl_core::WorkloadName,
+) -> Result<(), OwnError> {
+    if !ctx.supervisor.deferred_apply() {
+        return Ok(());
+    }
+    let inv = ops.inventory().await;
+    let mut next = (*inv).clone();
+    let mut had = false;
+    for w in &mut next.workloads {
+        if &w.name == workload {
+            if let Ownership::Managed { pending_apply, .. } = &mut w.ownership {
+                had = pending_apply.take().is_some();
+            }
+        }
+    }
+    if !had {
+        return Ok(());
+    }
+    bump_revision(ctx, ops, next).await
 }

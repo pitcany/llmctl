@@ -763,9 +763,21 @@ impl OpManager {
         if self.persist(row).await.is_err() {
             return StepOutcome::Failed("journaling effect boundary failed".into());
         }
+        let is_start = matches!(effect, Effect::StartUnit { .. });
         match self.engine.apply(effect).await {
             Ok(outcome) => {
-                applied.push(outcome.identity);
+                applied.push(outcome.identity.clone());
+                // launchd deferred apply: a start that bootstrapped from
+                // the plist (the ":boot:" mechanism in the identity) just
+                // made an owned/released file live — clear the marker.
+                if is_start && outcome.identity.contains(":boot:") {
+                    if let Some(ctx) = self.own_ctx.clone() {
+                        if let Err(e) = crate::own::clear_pending(&ctx, self, &row.workload).await
+                        {
+                            tracing::warn!(error = %e, "clearing pending_apply failed");
+                        }
+                    }
+                }
                 StepOutcome::Done
             }
             Err(EngineError::FaultAfter(msg) | EngineError::Unconfirmed(msg)) => {

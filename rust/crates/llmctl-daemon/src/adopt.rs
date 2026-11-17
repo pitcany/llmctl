@@ -16,13 +16,12 @@ use llmctl_client::wire::{
     AdoptRequest, AdoptResponse, AdoptionCheck, AdoptionPreview, CheckStatus, PROTOCOL_VERSION,
 };
 use llmctl_core::{
-    ControlAuthority, GpuId, Ownership, ProcessState, Readiness, ServedModel, UnitName, UnitScope,
-    UnitScopeMarker, WorkloadDefinition, WorkloadName,
+    GpuId, Ownership, ProcessState, Readiness, ServedModel, UnitName, WorkloadDefinition,
+    WorkloadName,
 };
 
 use crate::app::{AppState, InventoryFile};
 use crate::ops::OpsError;
-use crate::unitdef;
 
 #[derive(Debug)]
 pub enum AdoptError {
@@ -54,34 +53,30 @@ struct Parsed {
     unit: UnitName,
 }
 
-fn parse(req: &AdoptRequest) -> Result<Parsed, OpsError> {
+fn parse(state: &AppState, req: &AdoptRequest) -> Result<Parsed, OpsError> {
     if req.protocol != PROTOCOL_VERSION {
         return Err(OpsError::ProtocolMismatch {
             got: req.protocol,
             supported: vec![PROTOCOL_VERSION],
         });
     }
-    if !req.unit.ends_with(".service") || req.unit.contains('/') {
-        return Err(OpsError::Invalid(format!(
-            "unit must be a bare service name like foo.service, got {:?}",
-            req.unit
-        )));
-    }
     if req.model.trim().is_empty() {
         return Err(OpsError::Invalid("model must not be empty".into()));
     }
+    let unit = state
+        .supervisor
+        .parse_unit(&req.unit)
+        .map_err(OpsError::Invalid)?;
     Ok(Parsed {
         workload: WorkloadName::new(&req.workload).map_err(|e| OpsError::Invalid(e.to_string()))?,
-        unit: UnitName::systemd(UnitScopeMarker::User, &req.unit)
-            .map_err(|e| OpsError::Invalid(e.to_string()))?,
+        unit,
     })
 }
 
 /// Read-only: imports, renders, round-trips and checks. Never enrolls.
 pub async fn preview(state: &AppState, req: &AdoptRequest) -> Result<AdoptionPreview, OpsError> {
-    let parsed = parse(req)?;
+    let parsed = parse(state, req)?;
     let inv = state.ops.inventory().await;
-    let timeout = state.systemd.show_timeout();
     let mut checks = Vec::new();
 
     // Enrollment: identity, port and GPUs must be free and real.
@@ -113,7 +108,7 @@ pub async fn preview(state: &AppState, req: &AdoptRequest) -> Result<AdoptionPre
         check("enrollment", CheckStatus::Fail, problems.join("; "))
     });
 
-    let imported = match unitdef::import_unit(&parsed.unit, timeout).await {
+    let imported = match state.supervisor.import(&parsed.unit).await {
         Ok(i) => i,
         Err(e) => {
             checks.push(check("unit_loaded", CheckStatus::Fail, e.to_string()));
@@ -124,7 +119,7 @@ pub async fn preview(state: &AppState, req: &AdoptRequest) -> Result<AdoptionPre
         checks.push(check(
             "unit_loaded",
             CheckStatus::Fail,
-            format!("systemd load state is {:?}", imported.load_state),
+            format!("load state is {:?}", imported.load_state),
         ));
         return Ok(AdoptionPreview {
             provenance: imported.provenance,
@@ -134,7 +129,7 @@ pub async fn preview(state: &AppState, req: &AdoptRequest) -> Result<AdoptionPre
     checks.push(check(
         "unit_loaded",
         CheckStatus::Pass,
-        "loaded (user scope)",
+        format!("loaded ({})", state.supervisor.engine_name()),
     ));
 
     checks.push(if imported.secret_env_names.is_empty() {
@@ -150,25 +145,24 @@ pub async fn preview(state: &AppState, req: &AdoptRequest) -> Result<AdoptionPre
         )
     });
 
-    let generated = unitdef::render_unit(
-        &definition,
-        &format!(
-            "llmctl-next managed workload {} (adopted from {})",
-            parsed.workload, req.unit
-        ),
-    );
+    let generated = state
+        .supervisor
+        .render(&definition, &parsed.workload, false)
+        .map_err(OpsError::Invalid)?;
     checks.push(
-        match unitdef::roundtrip(&definition, &generated, timeout).await {
+        match state.supervisor.roundtrip(&definition, &generated).await {
             Ok(diffs) if diffs.is_empty() => check(
                 "definition_roundtrip",
                 CheckStatus::Pass,
-                "systemd loads the generated definition to the identical effective configuration",
+                format!(
+                    "the manager loads the generated definition to the identical effective configuration"
+                ),
             ),
             Ok(diffs) => check(
                 "definition_roundtrip",
                 CheckStatus::Fail,
                 format!(
-                    "generated definition differs after systemd loads it: {}",
+                    "generated definition differs after the manager loads it: {}",
                     diffs
                         .iter()
                         .map(|d| d.field.as_str())
@@ -181,7 +175,7 @@ pub async fn preview(state: &AppState, req: &AdoptRequest) -> Result<AdoptionPre
     );
 
     let probe = state
-        .systemd
+        .supervisor
         .probe_unenrolled(&parsed.unit, req.port, &req.model)
         .await;
     checks.push(
@@ -272,12 +266,16 @@ pub async fn transfer(state: &AppState, req: AdoptRequest) -> Result<AdoptRespon
         return Err(AdoptError::Refused(Box::new(preview)));
     };
 
-    let parsed = parse(&req)?;
+    let parsed = parse(state, &req)?;
     let inv = state.ops.inventory().await;
+    let version_pin = preview
+        .definition
+        .as_ref()
+        .and_then(|d| state.supervisor.program_digest_pin(d));
     let mut next = (*inv).clone();
     next.workloads.push(WorkloadDefinition {
         name: parsed.workload,
-        engine: crate::systemd::ENGINE_NAME.into(),
+        engine: state.supervisor.engine_name().into(),
         model: req.model.clone(),
         gpus: req
             .gpus
@@ -285,21 +283,22 @@ pub async fn transfer(state: &AppState, req: AdoptRequest) -> Result<AdoptRespon
             .map(|i| GpuId::new(inv.host.clone(), *i))
             .collect(),
         port: req.port,
-        unit: parsed.unit,
-        authority: ControlAuthority::SystemdUnit {
-            scope: UnitScope::User,
-            unit: req.unit.clone(),
-        },
+        unit: parsed.unit.clone(),
+        authority: state.supervisor.authority_for(&parsed.unit),
         ownership: Ownership::Managed {
             definition: Box::new(definition),
             digest,
             adopted_at: Utc::now(),
             provenance: preview.provenance.clone(),
             service_file: None,
-            version: None,
+            // launchd pins the program binary's digest here at adoption
+            // (an in-place upgrade of the single static binary is drift);
+            // systemd pins python-env facts lazily via recipes.
+            version: version_pin,
             // Schema 2 (version facts) is pinned by the startup re-pin
             // once the inventory names a recipe for this workload.
             definition_schema: 1,
+            pending_apply: None,
         },
         // Recovery stays off for adopted workloads until the owner turns it
         // on in the inventory (owner decision, 2026-11-16).
