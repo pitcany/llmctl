@@ -54,19 +54,25 @@ drive an already-adopted workload by name and never write the inventory.
    key. `own` would have refused the real plist (the uncovered-key guard
    from M2 worked); a render without it would demote llama-swap and every
    engine it spawns to the default scheduling class. The adopt preview
-   passed all checks anyway — **open:** the preview should report
-   uncovered keys, so the refusal does not first appear at `own`.
-3. **Open:** the F drill harness leaves its identity in the real agent:
-   status shows `gpus=drill-mac/gpu/9`, and the agent reports host
-   `workstation`. Cosmetic today (GPUs on a Mac are notional); fix the
-   harness to restore the inventory it found, not an empty `drill-mac`
-   one.
-4. **Open, display only:** `own` prints the *new* rendered file's digest as
-   "previous … digest". The stored original is right (`04b7a5f8…`) and
-   release restored it.
-5. **Open, display only:** llama-swap's log lines carry no timestamp, and
-   `logs` stamps them with the read time (all lines 08:22:32 although the
-   restart was 08:22:21).
+   passed all checks anyway — fixed after the pilot (`9e4fe0e`): the
+   preview has an `ownable` check that warns (non-blocking) when `own`
+   would refuse.
+3. **Fixed after the pilot:** the F drill harness left `drill-mac` in the
+   real agent's inventory (`gpus=drill-mac/gpu/9`) — it now restores the
+   inventory it found and refuses on an agent with workloads (`bbecb22`).
+   The agent also reported host `workstation`: every agent bound that id
+   on first start and enrollment never renamed it. `daemon --host-id`
+   now binds the enrollment name and renames the inventory once; `host
+   add`/`host upgrade` pass it (`23fc63c`). Rolled out to mbp2 the same
+   day: `host mbp2`, `gpus=mbp2/gpu/9`, llama-swap pid unchanged.
+4. **Fixed after the pilot (`38b9e55`), display only:** `own` printed the
+   *new* rendered file's digest as "previous … digest" (now "written:
+   digest …"). The stored original was right (`04b7a5f8…`) and release
+   restored it.
+5. **Fixed after the pilot (`38b9e55`), display only:** llama-swap's log
+   lines carry no timestamp, and `logs` showed the file's mtime on every
+   line (all 08:22:32 although the restart was 08:22:21). Entries now carry
+   `time_estimated`; the CLI prints the file time once as a header.
 6. **Sleep/wake blocked:** Acronis' scheduler (`schedul2`) holds
    `PreventSystemSleep` "AcronisTask" during its backup, so `pmset
    sleepnow` only turns the display off. Also: sudo on mbp2 needs a
