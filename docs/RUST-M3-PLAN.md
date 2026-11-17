@@ -1,6 +1,6 @@
 # Rust successor — M3 plan (remote execution)
 
-Status 2026-11-16, proposed. Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md)
+Status 2026-11-16, decided (owner answers below); not started. Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md)
 (milestone table, M3 row). Builds on M2 ([M2 plan](RUST-M2-PLAN.md),
 [pilot](RUST-M2-PILOT-2026-11-16.md)) and the answered M0 questions
 ([capability matrix](RUST-M0-CAPABILITY-MATRIX.md)).
@@ -172,7 +172,7 @@ workstation:
 | Lost ACK | kill the `ssh` bridge right after the admit request is written | retry by key finds the one operation; no second effect |
 | Disconnect mid-operation | drop the bridge during `AwaitReadiness` | the agent finishes; reconnect shows the true result |
 | Agent restart | SIGKILL the Mac agent mid-operation | reconciles as `Interrupted` honestly; workload survives (own launchd job) |
-| Host restart | reboot of the Mac (pilot only, owner present) | agent comes back after login; observations stale until then |
+| Host restart (simulated) | boot out and bootstrap the agent's LaunchAgent, as login does (no reboot: owner decision 3) | agent comes back; observations stale until then |
 | Sleep / wake | `pmset sleepnow` on the pilot Mac, wake by network or owner (pilot) | stale while asleep; no duplicate effect after wake; in-flight ops resolved by key |
 | Stale plan | admit with an old inventory revision | refused before any effect |
 | Protocol mismatch | an older client binary | mutation refused by name, `status` works |
@@ -185,8 +185,8 @@ workstation:
 2. Enroll the Mac, adopt llama-swap (preview, confirm), `own` (deferred
    apply), `restart` to apply (all Mac lanes reload — the owner accepts that
    outage), `logs`, stop / run.
-3. Drills from F on the real unit: lost ACK, agent SIGKILL, sleep/wake,
-   protocol mismatch.
+3. Drills from F on the real unit: lost ACK, agent SIGKILL, simulated login
+   start, sleep/wake, protocol mismatch.
 4. `release`, resume the healers and `llmctl-warm`, confirm the Mac llmctl
    and the router drive llama-swap as before.
 5. Write up as `docs/RUST-M3-PILOT-<date>.md`.
@@ -199,7 +199,8 @@ workstation:
   disposable and pilot
 - [ ] Sleep / reconnect: stale while asleep, resolved by key after wake — pilot
 - [ ] Host / agent restart: agent SIGKILL reconciles honestly (disposable and
-  pilot); host reboot comes back after login (pilot)
+  pilot); login start simulated by bootout + bootstrap of the agent (pilot).
+  A real reboot is not exercised (owner decision 3).
 - [ ] Stale plans and protocol mismatch refused before any effect —
   disposable
 
@@ -207,14 +208,13 @@ Carry-overs from M2 (small, fix during M3): a `rollback` straight after
 `promote --wait` can be refused until the history poller catches up;
 restaging a version overwrites its history row.
 
-## Owner decisions needed
+## Owner decisions (2026-11-16)
 
-1. **Pilot Mac.** Proposed: **mbp2**. It has fewer actors (no `llmctl-warm`
-   or `lms-stray-watch`), and a llama-swap restart there interrupts fewer
-   lanes than on the M5, which also hosts the big DeepSeek and MiMo lanes. The
-   M5 would be the more realistic test (never sleeps, always logged in).
-2. **Rust toolchain on the pilot Mac:** user-local `rustup` (~1.5 GB,
-   removable with `rustup self uninstall`). Proposed: yes.
-3. **Sleep and reboot drills:** OK to sleep (and once reboot) the pilot Mac
-   during the window, with you there to log back in? Proposed: yes for
-   sleep; reboot optional.
+1. **Pilot Mac: mbp2** (decided). Fewer actors than the M5 (no
+   `llmctl-warm`, no `lms-stray-watch`); a llama-swap restart interrupts
+   fewer lanes.
+2. **Rust toolchain on mbp2: yes** (decided) — user-local `rustup`.
+3. **Sleep drill: yes; reboot drill: no** (decided). The "host restart" row
+   is therefore covered by an agent SIGKILL plus a simulated login start (the
+   agent's LaunchAgent booted out and bootstrapped again, as login does), not
+   by a real reboot; the exit checklist records that limit.
