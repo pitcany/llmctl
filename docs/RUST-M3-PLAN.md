@@ -46,7 +46,9 @@ one unit every Mac engine already runs under.
   `~/Library/Logs/llama-swap/llama-swap.{out,err}.log`, `GET :8099/health`
   answers `OK`. Its `EnvironmentVariables` hold only `HOME`, `PATH`
   (`HF_HOME` on the M5): no secrets to refuse.
-- **Its config is generated.** The Mac llmctl (`~/local-llm/bin/llmctl`,
+- **Its config is generated.** *(Wrong — corrected 2026-11-17 in the
+  [M4 plan](RUST-M4-PLAN.md): both configs are hand-edited and committed
+  to git; `llmconf.py` only stores the path.)* The Mac llmctl (`~/local-llm/bin/llmctl`,
   repo `pitcany/local-llm`) writes llama-swap's `config.yaml` from its
   registry (`lib/llmconf.py`) and adds health checks, a memory budget,
   downloads and benchmarks. llmctl-next must not hand-edit that file in M3.
