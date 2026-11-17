@@ -65,6 +65,11 @@ drive an already-adopted workload by name and never write the inventory.
    now binds the enrollment name and renames the inventory once; `host
    add`/`host upgrade` pass it (`23fc63c`). Rolled out to mbp2 the same
    day: `host mbp2`, `gpus=mbp2/gpu/9`, llama-swap pid unchanged.
+   Harness restore proven the same day: with mbp2's inventory swapped for
+   a no-workload copy (sha256 `d116a7ae…`), the 4 F drills passed (27 s)
+   and left that copy byte-identical, with no drill jobs or plists behind;
+   the original inventory (`27ef8ef3…`, llama-swap at revision 6) was put
+   back afterwards and llama-swap kept pid 70780 throughout.
 4. **Fixed after the pilot (`38b9e55`), display only:** `own` printed the
    *new* rendered file's digest as "previous … digest" (now "written:
    digest …"). The stored original was right (`04b7a5f8…`) and release
