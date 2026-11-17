@@ -292,6 +292,27 @@ impl InstallRecipe {
                 if std::path::Path::new(&r.binary).is_absolute() {
                     return Err(kind("binary must be relative to the unpacked dir"));
                 }
+                // Supply chain (M4a security review): a fetched archive is
+                // unpacked and its binary is *executed* during validation
+                // and later promoted to ExecStart — so remote fetches fail
+                // closed: no plaintext http at all, and https requires a
+                // declared sha256 checksum. Local paths keep the
+                // record-only digest.
+                if r.url.starts_with("http://") {
+                    return Err(kind(
+                        "refuses plaintext http URLs (use https with a sha256 checksum)",
+                    ));
+                }
+                if r.url.starts_with("https://")
+                    && !r
+                        .checksum
+                        .as_deref()
+                        .is_some_and(|c| c.starts_with("sha256:"))
+                {
+                    return Err(kind(
+                        "https URLs require a sha256 checksum (the archive's binary runs here)",
+                    ));
+                }
             }
             InstallRecipe::SourceBuild(r) => {
                 if r.name.trim().is_empty() || r.git.trim().is_empty() || r.build.trim().is_empty()

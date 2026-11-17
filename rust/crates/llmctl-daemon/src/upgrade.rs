@@ -488,7 +488,14 @@ async fn stage_release_archive(
         run_logged_with(&mut unzip, &log, "unzip", Duration::from_secs(600)).await?;
     } else {
         let mut tar = Command::new("tar");
-        tar.arg("-xf").arg(&archive).arg("-C").arg(&work);
+        tar.arg("-xf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&work)
+            // The archive is untrusted input: keep the invoking user's
+            // ownership/permissions rather than any the archive claims.
+            .arg("--no-same-owner")
+            .arg("--no-same-permissions");
         if r.strip_components > 0 {
             tar.arg("--strip-components").arg(r.strip_components.to_string());
         }
@@ -862,6 +869,22 @@ pub async fn promote(
         .to_string();
     if executable.is_empty() {
         return Err(refuse("staged manifest names no executable"));
+    }
+    // Re-validate before anything runs or is admitted: the staged dir sat
+    // on disk since the stage, and the VerifyVersion step will execute
+    // this binary. A swapped dir (or a drifted manifest) refuses here
+    // rather than executing unverified code (M4a security review).
+    if !tokio::fs::try_exists(&executable).await.unwrap_or(false) {
+        return Err(refuse(format!(
+            "staged executable {executable} is gone; restage {version}"
+        )));
+    }
+    if let Err(e) =
+        crate::version::validate_offline(&recipe, &executable, version, "").await
+    {
+        return Err(refuse(format!(
+            "staged {version} no longer validates ({e}); restage it"
+        )));
     }
 
     // Expected versions after promote: python packages at `version`, or
