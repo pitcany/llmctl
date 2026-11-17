@@ -192,10 +192,12 @@ async fn bridge_subcommand_relays_http_to_the_socket() {
     let d = spawn_daemon();
     let request = "GET /v1/health HTTP/1.1\r\nhost: bridge-test\r\nconnection: close\r\n\r\n";
 
-    // A fresh relay per attempt; under full-suite load the daemon can be
-    // momentarily slow, which must surface as a retry, not a flake.
+    // Warm the accept loop with one full roundtrip so a busy first poll
+    // cannot look like a relay failure.
+    let health = d.client().health().await.expect("daemon answers http");
+
     let mut last = String::new();
-    for _ in 0..3 {
+    for attempt in 0..3 {
         let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
             .arg("--socket")
             .arg(&d.socket)
@@ -212,19 +214,23 @@ async fn bridge_subcommand_relays_http_to_the_socket() {
         drop(stdin); // EOF: the relay half-closes and drains the answer
 
         let mut response = String::new();
-        stdout.read_to_string(&mut response).await.unwrap();
+        let read = tokio::time::timeout(Duration::from_secs(10), stdout.read_to_string(&mut response))
+            .await
+            .expect("relay drain must not hang");
+        read.unwrap();
         let _ = child.wait().await;
         if response.starts_with("HTTP/1.1 200") {
-            assert!(
-                response.contains("\"host\":\"workstation\""),
-                "{response}"
-            );
+            assert!(response.contains("\"host\":\"workstation\""), "{response}");
             return;
         }
+        eprintln!("bridge attempt {attempt}: response {response:?}");
         last = response;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
-    panic!("bridge relay never answered: {last:?}");
+    panic!(
+        "bridge relay never answered (daemon healthy: {}): {last:?}",
+        health.daemon_version
+    );
 }
 
 // ---- batch criterion 1: a second client sees the same operation ----------

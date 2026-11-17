@@ -88,16 +88,18 @@ pub struct InventoryFile {
 }
 
 pub fn sample_inventory(host: &HostId) -> HostInventory {
-    // Fake workloads carry platform-appropriate identities only so their
-    // unit display strings look right in status output; the fake engine
-    // keys on that string and never talks to a manager.
-    let mk = |name: &str, gpus: &[u32], port: u16, label: String| WorkloadDefinition {
+    // The dev sample keeps its original systemd-shaped unit identities on
+    // every platform: the fake engine keys on that display string and
+    // never talks to a manager, and the e2e suite (faults/world/gpus
+    // injections) matches these strings. Real Mac agents get their own
+    // inventory written at enrollment.
+    let mk = |name: &str, gpus: &[u32], port: u16| WorkloadDefinition {
         name: WorkloadName::new(name).expect("sample name"),
         engine: "fake".into(),
         model: format!("fake/{name}"),
         gpus: gpus.iter().map(|i| GpuId::new(host.clone(), *i)).collect(),
         port,
-        unit: sample_unit(&label),
+        unit: sample_unit(name),
         authority: sample_authority(name),
         ownership: Default::default(),
         recovery: None,
@@ -109,9 +111,9 @@ pub fn sample_inventory(host: &HostId) -> HostInventory {
         platform: Platform::Linux,
         gpus: vec![GpuId::new(host.clone(), 0), GpuId::new(host.clone(), 1)],
         workloads: vec![
-            mk("coder", &[0], 8100, sample_label("coder")),
-            mk("helper", &[1], 8101, sample_label("helper")),
-            mk("big", &[0, 1], 8102, sample_label("big")),
+            mk("coder", &[0], 8100),
+            mk("helper", &[1], 8101),
+            mk("big", &[0, 1], 8102),
         ],
         revision: 1,
     };
@@ -122,40 +124,20 @@ pub fn sample_inventory(host: &HostId) -> HostInventory {
     inv
 }
 
-#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
-fn sample_label(name: &str) -> String {
-    format!("llmctl-next-fake-{name}.service")
-}
-
-#[cfg(any(target_os = "macos", llmctl_macos))]
-fn sample_label(name: &str) -> String {
-    format!("com.pitcany.llmctl-next-fake-{name}")
-}
-
-#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
-fn sample_unit(label: &str) -> UnitName {
+fn sample_unit(name: &str) -> UnitName {
     use llmctl_core::UnitScopeMarker;
-    UnitName::systemd(UnitScopeMarker::User, label).expect("sample unit")
+    UnitName::systemd(
+        UnitScopeMarker::User,
+        format!("llmctl-next-fake-{name}.service"),
+    )
+    .expect("sample unit")
 }
 
-#[cfg(any(target_os = "macos", llmctl_macos))]
-fn sample_unit(label: &str) -> UnitName {
-    UnitName::launchd(label).expect("sample unit")
-}
-
-#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
 fn sample_authority(name: &str) -> ControlAuthority {
     use llmctl_core::UnitScope;
     ControlAuthority::SystemdUnit {
         scope: UnitScope::User,
         unit: format!("llmctl-next-fake-{name}.service"),
-    }
-}
-
-#[cfg(any(target_os = "macos", llmctl_macos))]
-fn sample_authority(name: &str) -> ControlAuthority {
-    ControlAuthority::LaunchdService {
-        label: format!("com.pitcany.llmctl-next-fake-{name}"),
     }
 }
 
