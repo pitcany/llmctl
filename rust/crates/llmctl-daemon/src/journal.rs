@@ -149,6 +149,7 @@ pub fn parse_entry(v: &Value) -> Option<LogEntry> {
         invocation: own.or(manager).map(str::to_string),
         message,
         truncated,
+        time_estimated: false,
     })
 }
 

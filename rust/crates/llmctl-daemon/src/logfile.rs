@@ -149,6 +149,7 @@ pub async fn read(
                 invocation: invocation.clone(),
                 message: text,
                 truncated,
+                time_estimated: true,
             }
         })
         .collect();
@@ -213,6 +214,8 @@ mod tests {
         );
         assert!(page.more);
         assert!(page.entries[0].invocation.as_deref() == Some("run-1"));
+        // File lines have no time of their own; the file mtime stands in.
+        assert!(page.entries.iter().all(|e| e.time_estimated));
 
         // New content after the cursor only.
         let cursor = page.cursor.clone().unwrap();

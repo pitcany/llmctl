@@ -938,6 +938,7 @@ async fn cmd_logs(
     let mut printer = LogPrinter {
         json,
         last_run: None,
+        last_file_time: None,
     };
     let mut page = client
         .logs(&LogsRequest {
@@ -974,6 +975,8 @@ async fn cmd_logs(
 struct LogPrinter {
     json: bool,
     last_run: Option<String>,
+    /// File time last announced for lines without their own timestamp.
+    last_file_time: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl LogPrinter {
@@ -997,6 +1000,15 @@ impl LogPrinter {
             LogSource::Unit => "",
         };
         let cut = if e.truncated { " […truncated]" } else { "" };
+        if e.time_estimated {
+            // A shared file time on every line would read as each line's own
+            // time (M3 pilot finding 5): say it once, print lines bare.
+            if self.last_file_time != Some(e.timestamp) {
+                writeln!(out, "-- lines carry no timestamps; log file last written {when} --")?;
+                self.last_file_time = Some(e.timestamp);
+            }
+            return writeln!(out, "{who}{}{cut}", printable(&e.message));
+        }
         writeln!(out, "{when} {who}{}{cut}", printable(&e.message))
     }
 }
@@ -1029,8 +1041,10 @@ async fn cmd_own(cli: &Cli, name: &str) -> Result<u8, CliError> {
     ensure_protocol(&client).await?;
     let resp = client.own(name).await?;
     println!(
-        "own: {} → {} (previous: {}, digest {})",
-        name, resp.path, resp.previous_kind, resp.digest
+        // The digest is of the file own just wrote (the drift guard), not
+        // of the one it replaced (M3 pilot finding 4).
+        "own: {} → {} (written: digest {}; previous: {})",
+        name, resp.path, resp.digest, resp.previous_kind
     );
     println!(
         "the unit was not restarted; release restores the previous {}",

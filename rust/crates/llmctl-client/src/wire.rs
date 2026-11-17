@@ -461,6 +461,10 @@ pub struct LogEntry {
     pub message: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// The line carried no time of its own: `timestamp` is the log file's
+    /// last write, an upper bound shared by every line of the page.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub time_estimated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
