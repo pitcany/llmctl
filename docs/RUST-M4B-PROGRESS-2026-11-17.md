@@ -115,7 +115,7 @@ re-pins when the pin lacks a per-kind fact.
    `~/.ollama/models`. Recommended split: (3a) one `llm-unit <verb> <unit>`
    wrapper, all callers migrated while still system-scoped (no window);
    (3b) a window flips the wrapper's scope and moves the units; rollback =
-   flip back. Not queued; owner decision.
+   flip back. Not queued; plan: [RUST-M4B-STEP3-PLAN.md](RUST-M4B-STEP3-PLAN.md).
 4. **LM Studio on the Macs:** no launchd job to adopt (app-run server);
    enroll observe-only and record the console-login limit.
 5. **Capability-matrix rows** per engine × host as disposable spikes
