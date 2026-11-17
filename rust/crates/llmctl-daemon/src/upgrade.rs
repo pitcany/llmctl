@@ -540,6 +540,7 @@ async fn stage_source_build(
 
     let _ = tokio::fs::remove_file(dir.join("staged.json")).await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
+    let _ = tokio::fs::remove_dir_all(&work).await;
     let _ = tokio::fs::remove_file(&log).await;
     tokio::fs::write(&staging, b"interrupted stage; not promotable\n").await?;
 
