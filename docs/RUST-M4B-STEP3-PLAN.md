@@ -5,17 +5,13 @@ Parent: [RUST-M4-PLAN.md](RUST-M4-PLAN.md) (M4b step 3, owner decision 4:
 llmctl-next; no system-scope adapter, no new sudo path).
 Progress so far: [RUST-M4B-PROGRESS-2026-11-17.md](RUST-M4B-PROGRESS-2026-11-17.md).
 
-**Status (2026-11-17, evening): phase 3a code done — `llm-unit audit`
-clean.** Wrapper: AI repo `c9009f7c` + `c03d0c1d` (12 tests; symlinked into
-`~/.local/bin` so user services find it). Programs: llm-router `0c103ac`
-(+ notes `cb34c62`), longjob `e32e188`, hf2local `d161ba59`, Python llmctl
-`dd24bcb`, llmctl-stack `f194910e`. Scripts: 41 files rewritten
-(`c03d0c1d`; `~/.local/bin/llm-verify` edited in place, not in a repo); the
-three system-unit installers carry `llm-unit: system-only`. Not yet live:
-the running llm-router (reads `router.yaml` at start) and the deployed
-Python llmctl (`~/AI/.venv`) — both behaviour-identical, activated at the
-start of the 3b window (or earlier on request). Next: 3b prep — user unit
-files + `unit-scope-flip.sh`, tested without a window.
+**Status (2026-11-17, night): 3a done, 3b prepared — ready for the flip
+window.** 3b prep: user units + `unit-scope-flip.sh` (AI repo `cf570d6a`,
+7 tests, spiked both ways on a disposable real user unit; live preflight
+passes except "units running", as expected outside a window). llm-heal now
+takes the two units' scope from `llm-unit` (`622fe2c3`), so the flip edits
+no llm-heal config (decision 2 superseded: the vLLM lane's scope was
+hard-coded, not a `heal.yaml` field). Runbook: "The window" below.
 
 ## Why the plan needs this step
 
@@ -173,3 +169,39 @@ units' sudoers lines and masks or deletes the system units.
 Taken 2026-11-17: 1 `~/AI/bin/llm-unit` · 2 flip llm-heal's `scope:`
 field · 3 rename `vllm-tp` callers in the 3a pass · 4 the workstation pilot
 daemon adopts the moved units · 5 mask the system units after the week.
+
+## The window (runbook)
+
+Before (no window):
+
+1. Push llmctl (`dd24bcb` is local) and redeploy Python llmctl into
+   `~/AI/.venv` (pin bump + `systemctl --user restart llmctl-api`), so the
+   deployed llmctl drives the units through `llm-unit`.
+2. `~/AI/scripts/unit-scope-flip.sh check user` — every line `ok` except the
+   two "running in system scope" lines.
+
+The window (one longjob job; between 07:00 and 22:00 it waits for `go`):
+
+```
+longjob queue unit-scope-flip --stop-engine --stop ollama --eta 45m -- \
+  'systemctl --user restart llm-router && ~/AI/scripts/unit-scope-flip.sh user'
+```
+
+longjob stops both units through `llm-unit` (system scope), the job restarts
+llm-router (so it reads the `llm-unit` commands from `router.yaml`) and
+flips; longjob's end-of-job start goes through `llm-unit` again — now user
+scope — and waits until both answer.
+
+After (verify, ~10 min):
+
+- `unit-scope-flip.sh status` → both `scope=user system=disabled/inactive
+  user=enabled/active`; `:8003/v1/models` and `:11434/api/version` answer.
+- `llm-heal status` sees `vllm-engine` and `ollama` ok (user scope);
+  llm-router `/health`; a Hermes local cron fires.
+- Adopt both into the workstation pilot daemon:
+  `adopt vllm-engine.service --engine-kind vllm …` and
+  `adopt ollama.service --engine-kind ollama --model ollama …`.
+
+Rollback (any time in the week):
+`longjob queue unit-scope-flip-back --stop-engine --stop ollama -- '~/AI/scripts/unit-scope-flip.sh system'`.
+
