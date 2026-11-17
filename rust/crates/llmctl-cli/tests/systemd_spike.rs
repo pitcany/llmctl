@@ -559,6 +559,7 @@ fn adopt_running_unit_then_stop_and_run_it_as_managed() {
         "no_inline_secrets",
         "definition_roundtrip",
         "served_identity",
+        "ownable",
     ] {
         assert_eq!(check_status(&preview, check), "pass", "{check}: {preview}");
     }
@@ -1122,6 +1123,51 @@ fn a_bad_render_is_caught_restored_and_refused() {
         &["run", "adopted", "--wait", "--key", "bad-render-ok"],
     );
     assert!(ok, "{text}");
+}
+
+/// A directive the definition does not carry: the preview warns that own
+/// would refuse (M3 pilot: ProcessType passed every check, then own
+/// refused), adoption still goes through, and own then refuses by name.
+#[test]
+#[ignore = "touches the user's systemd: run with --ignored"]
+fn an_uncovered_directive_warns_at_preview_and_own_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let unit = SpikeUnit::create_with(
+        dir.path(),
+        &serving_exec(dir.path(), port, "spike/model"),
+        "Nice=5\n",
+    );
+    unit.start();
+    write_empty_inventory(dir.path());
+    let d = spawn_daemon(dir.path());
+    let port_s = port.to_string();
+    let args = adopt_args(&unit.name, &port_s);
+    let (mut preview, mut digest) = preview_digest(&d.socket, &args);
+    for _ in 0..50 {
+        if check_status(&preview, "served_identity") == "pass" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        (preview, digest) = preview_digest(&d.socket, &args);
+    }
+    assert_eq!(check_status(&preview, "ownable"), "warn", "{preview}");
+    let detail = preview["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "ownable")
+        .unwrap()["detail"]
+        .to_string();
+    assert!(detail.contains("[Service] Nice"), "{detail}");
+
+    let mut confirm = args.clone();
+    confirm.extend(["--confirm", &digest]);
+    let (code, text) = cli_code(&d.socket, &confirm);
+    assert_eq!(code, Some(0), "a warning does not block adoption: {text}");
+    let (code, text) = cli_code(&d.socket, &["own", "adopted"]);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("Nice"), "{text}");
 }
 
 #[test]

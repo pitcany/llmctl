@@ -800,6 +800,7 @@ fn print_preview(p: &AdoptionPreview) {
             CheckStatus::Pass => "pass",
             CheckStatus::Fail => "FAIL",
             CheckStatus::Unverified => "unverified",
+            CheckStatus::Warn => "warn",
         };
         println!("  {mark:<10} {:<21} {}", c.name, c.detail);
     }

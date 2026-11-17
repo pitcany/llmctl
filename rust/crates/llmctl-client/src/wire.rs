@@ -90,6 +90,8 @@ pub enum CheckStatus {
     Pass,
     Fail,
     Unverified,
+    /// Does not block this step, but a later one will refuse (e.g. `own`).
+    Warn,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

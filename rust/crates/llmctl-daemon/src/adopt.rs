@@ -174,6 +174,11 @@ pub async fn preview(state: &AppState, req: &AdoptRequest) -> Result<AdoptionPre
         },
     );
 
+    // Adoption only observes; `own` later renders the file and refuses what
+    // a render would lose. Say so now, not at `own` (M3 pilot finding 2:
+    // llama-swap's ProcessType passed every check, then own refused it).
+    checks.push(ownable_check(state, &imported, &definition));
+
     let probe = state
         .supervisor
         .probe_unenrolled(&parsed.unit, req.port, &req.model)
@@ -225,6 +230,49 @@ pub async fn preview(state: &AppState, req: &AdoptRequest) -> Result<AdoptionPre
         checks,
         inventory_revision: inv.revision,
     })
+}
+
+/// Whether `own` could take over this job's file after adoption: the same
+/// preconditions own checks (no drop-ins, a backing file, nothing the
+/// definition does not carry). Never blocks adoption.
+fn ownable_check(
+    state: &AppState,
+    imported: &crate::supervisor::ImportedJob,
+    definition: &llmctl_core::LaunchDefinition,
+) -> AdoptionCheck {
+    let mut problems = Vec::new();
+    if !imported.drop_in_paths.is_empty() {
+        problems.push(format!("drop-ins ({})", imported.drop_in_paths.join(", ")));
+    }
+    if imported.fragment_path.is_empty() {
+        problems.push("no definition file of its own".to_string());
+    } else {
+        let uncovered = state
+            .supervisor
+            .uncovered(std::path::Path::new(&imported.fragment_path), definition);
+        if !uncovered.is_empty() {
+            problems.push(format!(
+                "sets {} that the definition does not carry",
+                uncovered.join(", ")
+            ));
+        }
+    }
+    if problems.is_empty() {
+        check(
+            "ownable",
+            CheckStatus::Pass,
+            "own can take over the file later",
+        )
+    } else {
+        check(
+            "ownable",
+            CheckStatus::Warn,
+            format!(
+                "adoption works, but own would refuse: {}",
+                problems.join("; ")
+            ),
+        )
+    }
 }
 
 fn empty_preview(req: &AdoptRequest, checks: Vec<AdoptionCheck>, revision: u64) -> AdoptionPreview {
