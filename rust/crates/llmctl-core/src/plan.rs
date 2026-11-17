@@ -20,6 +20,9 @@ pub enum OpKind {
     /// Engine-level unload of one model from a vendor service (Ollama, LM
     /// Studio): the process keeps running (M4b step 1).
     Unload,
+    /// Write a llama-swap config rendered from lane records and confirm
+    /// llama-swap reloaded it (M4b step 4).
+    LaneWrite,
 }
 
 impl std::fmt::Display for OpKind {
@@ -30,6 +33,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Restart => "restart",
             OpKind::Upgrade => "upgrade",
             OpKind::Unload => "unload",
+            OpKind::LaneWrite => "lane_write",
         })
     }
 }
@@ -97,6 +101,25 @@ pub enum PlanStep {
         unit: UnitName,
         model: String,
     },
+    /// External: atomically replace a llama-swap config with `content`,
+    /// refusing when the file is no longer the one planned against
+    /// (`expect_digest`), then confirm llama-swap reloaded it (its log, then
+    /// `/v1/models` serving `lanes`). On success the agent's lane store is
+    /// re-imported from `content` and the change committed to the config's
+    /// git repo when it has one (history only, best effort).
+    WriteSwapConfig {
+        workload: WorkloadName,
+        path: String,
+        content: String,
+        expect_digest: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        log_path: Option<String>,
+        port: u16,
+        lanes: Vec<String>,
+        timeout_secs: u64,
+        store_path: String,
+        summary: String,
+    },
 }
 
 /// A binary's own version self-check (M4a): run `path arg`, the first
@@ -118,7 +141,8 @@ impl PlanStep {
             | PlanStep::VerifyServedModel { workload, .. }
             | PlanStep::ApplyDefinition { workload, .. }
             | PlanStep::VerifyVersion { workload, .. }
-            | PlanStep::UnloadModel { workload, .. } => workload,
+            | PlanStep::UnloadModel { workload, .. }
+            | PlanStep::WriteSwapConfig { workload, .. } => workload,
         }
     }
 
@@ -161,6 +185,12 @@ impl PlanStep {
             PlanStep::UnloadModel {
                 workload, model, ..
             } => format!("unload {model} from {workload}"),
+            PlanStep::WriteSwapConfig {
+                workload, lanes, summary, ..
+            } => format!(
+                "write {workload} config ({} lanes): {summary}; confirm the reload",
+                lanes.len()
+            ),
         }
     }
 }

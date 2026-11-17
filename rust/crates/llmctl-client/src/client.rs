@@ -190,6 +190,34 @@ impl ControlClient {
         self.post_json("/v1/unloads", req).await
     }
 
+    pub async fn lanes_import(
+        &self,
+        req: &crate::wire::LaneImportRequest,
+    ) -> Result<crate::wire::LaneImportResponse, ClientError> {
+        self.post_json("/v1/lanes/import", req).await
+    }
+
+    pub async fn lanes_status(
+        &self,
+        workload: &str,
+    ) -> Result<crate::wire::LaneStatusResponse, ClientError> {
+        self.get_json(&format!("/v1/lanes/{workload}")).await
+    }
+
+    pub async fn lanes_plan(
+        &self,
+        req: &crate::wire::LaneEditRequest,
+    ) -> Result<crate::wire::LanePlanResponse, ClientError> {
+        self.post_json("/v1/lanes/edit", req).await
+    }
+
+    pub async fn lanes_apply(
+        &self,
+        req: &crate::wire::LaneEditRequest,
+    ) -> Result<AdmitResponse, ClientError> {
+        self.post_json("/v1/lanes/edit", req).await
+    }
+
     pub async fn engine_report(
         &self,
         workload: &str,

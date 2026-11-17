@@ -673,7 +673,7 @@ fn render_entry(out: &mut String, key: &str, v: &Value, indent: usize, path: &st
                 && notes.flow.contains(path)
                 && a.iter().all(|i| !matches!(i, Value::Mapping(_) | Value::Sequence(_))) =>
         {
-            let items: Vec<String> = a.iter().map(|i| flow_scalar(i)).collect();
+            let items: Vec<String> = a.iter().map(flow_scalar).collect();
             out.push_str(&with_inline(format!("{pad}{k}: [{}]", items.join(", ")), path, notes));
         }
         Value::Sequence(a) if !a.is_empty() => {

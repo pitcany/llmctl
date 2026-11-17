@@ -1,0 +1,759 @@
+//! llama-swap lane records on the agent (M4b step 4, owner decision 3).
+//!
+//! The agent keeps one lane store per enrolled llama-swap workload
+//! (`<data>/lanes/<workload>.json`): the records imported from its config,
+//! the config path, its log, and the digest of the file the records stand
+//! for. Flow:
+//!
+//! - `import` previews (round-trip proof, validation, lanes) and, with the
+//!   preview's digest as confirmation, persists the store. Nothing is
+//!   written to the config.
+//! - `plan` applies edits to the records, validates, proves the render, and
+//!   lists what changes and which running lanes the reload restarts. A file
+//!   edited by hand since the import (drift) refuses: re-import first.
+//! - `apply` admits a `lane_write` operation whose one step writes the
+//!   render atomically, confirms llama-swap reloaded it, and rolls back to
+//!   the previous bytes (confirmed the same way) when it did not.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use llmctl_client::wire::{
+    LaneEdit, LaneImportRequest, LaneImportResponse, LanePlanResponse, LaneStatusResponse,
+    LaneSummary,
+};
+use llmctl_core::swap::{self, SwapConfig};
+use llmctl_core::{OpKind, Ownership, Plan, PlanStep, WorkloadName};
+
+use crate::app::AppState;
+use crate::ops::{AdmitOutcome, AdmitParams, OpsError};
+
+/// Seconds a write waits for llama-swap to report the reload.
+pub const RELOAD_TIMEOUT_SECS: u64 = 60;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneStore {
+    pub workload: String,
+    pub config_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<String>,
+    pub records: SwapConfig,
+    /// `sha256:` of the config bytes the records stand for.
+    pub file_digest: String,
+    pub revision: u64,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LanesError {
+    #[error(transparent)]
+    Ops(#[from] OpsError),
+    #[error("{0}")]
+    Refused(String),
+    #[error("{0}")]
+    Io(String),
+}
+
+fn refuse(msg: impl Into<String>) -> LanesError {
+    LanesError::Refused(msg.into())
+}
+
+pub fn store_path(state: &AppState, workload: &str) -> PathBuf {
+    state.paths.data_dir.join("lanes").join(format!("{workload}.json"))
+}
+
+pub fn bytes_digest(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+async fn read_store(path: &Path) -> Result<Option<LaneStore>, LanesError> {
+    match tokio::fs::read(path).await {
+        Ok(b) => serde_json::from_slice(&b)
+            .map(Some)
+            .map_err(|e| LanesError::Io(format!("lane store {}: {e}", path.display()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(LanesError::Io(format!("lane store {}: {e}", path.display()))),
+    }
+}
+
+async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let dir = path.parent().ok_or_else(|| format!("{} has no parent", path.display()))?;
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let tmp = dir.join(format!(
+        ".{}.llmctl-tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+    ));
+    let mut f = tokio::fs::File::create(&tmp)
+        .await
+        .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    f.write_all(bytes).await.map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    f.sync_all().await.map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+    drop(f);
+    // Keep the mode of the file being replaced (a config may be 0600).
+    if let Ok(meta) = tokio::fs::metadata(path).await {
+        let _ = tokio::fs::set_permissions(&tmp, meta.permissions()).await;
+    }
+    tokio::fs::rename(&tmp, path)
+        .await
+        .map_err(|e| format!("rename onto {}: {e}", path.display()))
+}
+
+async fn save_store(path: &Path, store: &LaneStore) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(store).map_err(|e| e.to_string())?;
+    write_atomic(path, &bytes).await
+}
+
+fn summaries(cfg: &SwapConfig) -> Vec<LaneSummary> {
+    cfg.lanes
+        .iter()
+        .map(|l| LaneSummary {
+            id: l.id.clone(),
+            engine_kind: l.engine_kind.to_string(),
+            name: l.str_field("name").map(str::to_owned),
+            model_name: l.str_field("useModelName").map(str::to_owned),
+            ttl: l.ttl(),
+        })
+        .collect()
+}
+
+/// The llama-swap workload, its config path and log path: from the request,
+/// else from the pinned launch definition (`-config <path>`, plist stdout).
+async fn locate(
+    state: &AppState,
+    workload: &str,
+    config_path: Option<String>,
+    log_path: Option<String>,
+) -> Result<(llmctl_core::WorkloadDefinition, String, Option<String>), LanesError> {
+    let name = WorkloadName::new(workload).map_err(|e| OpsError::Invalid(e.to_string()))?;
+    let inv = state.ops.inventory().await;
+    let def = inv
+        .workload(&name)
+        .cloned()
+        .ok_or_else(|| OpsError::UnknownWorkload(workload.to_string()))?;
+    let (argv, stdout) = match &def.ownership {
+        Ownership::Managed { definition, .. } => (
+            definition
+                .exec_start
+                .first()
+                .map(|c| c.argv.clone())
+                .unwrap_or_default(),
+            definition.launchd.as_ref().and_then(|l| l.stdout_path.clone()),
+        ),
+        Ownership::External => (Vec::new(), None),
+    };
+    let from_argv = argv
+        .iter()
+        .position(|a| a == "-config" || a == "--config")
+        .and_then(|i| argv.get(i + 1).cloned());
+    let config = config_path.or(from_argv).ok_or_else(|| {
+        refuse(format!(
+            "{workload}: no -config in its pinned definition; pass --config <path>"
+        ))
+    })?;
+    if !Path::new(&config).is_absolute() {
+        return Err(refuse(format!("config path {config} is not absolute")));
+    }
+    Ok((def, config, log_path.or(stdout)))
+}
+
+// ---- import --------------------------------------------------------------------
+
+pub async fn import(state: &AppState, req: LaneImportRequest) -> Result<LaneImportResponse, LanesError> {
+    let (def, config_path, log_path) =
+        locate(state, &req.workload, req.config_path.clone(), req.log_path.clone()).await?;
+    let bytes = tokio::fs::read(&config_path)
+        .await
+        .map_err(|e| LanesError::Io(format!("reading {config_path}: {e}")))?;
+    let file_digest = bytes_digest(&bytes);
+    let text = String::from_utf8(bytes).map_err(|_| refuse(format!("{config_path} is not UTF-8")))?;
+    let mut resp = LaneImportResponse {
+        workload: def.name.to_string(),
+        config_path: config_path.clone(),
+        log_path: log_path.clone(),
+        file_digest: file_digest.clone(),
+        records_digest: None,
+        roundtrip: String::new(),
+        validation: Vec::new(),
+        lanes: Vec::new(),
+        notes_kept: 0,
+        persisted: false,
+    };
+    let cfg = match swap::roundtrip(&text) {
+        Ok((cfg, _)) => {
+            resp.roundtrip = "equivalent".into();
+            cfg
+        }
+        Err(e) => {
+            resp.roundtrip = e.to_string();
+            return Ok(resp);
+        }
+    };
+    resp.validation = swap::validate(&cfg);
+    resp.lanes = summaries(&cfg);
+    resp.notes_kept = cfg.notes.count();
+    // The confirmation binds the records *and* the file they came from.
+    let digest = bytes_digest(format!("{}|{}", cfg.digest(), file_digest).as_bytes());
+    resp.records_digest = Some(digest.clone());
+    let Some(confirm) = req.confirm else {
+        return Ok(resp);
+    };
+    if confirm != digest {
+        return Err(refuse(format!(
+            "stale confirmation: the preview digest is now {digest}"
+        )));
+    }
+    if !resp.validation.is_empty() {
+        return Err(refuse(format!(
+            "llama-swap would refuse this config: {}",
+            resp.validation.join("; ")
+        )));
+    }
+    let path = store_path(state, &resp.workload);
+    let revision = read_store(&path).await?.map(|s| s.revision + 1).unwrap_or(1);
+    save_store(
+        &path,
+        &LaneStore {
+            workload: resp.workload.clone(),
+            config_path,
+            log_path,
+            records: cfg,
+            file_digest,
+            revision,
+            updated_at: Utc::now(),
+        },
+    )
+    .await
+    .map_err(LanesError::Io)?;
+    resp.persisted = true;
+    Ok(resp)
+}
+
+// ---- status --------------------------------------------------------------------
+
+pub async fn status(state: &AppState, workload: &str) -> Result<LaneStatusResponse, LanesError> {
+    let store = read_store(&store_path(state, workload))
+        .await?
+        .ok_or_else(|| refuse(format!("{workload} has no lane records; run `lanes import {workload}`")))?;
+    let now = tokio::fs::read(&store.config_path)
+        .await
+        .map(|b| bytes_digest(&b))
+        .unwrap_or_else(|e| format!("unreadable: {e}"));
+    Ok(LaneStatusResponse {
+        workload: store.workload.clone(),
+        config_path: store.config_path.clone(),
+        log_path: store.log_path.clone(),
+        revision: store.revision,
+        file_digest: store.file_digest.clone(),
+        drift: now != store.file_digest,
+        file_digest_now: now,
+        lanes: summaries(&store.records),
+        macros: store.records.macros.clone(),
+        validation: swap::validate(&store.records),
+        updated_at: store.updated_at,
+    })
+}
+
+// ---- plan / apply ----------------------------------------------------------------
+
+fn apply_edits(cfg: &mut SwapConfig, edits: &[LaneEdit]) -> Result<Vec<String>, LanesError> {
+    let mut summary = Vec::new();
+    for e in edits {
+        match e {
+            LaneEdit::SetField { lane, field, value } => {
+                let v: serde_yaml::Value = serde_yaml::to_value(value)
+                    .map_err(|e| refuse(format!("value for {lane}.{field}: {e}")))?;
+                let l = cfg
+                    .lane_mut(lane)
+                    .ok_or_else(|| refuse(format!("no lane {lane}")))?;
+                l.set(field, v);
+                summary.push(format!("{lane}.{field} = {value}"));
+            }
+            LaneEdit::RemoveField { lane, field } => {
+                let l = cfg
+                    .lane_mut(lane)
+                    .ok_or_else(|| refuse(format!("no lane {lane}")))?;
+                let before = l.fields.len();
+                l.fields.retain(|(k, _)| k != field);
+                if l.fields.len() == before {
+                    return Err(refuse(format!("lane {lane} has no field {field}")));
+                }
+                summary.push(format!("{lane}: remove {field}"));
+            }
+            LaneEdit::SetMacro { name, value } => {
+                cfg.set_macro(name, value);
+                summary.push(format!("macro {name} = {value}"));
+            }
+        }
+    }
+    if edits.is_empty() {
+        summary.push("re-render (no record change)".into());
+    }
+    // Kinds follow the commands.
+    let macros = cfg.macros.clone();
+    for l in &mut cfg.lanes {
+        l.engine_kind = swap::infer_lane_kind(l, &macros);
+    }
+    Ok(summary)
+}
+
+struct Planned {
+    store: LaneStore,
+    next: SwapConfig,
+    rendered: String,
+    current_bytes: Vec<u8>,
+    resp: LanePlanResponse,
+}
+
+async fn plan_inner(
+    state: &AppState,
+    workload: &str,
+    edits: &[LaneEdit],
+) -> Result<Planned, LanesError> {
+    let store = read_store(&store_path(state, workload))
+        .await?
+        .ok_or_else(|| refuse(format!("{workload} has no lane records; run `lanes import {workload}`")))?;
+    let current_bytes = tokio::fs::read(&store.config_path)
+        .await
+        .map_err(|e| LanesError::Io(format!("reading {}: {e}", store.config_path)))?;
+    if bytes_digest(&current_bytes) != store.file_digest {
+        return Err(refuse(format!(
+            "{} changed since the lane records were imported (edited by hand?); review it, then `lanes import {workload}` again",
+            store.config_path
+        )));
+    }
+    let mut next = store.records.clone();
+    let summary = apply_edits(&mut next, edits)?;
+    let validation = swap::validate(&next);
+    let rendered = swap::check_render(&next).map_err(|e| refuse(e.to_string()))?;
+    let changes = swap::value_diffs(&swap::to_value(&store.records), &swap::to_value(&next), "");
+    let running = running_lanes(state, workload).await;
+    let plan_digest = bytes_digest(
+        format!("{}|{}|{}", next.digest(), store.file_digest, bytes_digest(rendered.as_bytes())).as_bytes(),
+    );
+    let resp = LanePlanResponse {
+        workload: workload.to_string(),
+        summary: summary.join("; "),
+        changes,
+        validation,
+        reload_restarts: running,
+        plan_digest,
+        bytes_changed: rendered.as_bytes() != current_bytes.as_slice(),
+    };
+    Ok(Planned {
+        store,
+        next,
+        rendered,
+        current_bytes,
+        resp,
+    })
+}
+
+pub async fn plan(
+    state: &AppState,
+    workload: &str,
+    edits: &[LaneEdit],
+) -> Result<LanePlanResponse, LanesError> {
+    Ok(plan_inner(state, workload, edits).await?.resp)
+}
+
+/// Lanes llama-swap has running now (`GET /running`); a reload restarts them.
+async fn running_lanes(state: &AppState, workload: &str) -> Vec<String> {
+    let Ok(name) = WorkloadName::new(workload) else {
+        return Vec::new();
+    };
+    let Some(port) = state.ops.inventory().await.workload(&name).map(|d| d.port) else {
+        return Vec::new();
+    };
+    match crate::probe_http::request(port, hyper::Method::GET, "/running", None, Duration::from_secs(3)).await {
+        Ok((200, body)) => serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("running").and_then(|r| r.as_array()).cloned())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m.get("model").and_then(|x| x.as_str()).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+pub async fn apply(
+    state: &AppState,
+    workload: &str,
+    edits: &[LaneEdit],
+    confirm: &str,
+    idempotency_key: String,
+) -> Result<AdmitOutcome, LanesError> {
+    let p = plan_inner(state, workload, edits).await?;
+    if p.resp.plan_digest != confirm {
+        return Err(refuse(format!(
+            "stale confirmation: the plan digest is now {} (re-run the plan and review it)",
+            p.resp.plan_digest
+        )));
+    }
+    if !p.resp.validation.is_empty() {
+        return Err(refuse(format!(
+            "llama-swap would refuse this config: {}",
+            p.resp.validation.join("; ")
+        )));
+    }
+    if !p.resp.bytes_changed {
+        return Err(refuse("the render equals the live file; nothing to write"));
+    }
+    let name = WorkloadName::new(workload).map_err(|e| OpsError::Invalid(e.to_string()))?;
+    let inv = state.ops.inventory().await;
+    let def = inv
+        .workload(&name)
+        .cloned()
+        .ok_or_else(|| OpsError::UnknownWorkload(workload.to_string()))?;
+    let store_file = store_path(state, workload).display().to_string();
+    let next_lanes: Vec<String> = p.next.lanes.iter().map(|l| l.id.clone()).collect();
+    let prev_lanes: Vec<String> = p.store.records.lanes.iter().map(|l| l.id.clone()).collect();
+    let previous = String::from_utf8(p.current_bytes.clone())
+        .map_err(|_| refuse("the live config is not UTF-8"))?;
+    let step = |content: String, expect: String, lanes: Vec<String>, summary: String| {
+        PlanStep::WriteSwapConfig {
+            workload: name.clone(),
+            path: p.store.config_path.clone(),
+            content,
+            expect_digest: expect,
+            log_path: p.store.log_path.clone(),
+            port: def.port,
+            lanes,
+            timeout_secs: RELOAD_TIMEOUT_SECS,
+            store_path: store_file.clone(),
+            summary,
+        }
+    };
+    let plan = Plan {
+        id: llmctl_core::OperationId::generate(),
+        kind: OpKind::LaneWrite,
+        target: name.clone(),
+        revision: inv.revision,
+        expected_model: def.model.clone(),
+        affected_gpus: Vec::new(),
+        steps: vec![step(
+            p.rendered.clone(),
+            p.store.file_digest.clone(),
+            next_lanes,
+            p.resp.summary.clone(),
+        )],
+        rollback: vec![step(
+            previous,
+            bytes_digest(p.rendered.as_bytes()),
+            prev_lanes,
+            format!("roll back: {}", p.resp.summary),
+        )],
+    };
+    Ok(state
+        .ops
+        .admit(AdmitParams {
+            protocol: llmctl_client::wire::PROTOCOL_VERSION,
+            idempotency_key,
+            kind: OpKind::LaneWrite,
+            workload: workload.to_string(),
+            expected_revision: None,
+            expected_stop_targets: None,
+            plan_override: Some(plan),
+        })
+        .await?)
+}
+
+// ---- the effect (run by the executor) ------------------------------------------------
+
+/// Write `content` over `path` (refusing if the file is not `expect_digest`
+/// any more), then confirm llama-swap reloaded it. On success, re-import
+/// the store from `content` and commit to the config's git repo.
+#[allow(clippy::too_many_arguments)]
+pub async fn write_and_confirm(
+    workload: &str,
+    path: &str,
+    content: &str,
+    expect_digest: &str,
+    log_path: Option<&str>,
+    port: u16,
+    lanes: &[String],
+    timeout: Duration,
+    store_path: &str,
+    summary: &str,
+) -> Result<String, String> {
+    let current = tokio::fs::read(path)
+        .await
+        .map_err(|e| format!("reading {path}: {e}"))?;
+    let current_digest = bytes_digest(&current);
+    let target_digest = bytes_digest(content.as_bytes());
+    let already = current_digest == target_digest;
+    if !already && current_digest != expect_digest {
+        return Err(format!(
+            "{path} is {current_digest}, not the planned {expect_digest}: changed since the plan; refusing to overwrite"
+        ));
+    }
+    let log_offset = match log_path {
+        Some(l) => tokio::fs::metadata(l).await.map(|m| m.len()).ok(),
+        None => None,
+    };
+    if !already {
+        // The bytes being replaced stay next to the file for the owner.
+        let prev = format!("{path}.llmctl-previous");
+        write_atomic(Path::new(&prev), &current).await?;
+        write_atomic(Path::new(path), content.as_bytes()).await?;
+    }
+    let mut report = confirm_reload(log_path, log_offset, port, lanes, timeout, already).await?;
+
+    // The store follows what is now live.
+    if let Ok(records) = swap::import(content) {
+        let sp = Path::new(store_path);
+        let mut store = read_store(sp).await.ok().flatten();
+        if let Some(s) = store.as_mut() {
+            s.records = records;
+            s.file_digest = target_digest.clone();
+            s.revision += 1;
+            s.updated_at = Utc::now();
+            if let Err(e) = save_store(sp, s).await {
+                report.push_str(&format!("; lane store not updated: {e}"));
+            }
+        }
+    }
+    if !already {
+        report.push_str(&git_commit(path, &format!("llmctl-next({workload}): {summary}")).await);
+    }
+    Ok(report)
+}
+
+/// Wait for llama-swap's own word on the reload, then check it serves the
+/// expected lanes. Without a log, `/v1/models` alone decides (weaker: an
+/// unchanged lane set cannot prove the new file was read).
+async fn confirm_reload(
+    log_path: Option<&str>,
+    log_offset: Option<u64>,
+    port: u16,
+    lanes: &[String],
+    timeout: Duration,
+    unchanged: bool,
+) -> Result<String, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut notes = Vec::new();
+    if let (Some(log), Some(offset), false) = (log_path, log_offset, unchanged) {
+        loop {
+            let tail = read_from(log, offset).await;
+            let reloaded = tail.contains("configuration reloaded");
+            if let Some(err) = tail.lines().find(|l| {
+                let l = l.to_ascii_lowercase();
+                l.contains("[error]") && (l.contains("config") || l.contains("yaml") || l.contains("matrix"))
+            }) {
+                return Err(format!("llama-swap rejected the config: {}", err.trim()));
+            }
+            if reloaded {
+                notes.push("llama-swap logged `configuration reloaded`".to_string());
+                for l in tail.lines().filter(|l| l.contains("[ERROR]")) {
+                    notes.push(format!("after reload: {}", l.trim()));
+                }
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "llama-swap did not log a reload within {timeout:?} (log {log})"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    } else if unchanged {
+        notes.push("file already had the planned bytes; no reload expected".into());
+    } else {
+        notes.push("no log path: confirmed by /v1/models only".into());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    // Serving check: every expected lane listed.
+    loop {
+        match crate::probe_http::probe_models(port, Duration::from_secs(3)).await {
+            crate::probe_http::HttpProbe::Models(ids) => {
+                let missing: Vec<&String> = lanes.iter().filter(|l| !ids.contains(l)).collect();
+                if missing.is_empty() {
+                    notes.push(format!("/v1/models lists all {} lanes", lanes.len()));
+                    return Ok(notes.join("; "));
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(format!("llama-swap does not list {missing:?} after the reload"));
+                }
+            }
+            other if tokio::time::Instant::now() >= deadline => {
+                return Err(format!("llama-swap /v1/models after the reload: {other:?}"));
+            }
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn read_from(path: &str, offset: u64) -> String {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let Ok(mut f) = tokio::fs::File::open(path).await else {
+        return String::new();
+    };
+    let len = f.metadata().await.map(|m| m.len()).unwrap_or(0);
+    // A rotated (shorter) log starts over.
+    let start = if len < offset { 0 } else { offset };
+    if f.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    let _ = f.take(1 << 20).read_to_end(&mut buf).await;
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Commit just this file when it lives in a git work tree. Never pushes;
+/// a failure is reported, not fatal (the journal is the record).
+async fn git_commit(path: &str, message: &str) -> String {
+    let p = Path::new(path);
+    let (Some(dir), Some(file)) = (p.parent(), p.file_name()) else {
+        return String::new();
+    };
+    let run = |args: Vec<String>| {
+        let mut c = tokio::process::Command::new("git");
+        c.arg("-C").arg(dir).args(args).kill_on_drop(true);
+        c
+    };
+    let inside = run(vec!["rev-parse".into(), "--is-inside-work-tree".into()]).output().await;
+    if !matches!(&inside, Ok(o) if o.status.success()) {
+        return "; not in a git repo (no commit)".into();
+    }
+    let file = file.to_string_lossy().to_string();
+    let out = run(vec![
+        "commit".into(),
+        "--quiet".into(),
+        "-m".into(),
+        message.into(),
+        "--".into(),
+        file.clone(),
+    ])
+    .output()
+    .await;
+    match out {
+        Ok(o) if o.status.success() => "; committed to the config repo".into(),
+        Ok(o) => {
+            // An untracked file needs an add first; never stage anything else.
+            let added = run(vec!["add".into(), "--".into(), file.clone()]).output().await;
+            if matches!(&added, Ok(a) if a.status.success()) {
+                if let Ok(o2) = run(vec![
+                    "commit".into(),
+                    "--quiet".into(),
+                    "-m".into(),
+                    message.into(),
+                    "--".into(),
+                    file,
+                ])
+                .output()
+                .await
+                {
+                    if o2.status.success() {
+                        return "; committed to the config repo".into();
+                    }
+                }
+            }
+            format!(
+                "; git commit failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim().chars().take(200).collect::<String>()
+            )
+        }
+        Err(e) => format!("; git not runnable: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_write_refuses_a_file_changed_since_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "models: {}\n").unwrap();
+        let err = write_and_confirm(
+            "swap",
+            cfg.to_str().unwrap(),
+            "models:\n  a:\n    cmd: x\n",
+            "sha256:not-the-file",
+            None,
+            1,
+            &[],
+            Duration::from_millis(200),
+            dir.path().join("store.json").to_str().unwrap(),
+            "test",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("changed since the plan"), "{err}");
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), "models: {}\n");
+    }
+
+    #[tokio::test]
+    async fn a_write_without_a_reload_fails_and_keeps_the_previous_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let log = dir.path().join("swap.log");
+        std::fs::write(&cfg, "models: {}\n").unwrap();
+        std::fs::write(&log, "[INFO] started\n").unwrap();
+        let before = bytes_digest(b"models: {}\n");
+        let err = write_and_confirm(
+            "swap",
+            cfg.to_str().unwrap(),
+            "models:\n  a:\n    cmd: x\n",
+            &before,
+            Some(log.to_str().unwrap()),
+            1,
+            &["a".into()],
+            Duration::from_millis(600),
+            dir.path().join("store.json").to_str().unwrap(),
+            "test",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("did not log a reload"), "{err}");
+        // The new bytes are on disk (the executor's rollback restores);
+        // the replaced bytes sit beside the file.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("config.yaml.llmctl-previous")).unwrap(),
+            "models: {}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_logged_config_error_is_a_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let log = dir.path().join("swap.log");
+        std::fs::write(&cfg, "models: {}\n").unwrap();
+        std::fs::write(&log, "").unwrap();
+        let before = bytes_digest(b"models: {}\n");
+        let log2 = log.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let mut s = std::fs::read_to_string(&log2).unwrap();
+            s.push_str("[INFO] reloading configuration\n[ERROR] unable to load config: bad matrix\n");
+            std::fs::write(&log2, s).unwrap();
+        });
+        let err = write_and_confirm(
+            "swap",
+            cfg.to_str().unwrap(),
+            "models:\n  a:\n    cmd: x\n",
+            &before,
+            Some(log.to_str().unwrap()),
+            1,
+            &["a".into()],
+            Duration::from_secs(3),
+            dir.path().join("store.json").to_str().unwrap(),
+            "test",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("rejected the config"), "{err}");
+    }
+}

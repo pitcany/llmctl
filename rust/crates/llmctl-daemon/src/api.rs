@@ -49,6 +49,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/workloads/{name}/version", get(workload_version))
         .route("/v1/workloads/{name}/engine", get(workload_engine))
         .route("/v1/unloads", post(admit_unload))
+        .route("/v1/lanes/import", post(lanes_import))
+        .route("/v1/lanes/edit", post(lanes_edit))
+        .route("/v1/lanes/{workload}", get(lanes_status))
         .route("/v1/logs", post(logs))
         .with_state(state)
 }
@@ -379,6 +382,66 @@ async fn workload_engine(
         loaded: ans.loaded,
         supports_unload: def.engine_kind.has_engine_unload(),
     }))
+}
+
+async fn lanes_import(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::LaneImportRequest>,
+) -> Result<Json<llmctl_client::wire::LaneImportResponse>, ApiError> {
+    check_protocol(req.protocol)?;
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    Ok(Json(crate::lanes::import(&state, req).await.map_err(ApiError::from_lanes)?))
+}
+
+async fn lanes_status(
+    State(state): State<Arc<AppState>>,
+    Path(workload): Path<String>,
+) -> Result<Json<llmctl_client::wire::LaneStatusResponse>, ApiError> {
+    Ok(Json(crate::lanes::status(&state, &workload).await.map_err(ApiError::from_lanes)?))
+}
+
+/// Plan lane edits, or (with the plan digest) admit the write.
+async fn lanes_edit(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::LaneEditRequest>,
+) -> Result<Response, ApiError> {
+    check_protocol(req.protocol)?;
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    let Some(confirm) = req.confirm.clone() else {
+        let plan = crate::lanes::plan(&state, &req.workload, &req.edits)
+            .await
+            .map_err(ApiError::from_lanes)?;
+        return Ok(Json(plan).into_response());
+    };
+    let key = req.idempotency_key.clone().unwrap_or_else(|| {
+        format!("lanes-{}-{}", req.workload, &confirm[confirm.len().saturating_sub(12)..])
+    });
+    let outcome = crate::lanes::apply(&state, &req.workload, &req.edits, &confirm, key)
+        .await
+        .map_err(ApiError::from_lanes)?;
+    let (row, replayed, status) = match outcome {
+        AdmitOutcome::Admitted(row) => (row, false, StatusCode::ACCEPTED),
+        AdmitOutcome::Replayed(row) => (row, true, StatusCode::OK),
+    };
+    Ok((
+        status,
+        Json(AdmitResponse {
+            operation: operation_view(&row),
+            replayed,
+        }),
+    )
+        .into_response())
+}
+
+fn check_protocol(got: u32) -> Result<(), ApiError> {
+    if got == llmctl_client::wire::PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err(ApiError::from_ops(&crate::ops::OpsError::ProtocolMismatch {
+            got,
+            supported: vec![llmctl_client::wire::PROTOCOL_VERSION],
+        }))
+    }
 }
 
 async fn list_operations(
@@ -746,6 +809,24 @@ impl ApiError {
 }
 
 impl ApiError {
+    fn from_lanes(e: crate::lanes::LanesError) -> Self {
+        let (status, code, message) = match e {
+            crate::lanes::LanesError::Ops(e) => return ApiError::from_ops(&e),
+            crate::lanes::LanesError::Refused(m) => (StatusCode::CONFLICT, codes::LANES_REFUSED, m),
+            crate::lanes::LanesError::Io(m) => (StatusCode::INTERNAL_SERVER_ERROR, codes::DAEMON_ERROR, m),
+        };
+        Self {
+            status,
+            body: llmctl_client::wire::ApiError {
+                error: llmctl_client::wire::ApiErrorBody {
+                    code: code.to_string(),
+                    message,
+                    details: None,
+                },
+            },
+        }
+    }
+
     fn from_upgrade(e: crate::upgrade::UpgradeError) -> Self {
         match e {
             crate::upgrade::UpgradeError::Ops(e) => ApiError::from_ops(&e),

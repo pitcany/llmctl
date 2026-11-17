@@ -301,6 +301,11 @@ impl OpManager {
                     "unload plans name a model; use `unload <workload> <model>`".into(),
                 ))
             }
+            OpKind::LaneWrite => {
+                return Err(OpsError::Unsupported(
+                    "lane writes are planned by `lanes set`/`lanes macro`".into(),
+                ))
+            }
         }
         .map_err(plan_error)?;
         self.guard_gpus(&inv, &plan).await?;
@@ -408,7 +413,7 @@ impl OpManager {
             .await
             .map_err(|e| OpsError::Engine(e.to_string()))?;
         let plan = match (&params.kind, params.plan_override) {
-            (OpKind::Upgrade, Some(prebuilt)) => prebuilt,
+            (OpKind::Upgrade | OpKind::LaneWrite, Some(prebuilt)) => prebuilt,
             // Re-planned against the observations taken under the admission
             // lock: a service that stopped since the caller planned refuses.
             (OpKind::Unload, Some(prebuilt)) => {
@@ -419,7 +424,7 @@ impl OpManager {
                 llmctl_core::plan_unload(&inv, &observations, &name, &model)
                     .map_err(plan_error)?
             }
-            (OpKind::Upgrade | OpKind::Unload, None) => {
+            (OpKind::Upgrade | OpKind::Unload | OpKind::LaneWrite, None) => {
                 return Err(OpsError::Invalid(format!(
                     "{} admission requires its prebuilt plan",
                     params.kind
@@ -429,7 +434,7 @@ impl OpManager {
                 OpKind::Run => llmctl_core::plan_run(&inv, &observations, &name),
                 OpKind::Stop => llmctl_core::plan_stop(&inv, &observations, &name),
                 OpKind::Restart => llmctl_core::plan_restart(&inv, &observations, &name),
-                OpKind::Upgrade | OpKind::Unload => unreachable!(),
+                OpKind::Upgrade | OpKind::Unload | OpKind::LaneWrite => unreachable!(),
             }
             .map_err(plan_error)?,
         };
@@ -715,6 +720,26 @@ impl OpManager {
                     applied,
                 )
                 .await
+            }
+            PlanStep::WriteSwapConfig { .. } => {
+                // Effect boundary first: a crash mid-write is resolved by
+                // reconciliation, never assumed either way.
+                set_phase(&mut row.phases, index, |p| {
+                    p.status = PhaseStatus::EffectPending
+                });
+                if self.persist(row).await.is_err() {
+                    return StepOutcome::Failed("journaling effect boundary failed".into());
+                }
+                match run_swap_write(step).await {
+                    Ok(report) => {
+                        applied.push(format!("lane-write:{}", step.workload()));
+                        set_phase(&mut row.phases, index, |p| {
+                            p.detail = Some(report.clone())
+                        });
+                        StepOutcome::Done
+                    }
+                    Err(e) => StepOutcome::Failed(e),
+                }
             }
             PlanStep::AwaitReadiness {
                 workload: _,
@@ -1020,6 +1045,7 @@ impl OpManager {
                 PlanStep::UnloadModel { .. } => {
                     Err("an unload is not a restoration step".to_string())
                 }
+                PlanStep::WriteSwapConfig { .. } => run_swap_write(&step).await.map(Some),
             };
             match outcome {
                 Ok(identity) => recovery_steps.push(json!({
@@ -1166,7 +1192,9 @@ impl OpManager {
                     && row.plan.steps[p.index].is_external()
                     && matches!(
                         row.plan.steps[p.index],
-                        PlanStep::StopUnit { .. } | PlanStep::StartUnit { .. }
+                        PlanStep::StopUnit { .. }
+                            | PlanStep::StartUnit { .. }
+                            | PlanStep::WriteSwapConfig { .. }
                     )
             });
 
@@ -1278,4 +1306,36 @@ fn plan_error(e: llmctl_core::CoreError) -> OpsError {
         llmctl_core::CoreError::NotRunning { .. } => OpsError::InvalidState(e.to_string()),
         other => OpsError::Invalid(other.to_string()),
     }
+}
+
+/// Run one `WriteSwapConfig` step (forward or rollback).
+async fn run_swap_write(step: &PlanStep) -> Result<String, String> {
+    let PlanStep::WriteSwapConfig {
+        workload,
+        path,
+        content,
+        expect_digest,
+        log_path,
+        port,
+        lanes,
+        timeout_secs,
+        store_path,
+        summary,
+    } = step
+    else {
+        return Err("not a lane write".into());
+    };
+    crate::lanes::write_and_confirm(
+        workload.as_str(),
+        path,
+        content,
+        expect_digest,
+        log_path.as_deref(),
+        *port,
+        lanes,
+        std::time::Duration::from_secs(*timeout_secs),
+        store_path,
+        summary,
+    )
+    .await
 }

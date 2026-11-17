@@ -178,6 +178,13 @@ enum Command {
         #[command(subcommand)]
         cmd: UpgradeCmd,
     },
+    /// llama-swap lanes as records (M4b): import the config, then change
+    /// lanes through planned, confirmed writes that roll back when
+    /// llama-swap does not take the new file.
+    Lanes {
+        #[command(subcommand)]
+        cmd: LanesCmd,
+    },
     /// Installs per recipe kind (M4a): stage fetches/builds a new
     /// versioned dir; plan prints the vendor-app plan (owner-run steps,
     /// never executed by llmctl).
@@ -246,6 +253,68 @@ enum HostCmd {
     },
     /// Show enrolled hosts with agent version, protocol and last-seen.
     List,
+}
+
+#[derive(Subcommand, Clone)]
+enum LanesCmd {
+    /// Preview (or, with --confirm, persist) the records of a llama-swap
+    /// workload's config. Never writes the config.
+    Import {
+        workload: String,
+        #[arg(long)]
+        config: Option<String>,
+        #[arg(long)]
+        log: Option<String>,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Records, drift against the live file, and validation.
+    Show {
+        workload: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set one lane field (value parsed as JSON, else taken as a string).
+    Set {
+        workload: String,
+        lane: String,
+        field: String,
+        value: String,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Remove one lane field.
+    Unset {
+        workload: String,
+        lane: String,
+        field: String,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Set a macro (an engine version swap is a macro path change).
+    Macro {
+        workload: String,
+        name: String,
+        value: String,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Write the records as they are (normalises the file to the render).
+    Rewrite {
+        workload: String,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long)]
+        wait: bool,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -457,6 +526,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Own { name } => cmd_own(cli, &name).await,
         Command::Release { name } => cmd_release(cli, &name).await,
         Command::Upgrade { cmd } => cmd_upgrade(cli, cmd).await,
+        Command::Lanes { cmd } => cmd_lanes(cli, cmd).await,
         Command::Install { cmd } => cmd_install(cli, cmd).await,
         Command::Version { name } => cmd_version(cli, &name).await,
         Command::Adopt {
@@ -1278,6 +1348,147 @@ async fn cmd_ack(cli: &Cli, id: &str) -> Result<u8, CliError> {
     let op = client.acknowledge(id, None).await?;
     println!("acknowledged {} ({:?})", op.id, op.status);
     Ok(0)
+}
+
+async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
+    use llmctl_client::wire::{LaneEdit, LaneEditRequest, LaneImportRequest};
+    let client = connect(cli)?;
+    ensure_protocol(&client).await?;
+    let print_lanes = |lanes: &[llmctl_client::wire::LaneSummary]| {
+        for l in lanes {
+            println!(
+                "  {:<28} {:<10} ttl {:<6} {}",
+                l.id,
+                l.engine_kind,
+                l.ttl.map(|t| t.to_string()).unwrap_or_else(|| "-".into()),
+                l.model_name.clone().unwrap_or_default()
+            );
+        }
+    };
+    let (workload, edits, confirm, wait) = match cmd {
+        LanesCmd::Import {
+            workload,
+            config,
+            log,
+            confirm,
+            json,
+        } => {
+            let r = client
+                .lanes_import(&LaneImportRequest {
+                    protocol: PROTOCOL_VERSION,
+                    workload,
+                    config_path: config,
+                    log_path: log,
+                    confirm,
+                })
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                return Ok(0);
+            }
+            println!("{} ← {}", r.workload, r.config_path);
+            println!("  round trip: {}", r.roundtrip);
+            println!("  comments kept: {}", r.notes_kept);
+            if r.validation.is_empty() {
+                println!("  validation: ok");
+            } else {
+                println!("  validation: {}", r.validation.join("; "));
+            }
+            print_lanes(&r.lanes);
+            if r.persisted {
+                println!("records saved (config untouched)");
+            } else if let Some(d) = &r.records_digest {
+                println!("to save the records: llmctl-next lanes import {} --confirm {d}", r.workload);
+            }
+            return Ok(if r.roundtrip == "equivalent" && r.validation.is_empty() { 0 } else { 1 });
+        }
+        LanesCmd::Show { workload, json } => {
+            let r = client.lanes_status(&workload).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                return Ok(0);
+            }
+            println!("{} ({}, revision {})", r.workload, r.config_path, r.revision);
+            if r.drift {
+                println!("  DRIFT: the file changed since the records (now {})", r.file_digest_now);
+            }
+            for (k, v) in &r.macros {
+                println!("  macro {k} = {v}");
+            }
+            print_lanes(&r.lanes);
+            if !r.validation.is_empty() {
+                println!("  validation: {}", r.validation.join("; "));
+            }
+            return Ok(if r.drift { 1 } else { 0 });
+        }
+        LanesCmd::Set {
+            workload,
+            lane,
+            field,
+            value,
+            confirm,
+            wait,
+        } => {
+            let value = serde_json::from_str(&value).unwrap_or(serde_json::Value::String(value));
+            (workload, vec![LaneEdit::SetField { lane, field, value }], confirm, wait)
+        }
+        LanesCmd::Unset {
+            workload,
+            lane,
+            field,
+            confirm,
+            wait,
+        } => (workload, vec![LaneEdit::RemoveField { lane, field }], confirm, wait),
+        LanesCmd::Macro {
+            workload,
+            name,
+            value,
+            confirm,
+            wait,
+        } => (workload, vec![LaneEdit::SetMacro { name, value }], confirm, wait),
+        LanesCmd::Rewrite {
+            workload,
+            confirm,
+            wait,
+        } => (workload, Vec::new(), confirm, wait),
+    };
+    let mut req = LaneEditRequest {
+        protocol: PROTOCOL_VERSION,
+        workload: workload.clone(),
+        edits,
+        confirm: None,
+        idempotency_key: None,
+    };
+    let Some(confirm) = confirm else {
+        let p = client.lanes_plan(&req).await?;
+        println!("{}: {}", p.workload, p.summary);
+        for c in &p.changes {
+            println!("  change {c}");
+        }
+        if !p.bytes_changed {
+            println!("  the render equals the live file: nothing to write");
+        }
+        if !p.validation.is_empty() {
+            println!("  REFUSED by validation: {}", p.validation.join("; "));
+            return Ok(1);
+        }
+        if p.reload_restarts.is_empty() {
+            println!("  reload restarts: nothing running");
+        } else {
+            println!("  reload restarts running lanes: {}", p.reload_restarts.join(", "));
+        }
+        println!("to write it: add --confirm {}", p.plan_digest);
+        return Ok(0);
+    };
+    req.confirm = Some(confirm);
+    let admit = client.lanes_apply(&req).await?;
+    let op = admit.operation;
+    println!("admitted operation {} ({})", op.id, op.idempotency_key);
+    if !wait {
+        println!("progress: llmctl-next op {} --watch", op.id);
+        return Ok(0);
+    }
+    watch_and_report(&client, &op.id).await
 }
 
 async fn cmd_unload(

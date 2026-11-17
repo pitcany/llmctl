@@ -319,6 +319,115 @@ pub struct AdmitRequest {
     pub expected_stop_targets: Option<Vec<String>>,
 }
 
+// ---- llama-swap lane records (M4b step 4) ----------------------------------------
+
+/// Import a llama-swap workload's config into lane records. Without
+/// `confirm` it only previews; with the preview's `records_digest` it
+/// persists the records (the config file is never written by import).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneImportRequest {
+    pub protocol: u32,
+    pub workload: String,
+    /// Absent → the `-config` argument of the pinned launch definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    /// Absent → the plist's stdout path. Used to confirm reloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneSummary {
+    pub id: String,
+    pub engine_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneImportResponse {
+    pub workload: String,
+    pub config_path: String,
+    pub log_path: Option<String>,
+    pub file_digest: String,
+    /// The confirmation token; `None` when the round trip failed.
+    pub records_digest: Option<String>,
+    /// `equivalent`, or why the render does not round-trip.
+    pub roundtrip: String,
+    /// What llama-swap would refuse (empty = valid).
+    pub validation: Vec<String>,
+    pub lanes: Vec<LaneSummary>,
+    pub notes_kept: usize,
+    pub persisted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneStatusResponse {
+    pub workload: String,
+    pub config_path: String,
+    pub log_path: Option<String>,
+    pub revision: u64,
+    pub file_digest: String,
+    pub file_digest_now: String,
+    /// The file no longer matches the records (edited by hand).
+    pub drift: bool,
+    pub lanes: Vec<LaneSummary>,
+    pub macros: Vec<(String, String)>,
+    pub validation: Vec<String>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// One change to the lane records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum LaneEdit {
+    SetField {
+        lane: String,
+        field: String,
+        value: serde_json::Value,
+    },
+    RemoveField {
+        lane: String,
+        field: String,
+    },
+    SetMacro {
+        name: String,
+        value: String,
+    },
+}
+
+/// Plan (no `confirm`) or apply (with the plan's digest) lane edits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneEditRequest {
+    pub protocol: u32,
+    pub workload: String,
+    pub edits: Vec<LaneEdit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanePlanResponse {
+    pub workload: String,
+    pub summary: String,
+    /// Value paths that change (`/models/x/ttl: 3600 != 600`).
+    pub changes: Vec<String>,
+    pub validation: Vec<String>,
+    /// Lanes running now: llama-swap's reload restarts them.
+    pub reload_restarts: Vec<String>,
+    pub plan_digest: String,
+    /// False when the render equals the live file (nothing to write).
+    pub bytes_changed: bool,
+}
+
 /// Engine-level unload of one model from a vendor service (M4b step 1).
 /// Admitted like any operation; the key makes a retry safe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -555,4 +664,5 @@ pub mod codes {
     pub const OWNERSHIP_REFUSED: &str = "ownership_refused";
     pub const UPGRADE_REFUSED: &str = "upgrade_refused";
     pub const UNSUPPORTED: &str = "unsupported";
+    pub const LANES_REFUSED: &str = "lanes_refused";
 }

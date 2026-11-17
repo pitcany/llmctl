@@ -26,6 +26,7 @@ hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
 sha2 = { workspace = true }
+serde_yaml = "0.9"
 
 [dev-dependencies]
 tempfile = { workspace = true }
