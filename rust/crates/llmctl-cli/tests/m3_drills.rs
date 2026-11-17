@@ -7,8 +7,10 @@
 //! Prerequisites: `llmctl-next host add <alias>` enrolled the target
 //! (agent LaunchAgent running, bridge verified). Every drill uses its own
 //! `com.pitcany.llmctl-next-drill-<id>` label, rewrites the agent's
-//! inventory to name only that workload, and restores an empty inventory
-//! on drop. The sleep/wake drill is pilot-only (owner present); see
+//! inventory to name only that workload, and restores the inventory it
+//! found on drop. A drill refuses to start when the agent already manages
+//! real workloads (their intent would be dropped for the drill); drive a
+//! real workload with `m3_pilot_drills.rs` instead. The sleep/wake drill is pilot-only (owner present); see
 //! docs/RUST-M3-PROGRESS-2026-11-16.md.
 
 use std::process::{Command as StdCommand, Stdio};
@@ -60,6 +62,25 @@ async fn wait_agent_alive(alias: &str, timeout: Duration) {
     }
 }
 
+/// `push` for destructors: never panics.
+fn push_quiet(alias: &str, remote_path: &str, bytes: &[u8]) {
+    let Ok(mut child) = StdCommand::new("ssh")
+        .arg(alias)
+        .arg(format!("cat > {remote_path}"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    use std::io::Write as _;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(bytes);
+    }
+    let _ = child.wait();
+}
+
 /// Push a file's bytes to the host through `ssh cat >`.
 fn push(alias: &str, remote_path: &str, bytes: &[u8]) {
     let mut child = StdCommand::new("ssh")
@@ -104,10 +125,33 @@ struct DrillEnv {
     alias: String,
     label: String,
     port: u16,
+    /// The agent's inventory.json as found, restored byte for byte on drop.
+    original_inventory: Vec<u8>,
+    /// Host name and GPU list of that inventory: the drill workload reuses
+    /// them, so nothing drill-specific is left behind.
+    host: String,
+    gpus: serde_json::Value,
+}
+
+/// The agent's inventory file, raw, plus its parsed form.
+fn agent_inventory(alias: &str) -> (Vec<u8>, serde_json::Value) {
+    let raw = ssh(alias, "cat ~/.local/state/llmctl-next/inventory.json");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("agent inventory.json parses");
+    (raw.into_bytes(), parsed)
 }
 
 impl DrillEnv {
     fn create(alias: &str) -> DrillEnv {
+        let (original_inventory, inv) = agent_inventory(alias);
+        let workloads = inv["inventory"]["workloads"].as_array().map_or(0, |w| w.len());
+        assert_eq!(
+            workloads, 0,
+            "the agent on {alias} manages {workloads} workload(s); these drills replace its \
+             inventory — use tests/m3_pilot_drills.rs against a real workload"
+        );
+        let host = inv["inventory"]["host"].as_str().expect("inventory host").to_string();
+        let gpus = inv["inventory"]["gpus"].clone();
+        assert!(gpus.as_array().is_some_and(|g| !g.is_empty()), "agent inventory lists no GPUs");
         let label = format!(
             "com.pitcany.llmctl-next-drill-{}",
             &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -153,6 +197,9 @@ print(json.dumps({{"port": port}}))
             alias: alias.to_string(),
             label: label.clone(),
             port,
+            original_inventory,
+            host,
+            gpus,
         };
         env.write_agent_inventory();
         env.restart_agent();
@@ -162,14 +209,14 @@ print(json.dumps({{"port": port}}))
     fn write_agent_inventory(&self) {
         let inv = serde_json::json!({
             "inventory": {
-                "host": "drill-mac",
+                "host": self.host,
                 "platform": "macos",
-                "gpus": [{"host": "drill-mac", "index": 9}],
+                "gpus": self.gpus,
                 "workloads": [{
                     "name": "drill",
                     "engine": "launchd",
                     "model": "/usr/bin/python3",
-                    "gpus": [{"host": "drill-mac", "index": 9}],
+                    "gpus": [self.gpus[0]],
                     "port": self.port,
                     "unit": {"scope": "launchd", "name": self.label},
                     "authority": {"kind": "launchd_service", "label": self.label},
@@ -266,20 +313,13 @@ impl Drop for DrillEnv {
                 self.label
             ),
         );
-        // Restore an empty inventory so the agent returns to its real one
-        // on the next edit/restart.
-        let empty = serde_json::json!({
-            "inventory": {
-                "host": "drill-mac",
-                "platform": "macos",
-                "gpus": [{"host": "drill-mac", "index": 9}],
-                "workloads": [],
-                "revision": 1
-            }
-        });
-        if let Ok(bytes) = serde_json::to_vec_pretty(&empty) {
-            push(&self.alias, "~/.local/state/llmctl-next/inventory.json", &bytes);
-        }
+        // Put back the inventory the drill found, byte for byte (an empty
+        // stand-in left `drill-mac` ids in the real agent before the pilot).
+        push_quiet(
+            &self.alias,
+            "~/.local/state/llmctl-next/inventory.json",
+            &self.original_inventory,
+        );
         // Two-phase, quiet version of restart_agent (see its comment).
         ssh_quiet(
             &self.alias,
