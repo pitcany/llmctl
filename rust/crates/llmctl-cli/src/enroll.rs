@@ -410,14 +410,15 @@ pub async fn host_upgrade(
                 "~/.local/bin/llmctl-next.new",
                 &sha256_hex(&bytes),
             )?;
+            ssh(
+                &alias,
+                "mv ~/.local/bin/llmctl-next.new ~/.local/bin/llmctl-next && chmod +x ~/.local/bin/llmctl-next",
+            )?;
         }
+        // build_on_host installs the binary itself.
         (None, Some(src)) => build_on_host(&alias, src)?,
         (None, None) => return Err("pass --binary or --source".into()),
     }
-    ssh(
-        &alias,
-        "mv ~/.local/bin/llmctl-next.new ~/.local/bin/llmctl-next && chmod +x ~/.local/bin/llmctl-next",
-    )?;
     bootstrap_agent(&alias)?;
     // After: health + protocol check two.
     let after = bridge_health(&alias).await?;
