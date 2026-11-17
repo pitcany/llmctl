@@ -78,8 +78,11 @@ fn python_interpreter_for(recipe: &PythonEnvRecipe, def: &WorkloadDefinition) ->
         .map(str::to_owned)
 }
 
-/// The first `Exec*` path of the managed definition that lives under
-/// `root` — the engine binary a versioned-directory recipe runs.
+/// The path of the managed definition that lives under `root` — the
+/// engine binary a versioned-directory recipe runs. `Exec*` paths first;
+/// then inline `Environment=` values, because the llama.cpp lanes exec a
+/// guard wrapper while the versioned binary rides an env var
+/// (`LLAMA_GUARD_REAL_BIN`).
 fn exec_under_root(root: &str, def: &WorkloadDefinition) -> Option<String> {
     let root = Path::new(root);
     let llmctl_core::Ownership::Managed { definition, .. } = &def.ownership else {
@@ -91,6 +94,7 @@ fn exec_under_root(root: &str, def: &WorkloadDefinition) -> Option<String> {
         .chain(definition.exec_start.iter())
         .chain(definition.exec_start_post.iter())
         .map(|c| c.path.as_str())
+        .chain(definition.environment.iter().map(|(_, v)| v.as_str()))
         .find(|p| Path::new(p).starts_with(root))
         .map(str::to_owned)
 }
@@ -561,9 +565,12 @@ pub fn rewrite_definition(
     Ok(next)
 }
 
-/// Swap every `Exec*` path under `root` to the new version directory:
+/// Swap every `Exec*` path — and every inline `Environment=` value that is
+/// a path under `root` — to the new version directory:
 /// `<root>/<old-id>/<rel>` becomes `<root>/<new-id>/<rel>`, where the new
 /// directory is the first path component of `new_executable` under `root`.
+/// The env case is the llama.cpp lanes' shape: `ExecStart` runs the guard
+/// wrapper while `LLAMA_GUARD_REAL_BIN` names the versioned binary.
 fn rewrite_root_paths(next: &mut LaunchDefinition, root: &str, new_executable: &str) {
     let rootp = Path::new(root);
     let new_rel = Path::new(new_executable)
@@ -591,6 +598,11 @@ fn rewrite_root_paths(next: &mut LaunchDefinition, root: &str, new_executable: &
             if let Some(mapped) = map(&cmd.argv[0]) {
                 cmd.argv[0] = mapped;
             }
+        }
+    }
+    for (_name, value) in next.environment.iter_mut() {
+        if let Some(mapped) = map(value) {
+            *value = mapped;
         }
     }
 }
@@ -901,11 +913,8 @@ mod tests {
         });
         let old = LaunchDefinition {
             exec_start: vec![llmctl_core::ExecCommand {
-                path: "/d/builds/gpt-oss-120b-b10705-00112233/bin/llama-server".into(),
-                argv: vec![
-                    "/d/builds/gpt-oss-120b-b10705-00112233/bin/llama-server".into(),
-                    "--host".into(),
-                ],
+                path: "/usr/bin/llama-server-guarded".into(),
+                argv: vec!["/usr/bin/llama-server-guarded".into(), "--host".into()],
                 ignore_errors: false,
             }],
             exec_start_pre: vec![llmctl_core::ExecCommand {
@@ -913,6 +922,12 @@ mod tests {
                 argv: vec!["/usr/bin/id".into()],
                 ignore_errors: false,
             }],
+            // The llama.cpp lanes' shape: the versioned binary rides an
+            // env var (LLAMA_GUARD_REAL_BIN), the wrapper is exec'd.
+            environment: vec![
+                ("LLAMA_GUARD_REAL_BIN".into(), "/d/builds/gpt-oss-120b-b10705-00112233/bin/llama-server".into()),
+                ("LLAMA_GUARD_MIN_FREE_MIB".into(), "29500".into()),
+            ],
             ..Default::default()
         };
         let next = rewrite_definition(
@@ -921,16 +936,18 @@ mod tests {
             "/d/builds/gpt-oss-120b-b10800-aabbccdd/bin/llama-server",
         )
         .unwrap();
-        assert_eq!(
-            next.exec_start[0].path,
-            "/d/builds/gpt-oss-120b-b10800-aabbccdd/bin/llama-server"
-        );
-        assert_eq!(
-            next.exec_start[0].argv[0],
-            "/d/builds/gpt-oss-120b-b10800-aabbccdd/bin/llama-server"
-        );
-        // System paths stay untouched.
+        // The guard wrapper and system paths stay untouched...
+        assert_eq!(next.exec_start[0].path, "/usr/bin/llama-server-guarded");
         assert_eq!(next.exec_start_pre[0].path, "/usr/bin/id");
+        // ...the env value under the root swaps to the new version dir.
+        assert_eq!(
+            next.environment[0],
+            (
+                "LLAMA_GUARD_REAL_BIN".to_string(),
+                "/d/builds/gpt-oss-120b-b10800-aabbccdd/bin/llama-server".to_string()
+            )
+        );
+        assert_eq!(next.environment[1].1, "29500");
     }
 
     /// Drift: a changed per-kind fact is a finding; a pin without a fact
