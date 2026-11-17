@@ -25,8 +25,9 @@ pub use inventory::{
     WorkloadDefinition,
 };
 pub use launch::{
-    EnvFileRef, ExecCommand, FieldDiff, FileProvenance, LaunchDefinition, Ownership,
-    PreviousUnitFile, ServiceFileRecord, VersionRef,
+    looks_secret, EnvFileRef, ExecCommand, FieldDiff, FileProvenance, KeepAliveValue,
+    LaunchDefinition, LaunchdExtras, Ownership, PendingApply, PreviousUnitFile, ServiceFileRecord,
+    VersionRef,
 };
 pub use observation::{Observation, ProcessState, Readiness, ServedModel};
 pub use plan::{OpKind, Plan, PlanStep};

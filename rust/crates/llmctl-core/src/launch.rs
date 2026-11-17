@@ -74,6 +74,61 @@ pub struct LaunchDefinition {
     pub wants: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires: Option<Vec<String>>,
+    /// launchd plist facts with no systemd counterpart (macOS workloads).
+    /// `None` on systemd pins; the diff/digest machinery covers it like any
+    /// other field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launchd: Option<LaunchdExtras>,
+}
+
+/// The subset of a launchd plist the launch adapter pins. launchd has no
+/// drop-ins or merging, so this plus the shared fields is the whole job
+/// definition (RUST-M3-PLAN, design decision 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchdExtras {
+    /// The launchd job label (`Label`).
+    pub label: String,
+    /// Absolute path of the job's plist file.
+    pub plist_path: String,
+    /// `Program` when the plist names the binary directly (no
+    /// `ProgramArguments`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// `RunAtLoad`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub run_at_load: bool,
+    /// `KeepAlive`: bool, or the raw JSON when launchd's richer dict form
+    /// is used (kept verbatim so render/import round-trips exactly).
+    pub keep_alive: KeepAliveValue,
+    /// `StandardOutPath` / `StandardErrorPath` — the log source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_path: Option<String>,
+    /// `ThrottleInterval` (seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle_interval_secs: Option<u64>,
+    /// `Disabled` as written in the plist (the launchd override database is
+    /// separate state the adapter manages through enable/disable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+}
+
+/// `KeepAlive` as a plist value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum KeepAliveValue {
+    Bool(bool),
+    /// launchd's dict conditions, kept verbatim.
+    Other(serde_json::Value),
+}
+
+impl KeepAliveValue {
+    /// True only for `KeepAlive=true` (the respawn-always form; a dict is a
+    /// conditional form this adapter does not interpret).
+    pub fn is_always(&self) -> bool {
+        matches!(self, KeepAliveValue::Bool(true))
+    }
 }
 
 impl LaunchDefinition {
@@ -149,6 +204,13 @@ pub enum Ownership {
         /// false drift.
         #[serde(default = "default_definition_schema")]
         definition_schema: u32,
+        /// launchd only (RUST-M3-PLAN, design decision 6): the plist file
+        /// on disk differs from the bytes launchd loaded, and the next
+        /// admitted restart (bootstrap) applies it. systemd's
+        /// `daemon-reload` made every owned write live immediately, so this
+        /// stays `None` there.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_apply: Option<PendingApply>,
     },
 }
 
@@ -164,6 +226,15 @@ pub struct ServiceFileRecord {
     /// `sha256:<hex>` of the bytes llmctl wrote.
     pub digest: String,
     pub previous: PreviousUnitFile,
+}
+
+/// launchd deferred-apply marker: what still needs a bootstrap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingApply {
+    /// Human-readable reason (own wrote the rendered plist; release
+    /// restored the original bytes; …).
+    pub reason: String,
+    pub since: DateTime<Utc>,
 }
 
 /// Versioned-environment facts pinned next to a managed definition (plan
