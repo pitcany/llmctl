@@ -41,7 +41,7 @@ M4), the live inventory `~/.local/state/llmctl-next-m4a/inventory.json`
 | W3 | Stop a workload for a while (must stay down) | `llmctl stop` (4) | `stop` with manual-stop protection (survives eviction/rollback) | ✅ |
 | W4 | Restart/unload a model | `llmctl` restart, Ollama evictions | `restart`, `unload` with in-flight safety | ✅ |
 | W5 | Start a lane/model on a Mac | Mac `llmctl start MODEL` | `lanes swap` on the Mac agents | ◐ budget guard as write-blocker M5c item 4 |
-| W6 | `take-gpus` before a heavy job | `llmctl-stack take-gpus <lane> --take` (stops units itself) | — | ❌ delegates to llmctl-next in M5b item 2 |
+| W6 | `take-gpus` before a heavy job | `llmctl-stack take-gpus <lane> --take` (stops units itself) | owned units stop through llmctl-next (M5b, 2026-11-18); the `qwen3coder30b-start` script's own `systemctl start ollama-gpu1` still writes directly (B4 gap) | ◐ |
 | W7 | gpt-oss-120b start/stop | own unit, llm-router `gptoss` backend | `run/stop gpt-oss-120b` (owned) | ✅ until it moves into the llama.cpp router (M5d step 7) |
 
 ## Config, presets, catalog (writes)
@@ -59,10 +59,10 @@ M4), the live inventory `~/.local/state/llmctl-next-m4a/inventory.json`
 
 | # | Actor | Today | M5 shape |
 |---|---|---|---|
-| B1 | Python llmctl CLI/TUI/`:8088` | `sessions/swap_jobs/units` → systemd directly for non-handed-over workloads | guard: owned workload → llmctl-next, refusal (not fallback) when agent down (M5b item 1) |
-| B2 | llmctl-stack `take-gpus` | `systemctl --user stop` / `llm-unit stop` / `sudo -n systemctl stop` | `llmctl-next stop` for owned units (M5b item 2) |
-| B3 | Mac llmctl (m5) | `llama-swap` loads through its own path (`start/stop` on the router) | owned lanes → `llmctl-next lanes swap/stop` (M5b item 3) |
-| B4 | llm-router | own switch path for not-handed-over backends | hand the remaining owned-workload backends over (M5b item 4) |
+| B1 | Python llmctl CLI/TUI/`:8088` | `sessions/swap_jobs/units` → systemd directly for non-handed-over workloads | guard in `SystemctlRunner.run` (2026-11-18): owned workload → llmctl-next `--wait`, refusal (not fallback) when the agent is down; reversal `llmctl_next.enabled: false`. Enabled after the M5a baseline day |
+| B2 | llmctl-stack `take-gpus` | `systemctl --user stop` / `llm-unit stop` / `sudo -n systemctl stop` | `stop_blockers` delegates owned units to llmctl-next stop (2026-11-18, `26e52b8d` in llmctl-stack); same settings section; refusal, not fallback |
+| B3 | Mac llmctl (m5, mbp2) | `llama-swap` loads through its own path (`start/stop` on the router) | `next_enabled: 1` routes owned lanes through `llmctl-next lanes swap/stop` (2026-11-18, `5dd7415` in local-llm); agent down = refusal with the `next_enabled: 0` lever. mbp2 stays off: its llama-swap workload is not agent-owned yet |
+| B4 | llm-router | own switch path for not-handed-over backends | Remaining owned-unit backend: `qwen3coder30b` (→ `ollama-gpu1`). **Not handed over**: `run ollama-gpu1` starts the service but does not preload `qwen3-coder:30b`, which the router's readiness waits for — a handover would break the lane. Owner-accepted gap until a run can preload an Ollama model (M5c revisit) |
 | B5 | llm-heal / mac-heal | asks the agent's `intent` before repairs (since M4), then repairs through systemctl/launchctl itself; fail open | repairs that go through the agent are operations; direct repairs show as findings in `audit` (M5a) — full delegation is not in M5 |
 | B6 | llmctl-warm | never loads a lane (M4c); `--guarded` no-ops when the router is down | no change needed in M5 |
 | B7 | `ds4-llmctl-sync` | records adopted rows in the Python session table only; starts/stops nothing | kept all M5; retires at M6 with the Python reader |
