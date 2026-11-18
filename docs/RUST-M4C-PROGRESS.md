@@ -16,18 +16,19 @@ M4b: [RUST-M4B-PROGRESS-2026-11-17.md](RUST-M4B-PROGRESS-2026-11-17.md).
 | 2026-11-17 | **Router handoff, lane backends** (item 4, part). llm-router (`6ce79fc` in `~/AI/llm-router`): with `switch.llmctl_next_cmd` set and a `start_cmd` backend naming its workload (`llmctl_next`), a switch runs `llmctl-next run <workload> --wait --force` instead of the start script. Exit 3/4/5/6 (agent down, refused at admission, workload unknown, protocol) falls back to the script; a failed operation is a failed switch. **Off by default; `config/router.yaml` is unchanged.** Also `4121863`: `--wait` now watches for the plan's readiness waits plus 5 min (was a flat 10 min, shorter than a Strata cold start) | 10 router tests (`tests/test_switcher_llmctl_next.py`); router suite 356 pass, 1 known failure (`test_every_backend_profile_is_tracked_in_the_repo`). Live: `run strata-fast --dry-run` on the pilot daemon shows the plan a handoff of `flash-fast` would run (stop vllm-engine, start, verify; rollback restarts vllm-engine). No handoff has run for real |
 | 2026-11-17 | **Env-file profiles** (rest of item 3). `run <workload> --profile-env <file> --model <name>`: stop, make that file the workload's `EnvironmentFile` (old env kept as `<env>.llmctl-previous`), start, verify the profile's model, re-pin the workload (env digest + model, a new inventory revision). On failure the old env goes back; a target that was serving is restarted on its previous model and verified. A profile run tolerates drift that is only "the env contents changed" (what llm-router's own switch leaves behind). The profile must be a regular file named `<env file>.<profile>` next to it; the workload must be adopted with exactly one `EnvironmentFile`; the new env takes the stricter of the two file modes; contents never enter the journal, inventory, API or logs. `e735ba1`, `7310d60` | 3 planner tests, 4 profile tests, e2e `a_profile_run_swaps_the_env_repins_and_rolls_back` (switch, restart on the new pin, failed start restored and re-verified, five refusals); suite 30 e2e / 59 daemon / 23 planner green. Live, dry run only: `run vllm-engine --profile-env ~/AI/services/vllm-engine.env.qwen27b-awq --model qwen3.8-27b-awq --dry-run` lists stop, apply profile, start, verify `qwen3.8-27b-awq`, with the restore-and-restart rollback; `vllm-engine2.env` and `/etc/hostname` are refused; the env file's digest was unchanged afterwards |
 | 2026-11-17 | **Router handoff, vLLM profiles** (item 4, complete in code). llm-router `1c1c566`: with `switch.llmctl_next_cmd` and `switch.llmctl_next_workload`, a profile switch is one `llmctl-next run <workload> --profile-env <profile> --model <served> --wait --force`; exit 3/4/5/6 falls through to the router's own switch; a failed operation fails the switch and the router's rollback does not run on top of llmctl-next's. **Off by default.** | 17 router tests in `tests/test_switcher_llmctl_next.py`; router suite 363 pass, 1 known failure. No handoff has run for real |
+| 2026-11-17 | **Pilot: vLLM handoff enabled on the workstation.** `router.yaml` (`0d214e6` in `~/AI/llm-router`): `switch.llmctl_next_cmd` = the pilot daemon's own binary + data dir, `switch.llmctl_next_workload: vllm-engine`; llm-router restarted 17:59. Lane backends are not handed over. Pilot inventory: `vllm-engine` readiness 600 s (was the 120 s default, too short for an AWQ load). **Found and fixed:** `d07dabc` — the systemd adapter cleared the start-rate counter only for a `failed` unit; `vllm-engine` allows 3 starts per 30 min, the fourth was the rollback's and was refused (`start-limit-hit`). Also `46b2eca` (the ack hint named a command that does not exist) | Three jobs, all through `longjob … --router`. (1) `m4c-router-pilot` 18:03–18:07: `llmctl run qwen27b` went through llm-router, which handed it to llmctl-next (`model.switch.llmctl_next` in the router log; operation `Run vllm-engine Succeeded`, 6 phases, 122 s) — from an env the Python llmctl had just written itself, so the drift tolerance, a real file swap and the re-pin all ran. (2) `m4c-forced-rollback` 18:07–18:09: verify failed as intended, env restored, restart refused by systemd → `needs_attention`, engine down until a manual `llm-unit reset-failed` + `start` (serving again 18:11:28). (3) `m4c-forced-rollback-2` 18:17–18:20 on the fixed daemon: verify failed, env restored from `.llmctl-previous`, engine restarted on the default and verified, `recovery: restored`, 177 s. Spike suite 21/21 (`--test-threads=1`). End state: default profile, `qwen3.8-27b` serving, lock and lease free, `ccl --ask local` answered. Tutor downtime about 10 min in total |
 
 ## Next, in order
 
-1. **Enable the handoff and run the pilot** (owner's go). In
-   `~/AI/llm-router/config/router.yaml`: `switch.llmctl_next_cmd`
-   (the binary plus `--data-dir`), `switch.llmctl_next_workload:
-   vllm-engine`, and `llmctl_next: strata-fast` / `gpt-oss-120b` on the
-   `flash-fast` / `gptoss` backends; restart llm-router. Then one real
-   switch through the router with a rollback forced (stops the tutor for
-   minutes; start the window with `longjob start NAME --router`). Before
-   that the pilot daemon should run under a unit: today it is a detached
-   process, and while it is down every switch falls back to the old path.
+1. **Finish the handoff rollout.** Still open after the pilot: a
+   router-driven switch *to* a non-default two-card profile
+   (`qwen27b-heretic` or `-uncensored`; the pilot's first step used a
+   one-card AWQ preset, which the Python llmctl always starts directly,
+   never through the router); the lane backends (`llmctl_next:
+   strata-fast` / `gpt-oss-120b`, a 10-minute Strata load each way); a
+   request-safety refusal seen live; and the pilot daemon under a unit
+   (today a detached process — while it is down every switch falls back
+   to the router's own path).
 2. **Companion hooks** (item 5), **manual-stop protection against the
    healers** (item 7, including "a swap's rollback never restarts a
    manual stop"), **model acquisition** (item 1), **VRAM fit** (rest
@@ -69,3 +70,11 @@ M4b: [RUST-M4B-PROGRESS-2026-11-17.md](RUST-M4B-PROGRESS-2026-11-17.md).
   leaves the pin stale until the next profile run re-pins it (plain
   `run`/`restart` of that workload are refused as drift meanwhile, as
   before). No real profile switch has been executed on the workstation.
+- **Start limits:** llmctl-next now clears the start-rate counter before
+  each admitted start. The unit's own `Restart=` retries stay limited.
+  `vllm-engine`'s limit (3 per 30 min) still applies to starts made by
+  other tools, which reset it themselves (llm-router, the Python llmctl).
+- **Pilot residue:** operations `d927b40a` (needs_attention,
+  acknowledged) and the failed forced-rollback runs stay in the pilot
+  journal on purpose; `inventory.json.bak-m4c-pilot` is the inventory
+  before the readiness change.
