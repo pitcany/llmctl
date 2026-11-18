@@ -156,6 +156,105 @@ pub struct WorkloadDefinition {
     /// Absent → `at_start` (every pre-M4c record).
     #[serde(default, skip_serializing_if = "GpuClaim::is_at_start")]
     pub gpu_claim: GpuClaim,
+    /// Companion hooks (M4c item 5): commands that belong to this
+    /// workload's starts and stops and run inside the operation. Declared
+    /// in the inventory file only — no API registers a command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<Hook>,
+}
+
+/// When a companion hook runs, relative to its workload's unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookWhen {
+    /// Before the unit is started.
+    PreStart,
+    /// After the start: once the served model is verified when the plan
+    /// verifies it, otherwise right after the start (a rollback restart).
+    PostStart,
+    /// Before the unit is stopped.
+    PreStop,
+    /// After the unit is stopped.
+    PostStop,
+}
+
+impl std::fmt::Display for HookWhen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            HookWhen::PreStart => "pre_start",
+            HookWhen::PostStart => "post_start",
+            HookWhen::PreStop => "pre_stop",
+            HookWhen::PostStop => "post_stop",
+        })
+    }
+}
+
+/// One companion hook: an argv (no shell), bounded in time and output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hook {
+    pub name: String,
+    pub when: HookWhen,
+    /// Program (absolute path) and arguments.
+    pub argv: Vec<String>,
+    /// Run when the operation rolls back, after the plan's own
+    /// restoration. Must be safe to run even if the hook never ran: a
+    /// rollback does not know how far the operation got.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undo: Vec<String>,
+    /// Seconds before the hook is killed and counted as failed.
+    #[serde(default = "default_hook_timeout")]
+    pub timeout_secs: u64,
+    /// A failure is recorded but does not fail the operation (systemd's
+    /// `-` prefix on `ExecStartPost=`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
+}
+
+fn default_hook_timeout() -> u64 {
+    60
+}
+
+/// Longest a hook may be given.
+pub const MAX_HOOK_TIMEOUT_SECS: u64 = 3600;
+
+impl WorkloadDefinition {
+    /// Hooks of one kind, in declaration order.
+    pub fn hooks_at(&self, when: HookWhen) -> impl Iterator<Item = &Hook> {
+        self.hooks.iter().filter(move |h| h.when == when)
+    }
+
+    fn validate_hooks(&self) -> CoreResult<()> {
+        let bad = |reason: String| CoreError::InvalidConfig {
+            workload: self.name.to_string(),
+            reason,
+        };
+        let mut names = std::collections::HashSet::new();
+        for h in &self.hooks {
+            if h.name.trim().is_empty() || !names.insert(h.name.as_str()) {
+                return Err(bad(format!("hook name {:?} is empty or used twice", h.name)));
+            }
+            for (what, argv) in [("argv", &h.argv), ("undo", &h.undo)] {
+                if what == "argv" && argv.is_empty() {
+                    return Err(bad(format!("hook {} has no command", h.name)));
+                }
+                if let Some(program) = argv.first() {
+                    if !program.starts_with('/') {
+                        return Err(bad(format!(
+                            "hook {} {what}: {program:?} is not an absolute path (hooks run without a shell or PATH lookup)",
+                            h.name
+                        )));
+                    }
+                }
+            }
+            if h.timeout_secs == 0 || h.timeout_secs > MAX_HOOK_TIMEOUT_SECS {
+                return Err(bad(format!(
+                    "hook {} timeout {}s is not within 1..={MAX_HOOK_TIMEOUT_SECS}",
+                    h.name, h.timeout_secs
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl WorkloadDefinition {
@@ -270,6 +369,7 @@ impl HostInventory {
                     w.name
                 )));
             }
+            w.validate_hooks()?;
             if !units.insert(w.unit.clone()) {
                 return Err(CoreError::Validation(format!(
                     "duplicate unit {} (workload {})",
@@ -341,6 +441,7 @@ mod tests {
                 recipe: None,
                 readiness_timeout_secs: None,
                 gpu_claim: Default::default(),
+                hooks: Vec::new(),
             }],
             revision: 7,
         }

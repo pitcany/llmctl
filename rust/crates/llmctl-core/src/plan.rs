@@ -123,6 +123,19 @@ pub enum PlanStep {
         backup: Option<String>,
         model: String,
     },
+    /// External: run one companion hook of `workload` (M4c item 5): an
+    /// argv without a shell, killed after `timeout_secs`, its output kept
+    /// to a bounded tail. A non-zero exit fails the step unless the hook
+    /// is `optional`. `phase` says where it belongs (`pre_start`, `undo`…).
+    RunHook {
+        workload: WorkloadName,
+        name: String,
+        phase: String,
+        argv: Vec<String>,
+        timeout_secs: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        optional: bool,
+    },
     /// External: request `lane` from the llama-swap on `port` and confirm
     /// it is running. llama-swap does the eviction itself; `evicts` is
     /// what the lane records predicted, kept for the journal and compared
@@ -177,6 +190,7 @@ impl PlanStep {
             | PlanStep::UnloadModel { workload, .. }
             | PlanStep::ApplyEnvFile { workload, .. }
             | PlanStep::LoadLane { workload, .. }
+            | PlanStep::RunHook { workload, .. }
             | PlanStep::WriteSwapConfig { workload, .. } => workload,
         }
     }
@@ -234,6 +248,16 @@ impl PlanStep {
                     format!("restore the previous env of {workload} (serves {model})")
                 }
             }
+            PlanStep::RunHook {
+                workload,
+                name,
+                phase,
+                optional,
+                ..
+            } => format!(
+                "hook {name} ({phase} of {workload}){}",
+                if *optional { ", failure ignored" } else { "" }
+            ),
             PlanStep::LoadLane {
                 workload,
                 lane,

@@ -1711,6 +1711,96 @@ async fn a_start_that_fits_runs_beside_its_neighbours() {
     assert_eq!(measured.per_card_mib, [(0u32, 8000u64)].into_iter().collect());
 }
 
+// ---- M4c: companion hooks -----------------------------------------------------
+
+/// Hooks declared in the inventory run inside the operation, around their
+/// workload's start and stop; a failed required hook fails the operation,
+/// an optional one does not, and a rollback runs the undo.
+#[tokio::test]
+async fn companion_hooks_run_in_order_and_are_undone_on_rollback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("control.sock");
+    let log = dir.path().join("hooks.log");
+    let say = |word: &str| serde_json::json!(["/bin/sh", "-c", format!("echo {word} >> {}", log.display())]);
+    let host = "workstation";
+    let wl = |name: &str, port: u16, hooks: serde_json::Value| {
+        serde_json::json!({
+            "name": name, "engine": "fake", "model": format!("fake/{name}"),
+            "gpus": [{"host": host, "index": 0}], "port": port,
+            "unit": {"scope": "user", "name": format!("llmctl-next-fake-{name}.service")},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": format!("llmctl-next-fake-{name}.service")},
+            "ownership": {"kind": "external"},
+            "hooks": hooks
+        })
+    };
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [
+            wl("coder", 8100, serde_json::json!([
+                {"name": "drain", "when": "pre_stop", "argv": say("drain")},
+                {"name": "detach", "when": "post_stop", "argv": say("detach")}
+            ])),
+            wl("big", 8101, serde_json::json!([
+                {"name": "free", "when": "pre_start", "argv": say("free"), "undo": say("undo-free")},
+                {"name": "announce", "when": "post_start", "optional": true,
+                 "argv": ["/bin/sh", "-c", format!("echo announce >> {}; echo boom >&2; exit 1", log.display())]}
+            ])),
+            wl("broken", 8102, serde_json::json!([
+                {"name": "must", "when": "pre_start", "argv": ["/bin/sh", "-c", "echo cannot >&2; exit 7"]}
+            ]))
+        ],
+        "revision": 1
+    }});
+    std::fs::write(dir.path().join("inventory.json"), inv.to_string()).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(&socket).arg("--data-dir").arg(dir.path()).arg("daemon")
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let client = d.client();
+    let lines = || std::fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_owned).collect::<Vec<_>>();
+    let running = |st: &llmctl_client::wire::StatusResponse, name: &str| {
+        let w = st.workloads.iter().find(|w| w.name == name).unwrap();
+        format!("{:?}", w.process).contains("Running")
+    };
+
+    run_to_success(&d, "coder", "hk-setup").await;
+    assert!(lines().is_empty(), "coder has no start hooks");
+
+    // big evicts coder, but its start fails: coder's stop hooks and big's
+    // pre_start ran, then the rollback ran big's undo.
+    d.write_faults(serde_json::json!({"fail_effects": [
+        {"unit": "user/llmctl-next-fake-big.service", "kind": "start", "mode": "before"}
+    ]}));
+    let resp = client.admit(admit_req(OpKind::Run, "big", "hk-fail")).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Failed, "{op:?}");
+    assert_eq!(op.recovery.as_ref().expect("restoration")["outcome"], "restored");
+    assert_eq!(lines(), ["drain", "detach", "free", "undo-free"]);
+    assert!(running(&client.status().await.unwrap(), "coder"));
+
+    // The same run succeeding: the optional post_start hook fails and is
+    // only recorded, with the tail of what it printed.
+    std::fs::remove_file(&log).unwrap();
+    let resp = client.admit(admit_req(OpKind::Run, "big", "hk-ok")).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Succeeded, "{op:?}");
+    assert_eq!(lines(), ["drain", "detach", "free", "announce"]);
+    let announce = op.phases.iter().find(|p| p.label.starts_with("hook announce")).expect("the hook is a phase");
+    let detail = announce.detail.clone().unwrap_or_default();
+    assert!(detail.contains("boom") && detail.contains("optional: ignored"), "{detail}");
+
+    // A required hook that fails stops the operation before the start, and
+    // the evicted workload comes back.
+    let resp = client.admit(admit_req(OpKind::Run, "broken", "hk-broken")).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Failed, "{op:?}");
+    assert!(serde_json::to_string(&op).unwrap().contains("hook must failed"), "{op:?}");
+    let st = client.status().await.unwrap();
+    assert!(running(&st, "big") && !running(&st, "broken"));
+}
+
 // ---- B: bounded recovery ----------------------------------------------------
 
 /// A daemon whose inventory gives `coder` a recovery budget and whose

@@ -40,6 +40,7 @@ fn workload(name: &str, gpus: &[u32], port: u16) -> WorkloadDefinition {
         recipe: None,
         readiness_timeout_secs: None,
         gpu_claim: Default::default(),
+        hooks: Vec::new(),
     }
 }
 
@@ -670,4 +671,115 @@ fn a_run_that_fits_keeps_its_neighbours() {
     let observations = [obs("coder", &[0], true), obs("big", &[0, 1], true)];
     let plan = llmctl_core::plan_restart_with(&inv, &observations, &wn("big"), true).unwrap();
     assert_eq!(labels(&plan.steps)[..3], ["record intent: big → Running", "stop big", "start big"]);
+}
+
+// ---- M4c: companion hooks ------------------------------------------------------
+
+fn hook(name: &str, when: llmctl_core::HookWhen, undo: bool) -> llmctl_core::Hook {
+    llmctl_core::Hook {
+        name: name.into(),
+        when,
+        argv: vec!["/usr/bin/true".into(), name.into()],
+        undo: if undo { vec!["/usr/bin/true".into(), format!("undo-{name}")] } else { vec![] },
+        timeout_secs: 30,
+        optional: false,
+    }
+}
+
+#[test]
+fn hooks_wrap_every_start_and_stop_and_their_undo_ends_the_rollback() {
+    use llmctl_core::HookWhen::*;
+    let mut inv = inventory();
+    // coder (evicted): hooks around its stop, and around the start a
+    // rollback gives it back. big (the target): hooks around its start.
+    inv.workloads[0].hooks = vec![
+        hook("drain", PreStop, false),
+        hook("detach", PostStop, false),
+        hook("adopt", PostStart, false),
+    ];
+    inv.workloads[2].hooks = vec![hook("free-vram", PreStart, true), hook("announce", PostStart, true)];
+    inv.validate().unwrap();
+    let plan = plan_run(&inv, &[obs("coder", &[0], true)], &wn("big")).unwrap();
+    assert_eq!(
+        labels(&plan.steps),
+        vec![
+            "record intent: big → Running",
+            "record intent: coder → Stopped { manual: false }",
+            "hook drain (pre_stop of coder)",
+            "stop coder",
+            "hook detach (post_stop of coder)",
+            "hook free-vram (pre_start of big)",
+            "start big",
+            "wait for big readiness",
+            "verify big serves fake/big",
+            // post_start waits for the verification of the target.
+            "hook announce (post_start of big)",
+        ]
+    );
+    assert_eq!(
+        labels(&plan.rollback),
+        vec![
+            "record intent: coder → Running",
+            "start coder",
+            // Nothing verifies coder in a rollback: right after its start.
+            "hook adopt (post_start of coder)",
+            "stop big",
+            // The undo of each forward hook, last run first.
+            "hook announce (undo of big)",
+            "hook free-vram (undo of big)",
+        ]
+    );
+    let undo = plan.rollback.iter().find_map(|s| match s {
+        PlanStep::RunHook { name, argv, .. } if name == "free-vram" => Some(argv.clone()),
+        _ => None,
+    });
+    assert_eq!(undo, Some(vec!["/usr/bin/true".to_string(), "undo-free-vram".to_string()]));
+
+    // A stop runs the stop hooks; a profile switch keeps the target's hooks
+    // around the swapped start, and in its rollback restart.
+    let plan = plan_stop(&inv, &[obs("coder", &[0], true)], &wn("coder")).unwrap();
+    assert_eq!(
+        labels(&plan.steps)[1..],
+        ["hook drain (pre_stop of coder)", "stop coder", "hook detach (post_stop of coder)"]
+    );
+    let plan =
+        llmctl_core::plan_run_profile(&inv, &[obs("big", &[0, 1], true)], &wn("big"), &profile("fake/big-awq"))
+            .unwrap();
+    let l = labels(&plan.steps);
+    let at = |needle: &str| l.iter().position(|x| x.contains(needle)).unwrap_or_else(|| panic!("{needle} in {l:?}"));
+    // The pre_start hook stays right before the start, after the env swap.
+    assert!(at("apply profile") < at("hook free-vram") && at("hook free-vram") < at("start big"), "{l:?}");
+    assert!(at("verify big") < at("hook announce (post_start"), "{l:?}");
+    let r = labels(&plan.rollback);
+    assert!(r.contains(&"hook free-vram (pre_start of big)".to_string()), "{r:?}");
+    assert_eq!(r.last().map(String::as_str), Some("hook free-vram (undo of big)"), "{r:?}");
+}
+
+#[test]
+fn hook_declarations_are_validated() {
+    use llmctl_core::HookWhen::PreStart;
+    let with = |f: &dyn Fn(&mut llmctl_core::Hook)| {
+        let mut inv = inventory();
+        let mut h = hook("h", PreStart, true);
+        f(&mut h);
+        inv.workloads[0].hooks = vec![h];
+        inv.validate()
+    };
+    assert!(with(&|_| {}).is_ok());
+    for (why, bad) in [
+        ("relative program", with(&|h| h.argv[0] = "true".into())),
+        ("no command", with(&|h| h.argv.clear())),
+        ("relative undo", with(&|h| h.undo[0] = "sh".into())),
+        ("zero timeout", with(&|h| h.timeout_secs = 0)),
+        ("timeout too long", with(&|h| h.timeout_secs = 3601)),
+        ("empty name", with(&|h| h.name = " ".into())),
+    ] {
+        assert!(matches!(bad, Err(CoreError::InvalidConfig { .. })), "{why}: {bad:?}");
+    }
+    let mut inv = inventory();
+    inv.workloads[0].hooks = vec![hook("same", PreStart, false), hook("same", PreStart, false)];
+    assert!(inv.validate().is_err(), "duplicate hook names");
+    // Records without hooks stay as they were on disk.
+    let json = serde_json::to_value(&inventory().workloads[0]).unwrap();
+    assert!(json.get("hooks").is_none(), "{json}");
 }

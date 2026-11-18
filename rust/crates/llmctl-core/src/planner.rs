@@ -119,6 +119,17 @@ pub fn plan_run_with(
     target: &WorkloadName,
     keep_neighbours: bool,
 ) -> CoreResult<Plan> {
+    plan_run_raw(inventory, observations, target, keep_neighbours).map(|p| with_hooks(inventory, p))
+}
+
+/// The run plan before companion hooks are placed; builders that reshape
+/// it (a profile switch) do so first and place the hooks once at the end.
+fn plan_run_raw(
+    inventory: &crate::inventory::HostInventory,
+    observations: &[Observation],
+    target: &WorkloadName,
+    keep_neighbours: bool,
+) -> CoreResult<Plan> {
     let def = inventory
         .workload(target)
         .ok_or_else(|| CoreError::UnknownWorkload(target.to_string()))?;
@@ -263,7 +274,7 @@ pub fn plan_run_profile(
     target: &WorkloadName,
     profile: &ProfileSwap,
 ) -> CoreResult<Plan> {
-    let mut plan = plan_run(inventory, observations, target)?;
+    let mut plan = plan_run_raw(inventory, observations, target, false)?;
     let def = inventory
         .workload(target)
         .ok_or_else(|| CoreError::UnknownWorkload(target.to_string()))?;
@@ -350,7 +361,91 @@ pub fn plan_run_profile(
     }
     rollback.extend(evicted_back);
     plan.rollback = rollback;
-    Ok(plan)
+    Ok(with_hooks(inventory, plan))
+}
+
+/// Put every workload's companion hooks around its starts and stops (M4c
+/// item 5), in both the forward steps and the rollback, then append the
+/// `undo` of each forward hook to the rollback, last run first.
+///
+/// * `pre_stop` / `post_stop` wrap each `StopUnit` of that workload;
+/// * `pre_start` goes before each `StartUnit`;
+/// * `post_start` goes after the workload's `VerifyServedModel` when the
+///   same list verifies it (the target), else right after the start (a
+///   workload a rollback brings back).
+pub fn with_hooks(inventory: &crate::inventory::HostInventory, mut plan: Plan) -> Plan {
+    use crate::inventory::{Hook, HookWhen};
+    if inventory.workloads.iter().all(|w| w.hooks.is_empty()) {
+        return plan;
+    }
+    let step = |w: &crate::inventory::WorkloadDefinition, h: &Hook, phase: String, argv: &[String]| {
+        PlanStep::RunHook {
+            workload: w.name.clone(),
+            name: h.name.clone(),
+            phase,
+            argv: argv.to_vec(),
+            timeout_secs: h.timeout_secs,
+            optional: h.optional,
+        }
+    };
+    let wrap = |steps: Vec<PlanStep>| -> Vec<PlanStep> {
+        let mut out: Vec<PlanStep> = Vec::with_capacity(steps.len());
+        // post_start hooks waiting for their workload's verification.
+        let mut pending: Vec<(WorkloadName, Vec<PlanStep>)> = Vec::new();
+        let verified_later = |from: usize, w: &WorkloadName, all: &[PlanStep]| {
+            all[from..]
+                .iter()
+                .any(|s| matches!(s, PlanStep::VerifyServedModel { workload, .. } if workload == w))
+        };
+        for (i, s) in steps.iter().enumerate() {
+            let def = inventory.workload(s.workload());
+            match (s, def) {
+                (PlanStep::StopUnit { .. }, Some(w)) => {
+                    out.extend(w.hooks_at(HookWhen::PreStop).map(|h| step(w, h, "pre_stop".into(), &h.argv)));
+                    out.push(s.clone());
+                    out.extend(w.hooks_at(HookWhen::PostStop).map(|h| step(w, h, "post_stop".into(), &h.argv)));
+                }
+                (PlanStep::StartUnit { .. }, Some(w)) => {
+                    out.extend(w.hooks_at(HookWhen::PreStart).map(|h| step(w, h, "pre_start".into(), &h.argv)));
+                    out.push(s.clone());
+                    let post: Vec<PlanStep> = w
+                        .hooks_at(HookWhen::PostStart)
+                        .map(|h| step(w, h, "post_start".into(), &h.argv))
+                        .collect();
+                    if verified_later(i + 1, &w.name, &steps) {
+                        pending.push((w.name.clone(), post));
+                    } else {
+                        out.extend(post);
+                    }
+                }
+                (PlanStep::VerifyServedModel { workload, .. }, _) => {
+                    out.push(s.clone());
+                    if let Some(pos) = pending.iter().position(|(w, _)| w == workload) {
+                        out.extend(pending.remove(pos).1);
+                    }
+                }
+                _ => out.push(s.clone()),
+            }
+        }
+        out
+    };
+    plan.steps = wrap(std::mem::take(&mut plan.steps));
+    plan.rollback = wrap(std::mem::take(&mut plan.rollback));
+    let undos: Vec<PlanStep> = plan
+        .steps
+        .iter()
+        .rev()
+        .filter_map(|s| match s {
+            PlanStep::RunHook { workload, name, phase, .. } if phase != "undo" => {
+                let w = inventory.workload(workload)?;
+                let h = w.hooks.iter().find(|h| &h.name == name)?;
+                (!h.undo.is_empty()).then(|| step(w, h, "undo".into(), &h.undo))
+            }
+            _ => None,
+        })
+        .collect();
+    plan.rollback.extend(undos);
+    plan
 }
 
 /// Build a restart plan: the run plan of an observed-running target (stop,
@@ -429,7 +524,7 @@ pub fn plan_stop(
             unit: def.unit.clone(),
         });
     }
-    Ok(Plan {
+    let plan = Plan {
         id: OperationId::generate(),
         kind: OpKind::Stop,
         target: target.clone(),
@@ -438,7 +533,8 @@ pub fn plan_stop(
         affected_gpus: def.gpus.clone(),
         steps,
         rollback: Vec::new(),
-    })
+    };
+    Ok(with_hooks(inventory, plan))
 }
 
 /// Build an unload plan (M4b step 1): one engine-level unload of `model`
@@ -605,7 +701,7 @@ pub fn plan_upgrade(
         );
     }
 
-    Ok(Plan {
+    let plan = Plan {
         id: OperationId::generate(),
         kind: OpKind::Upgrade,
         target: target.clone(),
@@ -614,5 +710,6 @@ pub fn plan_upgrade(
         affected_gpus: def.gpus.clone(),
         steps,
         rollback,
-    })
+    };
+    Ok(with_hooks(inventory, plan))
 }

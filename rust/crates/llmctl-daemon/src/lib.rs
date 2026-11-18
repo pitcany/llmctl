@@ -25,6 +25,7 @@ pub mod engine;
 pub mod engine_api;
 pub mod lanes;
 pub mod gpu;
+pub mod hooks;
 pub mod inflight;
 pub mod logfile;
 pub mod ops;

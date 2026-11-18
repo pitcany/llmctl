@@ -1202,6 +1202,43 @@ impl OpManager {
                     Err(e) => StepOutcome::Failed(format!("applying definition: {e}")),
                 }
             }
+            PlanStep::RunHook {
+                workload,
+                name,
+                phase,
+                argv,
+                timeout_secs,
+                optional,
+            } => {
+                set_phase(&mut row.phases, index, |p| {
+                    p.status = PhaseStatus::EffectPending
+                });
+                if self.persist(row).await.is_err() {
+                    return StepOutcome::Failed("journaling effect boundary failed".into());
+                }
+                let ran = crate::hooks::run(
+                    workload.as_str(),
+                    name,
+                    phase,
+                    argv,
+                    std::time::Duration::from_secs(*timeout_secs),
+                )
+                .await;
+                match ran {
+                    Ok(report) => {
+                        applied.push(format!("hook:{workload}:{name}:{phase}"));
+                        set_phase(&mut row.phases, index, |p| p.detail = Some(report.clone()));
+                        StepOutcome::Done
+                    }
+                    Err(report) if *optional => {
+                        set_phase(&mut row.phases, index, |p| {
+                            p.detail = Some(format!("{report} (optional: ignored)"))
+                        });
+                        StepOutcome::Done
+                    }
+                    Err(report) => StepOutcome::Failed(report),
+                }
+            }
             PlanStep::LoadLane {
                 workload,
                 port,
@@ -1561,6 +1598,28 @@ impl OpManager {
                     Err("an unload is not a restoration step".to_string())
                 }
                 PlanStep::ApplyEnvFile { .. } => self.apply_env_file(&step).await.map(Some),
+                PlanStep::RunHook {
+                    workload,
+                    name,
+                    phase,
+                    argv,
+                    timeout_secs,
+                    optional,
+                } => {
+                    let ran = crate::hooks::run(
+                        workload.as_str(),
+                        name,
+                        phase,
+                        argv,
+                        std::time::Duration::from_secs(*timeout_secs),
+                    )
+                    .await;
+                    match ran {
+                        Ok(report) => Ok(Some(report)),
+                        Err(report) if *optional => Ok(Some(format!("{report} (optional: ignored)"))),
+                        Err(report) => Err(report),
+                    }
+                }
                 // Never planned as a restoration step: an evicted lane loads
                 // again on its next request.
                 PlanStep::LoadLane { .. } => Err("a lane load is not a restoration step".to_string()),
@@ -1714,6 +1773,7 @@ impl OpManager {
                         PlanStep::StopUnit { .. }
                             | PlanStep::StartUnit { .. }
                             | PlanStep::ApplyEnvFile { .. }
+                            | PlanStep::RunHook { .. }
                             | PlanStep::WriteSwapConfig { .. }
                     )
             });
