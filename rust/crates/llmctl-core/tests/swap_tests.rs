@@ -247,3 +247,67 @@ fn live_configs_round_trip() {
     }
     assert!(n > 0);
 }
+
+// ---- M4c: lane swap prediction ---------------------------------------------------
+
+const MATRIX_CONFIG: &str = r#"
+matrix:
+  vars:
+    mimo: mimo9b
+    q35: qwen35b
+    q4: qwen4b
+    fn: flash
+    glm: glm53
+  evict_costs:
+    mimo: 100
+  sets:
+    coding: "mimo & q35 & q4"
+    risky: "fn & mimo"
+    deep: "glm"
+models:
+  mimo9b: {cmd: "a --port ${PORT}"}
+  qwen35b: {cmd: "b --port ${PORT}"}
+  qwen4b: {cmd: "c --port ${PORT}"}
+  flash: {cmd: "d --port ${PORT}"}
+  glm53: {cmd: "e --port ${PORT}"}
+"#;
+
+#[test]
+fn a_lane_swap_is_predicted_from_the_matrix() {
+    use llmctl_core::swap::{import, predict_swap};
+    let cfg = import(MATRIX_CONFIG).unwrap();
+    let run = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+    // Fits beside what runs: nothing is evicted.
+    let p = predict_swap(&cfg, "qwen4b", &run(&["mimo9b"])).unwrap();
+    assert_eq!((p.evicts.clone(), p.set.as_str(), p.already_loaded), (vec![], "coding", false));
+
+    // Flash shares a set with MiMo only: the 4B goes, MiMo stays.
+    let p = predict_swap(&cfg, "flash", &run(&["mimo9b", "qwen4b"])).unwrap();
+    assert_eq!((p.evicts, p.set.as_str(), p.cost), (run(&["qwen4b"]), "risky", 1));
+
+    // GLM runs alone: everything goes, MiMo's cost included.
+    let p = predict_swap(&cfg, "glm53", &run(&["mimo9b", "qwen4b"])).unwrap();
+    assert_eq!((p.evicts, p.cost), (run(&["mimo9b", "qwen4b"]), 101));
+
+    // Already running: nothing to do.
+    let p = predict_swap(&cfg, "mimo9b", &run(&["mimo9b", "qwen4b"])).unwrap();
+    assert!(p.already_loaded && p.evicts.is_empty());
+
+    assert!(predict_swap(&cfg, "nope", &[]).unwrap_err().contains("no lane"));
+}
+
+#[test]
+fn without_a_matrix_llama_swap_keeps_one_lane_and_groups_are_not_guessed() {
+    use llmctl_core::swap::{import, predict_swap};
+    let plain = import("models:\n  a: {cmd: \"x --port ${PORT}\"}\n  b: {cmd: \"y --port ${PORT}\"}\n").unwrap();
+    let p = predict_swap(&plain, "b", &["a".to_string()]).unwrap();
+    assert_eq!((p.evicts, p.set.as_str()), (vec!["a".to_string()], ""));
+    assert!(predict_swap(&plain, "a", &["a".to_string()]).unwrap().evicts.is_empty());
+
+    let grouped = import(
+        "groups:\n  g: {swap: false, members: [a, b]}\nmodels:\n  a: {cmd: \"x --port ${PORT}\"}\n  b: {cmd: \"y --port ${PORT}\"}\n",
+    )
+    .unwrap();
+    assert!(predict_swap(&grouped, "b", &["a".to_string()]).unwrap_err().contains("groups"));
+}

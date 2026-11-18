@@ -52,6 +52,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/unloads", post(admit_unload))
         .route("/v1/lanes/import", post(lanes_import))
         .route("/v1/lanes/edit", post(lanes_edit))
+        .route("/v1/lane-swaps", post(lanes_swap))
         .route("/v1/lanes/{workload}", get(lanes_status))
         .route("/v1/logs", post(logs))
         .layer(axum::middleware::from_fn(under_lease_scope))
@@ -506,6 +507,29 @@ async fn lanes_edit(
         }),
     )
         .into_response())
+}
+
+async fn lanes_swap(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::LaneSwapRequest>,
+) -> Result<Response, ApiError> {
+    check_protocol(req.protocol)?;
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    let (mut resp, outcome) = crate::lanes::swap(&state, &req)
+        .await
+        .map_err(ApiError::from_lanes)?;
+    let status = match &outcome {
+        Some(AdmitOutcome::Admitted(row)) => {
+            resp.operation = Some(operation_view(row));
+            StatusCode::ACCEPTED
+        }
+        Some(AdmitOutcome::Replayed(row)) => {
+            resp.operation = Some(operation_view(row));
+            StatusCode::OK
+        }
+        None => StatusCode::OK,
+    };
+    Ok((status, Json(resp)).into_response())
 }
 
 fn check_protocol(got: u32) -> Result<(), ApiError> {

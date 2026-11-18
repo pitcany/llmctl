@@ -291,6 +291,19 @@ enum HostCmd {
 
 #[derive(Subcommand, Clone)]
 enum LanesCmd {
+    /// Load one lane: shows which running lanes llama-swap will evict
+    /// (from the records' matrix), requests the lane, and confirms it runs
+    /// and that the eviction matched. --dry-run only predicts.
+    Swap {
+        workload: String,
+        lane: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long)]
+        key: Option<String>,
+    },
     /// Preview (or, with --confirm, persist) the records of a llama-swap
     /// workload's config. Never writes the config.
     Import {
@@ -1481,6 +1494,48 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
         }
     };
     let (workload, edits, confirm, wait) = match cmd {
+        LanesCmd::Swap {
+            workload,
+            lane,
+            dry_run,
+            wait,
+            key,
+        } => {
+            let resp = client
+                .lanes_swap(&llmctl_client::wire::LaneSwapRequest {
+                    protocol: PROTOCOL_VERSION,
+                    workload,
+                    lane,
+                    dry_run,
+                    idempotency_key: key,
+                })
+                .await?;
+            let list = |v: &[String]| if v.is_empty() { "nothing".to_string() } else { v.join(", ") };
+            println!("{}: load lane {}", resp.workload, resp.lane);
+            println!("  running now: {}", list(&resp.running));
+            if resp.already_loaded {
+                println!("  already running: nothing to load or evict");
+            } else {
+                println!("  llama-swap will evict: {}", list(&resp.evicts));
+                if !resp.set.is_empty() {
+                    println!("  matrix set: {} (eviction cost {})", resp.set, resp.cost);
+                }
+            }
+            let Some(op) = resp.operation else {
+                return Ok(0);
+            };
+            println!("admitted operation {} ({})", op.id, op.idempotency_key);
+            if !wait {
+                println!("progress: llmctl-next op {} --watch", op.id);
+                return Ok(0);
+            }
+            return watch_and_report(
+                &client,
+                &op.id,
+                std::time::Duration::from_secs(20 * 60),
+            )
+            .await;
+        }
         LanesCmd::Import {
             workload,
             config,

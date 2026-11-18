@@ -29,6 +29,10 @@ models:
 struct FakeSwap {
     port: u16,
     lanes: Arc<Mutex<Vec<String>>>,
+    /// What `/running` lists; a chat request for a lane adds it.
+    running: Arc<Mutex<Vec<String>>>,
+    /// Lanes the fake drops when it loads one (the test plays the matrix).
+    evict_on_load: Arc<Mutex<Vec<String>>>,
 }
 
 /// Start the fake llama-swap on a free port, watching `config`, logging to
@@ -59,6 +63,9 @@ fn fake_swap(config: PathBuf, log: PathBuf) -> FakeSwap {
         }
     });
     let l3 = lanes.clone();
+    let running = Arc::new(Mutex::new(vec!["fast".to_string()]));
+    let evict_on_load = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (r2, e2) = (running.clone(), evict_on_load.clone());
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { continue };
@@ -66,7 +73,29 @@ fn fake_swap(config: PathBuf, log: PathBuf) -> FakeSwap {
             let n = s.read(&mut buf).unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]).to_string();
             let body = if req.starts_with("GET /running") {
-                r#"{"running":[{"model":"fast","state":"ready"}]}"#.to_string()
+                let rows: Vec<String> = r2
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|m| format!(r#"{{"model":"{m}","state":"ready"}}"#))
+                    .collect();
+                format!(r#"{{"running":[{}]}}"#, rows.join(","))
+            } else if req.starts_with("POST /v1/chat/completions") {
+                // Load the requested lane the way llama-swap does: evict
+                // first, then run it.
+                let model = req
+                    .split("\"model\":\"")
+                    .nth(1)
+                    .and_then(|r| r.split('"').next())
+                    .unwrap_or("")
+                    .to_string();
+                let gone = e2.lock().unwrap().clone();
+                let mut run = r2.lock().unwrap();
+                run.retain(|m| !gone.contains(m));
+                if !run.contains(&model) {
+                    run.push(model);
+                }
+                r#"{"choices":[{"message":{"content":"ok"}}]}"#.to_string()
             } else {
                 let ids: Vec<String> = l3
                     .lock()
@@ -83,7 +112,7 @@ fn fake_swap(config: PathBuf, log: PathBuf) -> FakeSwap {
             );
         }
     });
-    FakeSwap { port, lanes }
+    FakeSwap { port, lanes, running, evict_on_load }
 }
 
 fn lane_ids(text: &str) -> Vec<String> {
@@ -286,4 +315,85 @@ fn validation_refuses_before_anything_is_written() {
     let (ok, text) = cli(&d.socket, &["lanes", "set", "swap", "big", "cmd", "${nope} --port ${PORT}"]);
     assert!(!ok && text.contains("undefined macro"), "{text}");
     assert_eq!(std::fs::read_to_string(&config).unwrap(), CONFIG);
+}
+
+/// M4c lane swap: the records predict what llama-swap evicts, the lane is
+/// requested, and the journal says whether the eviction matched.
+#[test]
+fn a_lane_swap_predicts_loads_and_compares_the_eviction() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let config = root.join("config.yaml");
+    std::fs::write(
+        &config,
+        r#"matrix:
+  vars:
+    f: fast
+    c: coder
+    b: big
+  sets:
+    pair: "f & c"
+    solo: "b"
+models:
+  fast: {cmd: "a --port ${PORT}"}
+  coder: {cmd: "b --port ${PORT}"}
+  big: {cmd: "c --port ${PORT}"}
+"#,
+    )
+    .unwrap();
+    let log = root.join("swap.log");
+    std::fs::write(&log, "").unwrap();
+    let fake = fake_swap(config.clone(), log.clone());
+    let d = spawn(&root.join("data"), fake.port);
+    let s = &d.socket;
+
+    // No records yet: refused with the way out.
+    let (ok, text) = cli(s, &["lanes", "swap", "swap", "coder", "--dry-run"]);
+    assert!(!ok && text.contains("lanes import swap"), "{text}");
+    let (ok, text) = cli(
+        s,
+        &["lanes", "import", "swap", "--config", config.to_str().unwrap(), "--log", log.to_str().unwrap()],
+    );
+    assert!(ok, "{text}");
+    let digest = token_after(&text, "--confirm ");
+    let (ok, text) = cli(
+        s,
+        &["lanes", "import", "swap", "--config", config.to_str().unwrap(), "--log", log.to_str().unwrap(), "--confirm", &digest],
+    );
+    assert!(ok, "{text}");
+
+    // `coder` shares a set with the running `fast`: nothing is evicted.
+    let (ok, text) = cli(s, &["lanes", "swap", "swap", "coder", "--dry-run"]);
+    assert!(ok, "{text}");
+    assert!(text.contains("running now: fast") && text.contains("will evict: nothing"), "{text}");
+    assert!(text.contains("matrix set: pair"), "{text}");
+    assert_eq!(*fake.running.lock().unwrap(), vec!["fast"], "a dry run loads nothing");
+
+    let (ok, text) = cli(s, &["lanes", "swap", "swap", "coder", "--wait"]);
+    assert!(ok, "{text}");
+    assert!(text.contains("coder running; llama-swap evicted nothing, as the records predicted"), "{text}");
+    assert_eq!(*fake.running.lock().unwrap(), vec!["fast", "coder"]);
+
+    // `big` runs alone: both go, and llama-swap (the fake) does evict both.
+    *fake.evict_on_load.lock().unwrap() = vec!["fast".into(), "coder".into()];
+    let (ok, text) = cli(s, &["lanes", "swap", "swap", "big", "--wait"]);
+    assert!(ok, "{text}");
+    assert!(text.contains("will evict: fast, coder") && text.contains("matrix set: solo"), "{text}");
+    assert!(text.contains("evicted coder, fast, as the records predicted"), "{text}");
+    assert_eq!(*fake.running.lock().unwrap(), vec!["big"]);
+
+    // Already running: admitted, but nothing is loaded or evicted.
+    let (ok, text) = cli(s, &["lanes", "swap", "swap", "big", "--wait"]);
+    assert!(ok && text.contains("already running"), "{text}");
+
+    // The records say `fast` evicts `big`; this llama-swap keeps it. The
+    // lane is up, and the journal flags the wrong prediction.
+    *fake.evict_on_load.lock().unwrap() = vec![];
+    let (ok, text) = cli(s, &["lanes", "swap", "swap", "fast", "--wait"]);
+    assert!(ok, "{text}");
+    assert!(text.contains("PREDICTION MISMATCH") && text.contains("evicted nothing but the records predicted big"), "{text}");
+
+    // An unknown lane is refused before anything is asked of llama-swap.
+    let (ok, text) = cli(s, &["lanes", "swap", "swap", "nope"]);
+    assert!(!ok && text.contains("no lane"), "{text}");
 }

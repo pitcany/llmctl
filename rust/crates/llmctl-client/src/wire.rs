@@ -458,6 +458,38 @@ pub struct LaneEditRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// Load one lane on a llama-swap workload (M4c). `dry_run` only predicts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneSwapRequest {
+    pub protocol: u32,
+    pub workload: String,
+    pub lane: String,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// What the lane records predict for the swap, and the operation when it
+/// was admitted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneSwapResponse {
+    pub workload: String,
+    pub lane: String,
+    /// Lanes llama-swap has running now.
+    pub running: Vec<String>,
+    /// Of those, the ones the records say llama-swap evicts.
+    pub evicts: Vec<String>,
+    /// The matrix set it settles on (empty without a matrix).
+    pub set: String,
+    pub cost: i64,
+    pub already_loaded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<OperationView>,
+    #[serde(default)]
+    pub replayed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanePlanResponse {
     pub workload: String,

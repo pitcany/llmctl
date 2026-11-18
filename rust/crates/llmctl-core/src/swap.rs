@@ -1262,6 +1262,55 @@ pub fn solve(
     )
 }
 
+/// What a request for one lane makes llama-swap do, read from the records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwapPrediction {
+    /// Running lanes llama-swap unloads first.
+    pub evicts: Vec<String>,
+    /// The matrix set it settles on (empty without a matrix).
+    pub set: String,
+    pub cost: i64,
+    /// The lane is running already: nothing is loaded or evicted.
+    pub already_loaded: bool,
+}
+
+/// Predict a lane swap (M4c): which of `running` llama-swap evicts to load
+/// `target`. With a `matrix:` this is its solver; without one llama-swap
+/// keeps a single lane, so everything else goes. A config that still uses
+/// `groups:` is not modelled and gets no prediction rather than a wrong one.
+pub fn predict_swap(
+    cfg: &SwapConfig,
+    target: &str,
+    running: &[String],
+) -> Result<SwapPrediction, String> {
+    if cfg.lane(target).is_none() {
+        return Err(format!("no lane {target:?} in the records"));
+    }
+    let already_loaded = running.iter().any(|r| r == target);
+    let Some(matrix) = &cfg.matrix else {
+        if cfg.globals.iter().any(|(k, _)| k == "groups") {
+            return Err("this config uses `groups:`, which the lane records do not model".into());
+        }
+        let evicts: Vec<String> = running.iter().filter(|r| *r != target).cloned().collect();
+        let evicts = if already_loaded { Vec::new() } else { evicts };
+        return Ok(SwapPrediction {
+            cost: evicts.len() as i64,
+            evicts,
+            set: String::new(),
+            already_loaded,
+        });
+    };
+    let ids: BTreeSet<&str> = cfg.lanes.iter().map(|l| l.id.as_str()).collect();
+    let expanded = expand_matrix(matrix, &ids)?;
+    let (evicts, set, cost) = solve(&expanded, &resolved_costs(matrix), target, running);
+    Ok(SwapPrediction {
+        evicts,
+        set,
+        cost,
+        already_loaded,
+    })
+}
+
 /// Eviction costs keyed by real lane id (config keys are var ids).
 pub fn resolved_costs(m: &Matrix) -> BTreeMap<String, i64> {
     let vars: BTreeMap<&str, &str> = m.vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();

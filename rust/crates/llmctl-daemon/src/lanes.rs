@@ -380,6 +380,11 @@ async fn running_lanes(state: &AppState, workload: &str) -> Vec<String> {
     let Some(port) = state.ops.inventory().await.workload(&name).map(|d| d.port) else {
         return Vec::new();
     };
+    running_on(port).await
+}
+
+/// Lanes the llama-swap on `port` has running (empty when it cannot say).
+async fn running_on(port: u16) -> Vec<String> {
     match crate::probe_http::request(port, hyper::Method::GET, "/running", None, Duration::from_secs(3)).await {
         Ok((200, body)) => serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
@@ -476,6 +481,152 @@ pub async fn apply(
             plan_override: Some(plan),
         })
         .await?)
+}
+
+// ---- lane swap (M4c) -------------------------------------------------------------------
+
+/// Longest one lane load may take: a 35B read from disk needs minutes.
+const LANE_LOAD_TIMEOUT_SECS: u64 = 900;
+
+/// Predict a lane swap from the records and, unless `dry_run`, admit it as
+/// an operation. llama-swap decides the eviction when the lane is
+/// requested; the prediction tells the owner beforehand and is compared
+/// with what really happened afterwards.
+pub async fn swap(
+    state: &AppState,
+    req: &llmctl_client::wire::LaneSwapRequest,
+) -> Result<(llmctl_client::wire::LaneSwapResponse, Option<AdmitOutcome>), LanesError> {
+    let name = WorkloadName::new(&req.workload).map_err(|e| OpsError::Invalid(e.to_string()))?;
+    let inv = state.ops.inventory().await;
+    let def = inv
+        .workload(&name)
+        .cloned()
+        .ok_or_else(|| OpsError::UnknownWorkload(req.workload.clone()))?;
+    let Some(store) = read_store(&store_path(state, &req.workload)).await? else {
+        return Err(refuse(format!(
+            "{} has no lane records; `lanes import {}` first",
+            req.workload, req.workload
+        )));
+    };
+    let running = running_on(def.port).await;
+    let p = llmctl_core::swap::predict_swap(&store.records, &req.lane, &running).map_err(refuse)?;
+    let mut resp = llmctl_client::wire::LaneSwapResponse {
+        workload: req.workload.clone(),
+        lane: req.lane.clone(),
+        running,
+        evicts: p.evicts.clone(),
+        set: p.set,
+        cost: p.cost,
+        already_loaded: p.already_loaded,
+        operation: None,
+        replayed: false,
+    };
+    if req.dry_run {
+        return Ok((resp, None));
+    }
+    let plan = Plan {
+        id: llmctl_core::OperationId::generate(),
+        kind: OpKind::LaneSwap,
+        target: name.clone(),
+        revision: inv.revision,
+        expected_model: def.model.clone(),
+        affected_gpus: Vec::new(),
+        steps: vec![PlanStep::LoadLane {
+            workload: name.clone(),
+            port: def.port,
+            lane: req.lane.clone(),
+            evicts: p.evicts,
+            timeout_secs: LANE_LOAD_TIMEOUT_SECS,
+        }],
+        // Nothing to undo: an evicted lane loads again on its next request.
+        rollback: Vec::new(),
+    };
+    let key = req.idempotency_key.clone().unwrap_or_else(|| {
+        format!(
+            "laneswap-{}-{}-{}",
+            req.workload,
+            req.lane.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.', "_"),
+            chrono::Utc::now().timestamp_millis()
+        )
+    });
+    let outcome = state
+        .ops
+        .admit(AdmitParams {
+            protocol: llmctl_client::wire::PROTOCOL_VERSION,
+            idempotency_key: key,
+            kind: OpKind::LaneSwap,
+            workload: req.workload.clone(),
+            expected_revision: None,
+            expected_stop_targets: None,
+            force: false,
+            profile: None,
+            plan_override: Some(plan),
+        })
+        .await?;
+    resp.replayed = matches!(outcome, AdmitOutcome::Replayed(_));
+    Ok((resp, Some(outcome)))
+}
+
+/// The effect of a `LoadLane` step: a one-token request makes llama-swap
+/// load the lane (and evict what must go); then `/running` must list it.
+/// Reports what left memory and whether the records had predicted it.
+pub async fn load_and_confirm(
+    port: u16,
+    lane: &str,
+    predicted: &[String],
+    timeout: Duration,
+) -> Result<String, String> {
+    let before = running_on(port).await;
+    if before.iter().any(|l| l == lane) {
+        return Ok(format!("{lane} was already running; nothing loaded or evicted"));
+    }
+    let body = serde_json::json!({
+        "model": lane,
+        "messages": [{"role": "user", "content": "ok"}],
+        "max_tokens": 1,
+        "stream": false,
+    });
+    let sent = tokio::time::timeout(
+        timeout,
+        crate::probe_http::request(port, hyper::Method::POST, "/v1/chat/completions", Some(&body), timeout),
+    )
+    .await;
+    match sent {
+        Ok(Ok((status, _))) if (200..300).contains(&status) => {}
+        Ok(Ok((status, body))) => {
+            return Err(format!(
+                "llama-swap answered {status} for {lane}: {}",
+                String::from_utf8_lossy(&body).chars().take(200).collect::<String>()
+            ))
+        }
+        Ok(Err(())) => return Err(format!("llama-swap did not answer the request for {lane}")),
+        Err(_) => return Err(format!("{lane} did not load within {}s", timeout.as_secs())),
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let after = loop {
+        let now = running_on(port).await;
+        if now.iter().any(|l| l == lane) {
+            break now;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("{lane} answered but llama-swap does not list it as running"));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    let mut evicted: Vec<String> = before.into_iter().filter(|l| !after.contains(l)).collect();
+    evicted.sort();
+    let mut expected = predicted.to_vec();
+    expected.sort();
+    let list = |v: &[String]| if v.is_empty() { "nothing".to_string() } else { v.join(", ") };
+    Ok(if evicted == expected {
+        format!("{lane} running; llama-swap evicted {}, as the records predicted", list(&evicted))
+    } else {
+        format!(
+            "{lane} running; llama-swap evicted {} but the records predicted {} (PREDICTION MISMATCH)",
+            list(&evicted),
+            list(&expected)
+        )
+    })
 }
 
 // ---- the effect (run by the executor) ------------------------------------------------

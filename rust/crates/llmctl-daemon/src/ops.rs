@@ -582,6 +582,11 @@ impl OpManager {
                     "lane writes are planned by `lanes set`/`lanes macro`".into(),
                 ))
             }
+            OpKind::LaneSwap => {
+                return Err(OpsError::Unsupported(
+                    "lane swaps are planned by `lanes swap`".into(),
+                ))
+            }
         };
         self.guard_gpus(&inv, &plan).await?;
         Ok((
@@ -708,7 +713,7 @@ impl OpManager {
         let hold = self.coordinate(&inv, def, params.kind).await?;
         let observations = self.observe_for(&inv, params.kind, def).await?;
         let plan = match (&params.kind, params.plan_override) {
-            (OpKind::Upgrade | OpKind::LaneWrite, Some(prebuilt)) => prebuilt,
+            (OpKind::Upgrade | OpKind::LaneWrite | OpKind::LaneSwap, Some(prebuilt)) => prebuilt,
             // Re-planned against the observations taken under the admission
             // lock: a service that stopped since the caller planned refuses.
             (OpKind::Unload, Some(prebuilt)) => {
@@ -719,7 +724,7 @@ impl OpManager {
                 llmctl_core::plan_unload(&inv, &observations, &name, &model)
                     .map_err(plan_error)?
             }
-            (OpKind::Upgrade | OpKind::Unload | OpKind::LaneWrite, None) => {
+            (OpKind::Upgrade | OpKind::Unload | OpKind::LaneWrite | OpKind::LaneSwap, None) => {
                 return Err(OpsError::Invalid(format!(
                     "{} admission requires its prebuilt plan",
                     params.kind
@@ -1087,6 +1092,35 @@ impl OpManager {
                     Err(e) => StepOutcome::Failed(format!("applying definition: {e}")),
                 }
             }
+            PlanStep::LoadLane {
+                workload,
+                port,
+                lane,
+                evicts,
+                timeout_secs,
+            } => {
+                set_phase(&mut row.phases, index, |p| {
+                    p.status = PhaseStatus::EffectPending
+                });
+                if self.persist(row).await.is_err() {
+                    return StepOutcome::Failed("journaling effect boundary failed".into());
+                }
+                match crate::lanes::load_and_confirm(
+                    *port,
+                    lane,
+                    evicts,
+                    std::time::Duration::from_secs(*timeout_secs),
+                )
+                .await
+                {
+                    Ok(report) => {
+                        applied.push(format!("lane-load:{workload}:{lane}"));
+                        set_phase(&mut row.phases, index, |p| p.detail = Some(report.clone()));
+                        StepOutcome::Done
+                    }
+                    Err(e) => StepOutcome::Failed(e),
+                }
+            }
             PlanStep::ApplyEnvFile { workload, .. } => {
                 // Effect boundary first, as for every external step: a
                 // crash mid-swap is resolved by looking, never assumed.
@@ -1417,6 +1451,9 @@ impl OpManager {
                     Err("an unload is not a restoration step".to_string())
                 }
                 PlanStep::ApplyEnvFile { .. } => self.apply_env_file(&step).await.map(Some),
+                // Never planned as a restoration step: an evicted lane loads
+                // again on its next request.
+                PlanStep::LoadLane { .. } => Err("a lane load is not a restoration step".to_string()),
                 PlanStep::WriteSwapConfig { .. } => run_swap_write(&step).await.map(Some),
             };
             match outcome {

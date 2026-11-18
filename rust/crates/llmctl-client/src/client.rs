@@ -234,6 +234,13 @@ impl ControlClient {
         self.get_json(&format!("/v1/lanes/{workload}")).await
     }
 
+    pub async fn lanes_swap(
+        &self,
+        req: &crate::wire::LaneSwapRequest,
+    ) -> Result<crate::wire::LaneSwapResponse, ClientError> {
+        self.post_json("/v1/lane-swaps", req).await
+    }
+
     pub async fn lanes_plan(
         &self,
         req: &crate::wire::LaneEditRequest,

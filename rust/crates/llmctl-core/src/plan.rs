@@ -23,6 +23,9 @@ pub enum OpKind {
     /// Write a llama-swap config rendered from lane records and confirm
     /// llama-swap reloaded it (M4b step 4).
     LaneWrite,
+    /// Ask llama-swap for one lane and confirm it runs; llama-swap evicts
+    /// what the lane cannot share memory with (M4c).
+    LaneSwap,
 }
 
 impl std::fmt::Display for OpKind {
@@ -34,6 +37,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Upgrade => "upgrade",
             OpKind::Unload => "unload",
             OpKind::LaneWrite => "lane_write",
+            OpKind::LaneSwap => "lane_swap",
         })
     }
 }
@@ -119,6 +123,17 @@ pub enum PlanStep {
         backup: Option<String>,
         model: String,
     },
+    /// External: request `lane` from the llama-swap on `port` and confirm
+    /// it is running. llama-swap does the eviction itself; `evicts` is
+    /// what the lane records predicted, kept for the journal and compared
+    /// with what really left.
+    LoadLane {
+        workload: WorkloadName,
+        port: u16,
+        lane: String,
+        evicts: Vec<String>,
+        timeout_secs: u64,
+    },
     /// External: atomically replace a llama-swap config with `content`,
     /// refusing when the file is no longer the one planned against
     /// (`expect_digest`), then confirm llama-swap reloaded it (its log, then
@@ -161,6 +176,7 @@ impl PlanStep {
             | PlanStep::VerifyVersion { workload, .. }
             | PlanStep::UnloadModel { workload, .. }
             | PlanStep::ApplyEnvFile { workload, .. }
+            | PlanStep::LoadLane { workload, .. }
             | PlanStep::WriteSwapConfig { workload, .. } => workload,
         }
     }
@@ -218,6 +234,15 @@ impl PlanStep {
                     format!("restore the previous env of {workload} (serves {model})")
                 }
             }
+            PlanStep::LoadLane {
+                workload,
+                lane,
+                evicts,
+                ..
+            } => format!(
+                "load lane {lane} on {workload} (evicts {})",
+                if evicts.is_empty() { "nothing".to_string() } else { evicts.join(", ") }
+            ),
             PlanStep::WriteSwapConfig {
                 workload, lanes, summary, ..
             } => format!(
