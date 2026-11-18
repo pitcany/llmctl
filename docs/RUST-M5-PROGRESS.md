@@ -4,9 +4,11 @@ Work log for [RUST-M5-PLAN.md](RUST-M5-PLAN.md). Rows are dated; newest
 at the bottom of each section. Status line first.
 
 **Status 2026-11-18 (end of day):** M5a built, deployed to all three
-agents, baseline day running. M5b's guards built and tested on every
-writer; the workstation setting flips after the baseline day. M5c not
-started.
+agents, baseline day running. M5b's guards built, tested and committed on
+every writer (Python guard `8f30377`, take-gpus `26e52b8d` in llmctl-stack,
+Mac llmctl `5dd7415` in local-llm); the workstation setting flips after
+the baseline day. `~/AI/.venv` and `llmctl-api` run the guard build.
+M5c started: the preset line editor landed (`aae79aa`).
 
 ## M5a — workflow matrix and the foreign-write record
 
@@ -44,7 +46,7 @@ llmctl_next:
 
 | Date | What | Verified |
 |---|---|---|
-| 2026-11-18 | **Python guard** (`llmctl/integrations/llmctl_next.py` + `SystemctlRunner.run`): write verbs on a delegated unit go to `llmctl-next run/stop/restart <workload> --wait`; rc 3/4/5/6 → honest failure naming the reversal setting, never a systemctl fallback; read verbs never delegate; CLI, TUI and `:8088` inherit it (one chokepoint). `LLMCTL_NEXT_CMD`/`LLMCTL_NEXT_DISABLED` for tests | `tests/test_llmctl_next_guard.py` 6/6 with a stand-in binary (delegated argv, refusal on rc 3 with no fallback, rc 7 ≠ refused, unowned → systemctl, disabled/absent settings, env override) |
+| 2026-11-18 | **Python guard** (`8f30377`, `llmctl/integrations/llmctl_next.py` + `SystemctlRunner.run`): write verbs on a delegated unit go to `llmctl-next run/stop/restart <workload> --wait`; rc 3/4/5/6 → honest failure naming the reversal setting, never a systemctl fallback; read verbs never delegate; CLI, TUI and `:8088` inherit it (one chokepoint). Unit lookups normalize bare and `.service` forms (security review 2026-11-18: a near-miss key must never defeat the gate). `LLMCTL_NEXT_CMD`/`LLMCTL_NEXT_DISABLED` for tests | `tests/test_llmctl_next_guard.py` 7/7 with a stand-in binary (delegated argv, refusal on rc 3 with no fallback, rc 7 ≠ refused, unowned → systemctl, both unit-name forms, disabled/absent settings, env override); full Python suite 1815 passed |
 | 2026-11-18 | **take-gpus guard** (llmctl-stack `26e52b8d`): `stop_blockers` delegates owned units to `llmctl-next stop`; ImportError (old llmctl pin) falls back to the old path for everything | stack tests: owned → agent argv only; rc 3 → failed stop, no systemctl; unowned → `systemctl --user stop`. 16 pre-existing take_gpus tests unchanged-green |
 | 2026-11-18 | **Mac llmctl guard** (local-llm `5dd7415`, m5 + mbp2): `next_enabled: 1` routes `start/stop` of an owned lane through `llamctl-next lanes swap/stop --wait`; `--dry-run` untouched (exits in start_guard); agent unreachable → refusal with the lever | live on m5: T1 bin missing → die; T3 agent up, owned lane → delegated ("not running: nothing to stop", exit 0); T4 agent down (rc 3) → "refusing to touch llama-swap directly… next_enabled: 0". mbp2 merged, default off (its llama-swap workload is not agent-owned yet) |
 | 2026-11-18 | **Router item 4 — not done, owner-accepted gap**: `qwen3coder30b` maps to owned `ollama-gpu1`, but `run ollama-gpu1` does not preload `qwen3-coder:30b`; the router's Ollama readiness reads `/api/ps`, so a handover breaks the lane. Stayed on the script; its take-gpus stops now delegate (item 2), its final `systemctl start ollama-gpu1.service` remains a foreign write when that lane is used | reasoning in B4 of the workflow matrix; revisit with M5c catalog work |
@@ -53,7 +55,18 @@ llmctl_next:
 
 1. Enable the workstation `llmctl_next:` section (snippet above) after
    the baseline day; enable `next_enabled: 1` on m5 at the same time.
-2. Redeploy llmctl into `~/AI/.venv` from the guard commit (uv pip
-   --no-deps) and restart `llmctl-api`, so `:8088` runs the guard.
-3. One day of normal use with `audit` on: the foreign-write count for
+2. One day of normal use with `audit` on: the foreign-write count for
    owned workloads should fall to zero.
+
+Done the same evening: `~/AI/.venv` reinstalled from the guard commit
+(`uv pip --no-deps git+file:///home/yannik/Projects/llmctl@8f30377`),
+`llmctl-api` restarted and healthy with the guard importable (disabled).
+When the owner pushes `8f30377`, move the llmctl-stack pin
+(`packages/llmctl-stack/pyproject.toml`, git rev `c802e7c…`) to it and
+re-run `uv lock` in `~/AI`, so fresh installs resolve the same build.
+
+## M5c — preset/config parity and catalog operations
+
+| Date | What | Verified |
+|---|---|---|
+| 2026-11-18 | **Preset line editor** (`aae79aa`, `llmctl-core/src/presets.rs`): the Rust port of `llmctl/presets/yaml_edit.py` — span editing of top-level keys, trailing comments kept through value changes, deletions and appends, self-check refusing a line edit that does not reload to the desired mapping (fallback-to-dump stays the caller's job, as in Python) | core unit tests: byte-identical round trip of the live qwen27b preset's shape, comment/list/nested-mapping preservation, add/delete, block-scalar multiline, non-mapping refusal, empty-to-empty contract |
