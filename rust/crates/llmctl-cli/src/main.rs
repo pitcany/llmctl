@@ -130,6 +130,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Declared model stores (where weights live) with their free space.
+    Stores {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Model weights.
+    Model {
+        #[command(subcommand)]
+        cmd: ModelCmd,
+    },
     /// Measured VRAM per workload and the cards' free memory: what the
     /// fit decision ("start beside what runs, or make room") rests on.
     /// --measure records what a serving workload holds right now.
@@ -296,6 +306,33 @@ enum HostCmd {
     },
     /// Show enrolled hosts with agent version, protocol and last-seen.
     List,
+}
+
+#[derive(Subcommand, Clone)]
+enum ModelCmd {
+    /// Download weights into a declared store: `hf:org/name[@revision]`
+    /// into an hf_cache or directory store, `ollama:tag` into an ollama
+    /// store. The disk is checked first (size + the store's reserve); the
+    /// download runs as an operation beside swaps, shows progress, and can
+    /// be cancelled (`llmctl-next cancel <id>`).
+    Get {
+        source: String,
+        #[arg(long)]
+        store: String,
+        /// The workload whose journal this is filed under (default: the
+        /// store's own workload).
+        #[arg(long = "for", value_name = "WORKLOAD")]
+        for_workload: Option<String>,
+        /// Upper bound in GiB when the source cannot say its size.
+        #[arg(long)]
+        size_gib: Option<u64>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long)]
+        key: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -605,6 +642,8 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             force,
         } => cmd_mutate(cli, OpKind::Restart, &name, dry_run, wait, key, force, None).await,
         Command::Intent { name, json } => cmd_intent(cli, name.as_deref(), json).await,
+        Command::Stores { json } => cmd_stores(cli, json).await,
+        Command::Model { cmd } => cmd_model(cli, cmd).await,
         Command::Vram { measure, json } => cmd_vram(cli, measure.as_deref(), json).await,
         Command::Ops { json } => cmd_ops(cli, json).await,
         Command::Op { id, watch } => cmd_op(cli, &id, watch).await,
@@ -1398,6 +1437,76 @@ async fn cmd_upgrade(cli: &Cli, cmd: UpgradeCmd) -> Result<u8, CliError> {
             Ok(0)
         }
     }
+}
+
+async fn cmd_stores(cli: &Cli, json: bool) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    let resp = client.stores().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+        return Ok(0);
+    }
+    if resp.stores.is_empty() {
+        println!("no store declared on {} (add `stores` to the inventory)", resp.host);
+    }
+    for s in &resp.stores {
+        println!(
+            "{:<14} {:<10} {:<44} free {:<10} reserve {} GiB{}{}",
+            s.name,
+            s.kind,
+            s.path,
+            s.free_bytes
+                .map(|b| format!("{:.0} GiB", b as f64 / 1073741824.0))
+                .unwrap_or_else(|| "unknown".into()),
+            s.reserve_gib,
+            s.workload.as_ref().map(|w| format!("  for {w}")).unwrap_or_default(),
+            if s.exists { "" } else { "  (does not exist yet)" }
+        );
+    }
+    Ok(0)
+}
+
+async fn cmd_model(cli: &Cli, cmd: ModelCmd) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    ensure_protocol(&client).await?;
+    let ModelCmd::Get {
+        source,
+        store,
+        for_workload,
+        size_gib,
+        dry_run,
+        wait,
+        key,
+    } = cmd;
+    let resp = client
+        .acquire(&llmctl_client::wire::AcquireRequest {
+            protocol: PROTOCOL_VERSION,
+            source,
+            store,
+            for_workload,
+            size_gib,
+            dry_run,
+            idempotency_key: key,
+        })
+        .await?;
+    let gib = |b: u64| format!("{:.1} GiB", b as f64 / 1073741824.0);
+    println!("{} -> store {} ({})", resp.source, resp.store, resp.path);
+    println!(
+        "  needs {}, free {}, reserve {} GiB",
+        resp.need_bytes.map(gib).unwrap_or_else(|| "unknown".into()),
+        gib(resp.free_bytes),
+        resp.reserve_gib
+    );
+    println!("  runs: {}", resp.command.join(" "));
+    let Some(op) = resp.operation else {
+        return Ok(0);
+    };
+    println!("admitted operation {} ({}), filed under {}", op.id, op.idempotency_key, resp.workload);
+    if !wait {
+        println!("progress: llmctl-next op {} --watch   cancel: llmctl-next cancel {}", op.id, op.id);
+        return Ok(0);
+    }
+    watch_and_report(&client, &op.id, std::time::Duration::from_secs(12 * 3600 + 300)).await
 }
 
 async fn cmd_vram(cli: &Cli, measure: Option<&str>, json: bool) -> Result<u8, CliError> {

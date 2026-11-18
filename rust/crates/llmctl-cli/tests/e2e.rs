@@ -1801,6 +1801,169 @@ async fn companion_hooks_run_in_order_and_are_undone_on_rollback() {
     assert!(running(&st, "big") && !running(&st, "broken"));
 }
 
+// ---- M4c: model acquisition ----------------------------------------------------
+
+/// Downloads go into declared stores as operations: the disk is checked
+/// first, the tool does the fetching, a download runs beside a lifecycle
+/// operation, and it can be cancelled.
+#[tokio::test]
+async fn weights_are_downloaded_into_a_store_with_a_disk_check_and_can_be_cancelled() {
+    use llmctl_client::wire::AcquireRequest;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().canonicalize().unwrap();
+    let socket = root.join("control.sock");
+    let ctl = root.join("fake-ctl");
+    std::fs::create_dir_all(&ctl).unwrap();
+    // A stand-in for `hf`: the dry run prints a size, the download writes a
+    // 2 MB file where it was told to. Files in $FAKE_CTL steer it.
+    let bin = root.join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let hf = bin.join("hf");
+    std::fs::write(
+        &hf,
+        r#"#!/bin/sh
+dry=0; dest=""; prev=""
+for a in "$@"; do
+  [ "$a" = "--dry-run" ] && dry=1
+  if [ "$prev" = "--cache-dir" ] || [ "$prev" = "--local-dir" ]; then dest="$a"; fi
+  prev="$a"
+done
+if [ "$dry" = 1 ]; then
+  size=2.0M; [ -f "$FAKE_CTL/size" ] && size=$(cat "$FAKE_CTL/size")
+  echo "[{\"file\": \"model.safetensors\", \"size\": \"$size\"}]"; exit 0
+fi
+echo "Fetching 1 files"
+[ -f "$FAKE_CTL/sleep" ] && sleep "$(cat "$FAKE_CTL/sleep")"
+if [ -f "$FAKE_CTL/fail" ]; then echo "401 Unauthorized: token missing" >&2; exit 1; fi
+mkdir -p "$dest" && head -c 2000000 /dev/zero > "$dest/model.safetensors" && echo "Downloaded to $dest"
+"#,
+    )
+    .unwrap();
+    let ollama = bin.join("ollama");
+    std::fs::write(&ollama, "#!/bin/sh\necho \"$OLLAMA_HOST $*\" > \"$FAKE_CTL/ollama-call\"\necho success\n").unwrap();
+    for f in [&hf, &ollama] {
+        std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let host = "workstation";
+    let wl = |name: &str, port: u16| {
+        serde_json::json!({
+            "name": name, "engine": "fake", "model": format!("fake/{name}"),
+            "gpus": [{"host": host, "index": 0}], "port": port,
+            "unit": {"scope": "user", "name": format!("llmctl-next-fake-{name}.service")},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": format!("llmctl-next-fake-{name}.service")},
+            "ownership": {"kind": "external"}
+        })
+    };
+    let store = |name: &str, kind: &str, workload: Option<&str>| {
+        let mut s = serde_json::json!({"name": name, "kind": kind, "path": root.join(name), "reserve_gib": 1});
+        if let Some(w) = workload {
+            s["workload"] = w.into();
+        }
+        s
+    };
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [wl("coder", 8100), wl("svc", 8101)],
+        "stores": [store("hub", "hf_cache", Some("coder")), store("models", "directory", None), store("ollama", "ollama", Some("svc"))],
+        "revision": 1
+    }});
+    std::fs::write(root.join("inventory.json"), inv.to_string()).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(&socket).arg("--data-dir").arg(&root).arg("daemon")
+        .env("LLMCTL_NEXT_HF_BIN", &hf)
+        .env("LLMCTL_NEXT_OLLAMA_BIN", &ollama)
+        .env("FAKE_CTL", &ctl)
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let client = d.client();
+    let req = |source: &str, store: &str| AcquireRequest {
+        protocol: PROTOCOL_VERSION,
+        source: source.into(),
+        store: store.into(),
+        for_workload: None,
+        size_gib: None,
+        dry_run: false,
+        idempotency_key: None,
+    };
+    let refused = |r: Result<llmctl_client::wire::AcquireResponse, ClientError>, code_want: &str, why: &str| match r {
+        Err(ClientError::Api { code, message, .. }) => {
+            assert_eq!(code, code_want, "{message}");
+            assert!(message.contains(why), "{message}");
+        }
+        other => panic!("expected {code_want} ({why}), got {other:?}"),
+    };
+
+    // The stores are listed with what is free on their filesystem.
+    let stores = client.stores().await.unwrap();
+    assert_eq!(stores.stores.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["hub", "models", "ollama"]);
+    assert!(stores.stores.iter().all(|s| s.free_bytes.unwrap_or(0) > 0));
+
+    // A preview checks the disk and names the command; nothing is fetched.
+    let mut dry = req("hf:org/tiny@abc123", "hub");
+    dry.dry_run = true;
+    let p = client.acquire(&dry).await.unwrap();
+    assert_eq!(p.need_bytes, Some(2_000_000));
+    assert_eq!(p.command[1..], ["download", "org/tiny", "--revision", "abc123", "--cache-dir", p.path.as_str()]);
+    assert!(p.operation.is_none() && !root.join("hub").exists());
+
+    // Refusals before anything runs: not enough disk, an unknown size, a
+    // source that does not belong in the store, a store with no workload.
+    std::fs::write(ctl.join("size"), "9000000.0G").unwrap();
+    refused(client.acquire(&req("hf:org/huge", "hub")).await, codes::INVALID_STATE, "not enough disk");
+    std::fs::remove_file(ctl.join("size")).unwrap();
+    refused(client.acquire(&req("ollama:qwen3:8b", "ollama")).await, codes::INVALID_STATE, "--size-gib");
+    refused(client.acquire(&req("ollama:qwen3:8b", "hub")).await, codes::INVALID_REQUEST, "cannot go into store hub");
+    refused(client.acquire(&req("hf:org/tiny", "models")).await, codes::INVALID_REQUEST, "--for");
+    refused(client.acquire(&req("hf:--help/x", "hub")).await, codes::INVALID_REQUEST, "not a plain model name");
+    refused(client.acquire(&req("hf:org/tiny", "nowhere")).await, codes::INVALID_REQUEST, "declared: hub, models, ollama");
+
+    // The download: an operation filed under the store's workload.
+    let r = client.acquire(&req("hf:org/tiny", "hub")).await.unwrap();
+    let op = d.wait_terminal(&r.operation.expect("admitted").id).await;
+    assert_eq!(op.status, OpStatus::Succeeded, "{op:?}");
+    assert_eq!(op.workload, "coder");
+    assert_eq!(std::fs::metadata(root.join("hub/model.safetensors")).unwrap().len(), 2_000_000);
+    let detail = op.phases[0].detail.clone().unwrap_or_default();
+    assert!(detail.contains("hf:org/tiny is in") && detail.contains("Downloaded to"), "{detail}");
+
+    // A directory store gets one directory per model, filed under --for.
+    let mut into_models = req("hf:org/tiny", "models");
+    into_models.for_workload = Some("coder".into());
+    let r = client.acquire(&into_models).await.unwrap();
+    assert_eq!(d.wait_terminal(&r.operation.unwrap().id).await.status, OpStatus::Succeeded);
+    assert!(root.join("models/tiny/model.safetensors").exists());
+
+    // An Ollama store pulls through its server, with a size given.
+    let mut pull = req("ollama:qwen3:8b", "ollama");
+    pull.size_gib = Some(0);
+    let r = client.acquire(&pull).await.unwrap();
+    let op = d.wait_terminal(&r.operation.unwrap().id).await;
+    assert_eq!(op.status, OpStatus::Succeeded, "{op:?}");
+    assert_eq!(std::fs::read_to_string(ctl.join("ollama-call")).unwrap().trim(), "127.0.0.1:8101 pull qwen3:8b");
+
+    // A tool that fails: the operation fails with what the tool said.
+    std::fs::write(ctl.join("fail"), "1").unwrap();
+    let r = client.acquire(&req("hf:org/tiny", "hub")).await.unwrap();
+    let op = d.wait_terminal(&r.operation.unwrap().id).await;
+    assert_eq!(op.status, OpStatus::Failed, "{op:?}");
+    assert!(serde_json::to_string(&op).unwrap().contains("401 Unauthorized"), "{op:?}");
+    std::fs::remove_file(ctl.join("fail")).unwrap();
+
+    // A long download does not block a start, a second download waits its
+    // turn, and a cancel stops the tool.
+    std::fs::write(ctl.join("sleep"), "60").unwrap();
+    let slow = client.acquire(&req("hf:org/tiny", "hub")).await.unwrap().operation.unwrap();
+    run_to_success(&d, "coder", "acq-beside").await;
+    refused(client.acquire(&req("hf:org/other", "hub")).await, codes::OVERLAPPING_OPERATION, "acquire");
+    assert!(!client.operation(&slow.id).await.unwrap().status.is_terminal(), "still downloading");
+    client.cancel(&slow.id, None).await.unwrap();
+    let op = d.wait_terminal(&slow.id).await;
+    assert_eq!(op.status, OpStatus::Canceled, "{op:?}");
+}
+
 // ---- B: bounded recovery ----------------------------------------------------
 
 /// A daemon whose inventory gives `coder` a recovery budget and whose

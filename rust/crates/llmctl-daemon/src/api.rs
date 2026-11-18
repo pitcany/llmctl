@@ -30,6 +30,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/inventory", get(inventory))
         .route("/v1/intents", get(intents))
+        .route("/v1/stores", get(stores))
+        .route("/v1/models/acquire", post(models_acquire))
         .route("/v1/vram", get(vram))
         .route("/v1/vram/measure", post(vram_measure))
         .route("/v1/plans", post(create_plan))
@@ -80,6 +82,30 @@ async fn under_lease_scope(
     crate::coord::UNDER_LEASE
         .scope(pid, crate::coord::LOCK_HOLDER.scope(lock_holder, next.run(req)))
         .await
+}
+
+async fn stores(State(state): State<Arc<AppState>>) -> Json<llmctl_client::wire::StoresResponse> {
+    Json(crate::acquire::stores(&state).await)
+}
+
+async fn models_acquire(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::AcquireRequest>,
+) -> Result<Response, ApiError> {
+    check_protocol(req.protocol)?;
+    let (mut resp, outcome) = crate::acquire::acquire(&state, &req).await?;
+    let status = match &outcome {
+        Some(AdmitOutcome::Admitted(row)) => {
+            resp.operation = Some(operation_view(row));
+            StatusCode::ACCEPTED
+        }
+        Some(AdmitOutcome::Replayed(row)) => {
+            resp.operation = Some(operation_view(row));
+            StatusCode::OK
+        }
+        None => StatusCode::OK,
+    };
+    Ok((status, Json(resp)).into_response())
 }
 
 fn vram_view(r: &crate::vram::VramRecord) -> llmctl_client::wire::VramRecordView {

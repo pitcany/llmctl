@@ -340,6 +340,62 @@ pub struct PlanResponse {
     pub notes: Vec<String>,
 }
 
+/// Declared model stores with their free space (M4c item 1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoresResponse {
+    pub host: String,
+    pub stores: Vec<StoreView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreView {
+    pub name: String,
+    pub kind: String,
+    pub path: String,
+    pub reserve_gib: u64,
+    pub workload: Option<String>,
+    pub exists: bool,
+    /// Free bytes on the store's filesystem; `None` when it cannot be read.
+    pub free_bytes: Option<u64>,
+}
+
+/// Download weights into a store. `dry_run` only checks and previews.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcquireRequest {
+    pub protocol: u32,
+    /// `hf:org/name[@revision]` or `ollama:tag`.
+    pub source: String,
+    pub store: String,
+    /// The workload whose journal this is filed under (default: the
+    /// store's own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_workload: Option<String>,
+    /// An upper bound in GiB when the source cannot say its size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_gib: Option<u64>,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcquireResponse {
+    pub source: String,
+    pub store: String,
+    pub path: String,
+    pub workload: String,
+    pub need_bytes: Option<u64>,
+    pub free_bytes: u64,
+    pub reserve_gib: u64,
+    /// The command the operation runs.
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<OperationView>,
+    #[serde(default)]
+    pub replayed: bool,
+}
+
 /// Measured VRAM per workload and the cards' free memory (M4c VRAM fit).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VramResponse {

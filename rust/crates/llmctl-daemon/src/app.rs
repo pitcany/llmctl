@@ -118,6 +118,7 @@ pub fn sample_inventory(host: &HostId) -> HostInventory {
             mk("helper", &[1], 8101),
             mk("big", &[0, 1], 8102),
         ],
+        stores: Vec::new(),
         revision: 1,
     };
     // Platform is detected per host rather than hardcoded once Macs enroll.

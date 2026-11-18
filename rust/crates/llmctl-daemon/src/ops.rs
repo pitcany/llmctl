@@ -242,11 +242,13 @@ impl OpManager {
         self
     }
 
-    /// Blockers for any mutation: one active operation at a time, and
-    /// explicit unresolved outcomes must be acknowledged first.
-    async fn check_blockers(&self) -> Result<(), OpsError> {
+    /// Blockers for a mutation: one active operation of its class at a
+    /// time, and explicit unresolved outcomes must be acknowledged first.
+    /// Downloads (`Acquire`) are their own class: a download that runs for
+    /// an hour must not block a swap, and a swap must not block a download.
+    async fn check_blockers(&self, admitting_download: bool) -> Result<(), OpsError> {
         for row in self.db.list_ops(1000).await? {
-            if !row.status.is_terminal() {
+            if !row.status.is_terminal() && (row.kind == OpKind::Acquire) == admitting_download {
                 return Err(OpsError::Overlapping {
                     existing: row.id.to_string(),
                     existing_kind: row.kind,
@@ -270,7 +272,7 @@ impl OpManager {
     /// mutation is active or an outcome is unacknowledged.
     pub async fn quiesce(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, OpsError> {
         let guard = self.admit_lock.lock().await;
-        self.check_blockers().await?;
+        self.check_blockers(false).await?;
         Ok(guard)
     }
 
@@ -602,6 +604,129 @@ impl OpManager {
         Some((decision, names, units))
     }
 
+    /// One `Acquire` step (M4c item 1): run the download, and while it
+    /// runs report how much has landed, honour a cancel, stop at the
+    /// timeout, and stop if the disk gets down to half the store's reserve.
+    async fn run_acquire(
+        &self,
+        row: &mut OpRow,
+        index: usize,
+        step: &PlanStep,
+        applied: &mut Vec<String>,
+    ) -> StepOutcome {
+        use crate::acquire;
+        use llmctl_core::acquire::GIB;
+        let PlanStep::Acquire {
+            store,
+            path,
+            source,
+            argv,
+            env,
+            need_bytes,
+            reserve_gib,
+            timeout_secs,
+            ..
+        } = step
+        else {
+            return StepOutcome::Failed("not a download step".into());
+        };
+        let Some(ctx) = self.own_ctx.clone() else {
+            return StepOutcome::Failed("this daemon has no data directory for download logs".into());
+        };
+        let Some((program, args)) = argv.split_first() else {
+            return StepOutcome::Failed("the download has no command".into());
+        };
+        let store_path = std::path::Path::new(path);
+        let log = acquire::log_path(&ctx.paths.data_dir, row.id.as_str());
+        let opened = async {
+            tokio::fs::create_dir_all(log.parent().expect("log dir")).await?;
+            tokio::fs::create_dir_all(store_path).await?;
+            std::fs::File::create(&log)
+        }
+        .await;
+        let out = match opened {
+            Ok(f) => f,
+            Err(e) => return StepOutcome::Failed(format!("preparing the download: {e}")),
+        };
+        let Ok(err) = out.try_clone() else {
+            return StepOutcome::Failed("preparing the download log failed".into());
+        };
+        set_phase(&mut row.phases, index, |p| {
+            p.status = PhaseStatus::EffectPending
+        });
+        if self.persist(row).await.is_err() {
+            return StepOutcome::Failed("journaling effect boundary failed".into());
+        }
+        let free_before = acquire::free_bytes(store_path).await;
+        let mut child = match tokio::process::Command::new(program)
+            .args(args)
+            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .stdin(std::process::Stdio::null())
+            .stdout(out)
+            .stderr(err)
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => return StepOutcome::Failed(format!("cannot run {program}: {e}")),
+        };
+        let started = tokio::time::Instant::now();
+        let gib = |b: u64| b as f64 / GIB as f64;
+        let landed = |free_now: Option<u64>| match (free_before, free_now) {
+            (Some(before), Some(now)) => Some(before.saturating_sub(now)),
+            _ => None,
+        };
+        let floor = reserve_gib * GIB / 2;
+        let status = loop {
+            tokio::select! {
+                exited = child.wait() => break exited,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+            }
+            let stop = if let Some(why) = self.check_cancel(row).await {
+                Some(StepOutcome::Canceled(why))
+            } else if started.elapsed().as_secs() >= *timeout_secs {
+                Some(StepOutcome::Failed(format!("the download ran past {timeout_secs}s and was stopped")))
+            } else {
+                None
+            };
+            let free_now = acquire::free_bytes(store_path).await;
+            let stop = stop.or_else(|| {
+                free_now.filter(|f| *f < floor).map(|f| {
+                    StepOutcome::Failed(format!(
+                        "stopped: only {:.1} GiB left on {path}, under half the store's {reserve_gib} GiB reserve",
+                        gib(f)
+                    ))
+                })
+            });
+            if let Some(outcome) = stop {
+                let _ = child.kill().await;
+                return outcome;
+            }
+            let progress = match (landed(free_now), need_bytes) {
+                (Some(done), Some(need)) => format!("downloading: {:.1} of about {:.1} GiB", gib(done), gib(*need)),
+                (Some(done), None) => format!("downloading: {:.1} GiB so far", gib(done)),
+                (None, _) => "downloading".to_string(),
+            };
+            set_phase(&mut row.phases, index, |p| p.detail = Some(progress.clone()));
+            let _ = self.persist(row).await;
+        };
+        let tail = acquire::log_tail(&log, 400).await;
+        match status {
+            Ok(s) if s.success() => {
+                applied.push(format!("acquired:{store}:{source}"));
+                let size = landed(acquire::free_bytes(store_path).await)
+                    .map(|b| format!("{:.1} GiB", gib(b)))
+                    .unwrap_or_else(|| "an unknown amount".into());
+                set_phase(&mut row.phases, index, |p| {
+                    p.detail = Some(format!("{source} is in {path} ({size} added){}", if tail.is_empty() { String::new() } else { format!(": {tail}") }))
+                });
+                StepOutcome::Done
+            }
+            Ok(s) => StepOutcome::Failed(format!("{program} ended with {s}: {tail} (full log: {})", log.display())),
+            Err(e) => StepOutcome::Failed(format!("waiting for {program}: {e}")),
+        }
+    }
+
     /// One `ApplyEnvFile` step, forward or restore (M4c profiles): the
     /// file, then the pin — the env digest and the model the workload
     /// serves — so the next operation sees no drift and verifies the right
@@ -672,6 +797,11 @@ impl OpManager {
             OpKind::LaneSwap => {
                 return Err(OpsError::Unsupported(
                     "lane swaps are planned by `lanes swap`".into(),
+                ))
+            }
+            OpKind::Acquire => {
+                return Err(OpsError::Unsupported(
+                    "downloads are planned by `model get`".into(),
                 ))
             }
         };
@@ -796,7 +926,7 @@ impl OpManager {
             });
         }
 
-        self.check_blockers().await?;
+        self.check_blockers(params.kind == OpKind::Acquire).await?;
 
         // Fresh plan against fresh observations.
         let inv = self.inventory().await;
@@ -811,7 +941,10 @@ impl OpManager {
         let observations = self.observe_for(&inv, params.kind, def).await?;
         let mut keep_units = std::collections::BTreeSet::new();
         let plan = match (&params.kind, params.plan_override) {
-            (OpKind::Upgrade | OpKind::LaneWrite | OpKind::LaneSwap, Some(prebuilt)) => prebuilt,
+            (
+                OpKind::Upgrade | OpKind::LaneWrite | OpKind::LaneSwap | OpKind::Acquire,
+                Some(prebuilt),
+            ) => prebuilt,
             // Re-planned against the observations taken under the admission
             // lock: a service that stopped since the caller planned refuses.
             (OpKind::Unload, Some(prebuilt)) => {
@@ -822,7 +955,14 @@ impl OpManager {
                 llmctl_core::plan_unload(&inv, &observations, &name, &model)
                     .map_err(plan_error)?
             }
-            (OpKind::Upgrade | OpKind::Unload | OpKind::LaneWrite | OpKind::LaneSwap, None) => {
+            (
+                OpKind::Upgrade
+                | OpKind::Unload
+                | OpKind::LaneWrite
+                | OpKind::LaneSwap
+                | OpKind::Acquire,
+                None,
+            ) => {
                 return Err(OpsError::Invalid(format!(
                     "{} admission requires its prebuilt plan",
                     params.kind
@@ -1202,6 +1342,7 @@ impl OpManager {
                     Err(e) => StepOutcome::Failed(format!("applying definition: {e}")),
                 }
             }
+            PlanStep::Acquire { .. } => self.run_acquire(row, index, step, applied).await,
             PlanStep::RunHook {
                 workload,
                 name,
@@ -1598,6 +1739,9 @@ impl OpManager {
                     Err("an unload is not a restoration step".to_string())
                 }
                 PlanStep::ApplyEnvFile { .. } => self.apply_env_file(&step).await.map(Some),
+                // Never planned as a restoration step: weights are not removed
+                // or re-fetched by a rollback.
+                PlanStep::Acquire { .. } => Err("a download is not a restoration step".to_string()),
                 PlanStep::RunHook {
                     workload,
                     name,

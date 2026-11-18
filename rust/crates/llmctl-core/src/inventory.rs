@@ -271,6 +271,9 @@ pub struct HostInventory {
     pub platform: Platform,
     pub gpus: Vec<GpuId>,
     pub workloads: Vec<WorkloadDefinition>,
+    /// Places model weights live (M4c item 1). Absent in older files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stores: Vec<crate::acquire::ModelStore>,
     /// Bumped on every change. Plans carry the revision they were built
     /// against; admission revalidates and refuses stale plans instead of
     /// executing an obsolete confirmation.
@@ -359,6 +362,38 @@ impl HostInventory {
                 )));
             }
         }
+        let mut store_names = std::collections::HashSet::new();
+        for store in &self.stores {
+            let ok_name = !store.name.is_empty()
+                && store.name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+            if !ok_name || !store_names.insert(store.name.as_str()) {
+                return Err(CoreError::Validation(format!(
+                    "store name {:?} is empty, not a plain name, or used twice",
+                    store.name
+                )));
+            }
+            if !store.path.starts_with('/') {
+                return Err(CoreError::Validation(format!(
+                    "store {}: path {:?} is not absolute",
+                    store.name, store.path
+                )));
+            }
+            match &store.workload {
+                Some(w) if self.workload(w).is_none() => {
+                    return Err(CoreError::Validation(format!(
+                        "store {} names workload {w}, which is not enrolled",
+                        store.name
+                    )))
+                }
+                None if store.kind == crate::acquire::StoreKind::Ollama => {
+                    return Err(CoreError::Validation(format!(
+                        "store {} is an Ollama store and must name the Ollama workload that pulls into it",
+                        store.name
+                    )))
+                }
+                _ => {}
+            }
+        }
         let mut names = std::collections::HashSet::new();
         let mut units = std::collections::HashSet::new();
         let mut ports = std::collections::HashSet::new();
@@ -443,6 +478,7 @@ mod tests {
                 gpu_claim: Default::default(),
                 hooks: Vec::new(),
             }],
+            stores: Vec::new(),
             revision: 7,
         }
     }

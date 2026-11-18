@@ -16,6 +16,7 @@
 //! - [`api`]: the versioned local HTTP/JSON API over the Unix socket.
 //! - [`app`]: paths, inventory bootstrap, host identity, serve loop.
 
+pub mod acquire;
 pub mod adopt;
 pub mod api;
 pub mod app;

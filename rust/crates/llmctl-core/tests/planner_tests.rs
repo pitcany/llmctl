@@ -54,6 +54,7 @@ fn inventory() -> HostInventory {
             workload("helper", &[1], 8101),
             workload("big", &[0, 1], 8102),
         ],
+        stores: Vec::new(),
         revision: 12,
     };
     i.validate().unwrap();

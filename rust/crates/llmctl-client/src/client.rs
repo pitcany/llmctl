@@ -195,6 +195,19 @@ impl ControlClient {
         self.get_json("/v1/status").await
     }
 
+    /// Declared model stores with their free space.
+    pub async fn stores(&self) -> Result<crate::wire::StoresResponse, ClientError> {
+        self.get_json("/v1/stores").await
+    }
+
+    /// Check, preview and (unless `dry_run`) admit a download into a store.
+    pub async fn acquire(
+        &self,
+        req: &crate::wire::AcquireRequest,
+    ) -> Result<crate::wire::AcquireResponse, ClientError> {
+        self.post_json("/v1/models/acquire", req).await
+    }
+
     /// Measured VRAM per workload and the cards' free memory.
     pub async fn vram(&self) -> Result<crate::wire::VramResponse, ClientError> {
         self.get_json("/v1/vram").await

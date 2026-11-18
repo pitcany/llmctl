@@ -26,6 +26,9 @@ pub enum OpKind {
     /// Ask llama-swap for one lane and confirm it runs; llama-swap evicts
     /// what the lane cannot share memory with (M4c).
     LaneSwap,
+    /// Download model weights into a declared store (M4c item 1). Runs
+    /// beside lifecycle operations: a long download must not block a swap.
+    Acquire,
 }
 
 impl std::fmt::Display for OpKind {
@@ -38,6 +41,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Unload => "unload",
             OpKind::LaneWrite => "lane_write",
             OpKind::LaneSwap => "lane_swap",
+            OpKind::Acquire => "acquire",
         })
     }
 }
@@ -123,6 +127,24 @@ pub enum PlanStep {
         backup: Option<String>,
         model: String,
     },
+    /// External: download `source` into store `store` at `path` by running
+    /// `argv` (with `env` added). The disk was checked at admission
+    /// (`need_bytes` + `reserve_gib`); while it runs the step reports how
+    /// much has landed, stops if free space falls to half the reserve, and
+    /// can be cancelled. `workload` is only the journal it is filed under.
+    Acquire {
+        workload: WorkloadName,
+        store: String,
+        path: String,
+        source: String,
+        argv: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        env: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        need_bytes: Option<u64>,
+        reserve_gib: u64,
+        timeout_secs: u64,
+    },
     /// External: run one companion hook of `workload` (M4c item 5): an
     /// argv without a shell, killed after `timeout_secs`, its output kept
     /// to a bounded tail. A non-zero exit fails the step unless the hook
@@ -191,6 +213,7 @@ impl PlanStep {
             | PlanStep::ApplyEnvFile { workload, .. }
             | PlanStep::LoadLane { workload, .. }
             | PlanStep::RunHook { workload, .. }
+            | PlanStep::Acquire { workload, .. }
             | PlanStep::WriteSwapConfig { workload, .. } => workload,
         }
     }
@@ -247,6 +270,9 @@ impl PlanStep {
                 } else {
                     format!("restore the previous env of {workload} (serves {model})")
                 }
+            }
+            PlanStep::Acquire { source, store, .. } => {
+                format!("download {source} into store {store}")
             }
             PlanStep::RunHook {
                 workload,

@@ -187,6 +187,7 @@ fn write_inventory(dir: &Path, unit: &str, port: u16, model: &str) {
             gpu_claim: Default::default(),
             hooks: Vec::new(),
         }],
+        stores: Vec::new(),
         revision: 1,
     };
     std::fs::write(
