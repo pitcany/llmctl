@@ -121,8 +121,12 @@ pub fn hf_dry_run_bytes(json: &str) -> Option<u64> {
 }
 
 /// `"453.9K"` → bytes (K/M/G/T are powers of 1000, as the hub prints them).
+/// `"-"` is a file that is already in the store: nothing left to fetch.
 fn human_bytes(text: &str) -> Option<f64> {
     let text = text.trim();
+    if text == "-" {
+        return Some(0.0);
+    }
     let (number, factor) = match text.chars().last()? {
         'K' => (&text[..text.len() - 1], 1e3),
         'M' => (&text[..text.len() - 1], 1e6),
@@ -188,6 +192,12 @@ mod tests {
         let json = r#"[{"file": "a", "size": "791.0"}, {"file": "b", "size": "4.9K"},
                        {"file": "c", "size": "3.6M"}, {"file": "d", "size": "25.1G"}]"#;
         assert_eq!(hf_dry_run_bytes(json), Some(791 + 4_900 + 3_600_000 + 25_100_000_000));
+        // Files already in the store are listed with "-": only the rest counts.
+        assert_eq!(
+            hf_dry_run_bytes(r#"[{"file": "a", "size": "-"}, {"file": "b", "size": "2.0M"}]"#),
+            Some(2_000_000)
+        );
+        assert_eq!(hf_dry_run_bytes(r#"[{"file": "a", "size": "-"}]"#), Some(0));
         assert_eq!(hf_dry_run_bytes("[]"), None);
         assert_eq!(hf_dry_run_bytes(r#"[{"file": "a"}]"#), None);
         assert_eq!(hf_dry_run_bytes(r#"[{"file": "a", "size": "big"}]"#), None);

@@ -97,14 +97,16 @@ pub fn command(source: &Source, store: &ModelStore, port: Option<u16>) -> (Vec<S
     }
 }
 
-/// How much the hub says a repository is, through the tool's own dry run.
-async fn hf_size(repo: &str, revision: Option<&str>) -> Option<u64> {
-    let mut cmd = tokio::process::Command::new(tool(HF_BIN_ENV, "hf"));
-    cmd.args(["download", repo]);
-    if let Some(rev) = revision {
-        cmd.args(["--revision", rev]);
-    }
-    cmd.args(["--dry-run", "--format", "json"]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+/// How much is left to fetch, through the tool's own dry run of the very
+/// command the operation will run (same repository, revision and
+/// destination, so files already in that store count as zero).
+async fn hf_size(argv: &[String]) -> Option<u64> {
+    let (program, args) = argv.split_first()?;
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
+        .args(["--dry-run", "--format", "json"])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
     let out = tokio::time::timeout(Duration::from_secs(90), cmd.output()).await.ok()?.ok()?;
     hf_dry_run_bytes(&String::from_utf8_lossy(&out.stdout))
 }
@@ -153,10 +155,11 @@ pub async fn acquire(
         _ => None,
     };
 
+    let (argv, env) = command(&source, store, port);
     // The disk check comes first: nothing is fetched into a full disk.
     let need = match (req.size_gib, &source) {
         (Some(g), _) => Some(g.saturating_mul(GIB)),
-        (None, Source::Hf { repo, revision }) => hf_size(repo, revision.as_deref()).await,
+        (None, Source::Hf { .. }) => hf_size(&argv).await,
         (None, Source::Ollama { .. }) => None,
     };
     let free = free_bytes(Path::new(&store.path)).await.ok_or_else(|| {
@@ -168,7 +171,6 @@ pub async fn acquire(
     check_space(need, free, store.reserve_gib)
         .map_err(|e| OpsError::InvalidState(format!("{source} into {}: {e}", store.name)))?;
 
-    let (argv, env) = command(&source, store, port);
     let mut resp = AcquireResponse {
         source: source.to_string(),
         store: store.name.clone(),
