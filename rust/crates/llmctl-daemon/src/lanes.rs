@@ -50,6 +50,21 @@ pub struct LaneStore {
     /// lane's command ran when the owner last accepted it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub versions: std::collections::BTreeMap<String, llmctl_core::VersionRef>,
+    /// GiB of model peaks this host can hold at once (`lanes memory`). A
+    /// Mac has one pool of unified memory, not cards to fit models on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_gib: Option<u64>,
+    /// Peak memory per lane id, GiB.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub peaks_gib: std::collections::BTreeMap<String, f64>,
+}
+
+impl LaneStore {
+    /// The budget against `cfg` (the records, or a planned change of
+    /// them); `None` when no budget is set.
+    pub fn budget_report(&self, cfg: &SwapConfig) -> Option<swap::BudgetReport> {
+        self.budget_gib.map(|b| swap::budget_report(cfg, &self.peaks_gib, b))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -238,8 +253,11 @@ pub async fn import(state: &AppState, req: LaneImportRequest) -> Result<LaneImpo
     // A re-import follows a hand edit of the file. It changes what the
     // records say, not what the owner accepted: pins stay (for lanes that
     // still exist), so a moved engine path shows as drift, not as a pin.
-    let mut versions = existing.map(|s| s.versions).unwrap_or_default();
+    let (mut versions, budget_gib, mut peaks_gib) = existing
+        .map(|s| (s.versions, s.budget_gib, s.peaks_gib))
+        .unwrap_or_default();
     versions.retain(|id, _| cfg.lane(id).is_some());
+    peaks_gib.retain(|id, _| cfg.lane(id).is_some());
     save_store(
         &path,
         &LaneStore {
@@ -251,6 +269,8 @@ pub async fn import(state: &AppState, req: LaneImportRequest) -> Result<LaneImpo
             revision,
             updated_at: Utc::now(),
             versions,
+            budget_gib,
+            peaks_gib,
         },
     )
     .await
@@ -281,6 +301,10 @@ pub async fn status(state: &AppState, workload: &str) -> Result<LaneStatusRespon
         macros: store.records.macros.clone(),
         validation: swap::validate(&store.records),
         updated_at: store.updated_at,
+        memory: store
+            .budget_report(&store.records)
+            .map(|r| r.lines)
+            .unwrap_or_default(),
     })
 }
 
@@ -354,7 +378,22 @@ async fn plan_inner(
     }
     let mut next = store.records.clone();
     let summary = apply_edits(&mut next, edits)?;
-    let validation = swap::validate(&next);
+    let mut validation = swap::validate(&next);
+    // A write must not add a combination that does not fit the memory
+    // budget. One that was over before this change is the owner's
+    // standing decision and does not block an unrelated edit.
+    if let (Some(now), Some(after)) = (store.budget_report(&store.records), store.budget_report(&next)) {
+        let budget = store.budget_gib.unwrap_or(0);
+        for (set, peak) in &after.over {
+            if !now.over.iter().any(|(s, p)| s == set && p >= peak) {
+                validation.push(format!(
+                    "matrix set {set} would peak at {peak}G, over the {budget}G memory budget \
+                     (see `lanes memory {workload}`; a set named {}* is exempt)",
+                    swap::RISKY_SET_PREFIX
+                ));
+            }
+        }
+    }
     let rendered = swap::check_render(&next).map_err(|e| refuse(e.to_string()))?;
     let changes = swap::value_diffs(&swap::to_value(&store.records), &swap::to_value(&next), "");
     let running = running_lanes(state, workload).await;
@@ -782,6 +821,97 @@ pub async fn unload_and_confirm(port: u16, lane: &str, timeout: Duration) -> Res
     }
 }
 
+/// The largest `*_peak_memory_*_gb` figure of each registry record,
+/// by record id (the Mac model registry: one record per lane).
+fn registry_peaks(text: &str) -> Result<std::collections::BTreeMap<String, f64>, String> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(text).map_err(|e| format!("not YAML: {e}"))?;
+    let records = doc
+        .get("models")
+        .and_then(serde_yaml::Value::as_sequence)
+        .or_else(|| doc.as_sequence())
+        .ok_or("no `models:` list of records")?;
+    let mut out = std::collections::BTreeMap::new();
+    for rec in records {
+        let (Some(id), Some(map)) = (rec.get("id").and_then(serde_yaml::Value::as_str), rec.as_mapping()) else {
+            continue;
+        };
+        let peak = map
+            .iter()
+            .filter_map(|(k, v)| {
+                let key = k.as_str()?;
+                let named = (key.starts_with("estimated_peak_memory_") || key.starts_with("measured_peak_memory_"))
+                    && key.ends_with("_gb");
+                if named { v.as_f64() } else { None }
+            })
+            .fold(None::<f64>, |best, v| Some(best.map_or(v, |b| b.max(v))));
+        if let Some(p) = peak {
+            out.insert(id.to_string(), p.ceil());
+        }
+    }
+    Ok(out)
+}
+
+/// `lanes memory`: read, or change and read, the budget and the lanes'
+/// peak figures, and sum every combination the matrix allows.
+pub async fn memory(
+    state: &AppState,
+    req: &llmctl_client::wire::LaneMemoryRequest,
+) -> Result<llmctl_client::wire::LaneMemoryResponse, LanesError> {
+    let path = store_path(state, &req.workload);
+    let mut store = read_store(&path).await?.ok_or_else(|| {
+        refuse(format!(
+            "{} has no lane records; `lanes import {}` first",
+            req.workload, req.workload
+        ))
+    })?;
+    let before = (store.budget_gib, store.peaks_gib.clone());
+    if let Some(file) = &req.from_registry {
+        let text = tokio::fs::read_to_string(file)
+            .await
+            .map_err(|e| refuse(format!("reading {file}: {e}")))?;
+        let peaks = registry_peaks(&text).map_err(|e| refuse(format!("{file}: {e}")))?;
+        for (id, gib) in peaks {
+            if store.records.lane(&id).is_some() {
+                store.peaks_gib.insert(id, gib);
+            }
+        }
+    }
+    for (lane, gib) in &req.peaks {
+        if store.records.lane(lane).is_none() {
+            return Err(refuse(format!("{} has no lane {lane}", req.workload)));
+        }
+        match gib {
+            Some(g) if g.is_finite() && *g >= 0.0 => {
+                store.peaks_gib.insert(lane.clone(), *g);
+            }
+            Some(g) => return Err(refuse(format!("{g} GiB is not a peak figure for {lane}"))),
+            None => {
+                store.peaks_gib.remove(lane);
+            }
+        }
+    }
+    if let Some(b) = req.budget_gib {
+        store.budget_gib = (b > 0).then_some(b);
+    }
+    let changed = before != (store.budget_gib, store.peaks_gib.clone());
+    if changed {
+        save_store(&path, &store).await.map_err(LanesError::Io)?;
+        tracing::info!(workload = %req.workload, budget = ?store.budget_gib, "lane memory figures changed");
+    }
+    let report = store.budget_report(&store.records);
+    Ok(llmctl_client::wire::LaneMemoryResponse {
+        workload: store.workload.clone(),
+        budget_gib: store.budget_gib,
+        peaks: store.peaks_gib.clone(),
+        lines: match &report {
+            Some(r) => r.lines.clone(),
+            None => vec!["no memory budget is set: `lanes memory <workload> --budget <GiB>`".into()],
+        },
+        over: report.map(|r| r.over).unwrap_or_default(),
+        changed,
+    })
+}
+
 /// `lanes logs`: the lane's own output. llama-swap keeps a buffer per
 /// lane and serves it on `/logs/stream/<lane>`: first what it has, then
 /// new lines for as long as the connection stays open. This reads what
@@ -902,6 +1032,8 @@ pub async fn write_and_confirm(
         if let Some(s) = store.as_mut() {
             let previous = std::mem::replace(&mut s.records, records);
             crate::lane_version::follow_write(s, &previous).await;
+            let kept: Vec<String> = s.records.lanes.iter().map(|l| l.id.clone()).collect();
+            s.peaks_gib.retain(|id, _| kept.contains(id));
             s.file_digest = target_digest.clone();
             s.revision += 1;
             s.updated_at = Utc::now();

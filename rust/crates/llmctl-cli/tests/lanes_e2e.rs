@@ -435,6 +435,36 @@ models:
     let (ok, text) = cli(s, &["lanes", "swap", "swap", "big", "--wait"]);
     assert!(ok && text.contains("already running"), "{text}");
 
+    // The memory budget: nothing is checked until one is set; then every
+    // combination the matrix allows is summed at the lanes' peaks.
+    let (ok, text) = cli(s, &["lanes", "memory", "swap"]);
+    assert!(ok && text.contains("no memory budget"), "{text}");
+    let (ok, text) = cli(
+        s,
+        &["lanes", "memory", "swap", "--budget", "50", "--peak", "fast=20", "--peak", "coder=20", "--peak", "big=60"],
+    );
+    assert!(!ok, "a set over the budget is a finding: {text}");
+    assert!(text.contains("FAIL matrix set solo [big] peaks at 60G > 50G budget"), "{text}");
+    assert!(text.contains("pair [coder, fast] at 40G") && text.contains("figures saved"), "{text}");
+    let (_, text) = cli(s, &["lanes", "show", "swap"]);
+    assert!(text.contains("memory: FAIL matrix set solo"), "{text}");
+    let (ok, text) = cli(s, &["lanes", "memory", "swap", "--peak", "big=45", "--peak", "coder=none"]);
+    assert!(ok, "{text}");
+    assert!(text.contains("no peak figure for coder") && !text.contains("FAIL"), "{text}");
+    let (ok, text) = cli(s, &["lanes", "memory", "swap", "--peak", "nope=1"]);
+    assert!(!ok && text.contains("no lane nope"), "{text}");
+    // Figures from a model registry on the host (one record per lane).
+    let registry = root.join("models.yaml");
+    std::fs::write(
+        &registry,
+        "models:\n  - id: coder\n    estimated_peak_memory_8k_gb: 12\n    measured_peak_memory_32k_gb: 17.3\n    measured_peak_memory_8k_gb: null\n  - id: elsewhere\n    estimated_peak_memory_8k_gb: 99\n",
+    )
+    .unwrap();
+    let (ok, text) = cli(s, &["lanes", "memory", "swap", "--from-registry", registry.to_str().unwrap()]);
+    assert!(ok, "{text}");
+    assert!(text.contains("coder") && text.contains("peak 18 GiB") && !text.contains("elsewhere"), "{text}");
+    assert!(text.contains("PASS matrix: 2 set combination(s) fit the 50G budget"), "{text}");
+
     // A lane's own stop and log. The stop takes that lane away and nothing
     // else; it is held by requests in flight like an eviction.
     let (ok, text) = cli(s, &["lanes", "logs", "swap", "big", "-n", "2"]);

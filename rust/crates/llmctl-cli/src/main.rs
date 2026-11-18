@@ -452,6 +452,24 @@ enum LanesCmd {
         #[arg(long)]
         force: bool,
     },
+    /// The host's memory budget against every combination the matrix
+    /// allows, at the lanes' peak figures (a Mac has one pool of unified
+    /// memory, no cards). --budget, --peak and --from-registry change the
+    /// figures; with none it only reports. Exit 4 when a set is over.
+    Memory {
+        workload: String,
+        /// GiB of model peaks the host can hold (0 removes the budget).
+        #[arg(long)]
+        budget: Option<u64>,
+        /// LANE=GIB (repeat it); LANE=none removes a figure.
+        #[arg(long = "peak", value_name = "LANE=GIB")]
+        peaks: Vec<String>,
+        /// A model registry (YAML) on that host to take peak figures from.
+        #[arg(long)]
+        from_registry: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// One lane's own output (the newest lines llama-swap keeps for it).
     Logs {
         workload: String,
@@ -2072,6 +2090,61 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
             }
             return watch_and_report(&client, &op.id, std::time::Duration::from_secs(5 * 60)).await;
         }
+        LanesCmd::Memory {
+            workload,
+            budget,
+            peaks,
+            from_registry,
+            json,
+        } => {
+            let mut parsed = Vec::new();
+            for p in &peaks {
+                let Some((lane, gib)) = p.split_once('=') else {
+                    eprintln!("error: --peak takes LANE=GIB, not {p:?}");
+                    return Ok(2);
+                };
+                let gib = if gib.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    match gib.parse::<f64>() {
+                        Ok(g) => Some(g),
+                        Err(_) => {
+                            eprintln!("error: {gib:?} is not a number of GiB");
+                            return Ok(2);
+                        }
+                    }
+                };
+                parsed.push((lane.to_string(), gib));
+            }
+            let r = client
+                .lanes_memory(&llmctl_client::wire::LaneMemoryRequest {
+                    protocol: PROTOCOL_VERSION,
+                    workload,
+                    budget_gib: budget,
+                    peaks: parsed,
+                    from_registry,
+                })
+                .await?;
+            let code = if r.over.is_empty() { 0 } else { 4 };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                return Ok(code);
+            }
+            match r.budget_gib {
+                Some(b) => println!("{}: memory budget {b} GiB", r.workload),
+                None => println!("{}: no memory budget", r.workload),
+            }
+            for (lane, gib) in &r.peaks {
+                println!("  {lane:<28} peak {gib} GiB");
+            }
+            for line in &r.lines {
+                println!("  {line}");
+            }
+            if r.changed {
+                println!("  figures saved");
+            }
+            return Ok(code);
+        }
         LanesCmd::Logs {
             workload,
             lane,
@@ -2150,6 +2223,9 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
             print_lanes(&r.lanes);
             if !r.validation.is_empty() {
                 println!("  validation: {}", r.validation.join("; "));
+            }
+            for line in &r.memory {
+                println!("  memory: {line}");
             }
             return Ok(if r.drift { 1 } else { 0 });
         }

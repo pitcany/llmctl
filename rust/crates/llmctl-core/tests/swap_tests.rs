@@ -311,3 +311,53 @@ fn without_a_matrix_llama_swap_keeps_one_lane_and_groups_are_not_guessed() {
     .unwrap();
     assert!(predict_swap(&grouped, "b", &["a".to_string()]).unwrap_err().contains("groups"));
 }
+
+#[test]
+fn the_budget_is_summed_over_every_combination_the_matrix_allows() {
+    let cfg = llmctl_core::swap::import(
+        r#"matrix:
+  vars:
+    f: fast
+    c: coder
+    b: big
+    r: remote
+  sets:
+    pair: "f & c & r"
+    solo: "b"
+    riskyall: "f & c & b"
+models:
+  fast: {cmd: "/e/mtplx serve --port ${PORT}"}
+  coder: {cmd: "/e/mtplx serve --port ${PORT}"}
+  big: {cmd: "/e/mtplx serve --port ${PORT}"}
+  remote: {cmd: "bash -lc 'exec /a/m1-worker.sh forward --port ${PORT} --service router'"}
+"#,
+    )
+    .unwrap();
+    let peaks = |pairs: &[(&str, f64)]| -> std::collections::BTreeMap<String, f64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    };
+
+    // All known, all fit except the set that is over on purpose. The
+    // forwarder weighs nothing and needs no figure.
+    let r = llmctl_core::swap::budget_report(&cfg, &peaks(&[("fast", 20.0), ("coder", 19.2), ("big", 50.0)]), 60);
+    assert!(r.over.is_empty(), "{r:?}");
+    assert!(r.unknown.is_empty(), "{r:?}");
+    assert!(r.lines.iter().any(|l| l.starts_with("INFO matrix set riskyall") && l.contains("90G > 60G")), "{r:?}");
+    // 19.2 rounds up to 20: pair = 40, solo = 50 is the largest fit.
+    assert!(
+        r.lines.iter().any(|l| l.starts_with("PASS matrix: 2 other set combination(s) fit the 60G budget")
+            && l.contains("solo [big] at 50G")),
+        "{r:?}"
+    );
+
+    // Over the budget: named, with its sum.
+    let r = llmctl_core::swap::budget_report(&cfg, &peaks(&[("fast", 20.0), ("coder", 20.0), ("big", 61.0)]), 60);
+    assert_eq!(r.over, vec![("solo".to_string(), 61)]);
+    assert!(r.lines.iter().any(|l| l == "FAIL matrix set solo [big] peaks at 61G > 60G budget"), "{r:?}");
+
+    // A lane without a figure: its sets are lower bounds, and said so.
+    let r = llmctl_core::swap::budget_report(&cfg, &peaks(&[("fast", 20.0), ("big", 50.0)]), 60);
+    assert_eq!(r.unknown, vec!["coder".to_string()]);
+    assert!(r.lines.iter().any(|l| l.starts_with("WARN matrix set pair") && l.contains("no peak figure for coder")), "{r:?}");
+}
+

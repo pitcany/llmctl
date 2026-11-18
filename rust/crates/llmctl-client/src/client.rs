@@ -283,6 +283,13 @@ impl ControlClient {
         self.get_json(&format!("/v1/lanes/{workload}")).await
     }
 
+    pub async fn lanes_memory(
+        &self,
+        req: &crate::wire::LaneMemoryRequest,
+    ) -> Result<crate::wire::LaneMemoryResponse, ClientError> {
+        self.post_json("/v1/lanes/memory", req).await
+    }
+
     pub async fn lanes_logs(
         &self,
         req: &crate::wire::LaneLogsRequest,

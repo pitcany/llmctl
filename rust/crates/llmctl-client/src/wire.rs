@@ -615,6 +615,40 @@ pub struct LaneStatusResponse {
     pub macros: Vec<(String, String)>,
     pub validation: Vec<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// The memory budget against the matrix (`lanes memory`); empty when
+    /// no budget is set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory: Vec<String>,
+}
+
+/// The memory budget of a llama-swap host and its lanes' peak figures.
+/// Every field that is set changes the records; with none it only reads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneMemoryRequest {
+    pub protocol: u32,
+    pub workload: String,
+    /// GiB of model peaks the host can hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_gib: Option<u64>,
+    /// `(lane, peak GiB)`; `None` removes the lane's figure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peaks: Vec<(String, Option<f64>)>,
+    /// A model registry (YAML, records with `id` and
+    /// `*_peak_memory_*_gb` fields) to take peak figures from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_registry: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneMemoryResponse {
+    pub workload: String,
+    pub budget_gib: Option<u64>,
+    /// Peak GiB per lane, as recorded.
+    pub peaks: std::collections::BTreeMap<String, f64>,
+    pub lines: Vec<String>,
+    /// Sets over the budget (not `risky*`).
+    pub over: Vec<(String, u64)>,
+    pub changed: bool,
 }
 
 /// One change to the lane records.

@@ -1281,6 +1281,90 @@ pub fn solve(
 }
 
 /// What a request for one lane makes llama-swap do, read from the records.
+/// Matrix sets named `risky*` may exceed the memory budget on purpose.
+pub const RISKY_SET_PREFIX: &str = "risky";
+
+/// The memory budget against every combination the matrix allows (the
+/// Mac rule, ported from `llmreg.matrix_budget_lines`): unified memory
+/// has no cards to fit on, so what may run together must fit one budget.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BudgetReport {
+    /// `PASS` / `FAIL` / `WARN` / `INFO` lines for the owner.
+    pub lines: Vec<String>,
+    /// Sets over the budget that are not `risky*`: `(name, peak GiB)`.
+    pub over: Vec<(String, u64)>,
+    /// Lanes with no peak figure: every sum they are in is a lower bound.
+    pub unknown: Vec<String>,
+}
+
+/// Sum each allowed combination at the lanes' peak figures (GiB, rounded
+/// up; a forwarder weighs nothing: its engine is on another machine).
+pub fn budget_report(cfg: &SwapConfig, peaks: &BTreeMap<String, f64>, budget_gib: u64) -> BudgetReport {
+    let mut report = BudgetReport::default();
+    let Some(matrix) = &cfg.matrix else {
+        report.lines.push("INFO no matrix: llama-swap groups decide what runs together; nothing is summed".into());
+        return report;
+    };
+    let ids: BTreeSet<&str> = cfg.lanes.iter().map(|l| l.id.as_str()).collect();
+    let sets = match expand_matrix(matrix, &ids) {
+        Ok(sets) => sets,
+        Err(e) => {
+            report.lines.push(format!("WARN the matrix does not expand ({e}); nothing is summed"));
+            return report;
+        }
+    };
+    let weight = |lane: &str| -> Option<u64> {
+        let forwarder = cfg
+            .lane(lane)
+            .is_some_and(|l| matches!(&l.engine_kind, EngineKind::Other(k) if k == "forwarder"));
+        if forwarder {
+            return Some(0);
+        }
+        peaks.get(lane).map(|g| g.max(0.0).ceil() as u64)
+    };
+    let mut fitting: Vec<(u64, String)> = Vec::new();
+    let total_sets = sets.len();
+    for set in &sets {
+        let label = format!("matrix set {} [{}]", set.name, set.lanes.join(", "));
+        let mut total = 0u64;
+        for lane in &set.lanes {
+            match weight(lane) {
+                Some(g) => total += g,
+                None => {
+                    report
+                        .lines
+                        .push(format!("WARN {label}: no peak figure for {lane} (the sum is a lower bound)"));
+                    if !report.unknown.contains(lane) {
+                        report.unknown.push(lane.clone());
+                    }
+                }
+            }
+        }
+        if total <= budget_gib {
+            fitting.push((total, label));
+        } else if set.name.starts_with(RISKY_SET_PREFIX) {
+            report.lines.push(format!(
+                "INFO {label} peaks at {total}G > {budget_gib}G budget (accepted: {RISKY_SET_PREFIX}* set)"
+            ));
+        } else {
+            report
+                .lines
+                .push(format!("FAIL {label} peaks at {total}G > {budget_gib}G budget"));
+            report.over.push((set.name.clone(), total));
+        }
+    }
+    if let Some((top, label)) = fitting.iter().max() {
+        let others = if fitting.len() < total_sets { " other" } else { "" };
+        report.lines.push(format!(
+            "PASS matrix: {}{others} set combination(s) fit the {budget_gib}G budget (largest: {} at {top}G)",
+            fitting.len(),
+            label.trim_start_matches("matrix set ")
+        ));
+    }
+    report.unknown.sort();
+    report
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwapPrediction {
     /// Running lanes llama-swap unloads first.
