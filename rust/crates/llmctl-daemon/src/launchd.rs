@@ -244,13 +244,25 @@ impl LaunchdEngine {
             bootout(&unit.name, self.effect_timeout).await?;
         }
         disable(&unit.name, self.show_timeout).await?;
-        let after = print_job(&unit.name, self.show_timeout)
-            .await
-            .map_err(|e| EngineError::Unconfirmed(format!("stop {unit} done, readback: {e}")))?;
-        if after.loaded {
-            return Err(EngineError::Unconfirmed(format!(
-                "stop {unit}: job still loaded after bootout"
-            )));
+        // `bootout` returns while the process is still shutting down
+        // (Ollama on m5 needed a few seconds; a restart read "still
+        // loaded" at once, failed, and left the service down). The job is
+        // gone when launchd says so, so ask until it does.
+        let deadline = tokio::time::Instant::now() + self.effect_timeout;
+        loop {
+            let after = print_job(&unit.name, self.show_timeout).await.map_err(|e| {
+                EngineError::Unconfirmed(format!("stop {unit} done, readback: {e}"))
+            })?;
+            if !after.loaded {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(EngineError::Unconfirmed(format!(
+                    "stop {unit}: job still loaded {} s after bootout",
+                    self.effect_timeout.as_secs()
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
         Ok(format!("stopped:{unit}:{workload}:{runs}"))
     }

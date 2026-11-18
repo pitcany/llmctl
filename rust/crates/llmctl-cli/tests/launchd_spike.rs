@@ -66,8 +66,22 @@ struct SpikeJob {
     out_log: PathBuf,
 }
 
+/// Prepended to the server: it takes three seconds to exit on SIGTERM,
+/// like a real engine that finishes requests and frees memory first.
+const SLOW_EXIT_PY: &str = r#"
+import os, signal, time
+def slow_exit(*_):
+    time.sleep(3)
+    os._exit(0)
+signal.signal(signal.SIGTERM, slow_exit)
+"#;
+
 impl SpikeJob {
     fn create(dir: &Path, port: u16) -> SpikeJob {
+        Self::create_with_server(dir, port, SERVER_PY)
+    }
+
+    fn create_with_server(dir: &Path, port: u16, server: &str) -> SpikeJob {
         let label = format!(
             "com.pitcany.llmctl-next-spike-{}",
             &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -76,7 +90,7 @@ impl SpikeJob {
         let out_log = dir.join("spike.out.log");
         let python = "/usr/bin/python3";
         let script = dir.join("server.py");
-        std::fs::write(&script, SERVER_PY).unwrap();
+        std::fs::write(&script, server).unwrap();
         let body = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n\
              \t<key>Label</key>\n\t<string>{label}</string>\n\
@@ -545,4 +559,34 @@ fn logs_follow_a_restart_and_a_truncation() {
     let (ok, text) = cli(&d.socket, &["logs", "spike", "-n", "50"]);
     assert!(ok, "{text}");
     assert!(text.contains("truncated"), "{text}");
+}
+
+/// A job that needs seconds to exit: `bootout` returns before it is gone.
+/// The stop waits for launchd to say so, and a restart goes through (seen
+/// live on m5: Ollama's restart failed on "still loaded" and left it down).
+#[test]
+#[ignore = "touches the user's launchd: run with --ignored"]
+fn a_job_that_exits_slowly_is_stopped_and_restarted() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let slow = format!("{SLOW_EXIT_PY}{SERVER_PY}");
+    let job = SpikeJob::create_with_server(dir.path(), port, &slow);
+    write_inventory(dir.path(), &job.label, port, "/usr/bin/python3");
+    let d = spawn_daemon(dir.path());
+
+    let (ok, text) = cli(&d.socket, &["run", "spike", "--wait", "--key", "slow-run"]);
+    assert!(ok, "{text}");
+    let first = job.pid().expect("running pid");
+
+    let (ok, text) = cli(&d.socket, &["restart", "spike", "--wait", "--key", "slow-restart"]);
+    assert!(ok, "a slow exit is not a failed stop: {text}");
+    let up = spike_status(&d.socket);
+    assert_eq!(up["process"], "Running", "{up}");
+    assert_eq!(up["readiness"], "Ready", "{up}");
+    let second = job.pid().expect("running pid after the restart");
+    assert_ne!(first, second, "the process was replaced");
+
+    let (ok, text) = cli(&d.socket, &["stop", "spike", "--wait", "--key", "slow-stop"]);
+    assert!(ok, "{text}");
+    assert_eq!(job.pid(), None);
 }
