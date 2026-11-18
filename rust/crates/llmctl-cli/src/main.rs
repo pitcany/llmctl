@@ -17,6 +17,7 @@ use llmctl_core::{OpKind, Plan};
 
 mod enroll;
 mod catalog_cmds;
+mod lanes_matrix;
 mod preset_cmds;
 
 #[derive(Parser)]
@@ -582,6 +583,15 @@ enum LanesCmd {
         confirm: Option<String>,
         #[arg(long)]
         wait: bool,
+    },
+    /// The llama-swap matrix: with no op it shows the vars, sets and the
+    /// memory budget against them; an op plans a change (--confirm writes
+    /// it). The budget guards the write: refused without one, and for a
+    /// new set over it or holding a lane with no peak figure.
+    Matrix {
+        workload: String,
+        #[command(subcommand)]
+        op: Option<lanes_matrix::MatrixOp>,
     },
     /// Write the records as they are (normalises the file to the render).
     Rewrite {
@@ -2512,6 +2522,11 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
             confirm,
             wait,
         } => (workload, Vec::new(), confirm, wait),
+        LanesCmd::Matrix { workload, op: None } => return lanes_matrix::show(cli, &workload).await,
+        LanesCmd::Matrix { workload, op: Some(op) } => {
+            let (edits, confirm, wait) = lanes_matrix::edit(op)?;
+            (workload, edits, confirm, wait)
+        }
     };
     let mut req = LaneEditRequest {
         protocol: PROTOCOL_VERSION,

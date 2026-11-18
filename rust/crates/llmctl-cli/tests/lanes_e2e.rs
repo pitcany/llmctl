@@ -613,3 +613,82 @@ fn lane_versions_are_pinned_drift_is_reported_and_a_macro_swap_repins() {
     let (ok, out) = cli(s, &["lanes", "version", "swap"]);
     assert!(!ok && out.contains("2 drifting"), "{out}");
 }
+
+/// M5c item 4: the matrix by verb, with the memory budget guarding the
+/// write — refused without a budget, for a new set with a lane that has no
+/// peak figure, and for a new set over the budget (`risky*` exempt).
+#[test]
+fn the_matrix_changes_by_verb_and_the_budget_guards_the_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let config = root.join("config.yaml");
+    std::fs::write(
+        &config,
+        "matrix:\n  vars:\n    f: fast\n    c: coder\n    b: big\n  sets:\n    pair: \"f & c\"\n    solo: \"b\"\nmodels:\n  fast: {cmd: \"a --port ${PORT}\"}\n  coder: {cmd: \"b --port ${PORT}\"}\n  big: {cmd: \"c --port ${PORT}\"}\n",
+    )
+    .unwrap();
+    let log = root.join("swap.log");
+    std::fs::write(&log, "").unwrap();
+    let fake = fake_swap(config.clone(), log.clone());
+    let d = spawn(&root.join("data"), fake.port);
+    let s = &d.socket;
+    let (cfg, lg) = (config.to_str().unwrap(), log.to_str().unwrap());
+    let (ok, text) = cli(s, &["lanes", "import", "swap", "--config", cfg, "--log", lg]);
+    assert!(ok, "{text}");
+    let digest = token_after(&text, "--confirm ");
+    let (ok, text) = cli(s, &["lanes", "import", "swap", "--config", cfg, "--log", lg, "--confirm", &digest]);
+    assert!(ok, "{text}");
+
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap"]);
+    assert!(ok && text.contains("var  f        fast") && text.contains("set  pair             f & c"), "{text}");
+
+    // 1. No budget recorded: a matrix change is refused, nothing written.
+    let before = std::fs::read_to_string(&config).unwrap();
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap", "set", "trio", "f & b"]);
+    assert!(!ok && text.contains("no memory budget recorded"), "{text}");
+
+    // 2. A budget, but `big` has no peak figure: the new set cannot be checked.
+    let (ok, text) = cli(s, &["lanes", "memory", "swap", "--budget", "50", "--peak", "fast=20", "--peak", "coder=20"]);
+    assert!(text.contains("budget"), "{ok} {text}");
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap", "set", "trio", "f & b"]);
+    assert!(!ok && text.contains("holds big, which has no peak figure"), "{text}");
+
+    // 3. With the figure: a set that fits plans; one over the budget is
+    //    refused unless it is named risky*.
+    let (ok, text) = cli(s, &["lanes", "memory", "swap", "--peak", "big=25"]);
+    assert!(ok, "{text}");
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap", "set", "heavy", "f & c & b"]);
+    assert!(!ok && text.contains("matrix set heavy would peak at 65G, over the 50G memory budget"), "{text}");
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap", "set", "risky-all", "f & c & b"]);
+    assert!(ok && text.contains("--confirm"), "{text}");
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap", "set", "trio", "f & b"]);
+    assert!(ok && text.contains("matrix set trio = f & b"), "{text}");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), before, "plans write nothing");
+
+    // 4. Apply: the file has the set, llama-swap reloaded it, show lists it.
+    let plan = token_after(&text, "--confirm ");
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap", "set", "trio", "f & b", "--confirm", &plan, "--wait"]);
+    assert!(ok, "{text}");
+    let now = std::fs::read_to_string(&config).unwrap();
+    assert!(now.contains("trio: f & b"), "{now}");
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap"]);
+    assert!(ok && text.contains("set  trio") && text.contains("PASS matrix"), "{text}");
+
+    // 5. An eviction cost; a var a set still uses cannot go; a set can.
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap", "cost", "b", "5"]);
+    assert!(ok, "{text}");
+    let plan = token_after(&text, "--confirm ");
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap", "cost", "b", "5", "--confirm", &plan, "--wait"]);
+    assert!(ok, "{text}");
+    assert!(std::fs::read_to_string(&config).unwrap().contains("evict_costs:\n    b: 5\n"));
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap", "rm-var", "b"]);
+    assert!(!ok && text.contains("REFUSED") && text.contains("unknown var"), "{text}");
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap", "rm-set", "trio"]);
+    assert!(ok, "{text}");
+    let plan = token_after(&text, "--confirm ");
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap", "rm-set", "trio", "--confirm", &plan, "--wait"]);
+    assert!(ok, "{text}");
+    assert!(!std::fs::read_to_string(&config).unwrap().contains("trio"));
+    let (ok, text) = cli(s, &["lanes", "matrix", "swap", "var", "x", "nope"]);
+    assert!(!ok && text.contains("no lane"), "{text}");
+}

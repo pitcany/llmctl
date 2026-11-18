@@ -305,6 +305,7 @@ pub async fn status(state: &AppState, workload: &str) -> Result<LaneStatusRespon
             .budget_report(&store.records)
             .map(|r| r.lines)
             .unwrap_or_default(),
+        matrix: store.records.matrix.clone(),
     })
 }
 
@@ -337,6 +338,9 @@ fn apply_edits(cfg: &mut SwapConfig, edits: &[LaneEdit]) -> Result<Vec<String>, 
             LaneEdit::SetMacro { name, value } => {
                 cfg.set_macro(name, value);
                 summary.push(format!("macro {name} = {value}"));
+            }
+            LaneEdit::Matrix { edit } => {
+                summary.push(llmctl_core::matrix_edit::apply(cfg, edit).map_err(refuse)?);
             }
         }
     }
@@ -394,6 +398,7 @@ async fn plan_inner(
             }
         }
     }
+    validation.extend(matrix_guard(&store, &next, edits, workload));
     let rendered = swap::check_render(&next).map_err(|e| refuse(e.to_string()))?;
     let changes = swap::value_diffs(&swap::to_value(&store.records), &swap::to_value(&next), "");
     let running = running_lanes(state, workload).await;
@@ -425,6 +430,52 @@ async fn plan_inner(
         current_bytes,
         resp,
     })
+}
+
+/// The memory budget as a guard on matrix writes (M5c item 4): a matrix
+/// edit needs a recorded budget, and every set it adds or changes (not
+/// `risky*`) must have a peak figure for each of its lanes, so the sum
+/// the budget check makes is a real one and not a lower bound.
+fn matrix_guard(store: &LaneStore, next: &SwapConfig, edits: &[LaneEdit], workload: &str) -> Vec<String> {
+    if !edits.iter().any(|e| matches!(e, LaneEdit::Matrix { .. })) {
+        return Vec::new();
+    }
+    if store.budget_gib.is_none() {
+        return vec![format!(
+            "no memory budget recorded for {workload}: a matrix change is checked against it \
+             (`lanes memory {workload} --budget <GiB>` first)"
+        )];
+    }
+    let expand = |cfg: &SwapConfig| -> Vec<swap::ExpandedSet> {
+        let ids: std::collections::BTreeSet<&str> = cfg.lanes.iter().map(|l| l.id.as_str()).collect();
+        cfg.matrix
+            .as_ref()
+            .and_then(|m| swap::expand_matrix(m, &ids).ok())
+            .unwrap_or_default()
+    };
+    let before = expand(&store.records);
+    let mut out = Vec::new();
+    for set in expand(next) {
+        if set.name.starts_with(swap::RISKY_SET_PREFIX) || before.contains(&set) {
+            continue;
+        }
+        for lane in &set.lanes {
+            let forwarder = next
+                .lane(lane)
+                .is_some_and(|l| matches!(&l.engine_kind, llmctl_core::EngineKind::Other(k) if k == "forwarder"));
+            if !forwarder && !store.peaks_gib.contains_key(lane) {
+                let msg = format!(
+                    "matrix set {} holds {lane}, which has no peak figure, so the budget cannot \
+                     check it (`lanes memory {workload} --peak {lane}=<GiB>`)",
+                    set.name
+                );
+                if !out.contains(&msg) {
+                    out.push(msg);
+                }
+            }
+        }
+    }
+    out
 }
 
 pub async fn plan(
