@@ -2653,3 +2653,118 @@ async fn a_failed_restart_brings_the_workload_back_or_asks_for_attention() {
     assert_eq!(op.status, OpStatus::NeedsAttention, "{op:?}");
     assert!(!running(&client.status().await.unwrap(), "coder"));
 }
+
+/// Recipes and records without editing the inventory file: `recipe set`
+/// attaches a recipe and pins at once, `recipe clear` takes both away,
+/// and `forget` removes a record after saying what stays on the host.
+#[test]
+fn recipes_are_set_and_cleared_and_a_record_is_forgotten_by_verbs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("install");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("engine"), "build one").unwrap();
+    let helper = dir.path().join("helper.sh");
+    std::fs::write(&helper, "#!/bin/sh\n").unwrap();
+    let host = "workstation";
+    let wl = |name: &str, port: u16| {
+        serde_json::json!({
+            "name": name, "engine": "fake", "model": format!("fake/{name}"),
+            "gpus": [{"host": host, "index": 0}], "port": port,
+            "unit": {"scope": "user", "name": format!("llmctl-next-fake-{name}.service")},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": format!("llmctl-next-fake-{name}.service")},
+            "ownership": {"kind": "external"}
+        })
+    };
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [wl("eng", 8100), wl("plain", 8101)],
+        "revision": 1
+    }});
+    std::fs::write(dir.path().join("inventory.json"), inv.to_string()).unwrap();
+    let child = start_daemon_in(dir.path(), &[]);
+    let socket = dir.path().join("control.sock");
+    let run = |args: &[&str]| {
+        let out = cli(&socket, args);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.code(), text)
+    };
+    let json = |text: &str| -> serde_json::Value { serde_json::from_str(text).expect(text) };
+    let recipe_file = dir.path().join("recipe.json");
+    let write_recipe = |root: &str| {
+        std::fs::write(
+            &recipe_file,
+            serde_json::json!({
+                "kind": "source_build", "name": "eng", "root": root,
+                "git": "https://example.invalid/eng.git", "build": "true", "binary": "engine"
+            })
+            .to_string(),
+        )
+        .unwrap();
+    };
+    let file = recipe_file.to_str().unwrap();
+
+    // A recipe that fails validation changes nothing.
+    write_recipe("relative/root");
+    let (code, text) = run(&["recipe", "set", "eng", "--file", file]);
+    assert_ne!(code, Some(0), "{text}");
+    assert!(text.contains("root must be absolute"), "{text}");
+    let (_, text) = run(&["recipe", "show", "eng"]);
+    assert!(json(&text)["recipe"].is_null(), "{text}");
+
+    // Set: attached and pinned in one step, extra file included.
+    write_recipe(root.to_str().unwrap());
+    let (code, text) = run(&["recipe", "set", "eng", "--file", file, "--pin-file", helper.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "{text}");
+    let report = json(&text);
+    assert_eq!(report["changed"], true, "{text}");
+    assert_eq!(report["complete"], true, "{text}");
+    assert_eq!(report["pinned"]["fact"]["kind"], "source_build", "{text}");
+    assert_eq!(report["pinned"]["exec_digests"][0][0], helper.to_str().unwrap(), "{text}");
+    let (code, text) = run(&["version", "eng"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(!json(&text)["pinned"].is_null(), "{text}");
+    let (_, text) = run(&["recipe", "show", "eng"]);
+    let shown = json(&text);
+    assert_eq!(shown["recipe"]["binary"], "engine", "{text}");
+    assert_eq!(shown["pin_files"][0], helper.to_str().unwrap(), "{text}");
+
+    // Set again without --pin-file keeps the list; --no-pin-files drops it.
+    let (code, text) = run(&["recipe", "set", "eng", "--file", file]);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(json(&text)["pin_files"].as_array().unwrap().len(), 1, "{text}");
+    let (code, text) = run(&["recipe", "set", "eng", "--file", file, "--no-pin-files"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(json(&text)["pin_files"].as_array().unwrap().len(), 0, "{text}");
+
+    // Clear: recipe and pin are gone; clearing twice is a no-op.
+    let (code, text) = run(&["recipe", "clear", "eng"]);
+    assert_eq!(code, Some(0), "{text}");
+    let (code, text) = run(&["version", "eng"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("no recipe"), "{text}");
+    let (code, text) = run(&["recipe", "clear", "eng"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(json(&text)["changed"], false, "{text}");
+
+    // Forget: a preview first, then the record goes; the file follows.
+    let (code, text) = run(&["forget", "plain"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("would forget plain") && text.contains("--yes"), "{text}");
+    let (_, text) = run(&["status"]);
+    assert!(text.contains("plain"), "a preview removes nothing: {text}");
+    let (code, text) = run(&["forget", "plain", "--yes"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("forgot plain"), "{text}");
+    let (_, text) = run(&["status"]);
+    assert!(!text.contains("plain") && text.contains("eng"), "{text}");
+    let saved = std::fs::read_to_string(dir.path().join("inventory.json")).unwrap();
+    assert!(!saved.contains("llmctl-next-fake-plain"), "{saved}");
+    let (code, text) = run(&["forget", "plain", "--yes"]);
+    assert_eq!(code, Some(5), "an unknown workload: {text}");
+    stop_daemon(child);
+}

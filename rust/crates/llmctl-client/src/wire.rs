@@ -241,6 +241,26 @@ pub struct GcResponse {
 /// The vendor-app plan request: what runs, what is pinned, the drift
 /// between them, and the owner-run backup/reinstall steps. llmctl never
 /// executes any of it.
+/// Attach or replace a workload's install recipe (`recipe` present) or
+/// remove it (`recipe` absent). `pin_files` absent keeps the list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeSetRequest {
+    pub protocol: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_files: Option<Vec<String>>,
+}
+
+/// Remove a workload's record. Without `confirm` it only says what would
+/// go and what stays on the host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgetRequest {
+    pub protocol: u32,
+    #[serde(default)]
+    pub confirm: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallPlanRequest {
     pub workload: String,

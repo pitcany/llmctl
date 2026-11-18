@@ -53,6 +53,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/installs/plan", post(install_plan))
         .route("/v1/workloads/{name}/version", get(workload_version))
         .route("/v1/workloads/{name}/version/pin", post(workload_version_pin))
+        .route("/v1/workloads/{name}/recipe", post(workload_recipe))
+        .route("/v1/workloads/{name}/forget", post(workload_forget))
         .route("/v1/workloads/{name}/engine", get(workload_engine))
         .route("/v1/unloads", post(admit_unload))
         .route("/v1/lanes/import", post(lanes_import))
@@ -962,6 +964,41 @@ async fn workload_version(
             "note": "no recipe; version pinning is off",
         }),
     };
+    Ok(Json(report))
+}
+
+/// Attach, replace or remove a workload's recipe, and pin under it.
+async fn workload_recipe(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<llmctl_client::wire::RecipeSetRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_protocol(req.protocol)?;
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    let recipe = match &req.recipe {
+        Some(json) => Some(
+            llmctl_core::InstallRecipe::deserialize_flexible(json)
+                .map_err(|e| ApiError::from_ops(&OpsError::Invalid(format!("recipe: {e}"))))?,
+        ),
+        None => None,
+    };
+    let report = crate::pin::set_recipe(&state, &name, recipe, req.pin_files)
+        .await
+        .map_err(|e| ApiError::from_ops(&e))?;
+    Ok(Json(report))
+}
+
+/// Remove a workload's record (preview without `confirm`).
+async fn workload_forget(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<llmctl_client::wire::ForgetRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_protocol(req.protocol)?;
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    let report = crate::pin::forget(&state, &name, req.confirm)
+        .await
+        .map_err(|e| ApiError::from_ops(&e))?;
     Ok(Json(report))
 }
 

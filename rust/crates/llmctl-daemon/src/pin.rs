@@ -116,19 +116,7 @@ pub async fn repin(state: &AppState, name: &str) -> Result<Value, OpsError> {
             "note": "the install reports what the pin says; nothing was written",
         }));
     }
-    next.revision += 1;
-    next.validate()
-        .map_err(|e| OpsError::Invalid(format!("re-pinned inventory invalid: {e}")))?;
-    crate::engine::write_json_atomic(
-        &state.paths.inventory,
-        &InventoryFile {
-            inventory: next.clone(),
-        },
-    )
-    .await
-    .map_err(|e| OpsError::Engine(e.to_string()))?;
-    let revision = next.revision;
-    state.ops.update_inventory(Arc::new(next)).await;
+    let revision = commit_inventory(state, next, "re-pin").await?;
     tracing::info!(workload = %name, revision, first_pin, changes = changes.len(), "version pin recorded");
     Ok(json!({
         "workload": name,
@@ -147,6 +135,201 @@ pub async fn repin(state: &AppState, name: &str) -> Result<Value, OpsError> {
                     .into(),
             )
         },
+    }))
+}
+
+/// Write a changed inventory: validated, file first, then the live copy.
+async fn commit_inventory(
+    state: &AppState,
+    mut next: llmctl_core::HostInventory,
+    what: &str,
+) -> Result<u64, OpsError> {
+    next.revision += 1;
+    next.validate()
+        .map_err(|e| OpsError::Invalid(format!("{what}: the inventory would be invalid: {e}")))?;
+    crate::engine::write_json_atomic(
+        &state.paths.inventory,
+        &InventoryFile {
+            inventory: next.clone(),
+        },
+    )
+    .await
+    .map_err(|e| OpsError::Engine(e.to_string()))?;
+    let revision = next.revision;
+    state.ops.update_inventory(Arc::new(next)).await;
+    Ok(revision)
+}
+
+/// The pin a workload has before any recipe: nothing, except on launchd,
+/// where adoption pins the program binary's digest.
+fn reset_pin(state: &AppState, w: &mut WorkloadDefinition) {
+    w.observed_version = None;
+    if let Ownership::Managed {
+        definition,
+        version,
+        definition_schema,
+        ..
+    } = &mut w.ownership
+    {
+        *version = state.supervisor.program_digest_pin(definition);
+        *definition_schema = 1;
+    }
+}
+
+/// `recipe set` / `recipe clear`: attach, replace or remove a workload's
+/// install recipe (and its extra pinned files) and pin what the install
+/// reports under the new recipe, in one step. A recipe that cannot be
+/// probed is refused and nothing is written.
+pub async fn set_recipe(
+    state: &AppState,
+    name: &str,
+    recipe: Option<InstallRecipe>,
+    pin_files: Option<Vec<String>>,
+) -> Result<Value, OpsError> {
+    let wl = llmctl_core::WorkloadName::new(name).map_err(|e| OpsError::Invalid(e.to_string()))?;
+    let _quiet = state.ops.quiesce().await?;
+    let inv = state.ops.inventory().await;
+    if inv.workload(&wl).is_none() {
+        return Err(OpsError::UnknownWorkload(name.to_string()));
+    }
+    let mut next = (*inv).clone();
+    let w = next
+        .workloads
+        .iter_mut()
+        .find(|w| w.name == wl)
+        .expect("workload exists in the clone");
+    let had_recipe = w.recipe.is_some();
+    match &recipe {
+        Some(r) => {
+            r.validate()
+                .map_err(|e| OpsError::Invalid(format!("{name}: {e}")))?;
+            if let Some(files) = pin_files {
+                w.pin_files = files;
+            }
+        }
+        None => {
+            if !had_recipe && w.pin_files.is_empty() {
+                return Ok(json!({
+                    "workload": name,
+                    "changed": false,
+                    "inventory_revision": inv.revision,
+                    "note": "there is no recipe to clear",
+                }));
+            }
+            w.pin_files.clear();
+        }
+    }
+    w.recipe = recipe.clone();
+    // A pin made under another recipe says nothing about this one.
+    reset_pin(state, w);
+    let mut complete = true;
+    if let Some(r) = &recipe {
+        let live = crate::version::probe(r, w)
+            .await
+            .map_err(|e| OpsError::Invalid(format!("{name}: the recipe cannot be probed: {e}")))?;
+        complete = apply_pin(w, live);
+    }
+    let pinned = pinned_version(w).cloned();
+    let pin_files = w.pin_files.clone();
+    let revision = commit_inventory(state, next, "recipe").await?;
+    tracing::info!(workload = %name, revision, set = recipe.is_some(), "recipe changed");
+    Ok(json!({
+        "workload": name,
+        "changed": true,
+        "recipe": recipe,
+        "pin_files": pin_files,
+        "pinned": pinned,
+        "complete": complete,
+        "inventory_revision": revision,
+        "note": if recipe.is_some() && !complete {
+            Value::String(
+                "the server is not answering, so its running version was not pinned; \
+                 `version <name> --repin` while it serves"
+                    .into(),
+            )
+        } else {
+            Value::Null
+        },
+    }))
+}
+
+/// `forget`: remove a workload's record. Nothing on the host is stopped,
+/// started or deleted; llmctl-next only stops knowing about it. Refused
+/// for a managed workload that is running (stop it, or `release` it to
+/// keep it running unmanaged) and while a model store still names it.
+pub async fn forget(state: &AppState, name: &str, confirmed: bool) -> Result<Value, OpsError> {
+    let wl = llmctl_core::WorkloadName::new(name).map_err(|e| OpsError::Invalid(e.to_string()))?;
+    let _quiet = state.ops.quiesce().await?;
+    let inv = state.ops.inventory().await;
+    let Some(def) = inv.workload(&wl) else {
+        return Err(OpsError::UnknownWorkload(name.to_string()));
+    };
+    let managed = matches!(def.ownership, Ownership::Managed { .. });
+    let observed = state
+        .ops
+        .engine()
+        .observe(&inv)
+        .await
+        .map_err(|e| OpsError::Engine(e.to_string()))?;
+    let running = observed
+        .iter()
+        .any(|o| o.workload == wl && o.process == llmctl_core::ProcessState::Running);
+    if managed && running {
+        return Err(OpsError::InvalidState(format!(
+            "{name} is running and managed here; stop it first (llmctl-next stop {name}), \
+             or hand it back with `release` to keep it running unmanaged"
+        )));
+    }
+    if let Some(store) = inv.stores.iter().find(|s| s.workload.as_ref() == Some(&wl)) {
+        return Err(OpsError::InvalidState(format!(
+            "store {} downloads through {name}; remove the store from the inventory first",
+            store.name
+        )));
+    }
+    let mut notes: Vec<String> = Vec::new();
+    if let Ownership::Managed {
+        service_file: Some(file),
+        ..
+    } = &def.ownership
+    {
+        notes.push(format!(
+            "its unit file {} stays as llmctl-next wrote it; remove or edit it yourself",
+            file.path
+        ));
+    }
+    if running {
+        notes.push("it keeps running; llmctl-next no longer watches it".into());
+    }
+    if crate::lanes::store_path(state, name).exists() {
+        notes.push(format!(
+            "its lane records stay in {}",
+            crate::lanes::store_path(state, name).display()
+        ));
+    }
+    let unit = def.unit.to_string();
+    if !confirmed {
+        return Ok(json!({
+            "workload": name,
+            "removed": false,
+            "unit": unit,
+            "managed": managed,
+            "running": running,
+            "notes": notes,
+            "inventory_revision": inv.revision,
+        }));
+    }
+    let mut next = (*inv).clone();
+    next.workloads.retain(|w| w.name != wl);
+    let revision = commit_inventory(state, next, "forget").await?;
+    tracing::info!(workload = %name, %unit, revision, "workload record removed");
+    Ok(json!({
+        "workload": name,
+        "removed": true,
+        "unit": unit,
+        "managed": managed,
+        "running": running,
+        "notes": notes,
+        "inventory_revision": revision,
     }))
 }
 

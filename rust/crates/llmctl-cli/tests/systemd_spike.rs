@@ -2199,3 +2199,31 @@ HTTPServer(("127.0.0.1", port), H).serve_forever()
     assert_eq!(code, Some(4), "{text}");
     assert!(text.contains("vendor app"), "{text}");
 }
+
+/// `forget` never leaves a managed unit running unwatched: it is refused
+/// until the unit is stopped. After that the record goes and the unit
+/// file stays where it is.
+#[test]
+#[ignore = "touches the user's systemd: run with --ignored"]
+fn forget_refuses_a_running_managed_unit_then_removes_the_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let unit = SpikeUnit::create(dir.path(), &serving_exec(dir.path(), port, "spike/model"));
+    unit.start();
+    write_empty_inventory(dir.path());
+    let d = spawn_daemon(dir.path());
+    adopt_running(&d.socket, &unit.name, port);
+
+    let (code, text) = cli_code(&d.socket, &["forget", "adopted", "--yes"]);
+    assert_ne!(code, Some(0), "{text}");
+    assert!(text.contains("running and managed") && text.contains("stop"), "{text}");
+
+    let (code, text) = cli_code(&d.socket, &["stop", "adopted", "--wait"]);
+    assert_eq!(code, Some(0), "{text}");
+    let (code, text) = cli_code(&d.socket, &["forget", "adopted", "--yes"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("forgot adopted"), "{text}");
+    let (_, text) = cli_code(&d.socket, &["status"]);
+    assert!(!text.contains("adopted"), "{text}");
+    assert!(unit.file.exists(), "the unit file is not llmctl-next's to delete");
+}

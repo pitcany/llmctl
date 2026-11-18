@@ -245,6 +245,19 @@ enum Command {
         #[command(subcommand)]
         cmd: InstallCmd,
     },
+    /// A workload's install recipe: what its version facts are read from.
+    /// `set` attaches or replaces it and pins at once; `clear` removes it.
+    Recipe {
+        #[command(subcommand)]
+        cmd: RecipeCmd,
+    },
+    /// Remove a workload's record. Nothing on the host is stopped or
+    /// deleted. Without --yes it only says what would go.
+    Forget {
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Version facts of a workload's install: pin, live probe, drift. A
     /// mismatch is a finding, never auto-corrected. --repin records what
     /// the install reports now as the pin, and lists what changed: that is
@@ -341,6 +354,28 @@ enum ModelCmd {
         #[arg(long)]
         key: Option<String>,
     },
+}
+
+#[derive(Subcommand, Clone)]
+enum RecipeCmd {
+    /// The recipe and the extra pinned files, as JSON.
+    Show { name: String },
+    /// Attach or replace the recipe from a JSON file (the `recipe` object
+    /// of an inventory record), then pin what the install reports.
+    Set {
+        name: String,
+        #[arg(long)]
+        file: std::path::PathBuf,
+        /// Extra file pinned with the install (repeat it). Given at least
+        /// once, the list replaces the current one.
+        #[arg(long = "pin-file")]
+        pin_files: Vec<String>,
+        /// Drop every extra pinned file.
+        #[arg(long, conflicts_with = "pin_files")]
+        no_pin_files: bool,
+    },
+    /// Remove the recipe, the extra pinned files and the version pin.
+    Clear { name: String },
 }
 
 #[derive(Subcommand, Clone)]
@@ -682,6 +717,8 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Lanes { cmd } => cmd_lanes(cli, cmd).await,
         Command::Install { cmd } => cmd_install(cli, cmd).await,
         Command::Version { name, repin } => cmd_version(cli, &name, repin).await,
+        Command::Recipe { cmd } => cmd_recipe(cli, cmd).await,
+        Command::Forget { name, yes } => cmd_forget(cli, &name, yes).await,
         Command::Adopt {
             unit,
             name,
@@ -1360,6 +1397,125 @@ async fn cmd_release(cli: &Cli, name: &str) -> Result<u8, CliError> {
         "release: {} back to {} (revision {})",
         name, resp.ownership, resp.inventory_revision
     );
+    Ok(0)
+}
+
+async fn cmd_recipe(cli: &Cli, cmd: RecipeCmd) -> Result<u8, CliError> {
+    use llmctl_client::wire::{RecipeSetRequest, PROTOCOL_VERSION};
+    let client = connect(cli)?;
+    let show = |v: &serde_json::Value| println!("{}", serde_json::to_string_pretty(v).unwrap());
+    match cmd {
+        RecipeCmd::Show { name } => {
+            let inv = client.inventory().await?;
+            let record = inv["workloads"]
+                .as_array()
+                .and_then(|ws| ws.iter().find(|w| w["name"] == name.as_str()));
+            let Some(w) = record else {
+                eprintln!("error: no workload named {name}");
+                return Ok(5);
+            };
+            show(&serde_json::json!({
+                "workload": name,
+                "recipe": w["recipe"],
+                "pin_files": w.get("pin_files").cloned().unwrap_or(serde_json::json!([])),
+            }));
+            Ok(0)
+        }
+        RecipeCmd::Set {
+            name,
+            file,
+            pin_files,
+            no_pin_files,
+        } => {
+            ensure_protocol(&client).await?;
+            let text = match std::fs::read_to_string(&file) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("error: reading {}: {e}", file.display());
+                    return Ok(2);
+                }
+            };
+            let recipe: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("error: {} is not JSON: {e}", file.display());
+                    return Ok(2);
+                }
+            };
+            let pin_files = if no_pin_files {
+                Some(Vec::new())
+            } else if pin_files.is_empty() {
+                None
+            } else {
+                Some(pin_files)
+            };
+            let report = client
+                .recipe_set(
+                    &name,
+                    &RecipeSetRequest {
+                        protocol: PROTOCOL_VERSION,
+                        recipe: Some(recipe),
+                        pin_files,
+                    },
+                )
+                .await?;
+            show(&report);
+            Ok(0)
+        }
+        RecipeCmd::Clear { name } => {
+            ensure_protocol(&client).await?;
+            let report = client
+                .recipe_set(
+                    &name,
+                    &RecipeSetRequest {
+                        protocol: PROTOCOL_VERSION,
+                        recipe: None,
+                        pin_files: None,
+                    },
+                )
+                .await?;
+            show(&report);
+            Ok(0)
+        }
+    }
+}
+
+async fn cmd_forget(cli: &Cli, name: &str, yes: bool) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    ensure_protocol(&client).await?;
+    let report = client
+        .forget(
+            name,
+            &llmctl_client::wire::ForgetRequest {
+                protocol: llmctl_client::wire::PROTOCOL_VERSION,
+                confirm: yes,
+            },
+        )
+        .await?;
+    let notes: Vec<&str> = report["notes"]
+        .as_array()
+        .map(|n| n.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if report["removed"] == true {
+        println!(
+            "forgot {name} ({}); inventory revision {}",
+            report["unit"].as_str().unwrap_or("?"),
+            report["inventory_revision"]
+        );
+    } else {
+        println!(
+            "would forget {name} ({}): {}, {}. Nothing on the host is stopped or deleted.",
+            report["unit"].as_str().unwrap_or("?"),
+            if report["managed"] == true { "managed" } else { "not managed" },
+            if report["running"] == true { "running" } else { "not running" },
+        );
+    }
+    for n in notes {
+        println!("  note: {n}");
+    }
+    if report["removed"] != true {
+        println!("repeat with --yes to remove the record");
+    }
     Ok(0)
 }
 

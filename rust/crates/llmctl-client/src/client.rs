@@ -402,6 +402,24 @@ impl ControlClient {
             .await
     }
 
+    pub async fn recipe_set(
+        &self,
+        workload: &str,
+        req: &crate::wire::RecipeSetRequest,
+    ) -> Result<serde_json::Value, ClientError> {
+        self.post_json(&format!("/v1/workloads/{workload}/recipe"), req)
+            .await
+    }
+
+    pub async fn forget(
+        &self,
+        workload: &str,
+        req: &crate::wire::ForgetRequest,
+    ) -> Result<serde_json::Value, ClientError> {
+        self.post_json(&format!("/v1/workloads/{workload}/forget"), req)
+            .await
+    }
+
     /// Record what the install reports now as the workload's pin.
     pub async fn version_repin(&self, workload: &str) -> Result<serde_json::Value, ClientError> {
         self.post_json(
