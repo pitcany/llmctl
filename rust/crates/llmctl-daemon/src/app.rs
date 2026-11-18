@@ -108,6 +108,8 @@ pub fn sample_inventory(host: &HostId) -> HostInventory {
         readiness_timeout_secs: None,
         gpu_claim: Default::default(),
         hooks: Vec::new(),
+        pin_files: Vec::new(),
+        observed_version: None,
     };
     let mut inv = HostInventory {
         host: host.clone(),
@@ -360,25 +362,41 @@ async fn repin_legacy_versions(
                         | Some(llmctl_core::InstallRecipe::VendorApp(_))
                 )
         };
-        if !needs && !needs_m4 {
+        // A recipe-backed install llmctl-next does not manage (ds4 on
+        // m5): its facts are recorded on the record itself.
+        let needs_unmanaged = {
+            let w = &next.workloads[i];
+            matches!(w.ownership, llmctl_core::Ownership::External)
+                && w.observed_version.is_none()
+                && w.engine == manager_engine_name()
+                && (!w.pin_files.is_empty()
+                    || matches!(
+                        &w.recipe,
+                        Some(llmctl_core::InstallRecipe::ReleaseArchive(_))
+                            | Some(llmctl_core::InstallRecipe::SourceBuild(_))
+                            | Some(llmctl_core::InstallRecipe::VendorApp(_))
+                    ))
+        };
+        if !needs && !needs_m4 && !needs_unmanaged {
             continue;
         }
-        let schema = if needs_m4 { 3 } else { 2 };
         let recipe = next.workloads[i].recipe.clone().expect("checked");
         match crate::version::probe(&recipe, &next.workloads[i]).await {
             Ok(v) => {
+                let before = next.workloads[i].clone();
                 let w = &mut next.workloads[i];
-                tracing::info!(workload = %w.name, packages = ?v.packages, fact = ?v.fact, "pinned version facts (schema {schema})");
-                if let llmctl_core::Ownership::Managed {
-                    version,
-                    definition_schema,
-                    ..
-                } = &mut w.ownership
-                {
-                    *version = Some(v);
-                    *definition_schema = schema;
+                let complete = crate::pin::apply_pin(w, v);
+                if *w != before {
+                    let pin = crate::pin::pinned_version(w);
+                    tracing::info!(
+                        workload = %w.name,
+                        complete,
+                        packages = ?pin.map(|p| &p.packages),
+                        fact = ?pin.and_then(|p| p.fact.as_ref()),
+                        "pinned version facts"
+                    );
+                    changed = true;
                 }
-                changed = true;
             }
             Err(e) => {
                 // No baseline possible: stay at the old schema rather

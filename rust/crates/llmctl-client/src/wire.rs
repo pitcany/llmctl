@@ -476,6 +476,43 @@ pub struct LaneSummary {
     pub model_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<i64>,
+    /// The pinned version, named in one line (`mtplx 2.11.0`); absent
+    /// when the lane has no pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<String>,
+}
+
+/// Version facts per lane: the pin, what the lane's command runs now,
+/// and the drift between them. With `pin`, the live facts become the pin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneVersionRequest {
+    pub protocol: u32,
+    pub workload: String,
+    /// Absent → every lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+    #[serde(default)]
+    pub pin: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneVersion {
+    pub id: String,
+    pub engine_kind: String,
+    /// The live facts named in one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub pinned: Option<llmctl_core::VersionRef>,
+    pub live: Option<llmctl_core::VersionRef>,
+    pub drift: Vec<llmctl_core::FieldDiff>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneVersionResponse {
+    pub workload: String,
+    pub lanes: Vec<LaneVersion>,
+    /// Lanes whose pin this call wrote or changed.
+    pub pinned_now: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

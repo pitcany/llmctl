@@ -2449,3 +2449,114 @@ fn host_id_flag_renames_the_bound_host_and_its_inventory_once() {
     stop_daemon(d);
     assert_eq!(inventory(), after);
 }
+
+/// `version --repin` records what an install reports as its pin and says
+/// what changed. Here the install is one llmctl-next does not manage (the
+/// ds4 case): the recipe names the binary, a declared extra file is pinned
+/// with it, and the pin lives on the record.
+#[test]
+fn version_repin_records_the_pin_and_names_what_changed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("install");
+    std::fs::create_dir(&root).unwrap();
+    let engine = root.join("engine");
+    let helper = dir.path().join("helper.sh");
+    std::fs::write(&engine, "build one").unwrap();
+    std::fs::write(&helper, "#!/bin/sh\n").unwrap();
+    let host = "workstation";
+    let wl = |name: &str, port: u16| {
+        serde_json::json!({
+            "name": name, "engine": "fake", "model": format!("fake/{name}"),
+            "gpus": [{"host": host, "index": 0}], "port": port,
+            "unit": {"scope": "user", "name": format!("llmctl-next-fake-{name}.service")},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": format!("llmctl-next-fake-{name}.service")},
+            "ownership": {"kind": "external"}
+        })
+    };
+    let mut eng = wl("eng", 8100);
+    eng["recipe"] = serde_json::json!({
+        "kind": "source_build", "name": "eng", "root": root, "git": "https://example.invalid/eng.git",
+        "build": "true", "binary": "engine"
+    });
+    eng["pin_files"] = serde_json::json!([helper]);
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [eng, wl("plain", 8101)],
+        "revision": 1
+    }});
+    std::fs::write(dir.path().join("inventory.json"), inv.to_string()).unwrap();
+    let child = start_daemon_in(dir.path(), &[]);
+    let socket = dir.path().join("control.sock");
+    let run = |args: &[&str]| {
+        let out = cli(&socket, args);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.code(), text)
+    };
+    let json = |text: &str| -> serde_json::Value { serde_json::from_str(text).expect(text) };
+
+    // No pin yet: nothing to compare, so no drift.
+    let (code, text) = run(&["version", "eng"]);
+    assert_eq!(code, Some(0), "{text}");
+    let report = json(&text);
+    assert!(report["pinned"].is_null(), "{text}");
+    assert_eq!(report["live"]["fact"]["kind"], "source_build", "{text}");
+
+    // The first pin.
+    let (code, text) = run(&["version", "eng", "--repin"]);
+    assert_eq!(code, Some(0), "{text}");
+    let report = json(&text);
+    assert_eq!(report["repinned"], true, "{text}");
+    assert_eq!(report["complete"], true, "{text}");
+    assert_eq!(report["inventory_revision"], 2, "{text}");
+    assert_eq!(report["pinned"]["exec_digests"][0][0], helper.to_str().unwrap(), "{text}");
+    let saved = std::fs::read_to_string(dir.path().join("inventory.json")).unwrap();
+    assert!(saved.contains("observed_version"), "{saved}");
+    let (code, text) = run(&["version", "eng"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(json(&text)["drift"].as_array().unwrap().is_empty(), "{text}");
+
+    // The binary is rebuilt and the helper edited: both are findings.
+    std::fs::write(&engine, "build two").unwrap();
+    std::fs::write(&helper, "#!/bin/sh\n# edited\n").unwrap();
+    let (code, text) = run(&["version", "eng"]);
+    assert_eq!(code, Some(4), "drift is a finding: {text}");
+    assert!(text.contains("version.fact") && text.contains("version.exec_digests"), "{text}");
+
+    // Accepting them names each one; a second re-pin writes nothing.
+    let (code, text) = run(&["version", "eng", "--repin"]);
+    assert_eq!(code, Some(0), "{text}");
+    let report = json(&text);
+    let fields: Vec<&str> = report["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["field"].as_str().unwrap())
+        .collect();
+    assert_eq!(fields, vec!["version.exec_digests", "version.fact"], "{text}");
+    assert_eq!(report["inventory_revision"], 3, "{text}");
+    let (code, text) = run(&["version", "eng"]);
+    assert_eq!(code, Some(0), "{text}");
+    let (code, text) = run(&["version", "eng", "--repin"]);
+    assert_eq!(code, Some(0), "{text}");
+    let report = json(&text);
+    assert_eq!(report["repinned"], false, "{text}");
+    assert_eq!(report["inventory_revision"], 3, "{text}");
+
+    // The pin survives a daemon restart.
+    stop_daemon(child);
+    let child = start_daemon_in(dir.path(), &[]);
+    let (code, text) = run(&["version", "eng"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(!json(&text)["pinned"].is_null(), "{text}");
+
+    // Without a recipe there is nothing to probe.
+    let (code, text) = run(&["version", "plain", "--repin"]);
+    assert_ne!(code, Some(0), "{text}");
+    assert!(text.contains("no recipe"), "{text}");
+    stop_daemon(child);
+}

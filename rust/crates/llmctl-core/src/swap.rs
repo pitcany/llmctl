@@ -155,6 +155,24 @@ impl SwapConfig {
             .map(|(_, v)| v.as_str())
     }
 
+    /// A lane's `cmd` with the config's macros expanded (`${PORT}` and
+    /// `${MODEL_ID}` are llama-swap's own and stay as written).
+    pub fn expanded_cmd(&self, lane: &Lane) -> Option<String> {
+        let mut text = lane.cmd()?.to_string();
+        // A macro may name another macro; llama-swap expands until stable.
+        for _ in 0..8 {
+            let mut next = text.clone();
+            for (k, v) in &self.macros {
+                next = next.replace(&format!("${{{k}}}"), v);
+            }
+            if next == text {
+                break;
+            }
+            text = next;
+        }
+        Some(text)
+    }
+
     pub fn set_macro(&mut self, name: &str, value: &str) {
         match self.macros.iter_mut().find(|(k, _)| k == name) {
             Some((_, v)) => *v = value.to_string(),

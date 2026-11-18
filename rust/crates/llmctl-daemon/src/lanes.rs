@@ -46,6 +46,10 @@ pub struct LaneStore {
     pub file_digest: String,
     pub revision: u64,
     pub updated_at: DateTime<Utc>,
+    /// Pinned version facts per lane id (`lanes version --pin`): what the
+    /// lane's command ran when the owner last accepted it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub versions: std::collections::BTreeMap<String, llmctl_core::VersionRef>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -58,7 +62,7 @@ pub enum LanesError {
     Io(String),
 }
 
-fn refuse(msg: impl Into<String>) -> LanesError {
+pub(crate) fn refuse(msg: impl Into<String>) -> LanesError {
     LanesError::Refused(msg.into())
 }
 
@@ -70,7 +74,7 @@ pub fn bytes_digest(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
-async fn read_store(path: &Path) -> Result<Option<LaneStore>, LanesError> {
+pub(crate) async fn read_store(path: &Path) -> Result<Option<LaneStore>, LanesError> {
     match tokio::fs::read(path).await {
         Ok(b) => serde_json::from_slice(&b)
             .map(Some)
@@ -105,7 +109,7 @@ async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|e| format!("rename onto {}: {e}", path.display()))
 }
 
-async fn save_store(path: &Path, store: &LaneStore) -> Result<(), String> {
+pub(crate) async fn save_store(path: &Path, store: &LaneStore) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(store).map_err(|e| e.to_string())?;
     write_atomic(path, &bytes).await
 }
@@ -119,8 +123,18 @@ fn summaries(cfg: &SwapConfig) -> Vec<LaneSummary> {
             name: l.str_field("name").map(str::to_owned),
             model_name: l.str_field("useModelName").map(str::to_owned),
             ttl: l.ttl(),
+            pinned: None,
         })
         .collect()
+}
+
+/// The summaries with each lane's pinned version named (no probing).
+fn summaries_with_pins(store: &LaneStore) -> Vec<LaneSummary> {
+    let mut out = summaries(&store.records);
+    for s in &mut out {
+        s.pinned = store.versions.get(&s.id).map(crate::lane_version::label);
+    }
+    out
 }
 
 /// The llama-swap workload, its config path and log path: from the request,
@@ -216,7 +230,13 @@ pub async fn import(state: &AppState, req: LaneImportRequest) -> Result<LaneImpo
         )));
     }
     let path = store_path(state, &resp.workload);
-    let revision = read_store(&path).await?.map(|s| s.revision + 1).unwrap_or(1);
+    let existing = read_store(&path).await?;
+    let revision = existing.as_ref().map(|s| s.revision + 1).unwrap_or(1);
+    // A re-import follows a hand edit of the file. It changes what the
+    // records say, not what the owner accepted: pins stay (for lanes that
+    // still exist), so a moved engine path shows as drift, not as a pin.
+    let mut versions = existing.map(|s| s.versions).unwrap_or_default();
+    versions.retain(|id, _| cfg.lane(id).is_some());
     save_store(
         &path,
         &LaneStore {
@@ -227,6 +247,7 @@ pub async fn import(state: &AppState, req: LaneImportRequest) -> Result<LaneImpo
             file_digest,
             revision,
             updated_at: Utc::now(),
+            versions,
         },
     )
     .await
@@ -253,7 +274,7 @@ pub async fn status(state: &AppState, workload: &str) -> Result<LaneStatusRespon
         file_digest: store.file_digest.clone(),
         drift: now != store.file_digest,
         file_digest_now: now,
-        lanes: summaries(&store.records),
+        lanes: summaries_with_pins(&store),
         macros: store.records.macros.clone(),
         validation: swap::validate(&store.records),
         updated_at: store.updated_at,
@@ -738,7 +759,8 @@ pub async fn write_and_confirm(
         let sp = Path::new(store_path);
         let mut store = read_store(sp).await.ok().flatten();
         if let Some(s) = store.as_mut() {
-            s.records = records;
+            let previous = std::mem::replace(&mut s.records, records);
+            crate::lane_version::follow_write(s, &previous).await;
             s.file_digest = target_digest.clone();
             s.revision += 1;
             s.updated_at = Utc::now();

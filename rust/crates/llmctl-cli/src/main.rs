@@ -245,9 +245,15 @@ enum Command {
         #[command(subcommand)]
         cmd: InstallCmd,
     },
-    /// Version facts of a managed workload's install: pin, live probe,
-    /// drift. A mismatch is a finding, never auto-corrected.
-    Version { name: String },
+    /// Version facts of a workload's install: pin, live probe, drift. A
+    /// mismatch is a finding, never auto-corrected. --repin records what
+    /// the install reports now as the pin, and lists what changed: that is
+    /// how a vendor upgrade or a package change is accepted.
+    Version {
+        name: String,
+        #[arg(long)]
+        repin: bool,
+    },
     /// Run the daemon in the foreground (binds the control socket).
     Daemon {
         #[arg(long)]
@@ -371,6 +377,19 @@ enum LanesCmd {
     /// Records, drift against the live file, and validation.
     Show {
         workload: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Version facts per lane: what each lane's command runs (the
+    /// programs it names, and its Python env's packages) against the
+    /// pin. --pin records the live facts as the pin. Exit 4 on drift.
+    Version {
+        workload: String,
+        /// One lane instead of all.
+        #[arg(long)]
+        lane: Option<String>,
+        #[arg(long)]
+        pin: bool,
         #[arg(long)]
         json: bool,
     },
@@ -662,7 +681,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Upgrade { cmd } => cmd_upgrade(cli, cmd).await,
         Command::Lanes { cmd } => cmd_lanes(cli, cmd).await,
         Command::Install { cmd } => cmd_install(cli, cmd).await,
-        Command::Version { name } => cmd_version(cli, &name).await,
+        Command::Version { name, repin } => cmd_version(cli, &name, repin).await,
         Command::Adopt {
             unit,
             name,
@@ -1344,8 +1363,14 @@ async fn cmd_release(cli: &Cli, name: &str) -> Result<u8, CliError> {
     Ok(0)
 }
 
-async fn cmd_version(cli: &Cli, name: &str) -> Result<u8, CliError> {
+async fn cmd_version(cli: &Cli, name: &str, repin: bool) -> Result<u8, CliError> {
     let client = connect(cli)?;
+    if repin {
+        ensure_protocol(&client).await?;
+        let report = client.version_repin(name).await?;
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        return Ok(0);
+    }
     let report = client.version_report(name).await?;
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
     let drifting = report["drift"].as_array().is_some_and(|d| !d.is_empty());
@@ -1650,10 +1675,11 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
     let print_lanes = |lanes: &[llmctl_client::wire::LaneSummary]| {
         for l in lanes {
             println!(
-                "  {:<28} {:<10} ttl {:<6} {}",
+                "  {:<28} {:<10} ttl {:<6} {:<26} {}",
                 l.id,
                 l.engine_kind,
                 l.ttl.map(|t| t.to_string()).unwrap_or_else(|| "-".into()),
+                l.pinned.clone().unwrap_or_else(|| "(no pin)".into()),
                 l.model_name.clone().unwrap_or_default()
             );
         }
@@ -1757,6 +1783,58 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
                 println!("  validation: {}", r.validation.join("; "));
             }
             return Ok(if r.drift { 1 } else { 0 });
+        }
+        LanesCmd::Version {
+            workload,
+            lane,
+            pin,
+            json,
+        } => {
+            let r = client
+                .lanes_version(&llmctl_client::wire::LaneVersionRequest {
+                    protocol: llmctl_client::wire::PROTOCOL_VERSION,
+                    workload,
+                    lane,
+                    pin,
+                })
+                .await?;
+            let drifting = r.lanes.iter().filter(|l| !l.drift.is_empty()).count();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                return Ok(if drifting > 0 { 4 } else { 0 });
+            }
+            let pinned = r.lanes.iter().filter(|l| l.pinned.is_some()).count();
+            println!(
+                "{}: {} lanes, {} pinned, {} drifting",
+                r.workload,
+                r.lanes.len(),
+                pinned,
+                drifting
+            );
+            for l in &r.lanes {
+                let state = match (&l.pinned, l.drift.is_empty()) {
+                    (None, _) => "not pinned",
+                    (Some(_), true) => "matches the pin",
+                    (Some(_), false) => "DRIFT",
+                };
+                println!(
+                    "  {:<28} {:<10} {:<26} {}",
+                    l.id,
+                    l.engine_kind,
+                    l.label.clone().unwrap_or_default(),
+                    state
+                );
+                for d in &l.drift {
+                    println!("      {}: pinned {} now {}", d.field, d.expected, d.actual);
+                }
+            }
+            if !r.pinned_now.is_empty() {
+                println!("  pinned now: {}", r.pinned_now.join(", "));
+            }
+            if pinned < r.lanes.len() {
+                println!("  record the rest with: lanes version {} --pin", r.workload);
+            }
+            return Ok(if drifting > 0 { 4 } else { 0 });
         }
         LanesCmd::Set {
             workload,

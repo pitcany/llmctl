@@ -1300,13 +1300,10 @@ pub async fn vendor_plan(
     let live = crate::version::probe(&InstallRecipe::VendorApp(r.clone()), def)
         .await
         .map_err(|e| UpgradeError::Io(format!("probing {name}: {e}")))?;
-    let pinned = match &def.ownership {
-        Ownership::Managed { version, .. } => version.clone(),
-        _ => None,
-    };
-    let drift = match (&pinned, &live) {
-        (Some(p), _) => crate::version::version_drift(p, &live),
-        (None, _) => Vec::new(),
+    let pinned = crate::pin::pinned_version(def).cloned();
+    let drift = match &pinned {
+        Some(p) => crate::version::version_drift(p, &live),
+        None => Vec::new(),
     };
     Ok(json!({
         "workload": name,

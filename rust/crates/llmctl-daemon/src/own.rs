@@ -587,9 +587,7 @@ pub async fn repin_version(
     let mut next = (*inv).clone();
     for w in &mut next.workloads {
         if &w.name == workload {
-            if let Ownership::Managed { version, .. } = &mut w.ownership {
-                *version = Some(live.clone());
-            }
+            crate::pin::apply_pin(w, live.clone());
         }
     }
     bump_revision(ctx, ops, next).await

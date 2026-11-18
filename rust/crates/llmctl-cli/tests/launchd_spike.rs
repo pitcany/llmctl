@@ -175,6 +175,8 @@ fn write_inventory(dir: &Path, label: &str, port: u16, program_identity: &str) {
             readiness_timeout_secs: Some(30),
             gpu_claim: Default::default(),
             hooks: Vec::new(),
+            pin_files: Vec::new(),
+            observed_version: None,
         }],
         stores: Vec::new(),
         revision: 1,

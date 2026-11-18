@@ -41,6 +41,8 @@ fn workload(name: &str, gpus: &[u32], port: u16) -> WorkloadDefinition {
         readiness_timeout_secs: None,
         gpu_claim: Default::default(),
         hooks: Vec::new(),
+        pin_files: Vec::new(),
+        observed_version: None,
     }
 }
 

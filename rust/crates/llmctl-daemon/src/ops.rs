@@ -53,7 +53,7 @@ pub enum OpsError {
     },
     #[error("operation {existing} needs attention and is unacknowledged; run `llmctl-next ack {existing}` after reviewing it")]
     NeedsAttentionBlock { existing: String },
-    #[error("{workload}: unit drifted from its adopted definition; differing: {}", diffs.iter().map(|d| d.field.as_str()).collect::<Vec<_>>().join(", "))]
+    #[error("{workload}: unit drifted from its adopted definition; differing: {}{}", diffs.iter().map(|d| d.field.as_str()).collect::<Vec<_>>().join(", "), repin_hint(workload, diffs))]
     DefinitionDrift {
         workload: String,
         diffs: Vec<llmctl_core::FieldDiff>,
@@ -98,6 +98,17 @@ pub enum OpsError {
     Db(#[from] crate::db::DbError),
     #[error("engine error: {0}")]
     Engine(String),
+}
+
+/// When only version facts moved (a package installed into the env, a
+/// launcher edited, a vendor upgrade), the owner can accept the change
+/// in one step; a changed unit definition needs a look first.
+fn repin_hint(workload: &str, diffs: &[llmctl_core::FieldDiff]) -> String {
+    if !diffs.is_empty() && diffs.iter().all(|d| d.field.starts_with("version.")) {
+        format!(". See `llmctl-next version {workload}`; if the change is intended, accept it with `llmctl-next version {workload} --repin`")
+    } else {
+        String::new()
+    }
 }
 
 impl OpsError {

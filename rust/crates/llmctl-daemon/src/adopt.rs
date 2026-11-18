@@ -358,6 +358,8 @@ pub async fn transfer(state: &AppState, req: AdoptRequest) -> Result<AdoptRespon
         readiness_timeout_secs: None,
         gpu_claim: requested_claim(&req),
         hooks: Vec::new(),
+        pin_files: Vec::new(),
+        observed_version: None,
     });
     next.revision += 1;
     next.validate()

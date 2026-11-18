@@ -104,10 +104,44 @@ pub async fn probe(
     recipe: &InstallRecipe,
     def: &WorkloadDefinition,
 ) -> Result<VersionRef, EngineError> {
-    let exec_digests = exec_digests_of(def).await;
+    let mut exec_digests = exec_digests_of(def).await;
+    // Declared extra files (an engine binary a launcher execs, a binary
+    // under a system prefix) are pinned with the same rule.
+    for path in &def.pin_files {
+        if !exec_digests.iter().any(|(p, _)| p == path) {
+            exec_digests.push((path.clone(), file_digest(path).await));
+        }
+    }
+    let managed = matches!(def.ownership, llmctl_core::Ownership::Managed { .. });
     match recipe {
         InstallRecipe::PythonEnv(py) => {
             probe_python(py, def, exec_digests).await
+        }
+        // No launch definition to find the binary in: the recipe's own
+        // root and binary are the install (ds4 on m5).
+        InstallRecipe::ReleaseArchive(r) if !managed => {
+            let (exe, fact) =
+                unmanaged_dir_fact(&r.root, &r.binary, r.version_arg.as_deref(), false).await;
+            Ok(VersionRef {
+                interpreter: Some(exe),
+                packages: Vec::new(),
+                cuda: None,
+                lock_digest: String::new(),
+                exec_digests,
+                fact: Some(fact),
+            })
+        }
+        InstallRecipe::SourceBuild(r) if !managed => {
+            let (exe, fact) =
+                unmanaged_dir_fact(&r.root, &r.binary, r.version_arg.as_deref(), true).await;
+            Ok(VersionRef {
+                interpreter: Some(exe),
+                packages: Vec::new(),
+                cuda: None,
+                lock_digest: String::new(),
+                exec_digests,
+                fact: Some(fact),
+            })
         }
         InstallRecipe::ReleaseArchive(r) => Ok(VersionRef {
             interpreter: exec_under_root(&r.root, def),
@@ -278,8 +312,108 @@ async fn dir_fact(root: &str, version_arg: Option<&str>, def: &WorkloadDefinitio
     }
 }
 
+/// `sha256:<hex>` of a file's content, or `missing`.
+pub(crate) async fn file_digest(path: &str) -> String {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => format!("sha256:{:x}", Sha256::digest(bytes)),
+        Err(_) => "missing".into(),
+    }
+}
+
+/// The versioned-directory fact for an install llmctl-next does not
+/// manage: the recipe names the root and the binary. A source build also
+/// records the commit the work tree is at (`git rev-parse HEAD`), so a
+/// pull or a rebuild shows as drift even when the path never changes.
+async fn unmanaged_dir_fact(
+    root: &str,
+    binary: &str,
+    version_arg: Option<&str>,
+    source: bool,
+) -> (String, VersionFact) {
+    let exe = Path::new(root).join(binary).display().to_string();
+    let binary_digest = file_digest(&exe).await;
+    let reported = match version_arg {
+        Some(arg) if binary_digest != "missing" => run_binary_version(&exe, arg).await.ok(),
+        _ => None,
+    };
+    let fact = if source {
+        VersionFact::SourceBuild {
+            dir: root.to_string(),
+            commit: git_head(root).await,
+            binary_digest,
+            reported,
+        }
+    } else {
+        VersionFact::ReleaseArchive {
+            dir: root.to_string(),
+            archive_sha256: None,
+            binary_digest,
+            reported,
+        }
+    };
+    (exe, fact)
+}
+
+/// The commit a work tree is at; `None` when `root` is not one (or git
+/// is missing).
+async fn git_head(root: &str) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", root, "rev-parse", "HEAD"])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(10), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit())).then_some(head)
+}
+
+/// The version in the first line a vendor command printed: the first
+/// word that starts like a version (`0.33.1`, `v230`), else the first
+/// word. `ollama version is 0.33.1` and `version: 230 (32bc781), built
+/// at ...` both name their program before their version.
+pub(crate) fn version_token(stdout: &str) -> Option<String> {
+    let line = stdout.lines().find(|l| !l.trim().is_empty())?;
+    let versionish = |w: &&str| {
+        let w = w.strip_prefix('v').unwrap_or(w);
+        w.chars().next().is_some_and(|c| c.is_ascii_digit())
+    };
+    let clean = |w: &str| w.trim_matches(|c: char| matches!(c, ',' | ';' | '(' | ')')).to_string();
+    line.split_whitespace()
+        .find(versionish)
+        .or_else(|| line.split_whitespace().next())
+        .map(clean)
+        .filter(|w| !w.is_empty())
+}
+
+/// True for a vendor app's HTTP probe that got no answer: the service is
+/// not serving, so there is no running version to compare or to pin.
+pub fn unanswered_http_probe(fact: &Option<VersionFact>) -> bool {
+    matches!(
+        fact,
+        Some(VersionFact::VendorApp { running: None, probe }) if probe.starts_with("http_json")
+    )
+}
+
+/// What a probe result may be stored as. An unanswered HTTP probe is
+/// left out of the pin (a pinned "no version" would read as drift on the
+/// first restart); the second value says whether the pin is complete.
+pub fn storable(mut live: VersionRef) -> (VersionRef, bool) {
+    if unanswered_http_probe(&live.fact) {
+        live.fact = None;
+        (live, false)
+    } else {
+        (live, true)
+    }
+}
+
 /// The running version of a vendor app, per its declared probe. An app
-/// that cannot be observed reports `None` — itself a finding.
+/// that cannot be observed reports `None`: a stopped server for an HTTP
+/// probe (not drift, see [`version_drift`]), a missing app for the others.
 async fn probe_vendor(probe: &VendorProbe, def: &WorkloadDefinition) -> (Option<String>, String) {
     match probe {
         VendorProbe::HttpJson { path, field } => {
@@ -298,16 +432,7 @@ async fn probe_vendor(probe: &VendorProbe, def: &WorkloadDefinition) -> (Option<
             cmd.args(&argv[1..]).kill_on_drop(true);
             match tokio::time::timeout(PROBE_TIMEOUT, cmd.output()).await {
                 Ok(Ok(out)) if out.status.success() => {
-                    let first = String::from_utf8_lossy(&out.stdout)
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("")
-                        .to_string();
-                    let version = (!first.is_empty()).then_some(first);
-                    (version, desc)
+                    (version_token(&String::from_utf8_lossy(&out.stdout)), desc)
                 }
                 _ => (None, desc),
             }
@@ -810,7 +935,8 @@ async fn run_python(
 /// True when the recomputed version facts differ from the pin. The
 /// per-kind fact is compared only when the pin carries one (a pre-M4a pin
 /// of a new-kind recipe declares nothing to compare — the daemon re-pins
-/// it at startup).
+/// it at startup) and only when the live probe could observe one (a
+/// vendor server that is stopped reports no version).
 pub fn version_drift(pinned: &VersionRef, live: &VersionRef) -> Vec<llmctl_core::FieldDiff> {
     let mut diffs = Vec::new();
     let mut push = |field: &str, expected: Value, actual: Value| {
@@ -847,7 +973,9 @@ pub fn version_drift(pinned: &VersionRef, live: &VersionRef) -> Vec<llmctl_core:
         serde_json::to_value(&pinned.exec_digests).unwrap_or(Value::Null),
         serde_json::to_value(&live.exec_digests).unwrap_or(Value::Null),
     );
-    if pinned.fact.is_some() {
+    // A server that is not answering has no running version: a stopped
+    // Ollama is not drift, and the start guard must let it start.
+    if pinned.fact.is_some() && !unanswered_http_probe(&live.fact) {
         push(
             "version.fact",
             serde_json::to_value(&pinned.fact).unwrap_or(Value::Null),
@@ -1026,5 +1154,133 @@ mod tests {
         let mut legacy_pin = base();
         legacy_pin.fact = None;
         assert!(version_drift(&legacy_pin, &drifted).is_empty());
+    }
+
+    /// The start guard runs `version_drift`: a pinned Ollama that is
+    /// stopped answers nothing, and that must not refuse its start.
+    #[test]
+    fn a_stopped_http_vendor_app_is_not_drift_but_a_missing_app_is() {
+        let vendor = |running: Option<&str>, probe: &str| VersionRef {
+            interpreter: None,
+            packages: vec![],
+            cuda: None,
+            lock_digest: String::new(),
+            exec_digests: vec![],
+            fact: Some(VersionFact::VendorApp {
+                running: running.map(String::from),
+                probe: probe.into(),
+            }),
+        };
+        let pinned = vendor(Some("0.33.1"), "http_json /api/version");
+        let stopped = vendor(None, "http_json /api/version");
+        assert!(version_drift(&pinned, &stopped).is_empty());
+        assert!(unanswered_http_probe(&stopped.fact));
+        let (stored, complete) = storable(stopped);
+        assert!(!complete && stored.fact.is_none());
+
+        // The other probes do not depend on a running server: nothing
+        // found there means the app is gone.
+        let dir_pinned = vendor(Some("0.0.18-1"), "dir_name /home/u/.lmstudio/llmster");
+        let dir_gone = vendor(None, "dir_name /home/u/.lmstudio/llmster");
+        let diffs = version_drift(&dir_pinned, &dir_gone);
+        assert_eq!(diffs.len(), 1, "{diffs:?}");
+        let (stored, complete) = storable(dir_gone);
+        assert!(complete && stored.fact.is_some());
+    }
+
+    #[test]
+    fn the_version_is_the_first_word_that_looks_like_one() {
+        assert_eq!(version_token("0.34.3\n").as_deref(), Some("0.34.3"));
+        assert_eq!(version_token("ollama version is 0.33.1\n").as_deref(), Some("0.33.1"));
+        assert_eq!(
+            version_token("version: 230 (32bc7813), built at 2026-06-25T04:03:31Z").as_deref(),
+            Some("230")
+        );
+        assert_eq!(version_token("\nv1.2.3-rc1, built today").as_deref(), Some("v1.2.3-rc1"));
+        // Nothing version-like: the first word, as before.
+        assert_eq!(version_token("stable channel").as_deref(), Some("stable"));
+        assert_eq!(version_token("  \n"), None);
+    }
+
+    fn external_workload() -> WorkloadDefinition {
+        let host = llmctl_core::HostId::new("workstation").unwrap();
+        crate::app::sample_inventory(&host).workloads.remove(0)
+    }
+
+    #[tokio::test]
+    async fn declared_pin_files_are_digested_with_the_exec_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("engine-binary");
+        std::fs::write(&engine, b"v1").unwrap();
+        let mut def = external_workload();
+        def.pin_files = vec![
+            engine.display().to_string(),
+            dir.path().join("gone").display().to_string(),
+        ];
+        let recipe = InstallRecipe::External(llmctl_core::ExternalRecipe {
+            name: "strata".into(),
+            note: None,
+        });
+        let pinned = probe(&recipe, &def).await.unwrap();
+        assert_eq!(pinned.exec_digests.len(), 2);
+        assert!(pinned.exec_digests[0].1.starts_with("sha256:"));
+        assert_eq!(pinned.exec_digests[1].1, "missing");
+
+        std::fs::write(&engine, b"v2").unwrap();
+        let live = probe(&recipe, &def).await.unwrap();
+        let diffs = version_drift(&pinned, &live);
+        assert_eq!(diffs.len(), 1, "{diffs:?}");
+        assert_eq!(diffs[0].field, "version.exec_digests");
+    }
+
+    #[tokio::test]
+    async fn an_unmanaged_source_build_is_identified_by_commit_and_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().display().to_string();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        std::fs::write(dir.path().join("engine"), b"built from A").unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "engine"]);
+        git(&["commit", "-q", "-m", "A"]);
+
+        let recipe = InstallRecipe::SourceBuild(llmctl_core::SourceBuildRecipe {
+            name: "ds4".into(),
+            root: root.clone(),
+            git: "https://example.com/ds4.git".into(),
+            git_ref: None,
+            build: "true".into(),
+            binary: "engine".into(),
+            version_arg: None,
+            version_pattern: None,
+        });
+        let def = external_workload();
+        assert!(matches!(def.ownership, llmctl_core::Ownership::External));
+        let pinned = probe(&recipe, &def).await.unwrap();
+        assert_eq!(pinned.interpreter.as_deref(), Some(dir.path().join("engine").to_str().unwrap()));
+        let Some(VersionFact::SourceBuild { dir: d, commit, binary_digest, .. }) = &pinned.fact else {
+            panic!("expected a source-build fact: {:?}", pinned.fact);
+        };
+        assert_eq!(d, &root);
+        assert_eq!(commit.as_ref().map(String::len), Some(40), "{commit:?}");
+        assert!(binary_digest.starts_with("sha256:"));
+
+        // A rebuild from a new commit moves both facts.
+        std::fs::write(dir.path().join("engine"), b"built from B").unwrap();
+        git(&["commit", "-q", "-am", "B"]);
+        let live = probe(&recipe, &def).await.unwrap();
+        let diffs = version_drift(&pinned, &live);
+        assert_eq!(diffs.len(), 1, "{diffs:?}");
+        assert_eq!(diffs[0].field, "version.fact");
     }
 }

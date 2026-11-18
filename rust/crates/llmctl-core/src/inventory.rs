@@ -161,6 +161,19 @@ pub struct WorkloadDefinition {
     /// in the inventory file only — no API registers a command.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<Hook>,
+    /// Extra files whose content belongs to this install's identity and
+    /// that no `Exec*` line names: an engine binary a launcher execs, or
+    /// a binary under a system prefix (`/usr/local/bin/ollama`). Absolute
+    /// paths; their digests are pinned next to the `Exec*` digests once
+    /// the workload has a recipe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pin_files: Vec<String>,
+    /// Version facts recorded for a workload llmctl-next does not manage
+    /// (ownership external, e.g. ds4 on m5). Drift against them is
+    /// reported by `version`; nothing is guarded, because there is no
+    /// start to refuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_version: Option<crate::launch::VersionRef>,
 }
 
 /// When a companion hook runs, relative to its workload's unit.
@@ -448,6 +461,19 @@ impl HostInventory {
                     });
                 }
             }
+            if let Some(bad) = w.pin_files.iter().find(|p| !p.starts_with('/')) {
+                return Err(CoreError::InvalidConfig {
+                    workload: w.name.to_string(),
+                    reason: format!("pin_files entry {bad:?} is not an absolute path"),
+                });
+            }
+            if !w.pin_files.is_empty() && w.recipe.is_none() {
+                return Err(CoreError::InvalidConfig {
+                    workload: w.name.to_string(),
+                    reason: "pin_files needs a recipe: files are pinned with the install's version facts"
+                        .into(),
+                });
+            }
         }
         Ok(())
     }
@@ -483,6 +509,8 @@ mod tests {
                 readiness_timeout_secs: None,
                 gpu_claim: Default::default(),
                 hooks: Vec::new(),
+                pin_files: Vec::new(),
+                observed_version: None,
             }],
             stores: Vec::new(),
             revision: 7,
@@ -687,4 +715,22 @@ mod tests {
             "explicit kind is kept as written"
         );
     }
+    #[test]
+    fn pin_files_are_absolute_and_need_a_recipe() {
+        let mut inv = inv();
+        inv.workloads[0].pin_files = vec!["/usr/local/bin/ollama".into()];
+        let err = inv.validate().unwrap_err().to_string();
+        assert!(err.contains("pin_files needs a recipe"), "{err}");
+
+        inv.workloads[0].recipe = Some(crate::InstallRecipe::External(crate::ExternalRecipe {
+            name: "ollama".into(),
+            note: None,
+        }));
+        inv.validate().unwrap();
+
+        inv.workloads[0].pin_files = vec!["bin/ollama".into()];
+        let err = inv.validate().unwrap_err().to_string();
+        assert!(err.contains("not an absolute path"), "{err}");
+    }
+
 }

@@ -261,6 +261,13 @@ impl ControlClient {
         self.get_json(&format!("/v1/lanes/{workload}")).await
     }
 
+    pub async fn lanes_version(
+        &self,
+        req: &crate::wire::LaneVersionRequest,
+    ) -> Result<crate::wire::LaneVersionResponse, ClientError> {
+        self.post_json("/v1/lanes/version", req).await
+    }
+
     pub async fn lanes_swap(
         &self,
         req: &crate::wire::LaneSwapRequest,
@@ -393,6 +400,15 @@ impl ControlClient {
     pub async fn version_report(&self, workload: &str) -> Result<serde_json::Value, ClientError> {
         self.get_json(&format!("/v1/workloads/{workload}/version"))
             .await
+    }
+
+    /// Record what the install reports now as the workload's pin.
+    pub async fn version_repin(&self, workload: &str) -> Result<serde_json::Value, ClientError> {
+        self.post_json(
+            &format!("/v1/workloads/{workload}/version/pin"),
+            &serde_json::json!({}),
+        )
+        .await
     }
 
     pub async fn logs(&self, req: &LogsRequest) -> Result<LogsResponse, ClientError> {

@@ -186,6 +186,8 @@ fn write_inventory(dir: &Path, unit: &str, port: u16, model: &str) {
             readiness_timeout_secs: None,
             gpu_claim: Default::default(),
             hooks: Vec::new(),
+            pin_files: Vec::new(),
+            observed_version: None,
         }],
         stores: Vec::new(),
         revision: 1,
@@ -2167,6 +2169,16 @@ HTTPServer(("127.0.0.1", port), H).serve_forever()
         text.contains("\"running\": \"0.1\"") && text.contains("0.1"),
         "{text}"
     );
+
+    // A stopped vendor server reports no version. That is not drift: the
+    // start guard runs the same comparison, and it must let the app start.
+    let (code, text) = cli_code(&d.socket, &["stop", "adopted", "--wait"]);
+    assert_eq!(code, Some(0), "{text}");
+    let (code, text) = cli_code(&d.socket, &["version", "adopted"]);
+    assert_eq!(code, Some(0), "a stopped server is not drift: {text}");
+    assert!(text.contains("\"running\": null"), "{text}");
+    let (code, text) = cli_code(&d.socket, &["run", "adopted", "--wait"]);
+    assert_eq!(code, Some(0), "the pinned app starts again: {text}");
 
     // The vendor "auto-updates": the running version moves off the pin.
     std::fs::write(&version_file, "0.2\n").unwrap();

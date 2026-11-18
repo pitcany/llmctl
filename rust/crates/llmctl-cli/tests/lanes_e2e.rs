@@ -431,3 +431,102 @@ models:
     let (ok, text) = cli(s, &["lanes", "swap", "swap", "nope"]);
     assert!(!ok && text.contains("no lane"), "{text}");
 }
+
+/// Version pins per lane: nothing is pinned until the owner says so, an
+/// engine replaced in place is drift, a version swap written through
+/// `lanes macro` moves the pin with it, and a hand edit does not.
+#[test]
+fn lane_versions_are_pinned_drift_is_reported_and_a_macro_swap_repins() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = |version: &str, body: &str| {
+        let bin = dir.path().join(format!("eng-{version}")).join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("serve");
+        std::fs::write(&exe, body).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exe.display().to_string()
+    };
+    let eng1 = engine("1.0", "#!/bin/sh\n# one\n");
+    let eng2 = engine("2.0", "#!/bin/sh\n# two\n");
+    let config = dir.path().join("config.yaml");
+    let log = dir.path().join("swap.log");
+    let text = CONFIG.replace("/opt/eng-1.0/bin/serve", &eng1);
+    std::fs::write(&config, &text).unwrap();
+    std::fs::write(&log, "").unwrap();
+    let swap = fake_swap(config.clone(), log.clone());
+    let d = spawn(&dir.path().join("agent"), swap.port);
+    let s = &d.socket;
+    let cfg_s = config.to_str().unwrap();
+    let log_s = log.to_str().unwrap();
+    let import = |confirm: Option<&str>| {
+        let mut args = vec!["lanes", "import", "swap", "--config", cfg_s, "--log", log_s];
+        if let Some(c) = confirm {
+            args.extend(["--confirm", c]);
+        }
+        cli(s, &args)
+    };
+    let (ok, out) = import(None);
+    assert!(ok, "{out}");
+    let (ok, out) = import(Some(&token_after(&out, "--confirm ")));
+    assert!(ok, "{out}");
+
+    // Nothing is pinned by importing.
+    let (ok, out) = cli(s, &["lanes", "version", "swap"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("2 lanes, 0 pinned, 0 drifting"), "{out}");
+    assert!(out.contains("not pinned") && out.contains("--pin"), "{out}");
+    let (_, out) = cli(s, &["lanes", "show", "swap"]);
+    assert!(out.contains("(no pin)"), "{out}");
+
+    // The owner pins what the lanes run now.
+    let (ok, out) = cli(s, &["lanes", "version", "swap", "--pin"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("2 lanes, 2 pinned, 0 drifting"), "{out}");
+    assert!(out.contains("pinned now: fast, big"), "{out}");
+    let (_, out) = cli(s, &["lanes", "show", "swap"]);
+    assert!(out.contains("serve ") && !out.contains("(no pin)"), "{out}");
+    // Pinning again changes nothing.
+    let (ok, out) = cli(s, &["lanes", "version", "swap", "--pin"]);
+    assert!(ok && !out.contains("pinned now"), "{out}");
+
+    // The engine is replaced in place: same path, different program.
+    std::fs::write(&eng1, "#!/bin/sh\n# one, patched\n").unwrap();
+    let (ok, out) = cli(s, &["lanes", "version", "swap"]);
+    assert!(!ok, "drift is a finding: {out}");
+    assert!(out.contains("2 drifting") && out.contains("DRIFT"), "{out}");
+    assert!(out.contains("version.exec_digests"), "{out}");
+    let (ok, out) = cli(s, &["lanes", "version", "swap", "--lane", "fast"]);
+    assert!(!ok && out.contains("1 lanes, 1 pinned, 1 drifting") && !out.contains("big"), "{out}");
+    let (ok, out) = cli(s, &["lanes", "version", "swap", "--lane", "nope"]);
+    assert!(!ok && out.contains("no lane nope"), "{out}");
+    std::fs::write(&eng1, "#!/bin/sh\n# one\n").unwrap();
+    let (ok, out) = cli(s, &["lanes", "version", "swap"]);
+    assert!(ok && out.contains("0 drifting"), "{out}");
+
+    // A version swap through llmctl-next: the write is the acceptance, so
+    // the pins follow to the new engine.
+    let (ok, out) = cli(s, &["lanes", "macro", "swap", "eng", &eng2]);
+    assert!(ok, "{out}");
+    let plan = token_after(&out, "--confirm ");
+    let (ok, out) = cli(s, &["lanes", "macro", "swap", "eng", &eng2, "--confirm", &plan, "--wait"]);
+    assert!(ok, "{out}");
+    let (ok, out) = cli(s, &["lanes", "version", "swap", "--json"]);
+    assert!(ok, "{out}");
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    for lane in report["lanes"].as_array().unwrap() {
+        assert_eq!(lane["drift"].as_array().unwrap().len(), 0, "{lane}");
+        assert_eq!(lane["pinned"]["exec_digests"][0][0], eng2.as_str(), "{lane}");
+    }
+
+    // A hand edit back to the old engine, re-imported: the records follow
+    // the file, the pins do not, so the lanes report drift.
+    let now = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, now.replace(&eng2, &eng1)).unwrap();
+    let (ok, out) = import(None);
+    assert!(ok, "{out}");
+    let (ok, out) = import(Some(&token_after(&out, "--confirm ")));
+    assert!(ok, "{out}");
+    let (ok, out) = cli(s, &["lanes", "version", "swap"]);
+    assert!(!ok && out.contains("2 drifting"), "{out}");
+}

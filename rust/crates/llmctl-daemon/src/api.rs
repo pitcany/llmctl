@@ -52,11 +52,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/upgrades", post(upgrade_list))
         .route("/v1/installs/plan", post(install_plan))
         .route("/v1/workloads/{name}/version", get(workload_version))
+        .route("/v1/workloads/{name}/version/pin", post(workload_version_pin))
         .route("/v1/workloads/{name}/engine", get(workload_engine))
         .route("/v1/unloads", post(admit_unload))
         .route("/v1/lanes/import", post(lanes_import))
         .route("/v1/lanes/edit", post(lanes_edit))
         .route("/v1/lane-swaps", post(lanes_swap))
+        .route("/v1/lanes/version", post(lanes_version))
         .route("/v1/lanes/{workload}", get(lanes_status))
         .route("/v1/logs", post(logs))
         .layer(axum::middleware::from_fn(under_lease_scope))
@@ -555,6 +557,20 @@ async fn lanes_status(
     Ok(Json(crate::lanes::status(&state, &workload).await.map_err(ApiError::from_lanes)?))
 }
 
+/// Version facts per lane; with `pin`, record the live facts as the pin.
+async fn lanes_version(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::LaneVersionRequest>,
+) -> Result<Json<llmctl_client::wire::LaneVersionResponse>, ApiError> {
+    check_protocol(req.protocol)?;
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    Ok(Json(
+        crate::lane_version::versions(&state, req)
+            .await
+            .map_err(ApiError::from_lanes)?,
+    ))
+}
+
 /// Plan lane edits, or (with the plan digest) admit the write.
 async fn lanes_edit(
     State(state): State<Arc<AppState>>,
@@ -916,13 +932,10 @@ async fn workload_version(
             let live = crate::version::probe(recipe, def)
                 .await
                 .map_err(|e| OpsError::Engine(format!("probing {name}: {e}")))?;
-            let pinned = match &def.ownership {
-                llmctl_core::Ownership::Managed { version, .. } => version.clone(),
-                _ => None,
-            };
-            let drift = match (&pinned, def.ownership.clone()) {
-                (Some(p), _) => crate::version::version_drift(p, &live),
-                (None, _) => Vec::new(),
+            let pinned = crate::pin::pinned_version(def).cloned();
+            let drift = match &pinned {
+                Some(p) => crate::version::version_drift(p, &live),
+                None => Vec::new(),
             };
             json!({
                 "workload": name,
@@ -949,6 +962,18 @@ async fn workload_version(
             "note": "no recipe; version pinning is off",
         }),
     };
+    Ok(Json(report))
+}
+
+/// Record what the install reports now as its pin (`version --repin`).
+async fn workload_version_pin(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    let report = crate::pin::repin(&state, &name)
+        .await
+        .map_err(|e| ApiError::from_ops(&e))?;
     Ok(Json(report))
 }
 
