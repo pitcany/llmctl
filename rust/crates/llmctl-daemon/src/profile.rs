@@ -22,6 +22,9 @@ use sha2::{Digest, Sha256};
 /// same mode). One slot: it only ever needs to undo the running operation.
 pub const BACKUP_SUFFIX: &str = ".llmctl-previous";
 
+/// Marks the temp file a swap writes before the rename (`<env>.llmctl-tmp-<pid>`).
+const TMP_INFIX: &str = "llmctl-tmp-";
+
 /// A profile is a handful of `KEY=value` lines; anything larger is not one.
 const MAX_PROFILE_BYTES: u64 = 1024 * 1024;
 
@@ -95,8 +98,29 @@ pub async fn resolve(
     if source == target_real {
         return Err(format!("{} is the active env file itself, not a profile", source.display()));
     }
-    if source.to_string_lossy().ends_with(BACKUP_SUFFIX) {
-        return Err(format!("{} is llmctl's own backup, not a profile", source.display()));
+    // A profile of `vllm-engine.env` is named `vllm-engine.env.<profile>`.
+    // Without this, another unit's env file in the same directory (and
+    // whatever it holds) could be made this unit's env.
+    let env_name = target_real
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let source_name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let suffix = source_name
+        .strip_prefix(&env_name)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .filter(|rest| !rest.is_empty());
+    let Some(suffix) = suffix else {
+        return Err(format!(
+            "{} is not a profile of {env_name}: profiles are named {env_name}.<profile>",
+            source.display()
+        ));
+    };
+    if source_name.ends_with(BACKUP_SUFFIX) || suffix.starts_with(TMP_INFIX) {
+        return Err(format!("{} is llmctl's own working file, not a profile", source.display()));
     }
     let bytes = tokio::fs::read(&source)
         .await
@@ -141,19 +165,25 @@ pub async fn apply_file(
             "{source} is not the file this plan was made for (expected {source_digest}, found {found})"
         ));
     }
-    // Keep the env file's own mode (it may hold credentials); 0600 when
-    // there is nothing to copy it from.
-    let mode = tokio::fs::metadata(path)
-        .await
-        .map(|m| m.permissions().mode() & 0o777)
-        .unwrap_or(0o600);
+    // Env files may hold credentials. Contents never become more readable
+    // by moving: the new env gets the stricter of the env file's mode and
+    // the profile's own, and the backup keeps the mode of the env it copies.
+    // 0600 when a mode cannot be read.
+    let mode_of = |p: PathBuf| async move {
+        tokio::fs::metadata(&p)
+            .await
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or(0o600)
+    };
+    let env_mode = mode_of(path.to_path_buf()).await;
+    let new_mode = env_mode & mode_of(PathBuf::from(source)).await;
     if let Some(backup) = backup {
         let current = tokio::fs::read(path)
             .await
             .map_err(|e| format!("reading {}: {e}", path.display()))?;
-        write_replacing(Path::new(backup), &current, mode).await?;
+        write_replacing(Path::new(backup), &current, env_mode).await?;
     }
-    write_replacing(path, &bytes, mode).await?;
+    write_replacing(path, &bytes, new_mode).await?;
     Ok("swapped")
 }
 
@@ -161,7 +191,7 @@ pub async fn apply_file(
 /// reader never sees half an env file.
 async fn write_replacing(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let tmp = PathBuf::from(format!("{}.llmctl-tmp-{}", path.display(), std::process::id()));
+    let tmp = PathBuf::from(format!("{}.{TMP_INFIX}{}", path.display(), std::process::id()));
     let io = |what: &str, e: std::io::Error| format!("{what} {}: {e}", path.display());
     let _ = tokio::fs::remove_file(&tmp).await;
     {
@@ -273,6 +303,9 @@ mod tests {
         std::fs::write(d.join("coder.env"), "A=1\n").unwrap();
         std::fs::write(d.join("coder.env.fast"), "A=2\n").unwrap();
         std::fs::write(d.join(format!("coder.env{BACKUP_SUFFIX}")), "A=0\n").unwrap();
+        for other in ["coder.env.llmctl-tmp-4242", "helper.env", "coder.envx"] {
+            std::fs::write(d.join(other), "A=7\n").unwrap();
+        }
         let other = tempfile::tempdir().unwrap();
         std::fs::write(other.path().join("evil.env"), "A=9\n").unwrap();
         let def = managed(&d, &["coder.env"]);
@@ -298,7 +331,11 @@ mod tests {
             (p("nope.env"), "m", "nope.env"),
             (other.path().join("evil.env").display().to_string(), "m", "next to the env file"),
             (p("coder.env"), "m", "the active env file itself"),
-            (p(&format!("coder.env{BACKUP_SUFFIX}")), "m", "own backup"),
+            (p(&format!("coder.env{BACKUP_SUFFIX}")), "m", "own working file"),
+            (p("coder.env.llmctl-tmp-4242"), "m", "own working file"),
+            // Another unit's env file in the same directory is not a profile.
+            (p("helper.env"), "m", "profiles are named coder.env.<profile>"),
+            (p("coder.envx"), "m", "profiles are named coder.env.<profile>"),
             (d.display().to_string(), "m", "not a regular file"),
         ];
         for (src, model, why) in refused {
@@ -321,6 +358,7 @@ mod tests {
         std::fs::write(p("e.env"), "OLD=1\n").unwrap();
         std::fs::set_permissions(p("e.env"), std::fs::Permissions::from_mode(0o640)).unwrap();
         std::fs::write(p("e.env.new"), "NEW=1\n").unwrap();
+        std::fs::set_permissions(p("e.env.new"), std::fs::Permissions::from_mode(0o600)).unwrap();
         let (old, new) = (digest(b"OLD=1\n"), digest(b"NEW=1\n"));
 
         // A source that changed since the plan: refused, nothing touched.
@@ -334,10 +372,11 @@ mod tests {
         assert_eq!(apply_file(&p("e.env"), &p("e.env.new"), &new, Some(&p("e.bak"))).await, Ok("swapped"));
         assert_eq!(std::fs::read_to_string(p("e.env")).unwrap(), "NEW=1\n");
         assert_eq!(std::fs::read_to_string(p("e.bak")).unwrap(), "OLD=1\n");
-        // Both keep the env file's mode; no temp file is left behind.
-        for f in ["e.env", "e.bak"] {
-            assert_eq!(std::fs::metadata(p(f)).unwrap().permissions().mode() & 0o777, 0o640, "{f}");
-        }
+        // The profile was 0600 (set below before the swap): its contents do
+        // not become group-readable by landing in a 0640 env file. The
+        // backup keeps the old env's mode. No temp file is left behind.
+        let mode = |f: &str| std::fs::metadata(p(f)).unwrap().permissions().mode() & 0o777;
+        assert_eq!((mode("e.env"), mode("e.bak")), (0o600, 0o640));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
 
         // Again: already in place, and the backup is not overwritten with
