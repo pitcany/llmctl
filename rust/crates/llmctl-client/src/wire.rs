@@ -321,6 +321,11 @@ pub struct AdmitRequest {
     /// footprint differs, admission returns a revised plan instead of
     /// executing an obsolete confirmation.
     pub expected_stop_targets: Option<Vec<String>>,
+    /// Stop serving workloads even while llm-router has requests in flight
+    /// on them (M4c request safety). Without it the agent waits a bounded
+    /// time, then refuses with `requests_in_flight`.
+    #[serde(default)]
+    pub force: bool,
 }
 
 // ---- llama-swap lane records (M4b step 4) ----------------------------------------
@@ -678,4 +683,7 @@ pub mod codes {
     pub const HOST_LOCK_BUSY: &str = "host_lock_busy";
     /// A tool holds a fresh lane lease this operation would disturb (M4c).
     pub const LANE_LEASED: &str = "lane_leased";
+    /// llm-router has requests in flight on a workload this operation
+    /// would stop; retry, or force it (M4c).
+    pub const REQUESTS_IN_FLIGHT: &str = "requests_in_flight";
 }

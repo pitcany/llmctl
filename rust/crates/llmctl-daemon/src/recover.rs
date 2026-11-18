@@ -148,6 +148,7 @@ async fn maybe_recover(
                 workload: def.name.to_string(),
                 expected_revision: None,
                 expected_stop_targets: None,
+                force: false,
                 plan_override: None,
             })
             .await

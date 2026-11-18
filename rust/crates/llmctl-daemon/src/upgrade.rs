@@ -990,6 +990,7 @@ pub async fn promote(
             workload: name.to_string(),
             expected_revision: None,
             expected_stop_targets: None,
+            force: false,
             plan_override: Some(plan),
         })
         .await;
@@ -1255,6 +1256,7 @@ async fn rollback_admit(
             workload: name.to_string(),
             expected_revision: None,
             expected_stop_targets: None,
+            force: false,
             plan_override: Some(plan),
         })
         .await;

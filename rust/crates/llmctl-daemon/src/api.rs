@@ -297,6 +297,7 @@ async fn admit_operation(
             workload: req.workload,
             expected_revision: req.expected_revision,
             expected_stop_targets: req.expected_stop_targets,
+            force: req.force,
             plan_override: None,
         })
         .await?;
@@ -346,6 +347,7 @@ async fn admit_unload(
             workload: req.workload,
             expected_revision: None,
             expected_stop_targets: None,
+            force: false,
             plan_override: Some(provisional),
         })
         .await?;

@@ -375,6 +375,7 @@ async fn drill_lost_ack_resolves_by_key_without_duplicate_effect() {
         workload: "drill".into(),
         expected_revision: Some(plan.revision),
         expected_stop_targets: Some(plan.stop_targets.clone()),
+        force: false,
     })
     .unwrap();
     let request = format!(
@@ -415,6 +416,7 @@ async fn drill_lost_ack_resolves_by_key_without_duplicate_effect() {
                     workload: "drill".into(),
                     expected_revision: Some(plan.revision),
                     expected_stop_targets: Some(plan.stop_targets.clone()),
+                    force: false,
                 })
                 .await
                 .expect("first real admit");
@@ -434,6 +436,7 @@ async fn drill_lost_ack_resolves_by_key_without_duplicate_effect() {
             workload: "drill".into(),
             expected_revision: Some(plan.revision),
             expected_stop_targets: Some(plan.stop_targets.clone()),
+            force: false,
         })
         .await
         .expect("replay admit");
@@ -518,6 +521,7 @@ async fn drill_stale_plan_and_protocol_mismatch_refused() {
             workload: "drill".into(),
             expected_revision: Some(0),
             expected_stop_targets: None,
+            force: false,
         })
         .await
         .expect_err("stale plan refused");
@@ -536,6 +540,7 @@ async fn drill_stale_plan_and_protocol_mismatch_refused() {
             workload: "drill".into(),
             expected_revision: Some(status.inventory_revision),
             expected_stop_targets: None,
+            force: false,
         })
         .await
         .expect_err("protocol mismatch refused");

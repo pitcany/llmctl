@@ -471,6 +471,7 @@ pub async fn apply(
             workload: workload.to_string(),
             expected_revision: None,
             expected_stop_targets: None,
+            force: false,
             plan_override: Some(plan),
         })
         .await?)

@@ -61,6 +61,10 @@ enum Command {
         /// Override the idempotency key (default run-<name>-r<revision>).
         #[arg(long)]
         key: Option<String>,
+        /// Do not wait for requests llm-router has in flight on the
+        /// workloads this stops; cut them.
+        #[arg(long)]
+        force: bool,
     },
     /// Stop a workload (records a manual-stop intent that recovery respects).
     Stop {
@@ -69,6 +73,10 @@ enum Command {
         wait: bool,
         #[arg(long)]
         key: Option<String>,
+        /// Do not wait for requests llm-router has in flight on the
+        /// workloads this stops; cut them.
+        #[arg(long)]
+        force: bool,
     },
     /// Unload one model from a running vendor service (Ollama, LM Studio)
     /// without stopping it; confirmed through the engine's loaded list.
@@ -100,6 +108,10 @@ enum Command {
         /// by an earlier attempt to retry that attempt instead.
         #[arg(long)]
         key: Option<String>,
+        /// Do not wait for requests llm-router has in flight on the
+        /// workloads this stops; cut them.
+        #[arg(long)]
+        force: bool,
     },
     /// List operations from the journal.
     Ops {
@@ -379,6 +391,9 @@ fn exit_code_for_client_error(e: &ClientError) -> u8 {
             | codes::ADOPTION_UNVERIFIED
             | codes::OWNERSHIP_REFUSED
             | codes::UPGRADE_REFUSED
+            | codes::HOST_LOCK_BUSY
+            | codes::LANE_LEASED
+            | codes::REQUESTS_IN_FLIGHT
             | codes::UNSUPPORTED => 4,
             _ => 1,
         },
@@ -507,10 +522,14 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             dry_run,
             wait,
             key,
-        } => cmd_mutate(cli, OpKind::Run, &name, dry_run, wait, key).await,
-        Command::Stop { name, wait, key } => {
-            cmd_mutate(cli, OpKind::Stop, &name, false, wait, key).await
-        }
+            force,
+        } => cmd_mutate(cli, OpKind::Run, &name, dry_run, wait, key, force).await,
+        Command::Stop {
+            name,
+            wait,
+            key,
+            force,
+        } => cmd_mutate(cli, OpKind::Stop, &name, false, wait, key, force).await,
         Command::Unload {
             name,
             model,
@@ -523,7 +542,8 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             dry_run,
             wait,
             key,
-        } => cmd_mutate(cli, OpKind::Restart, &name, dry_run, wait, key).await,
+            force,
+        } => cmd_mutate(cli, OpKind::Restart, &name, dry_run, wait, key, force).await,
         Command::Ops { json } => cmd_ops(cli, json).await,
         Command::Op { id, watch } => cmd_op(cli, &id, watch).await,
         Command::Cancel { id } => cmd_cancel(cli, &id).await,
@@ -964,6 +984,7 @@ async fn cmd_mutate(
     dry_run: bool,
     wait: bool,
     key: Option<String>,
+    force: bool,
 ) -> Result<u8, CliError> {
     let client = connect(cli)?;
     ensure_protocol(&client).await?;
@@ -1003,6 +1024,7 @@ async fn cmd_mutate(
             workload: name.to_string(),
             expected_revision: Some(plan_resp.revision),
             expected_stop_targets: Some(plan_resp.stop_targets.clone()),
+            force,
         })
         .await
     {
@@ -1036,6 +1058,7 @@ async fn cmd_mutate(
                             workload: name.to_string(),
                             expected_revision: Some(plan_resp.revision),
                             expected_stop_targets: Some(plan_resp.stop_targets.clone()),
+                            force,
                         })
                         .await?
                 }

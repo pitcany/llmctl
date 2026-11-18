@@ -82,6 +82,12 @@ pub enum OpsError {
         what: String,
         path: String,
     },
+    #[error("{workload}: llm-router has requests in flight on {}; waited {waited_ms} ms. Retry when they finish, or pass --force to cut them", busy.iter().map(|(w, n)| format!("{w} ({n})")).collect::<Vec<_>>().join(", "))]
+    RequestsInFlight {
+        workload: String,
+        busy: Vec<(String, u64)>,
+        waited_ms: u64,
+    },
     #[error("unknown operation: {0}")]
     UnknownOperation(String),
     #[error("invalid state: {0}")]
@@ -119,6 +125,9 @@ impl OpsError {
                 (llmctl_client::wire::codes::HOST_LOCK_BUSY, 409)
             }
             OpsError::LaneLeased { .. } => (llmctl_client::wire::codes::LANE_LEASED, 409),
+            OpsError::RequestsInFlight { .. } => {
+                (llmctl_client::wire::codes::REQUESTS_IN_FLIGHT, 409)
+            }
             OpsError::DefinitionDrift { .. } => (llmctl_client::wire::codes::DEFINITION_DRIFT, 409),
             OpsError::UnknownOperation(_) => (llmctl_client::wire::codes::UNKNOWN_OPERATION, 404),
             OpsError::InvalidState(_) => (llmctl_client::wire::codes::INVALID_STATE, 409),
@@ -152,6 +161,9 @@ impl OpsError {
                 ..
             } => Some(json!({ "workload": workload, "gpu": gpu, "occupant": desc })),
             OpsError::HostLockBusy { holder, .. } => Some(json!({ "holder": holder })),
+            OpsError::RequestsInFlight { busy, .. } => Some(json!({
+                "in_flight": busy.iter().map(|(w, n)| json!({"workload": w, "requests": n})).collect::<Vec<_>>(),
+            })),
             OpsError::LaneLeased {
                 holder, pid, what, path, ..
             } => Some(json!({ "holder": holder, "pid": pid, "lease": what, "path": path })),
@@ -173,6 +185,8 @@ pub struct AdmitParams {
     pub workload: String,
     pub expected_revision: Option<u64>,
     pub expected_stop_targets: Option<Vec<String>>,
+    /// Skip the in-flight request wait (M4c request safety).
+    pub force: bool,
     /// Upgrade promotions carry their plan (built by the upgrade module
     /// against fresh observations under the admission lock); required for
     /// `OpKind::Upgrade`, ignored otherwise.
@@ -379,6 +393,60 @@ impl OpManager {
                 waited_ms: wait.as_millis() as u64,
             }),
             Err(LockRefusal::Io(e)) => Err(OpsError::HostLockUnavailable(e)),
+        }
+    }
+
+    /// Request safety (M4c item 6): every workload this plan stops, or
+    /// unloads a model from, must have no requests in flight through
+    /// llm-router. Waits a bounded time for them, then refuses. Only a
+    /// positive count blocks; a router that cannot say blocks nothing.
+    async fn wait_for_requests(
+        &self,
+        inv: &HostInventory,
+        def: &llmctl_core::WorkloadDefinition,
+        plan: &Plan,
+    ) -> Result<(), OpsError> {
+        use crate::inflight;
+        let mut stopping: Vec<(String, u16)> = Vec::new();
+        for step in &plan.steps {
+            let (PlanStep::StopUnit { workload, .. } | PlanStep::UnloadModel { workload, .. }) =
+                step
+            else {
+                continue;
+            };
+            if stopping.iter().any(|(n, _)| n == workload.as_str()) {
+                continue;
+            }
+            if let Some(w) = inv.workload(workload) {
+                stopping.push((w.name.to_string(), w.port));
+            }
+        }
+        if stopping.is_empty() {
+            return Ok(());
+        }
+        let Some(router) = inflight::router_port(&inv.platform, def) else {
+            return Ok(());
+        };
+        let budget = inflight::wait_budget();
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            let Some(counts) = inflight::in_flight(router, std::time::Duration::from_secs(3)).await
+            else {
+                tracing::debug!(router, "llm-router gave no in-flight counts; not blocking");
+                return Ok(());
+            };
+            let busy = inflight::busy(&counts, &stopping);
+            if busy.is_empty() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(OpsError::RequestsInFlight {
+                    workload: def.name.to_string(),
+                    busy,
+                    waited_ms: budget.as_millis() as u64,
+                });
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
     }
 
@@ -598,6 +666,12 @@ impl OpManager {
                     revised: Box::new(plan),
                 });
             }
+        }
+
+        // An explicit `unload` names one model on purpose; the wait covers
+        // stops and the unloads a run or restart plans on its own.
+        if !params.force && params.kind != OpKind::Unload {
+            self.wait_for_requests(&inv, def, &plan).await?;
         }
 
         let now = Utc::now();

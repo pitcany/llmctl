@@ -147,6 +147,7 @@ fn admit_req(kind: OpKind, workload: &str, key: &str) -> AdmitRequest {
         workload: workload.into(),
         expected_revision: None,
         expected_stop_targets: None,
+        force: false,
     }
 }
 
@@ -560,6 +561,7 @@ async fn stale_destructive_footprint_returns_revised_plan() {
             workload: "big".into(),
             expected_revision: Some(plan.revision),
             expected_stop_targets: Some(plan.stop_targets.clone()),
+            force: false,
         })
         .await;
     match stale {
@@ -1256,6 +1258,115 @@ async fn gpu_operations_take_the_host_lock_and_honour_the_lane_lease() {
     )
     .unwrap();
     run_to_success(&d, "coder", "lease-6").await;
+}
+
+// ---- M4c: request safety (in-flight requests from llm-router) ----------------
+
+/// A stand-in for llm-router's `GET /running`: in-flight counts per
+/// upstream, set by the test. Returns the port and the shared counts.
+async fn fake_router() -> (u16, std::sync::Arc<std::sync::Mutex<serde_json::Value>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let counts = std::sync::Arc::new(std::sync::Mutex::new(serde_json::json!({})));
+    let shared = counts.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let mut buf = vec![0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let body = serde_json::json!({
+                "loaded": [],
+                "idle_revert": {"in_flight": shared.lock().unwrap().clone(), "deferred": null}
+            })
+            .to_string();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(body.as_bytes()).await;
+        }
+    });
+    (port, counts)
+}
+
+/// A stop, restart or eviction of a workload that is answering requests
+/// through the router waits for them, then refuses — unless forced.
+#[tokio::test]
+async fn stops_wait_for_in_flight_requests_or_refuse_without_force() {
+    let (router_port, counts) = fake_router().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("control.sock");
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(&socket).arg("--data-dir").arg(dir.path()).arg("daemon")
+        .env("LLMCTL_NEXT_ROUTER", router_port.to_string())
+        .env("LLMCTL_NEXT_INFLIGHT_WAIT_MS", "700")
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let client = d.client();
+    let st = client.status().await.unwrap();
+    let port_of = |name: &str| st.workloads.iter().find(|w| w.name == name).unwrap().port;
+    let upstream = |name: &str| format!("http://127.0.0.1:{}", port_of(name));
+    let set = |v: serde_json::Value| *counts.lock().unwrap() = v;
+    let running = |st: &llmctl_client::wire::StatusResponse, name: &str| {
+        let w = st.workloads.iter().find(|w| w.name == name).unwrap();
+        format!("{:?}", w.process).contains("Running")
+    };
+
+    // Starting something that stops nobody never asks.
+    set(serde_json::json!({upstream("coder"): 3}));
+    run_to_success(&d, "coder", "rs-setup").await;
+
+    // 1. Two requests in flight on coder: a stop waits out its bound, then
+    //    refuses, naming the workload and the count. Nothing is stopped.
+    set(serde_json::json!({upstream("coder"): 2}));
+    let started = std::time::Instant::now();
+    match client.admit(admit_req(OpKind::Stop, "coder", "rs-1")).await {
+        Err(ClientError::Api { code, message, .. }) => {
+            assert_eq!(code, codes::REQUESTS_IN_FLIGHT, "{message}");
+            assert!(message.contains("coder") && message.contains('2'), "{message}");
+            assert!(message.contains("--force"), "{message}");
+        }
+        other => panic!("expected requests_in_flight, got {other:?}"),
+    }
+    assert!(started.elapsed() >= Duration::from_millis(600), "did not wait: {:?}", started.elapsed());
+    assert!(running(&client.status().await.unwrap(), "coder"));
+
+    // 2. The requests finish inside the bound: the stop is admitted.
+    let finish = counts.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        *finish.lock().unwrap() = serde_json::json!({});
+    });
+    let resp = client.admit(admit_req(OpKind::Stop, "coder", "rs-2")).await.unwrap();
+    assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
+
+    // 3. An eviction counts too: `big` needs coder's card, coder is busy.
+    run_to_success(&d, "coder", "rs-3-setup").await;
+    set(serde_json::json!({upstream("coder"): 1}));
+    match client.admit(admit_req(OpKind::Run, "big", "rs-3")).await {
+        Err(ClientError::Api { code, message, .. }) => {
+            assert_eq!(code, codes::REQUESTS_IN_FLIGHT, "{message}");
+            assert!(message.contains("coder"), "{message}");
+        }
+        other => panic!("expected requests_in_flight, got {other:?}"),
+    }
+
+    // 4. Forced: admitted at once, requests or not.
+    let mut forced = admit_req(OpKind::Run, "big", "rs-4");
+    forced.force = true;
+    let started = std::time::Instant::now();
+    let resp = client.admit(forced).await.unwrap();
+    assert!(started.elapsed() < Duration::from_millis(600), "forced admit waited");
+    assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
+
+    // 5. Requests on workloads this plan does not stop, and on ports that
+    //    are nobody's, do not matter.
+    set(serde_json::json!({upstream("helper"): 4, "http://127.0.0.1:1": 9}));
+    let resp = client.admit(admit_req(OpKind::Stop, "big", "rs-5")).await.unwrap();
+    assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
 }
 
 // ---- B: bounded recovery ----------------------------------------------------
