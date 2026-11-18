@@ -2865,3 +2865,195 @@ fn stores_are_declared_and_weights_removed_only_when_nothing_names_them() {
     assert!(text.contains("no store declared"), "{text}");
     stop_daemon(child);
 }
+
+// ---- M5a: the foreign-write record ------------------------------------------
+
+/// One fake workload, adopted (managed) + one external sibling — the
+/// audit compares managed workloads only.
+fn write_managed_inventory(dir: &Path) {
+    let host = "workstation";
+    let definition = llmctl_core::LaunchDefinition::default();
+    let wl = |name: &str, port: u16| {
+        serde_json::json!({
+            "name": name, "engine": "fake", "model": format!("fake/{name}"),
+            "gpus": [{"host": host, "index": 0}], "port": port,
+            "unit": {"scope": "user", "name": format!("llmctl-next-fake-{name}.service")},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": format!("llmctl-next-fake-{name}.service")},
+            "ownership": {"kind": "external"}
+        })
+    };
+    let mut coder = wl("coder", 8100);
+    coder["ownership"] = serde_json::json!({
+        "kind": "managed", "definition": definition, "digest": "sha256:0",
+        "adopted_at": "2026-11-18T00:00:00Z", "provenance": []
+    });
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [coder, wl("helper", 8101)],
+        "revision": 1
+    }});
+    std::fs::write(dir.join("inventory.json"), inv.to_string()).unwrap();
+}
+
+async fn spawn_managed() -> DaemonGuard {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("control.sock");
+    write_managed_inventory(dir.path());
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(&socket).arg("--data-dir").arg(dir.path()).arg("daemon")
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    d
+}
+
+/// Flip the fake world behind the agent's back: the one thing no admitted
+/// operation explains.
+fn foreign_flip(d: &DaemonGuard, name: &str, patch: serde_json::Value) {
+    foreign_flip_dir(d.data_dir(), name, patch);
+}
+
+fn foreign_flip_dir(dir: &Path, name: &str, patch: serde_json::Value) {
+    let path = dir.join("world.json");
+    let mut world: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let unit = world["units"]
+        .as_object_mut().unwrap()
+        .entry(format!("user/llmctl-next-fake-{name}.service"))
+        .or_insert(serde_json::json!({}));
+    if let Some(obj) = unit.as_object_mut() {
+        for (k, v) in patch.as_object().unwrap() {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    std::fs::write(&path, world.to_string()).unwrap();
+}
+
+/// A unit flipped behind the agent's back is a finding; the same flip
+/// through an admitted operation is not (M5a tests, plan decision 1).
+#[tokio::test]
+async fn a_foreign_flip_is_a_finding_and_an_operated_flip_is_not() {
+    let d = spawn_managed().await;
+    let client = d.client();
+
+    // Baseline: both stopped.
+    let st = client.status().await.unwrap();
+    assert_eq!(st.workloads.len(), 2);
+
+    // Through the front door: an admitted run explains its own transition.
+    run_to_success(&d, "coder", "audit-op-1").await;
+    client.status().await.unwrap();
+    let audit = client.audit(None).await.unwrap();
+    assert!(audit.findings.is_empty(), "{:?}", audit.findings);
+
+    // Behind the agent's back: the unit goes away with no operation.
+    foreign_flip(&d, "coder", serde_json::json!({
+        "active": false, "pid": null, "ready_at": null, "model": null
+    }));
+    client.status().await.unwrap();
+    let audit = client.audit(None).await.unwrap();
+    assert_eq!(audit.findings.len(), 1, "{:?}", audit.findings);
+    let f = &audit.findings[0];
+    assert_eq!(f.workload, "coder");
+    assert_eq!(f.kind, "foreign_transition");
+    assert_eq!(f.what, "unit");
+    assert!(f.before_state.contains("\"running\""), "{}", f.before_state);
+    assert!(f.after_state.contains("\"stopped\""), "{}", f.after_state);
+    assert!(f.actor.is_none());
+
+    // Restarted from outside: pid change while running is a finding too.
+    foreign_flip(&d, "coder", serde_json::json!({
+        "active": true, "pid": 49999,
+        "ready_at": "2020-01-01T00:00:00Z", "model": "fake/coder"
+    }));
+    client.status().await.unwrap();
+    let audit = client.audit(None).await.unwrap();
+    assert_eq!(audit.findings.len(), 2, "{:?}", audit.findings);
+    assert!(audit.findings[0].after_state.contains("49999"), "{:?}", audit.findings[0]);
+
+    // An external workload's flips are not llmctl-next's findings.
+    foreign_flip(&d, "helper", serde_json::json!({"active": true, "pid": 50000,
+        "ready_at": "2020-01-01T00:00:00Z", "model": "fake/helper"}));
+    client.status().await.unwrap();
+    let audit = client.audit(None).await.unwrap();
+    assert_eq!(audit.findings.len(), 2, "{:?}", audit.findings);
+
+    // The CLI verb reads the same record, filtered and unfiltered.
+    let out = cli(&d.socket, &["audit", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("audit --json parses");
+    assert_eq!(parsed["findings"].as_array().unwrap().len(), 2);
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let out = cli(&d.socket, &["audit", "--since", &today]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("coder") && text.contains("2 foreign write(s)"), "{text}");
+}
+
+/// Findings live in the journal DB: an agent restart keeps them and does
+/// not re-record what it already knows (M5a tests).
+#[tokio::test]
+async fn agent_restart_keeps_findings_without_duplicating() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("control.sock");
+    write_managed_inventory(dir.path());
+    let spawn_on = || {
+        Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+            .arg("--socket").arg(&socket).arg("--data-dir").arg(dir.path()).arg("daemon")
+            .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon")
+    };
+    let mut child = spawn_on();
+    wait_socket(&socket).await;
+    let probe = |f: fn(&std::path::Path)| {} ;
+    let _ = probe;
+
+    async fn with_client<T>(socket: &Path, f: impl std::future::Future<Output = T>) -> T {
+        let client = ControlClient::connect(socket).expect("connect");
+        f.await
+    }
+    let _ = &child;
+
+    // Baseline, an explained run, then a foreign stop.
+    let client = ControlClient::connect(&socket).unwrap();
+    client.status().await.unwrap(); // baseline
+    let resp = client
+        .admit(admit_req(OpKind::Run, "coder", "audit-restart-1"))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let op = client.operation(&resp.operation.id).await.unwrap();
+        if op.status.is_terminal() {
+            assert_eq!(op.status, OpStatus::Succeeded, "{op:?}");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "run never terminal");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    client.status().await.unwrap(); // explained: no finding
+    foreign_flip_dir(dir.path(), "coder", serde_json::json!({
+        "active": false, "pid": null, "ready_at": null, "model": null
+    }));
+    client.status().await.unwrap();
+    let audit = client.audit(None).await.unwrap();
+    assert_eq!(audit.findings.len(), 1, "{:?}", audit.findings);
+
+    // Restart the agent on the same data dir.
+    child.kill().unwrap();
+    child.wait().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let mut child2 = spawn_on();
+    wait_socket(&socket).await;
+    let client = ControlClient::connect(&socket).unwrap();
+
+    // The finding survived, and the first pass after restart (baseline was
+    // persisted too) records nothing new.
+    client.status().await.unwrap();
+    let audit = client.audit(None).await.unwrap();
+    assert_eq!(audit.findings.len(), 1, "{:?}", audit.findings);
+    assert_eq!(audit.findings[0].workload, "coder");
+    child2.kill().unwrap();
+    child2.wait().unwrap();
+}

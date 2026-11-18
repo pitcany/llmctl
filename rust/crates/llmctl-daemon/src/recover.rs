@@ -64,6 +64,14 @@ pub fn spawn(state: Arc<AppState>) {
 /// One observation pass. Errors are logged by the caller, never fatal.
 async fn tick(state: &Arc<AppState>) -> Result<(), crate::ops::OpsError> {
     let inv = state.ops.inventory().await;
+
+    // The foreign-write record rides on every pass (M5a decision 1): a
+    // transition no admitted operation explains becomes a finding, even
+    // when nobody asks for status.
+    if let Ok(observations) = state.ops.engine().observe(&inv).await {
+        let _ = crate::audit::compare(state, &observations).await;
+    }
+
     let intents: std::collections::HashMap<String, DesiredIntent> = state
         .ops
         .db()

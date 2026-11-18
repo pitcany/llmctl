@@ -101,6 +101,10 @@ pub struct UnitProbe {
     pub process: ProcessState,
     pub readiness: Readiness,
     pub served_model: ServedModel,
+    /// Main pid when the service manager names one (M5a audit signal).
+    /// `None` = not asked or not nameable.
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 /// What the service manager says about a unit that is down — the recovery
@@ -371,6 +375,7 @@ impl FakeEngine {
                 process: ProcessState::Stopped,
                 readiness: Readiness::NotReady,
                 served_model: ServedModel::NotServing,
+                pid: None,
             };
         }
         let now = Utc::now();
@@ -389,6 +394,7 @@ impl FakeEngine {
             } else {
                 Readiness::Loading
             },
+            pid: unit.pid,
             served_model: model,
         }
     }
@@ -424,6 +430,7 @@ impl Engine for FakeEngine {
                         process: probe.process,
                         readiness: probe.readiness,
                         served_model: probe.served_model,
+                        pid: probe.pid,
                         gpus: if state.active {
                             def.gpus.clone()
                         } else {

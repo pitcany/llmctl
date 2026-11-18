@@ -30,6 +30,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/inventory", get(inventory))
         .route("/v1/intents", get(intents))
+        .route("/v1/audit", get(audit))
         .route("/v1/stores", get(stores))
         .route("/v1/models/acquire", post(models_acquire))
         .route("/v1/models/remove", post(models_remove))
@@ -262,6 +263,47 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     })
 }
 
+/// The foreign-write record (M5a decision 1): findings at or after
+/// `since` (RFC 3339), newest first. Read-only — findings are recorded by
+/// the observation passes, never by this call.
+async fn audit(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<llmctl_client::wire::AuditResponse>, ApiError> {
+    let since = match params.get("since") {
+        None => None,
+        Some(raw) => Some(
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .map(|t| t.with_timezone(&chrono::Utc))
+                .map_err(|e| {
+                    ApiError::from_ops(&OpsError::Invalid(format!(
+                        "since is not RFC 3339 ({raw:?}): {e}"
+                    )))
+                })?,
+        ),
+    };
+    let findings = crate::audit::list(&state, since)
+        .await
+        .map_err(|e| ApiError::from_ops(&e))?;
+    Ok(Json(llmctl_client::wire::AuditResponse {
+        host: state.host.to_string(),
+        findings: findings
+            .into_iter()
+            .map(|f| llmctl_client::wire::AuditFinding {
+                id: f.id,
+                host: f.host,
+                workload: f.workload,
+                kind: f.kind,
+                what: f.what,
+                before_state: f.before_state,
+                after_state: f.after_state,
+                actor: f.actor,
+                observed_at: f.observed_at,
+            })
+            .collect(),
+    }))
+}
+
 async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusResponse>, ApiError> {
     let inv = state.ops.inventory().await;
     let observations = state
@@ -270,6 +312,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
         .observe(&inv)
         .await
         .map_err(|e| ApiError::from_ops(&OpsError::Engine(e.to_string())))?;
+    // Every observation pass feeds the foreign-write record (M5a).
+    let _ = crate::audit::compare(&state, &observations).await;
     let intents: std::collections::HashMap<String, String> = state
         .ops
         .db()

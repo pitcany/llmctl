@@ -77,6 +77,9 @@ pub struct AppState {
     pub supervisor: Arc<dyn Supervisor>,
     /// Serializes adoption previews' scratch-unit round trips with transfers.
     pub adopt_lock: tokio::sync::Mutex<()>,
+    /// Serializes audit comparison passes (M5a): a status call and the
+    /// watcher tick must never double-report one transition.
+    pub audit_lock: tokio::sync::Mutex<()>,
 }
 
 /// Sample M1 inventory: fake-engine workloads only, nothing that touches
@@ -279,6 +282,7 @@ impl AppState {
             ops,
             supervisor,
             adopt_lock: tokio::sync::Mutex::new(()),
+            audit_lock: tokio::sync::Mutex::new(()),
         }))
     }
 }

@@ -149,6 +149,7 @@ impl SystemdEngine {
                     process: ProcessState::Unknown,
                     readiness: Readiness::Unknown,
                     served_model: ServedModel::Unknown,
+                    pid: None,
                 };
             }
         };
@@ -259,6 +260,7 @@ impl Engine for SystemdEngine {
                     process: probe.process,
                     readiness: probe.readiness,
                     served_model: probe.served_model,
+                    pid: probe.pid,
                     loaded_models: None,
                     observed_at: Utc::now(),
                 });
@@ -628,11 +630,13 @@ pub fn combine(status: &UnitStatus, http: Option<&HttpProbe>, expected: &str) ->
             process: ProcessState::Stopped,
             readiness: Readiness::NotReady,
             served_model: ServedModel::NotServing,
+            pid: None,
         },
         ProcessState::Unknown => UnitProbe {
             process: ProcessState::Unknown,
             readiness: Readiness::Unknown,
             served_model: ServedModel::Unknown,
+            pid: None,
         },
         ProcessState::Running => {
             let (readiness, served_model) = match http {
@@ -656,6 +660,7 @@ pub fn combine(status: &UnitStatus, http: Option<&HttpProbe>, expected: &str) ->
                 process: ProcessState::Running,
                 readiness,
                 served_model,
+                pid: status.main_pid,
             }
         }
     }

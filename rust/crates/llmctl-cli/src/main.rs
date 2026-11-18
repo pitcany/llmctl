@@ -130,6 +130,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Foreign-write findings (M5a): a managed workload's state changed
+    /// and no admitted operation explains it. Read-only — the pilot day's
+    /// "no unexplained foreign writes" evidence.
+    Audit {
+        /// Only findings at or after this instant: RFC 3339
+        /// (`2026-11-18T00:00:00Z`) or a bare UTC date (`2026-11-18`).
+        #[arg(long)]
+        since: Option<String>,
+        /// Ask every enrolled host too, local first.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Declared model stores (where weights live) with their free space.
     /// `stores add` / `stores remove` declare or forget one; neither
     /// creates or deletes anything on disk.
@@ -781,6 +795,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             force,
         } => cmd_mutate(cli, OpKind::Restart, &name, dry_run, wait, key, force, None).await,
         Command::Intent { name, json } => cmd_intent(cli, name.as_deref(), json).await,
+        Command::Audit { since, all, json } => cmd_audit(cli, since.as_deref(), all, json).await,
         Command::Stores { cmd, json } => cmd_stores(cli, cmd, json).await,
         Command::Model { cmd } => cmd_model(cli, cmd).await,
         Command::Vram { measure, json } => cmd_vram(cli, measure.as_deref(), json).await,
@@ -1962,6 +1977,116 @@ async fn cmd_intent(cli: &Cli, name: Option<&str>, json: bool) -> Result<u8, Cli
     Ok(0)
 }
 
+/// `audit [--since] [--all] [--json]`: the foreign-write record (M5a).
+/// Read-only; findings land through the agent's observation passes.
+async fn cmd_audit(cli: &Cli, since: Option<&str>, all: bool, json: bool) -> Result<u8, CliError> {
+    let since = match since {
+        None => None,
+        Some(raw) => Some(parse_since(raw)?),
+    };
+    let client = connect(cli)?;
+    let mut total = 0usize;
+
+    let report = |host: &str, resp: llmctl_client::wire::AuditResponse| {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+            return;
+        }
+        if resp.findings.is_empty() {
+            println!("host {}: no foreign writes", host);
+            return;
+        }
+        println!("host {}: {} foreign write(s)", host, resp.findings.len());
+        for f in &resp.findings {
+            println!(
+                "  {}  {:<12} {:<10} {} -> {}{}",
+                f.observed_at.format("%Y-%m-%d %H:%M:%S"),
+                f.workload,
+                f.what,
+                fmt_seen(&f.before_state),
+                fmt_seen(&f.after_state),
+                f.actor
+                    .as_deref()
+                    .map(|a| format!("  actor={a}"))
+                    .unwrap_or_default()
+            );
+        }
+    };
+
+    let local = client.audit(since).await?;
+    total += local.findings.len();
+    report(&local.host.clone(), local);
+
+    if all {
+        let hosts = enroll::load_hosts();
+        for h in &hosts.hosts {
+            let remote = ControlClient::connect_bridge(&h.ssh_alias);
+            let answer = tokio::time::timeout(remote_status_timeout(), remote.audit(since)).await;
+            match answer {
+                Ok(Ok(resp)) => {
+                    total += resp.findings.len();
+                    report(&h.name.clone(), resp);
+                }
+                Ok(Err(e)) if e.to_string().contains("404") => {
+                    eprintln!("host {}: audit not supported by this agent — upgrade it", h.name);
+                }
+                Ok(Err(e)) => eprintln!("host {}: {e}", h.name),
+                Err(_) => eprintln!("host {}: no answer within the status timeout", h.name),
+            }
+        }
+    }
+
+    if !json {
+        println!("\n{} foreign write(s){}", total, since.map(|t| format!(" since {}", t.to_rfc3339())).unwrap_or_default());
+    }
+    Ok(0)
+}
+
+/// `--since` accepts RFC 3339 or a bare UTC date (midnight).
+fn parse_since(raw: &str) -> Result<chrono::DateTime<chrono::Utc>, CliError> {
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Ok(t.with_timezone(&chrono::Utc));
+    }
+    let date = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|e| {
+        CliError::Daemon(format!("--since {raw:?}: not RFC 3339 or YYYY-MM-DD ({e})"))
+    })?;
+    Ok(date
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight")
+        .and_utc())
+}
+
+/// One comparison state, compact for one line: `running pid=100 model=qwen`.
+fn fmt_seen(raw: &str) -> String {
+    let v: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return raw.to_string(),
+    };
+    let mut parts = Vec::new();
+    if let Some(p) = v.get("process").and_then(|p| p.as_str()) {
+        parts.push(p.to_string());
+    }
+    for key in ["pid", "model"] {
+        if let Some(x) = v.get(key) {
+            if !x.is_null() {
+                let s = match x {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                parts.push(format!("{key}={s}"));
+            }
+        }
+    }
+    if let Some(lanes) = v.get("lanes").and_then(|l| l.as_array()) {
+        let ids: Vec<String> = lanes
+            .iter()
+            .filter_map(|l| l.as_str().map(str::to_owned))
+            .collect();
+        parts.push(format!("lanes=[{}]", ids.join(",")));
+    }
+    parts.join(" ")
+}
+
 async fn cmd_ops(cli: &Cli, json: bool) -> Result<u8, CliError> {
     let client = connect(cli)?;
     let ops = client.list_operations().await?;
@@ -1972,8 +2097,7 @@ async fn cmd_ops(cli: &Cli, json: bool) -> Result<u8, CliError> {
     if ops.operations.is_empty() {
         println!("no operations");
         return Ok(0);
-    }
-    for op in &ops.operations {
+    }    for op in &ops.operations {
         println!(
             "{}  {:<7} {:<6} {:<16} {} phases={}",
             op.created_at.format("%Y-%m-%d %H:%M:%S"),

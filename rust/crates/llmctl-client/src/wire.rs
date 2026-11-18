@@ -344,6 +344,35 @@ pub struct IntentView {
     pub manual_stop: bool,
 }
 
+/// One foreign-write finding (M5a, decision 1): a managed workload's
+/// state changed and no admitted operation explains it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditFinding {
+    pub id: i64,
+    pub host: String,
+    pub workload: String,
+    /// Always `foreign_transition` in M5.
+    pub kind: String,
+    /// What changed: `unit`, `lanes`, or `unit+lanes`.
+    pub what: String,
+    /// Comparison states as compact JSON (`process`, `pid`, `model`,
+    /// `lanes`).
+    pub before_state: String,
+    pub after_state: String,
+    /// Who did it when a name exists (`llama-swap (ttl: …)`); `None` =
+    /// unknown.
+    pub actor: Option<String>,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// `GET /v1/audit?since=<rfc3339>` — the pilot's "no unexplained foreign
+/// writes" evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditResponse {
+    pub host: String,
+    pub findings: Vec<AuditFinding>,
+}
+
 /// Dry-run response: the plan the daemon would execute now, against fresh
 /// observations. Offline plans are estimates; this one is revalidated again
 /// at admission.

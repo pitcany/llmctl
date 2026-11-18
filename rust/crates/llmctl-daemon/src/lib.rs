@@ -19,6 +19,7 @@
 pub mod acquire;
 pub mod adopt;
 pub mod api;
+pub mod audit;
 pub mod app;
 pub mod coord;
 pub mod db;

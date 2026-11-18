@@ -1978,6 +1978,7 @@ impl OpManager {
                     process: ProcessState::Unknown,
                     readiness: Readiness::Unknown,
                     served_model: ServedModel::Unknown,
+                    pid: None,
                 });
                 observed.insert(
                     unit.to_string(),

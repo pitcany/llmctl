@@ -249,6 +249,23 @@ impl ControlClient {
         self.get_json("/v1/intents").await
     }
 
+    /// Foreign-write findings (`GET /v1/audit`), newest first. `since`
+    /// filters (RFC 3339); `None` lists all retained findings.
+    pub async fn audit(
+        &self,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<crate::wire::AuditResponse, ClientError> {
+        match since {
+            Some(t) => {
+                // `Z` suffix, not `+00:00`: the offset's `+` is not
+                // URL-safe in a query string.
+                let q = t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                self.get_json(&format!("/v1/audit?since={q}")).await
+            }
+            None => self.get_json("/v1/audit").await,
+        }
+    }
+
     /// The raw inventory (read-only; adoption/ownership state included).
     pub async fn inventory(&self) -> Result<serde_json::Value, ClientError> {
         self.get_json("/v1/inventory").await

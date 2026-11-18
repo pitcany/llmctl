@@ -166,6 +166,7 @@ impl LaunchdEngine {
                     process: ProcessState::Unknown,
                     readiness: Readiness::Unknown,
                     served_model: ServedModel::Unknown,
+                    pid: None,
                 }
             }
         };
@@ -194,16 +195,19 @@ impl LaunchdEngine {
                 } else {
                     ServedModel::Unverified { model: ids.first().cloned().unwrap_or_default() }
                 },
+                pid: None,
             },
             HttpProbe::Garbled => UnitProbe {
                 process: ProcessState::Running,
                 readiness: Readiness::Unknown,
                 served_model: ServedModel::Unknown,
+                pid: None,
             },
             _ => UnitProbe {
                 process: ProcessState::Stopped,
                 readiness: Readiness::NotReady,
                 served_model: ServedModel::NotServing,
+                pid: None,
             },
         }
     }
@@ -282,6 +286,7 @@ impl LaunchdEngine {
                     process: ProcessState::Unknown,
                     readiness: Readiness::Unknown,
                     served_model: ServedModel::Unknown,
+                    pid: None,
                 };
             }
         };
@@ -412,6 +417,7 @@ impl Engine for LaunchdEngine {
                     process: probe.process,
                     readiness: probe.readiness,
                     served_model: probe.served_model,
+                    pid: probe.pid,
                     loaded_models: None,
                     observed_at: Utc::now(),
                 });
@@ -745,11 +751,13 @@ pub fn combine(
             process: ProcessState::Stopped,
             readiness: Readiness::NotReady,
             served_model: ServedModel::NotServing,
+            pid: None,
         },
         ProcessState::Unknown => UnitProbe {
             process: ProcessState::Unknown,
             readiness: Readiness::Unknown,
             served_model: ServedModel::Unknown,
+            pid: None,
         },
         ProcessState::Running => {
             let readiness = if health == HealthProbe::Healthy {
@@ -773,6 +781,7 @@ pub fn combine(
                 process: ProcessState::Running,
                 readiness,
                 served_model,
+                pid: ps.pid,
             }
         }
     }

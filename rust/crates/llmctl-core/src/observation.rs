@@ -55,6 +55,11 @@ pub struct Observation {
     pub process: ProcessState,
     pub readiness: Readiness,
     pub served_model: ServedModel,
+    /// Main pid when the manager names one (M5a: a pid change with no
+    /// admitted operation is a foreign transition). `None` = this engine
+    /// cannot name pids; never read as "no process".
+    #[serde(default)]
+    pub pid: Option<u32>,
     pub gpus: Vec<GpuId>,
     /// Models a vendor service (Ollama, LM Studio) holds in GPU memory on
     /// this machine right now. Filled only for planning, and only for a
@@ -91,6 +96,7 @@ mod tests {
             process,
             readiness,
             served_model: ServedModel::Unknown,
+            pid: None,
             gpus: vec![GpuId::new(host, 0)],
             loaded_models: None,
             observed_at: Utc::now(),

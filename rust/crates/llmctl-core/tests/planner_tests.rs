@@ -85,6 +85,7 @@ fn obs(name: &str, gpus: &[u32], running: bool) -> Observation {
             ServedModel::NotServing
         },
         gpus: gpus.iter().map(|i| gpu(*i)).collect(),
+        pid: None,
         loaded_models: None,
         observed_at: Utc.with_ymd_and_hms(2026, 11, 15, 12, 0, 0).unwrap(),
     }

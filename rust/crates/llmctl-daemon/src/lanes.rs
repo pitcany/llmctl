@@ -448,6 +448,12 @@ async fn running_lanes(state: &AppState, workload: &str) -> Vec<String> {
 
 /// Lanes the llama-swap on `port` has running (empty when it cannot say).
 async fn running_on(port: u16) -> Vec<String> {
+    running_on_checked(port).await.unwrap_or_default()
+}
+
+/// Lanes the llama-swap on `port` has running. `None` = the router could
+/// not be asked — never read as "nothing loaded" (M5a audit baseline).
+pub(crate) async fn running_on_checked(port: u16) -> Option<Vec<String>> {
     match crate::probe_http::request(port, hyper::Method::GET, "/running", None, Duration::from_secs(3)).await {
         Ok((200, body)) => serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
@@ -456,9 +462,8 @@ async fn running_on(port: u16) -> Vec<String> {
                 a.iter()
                     .filter_map(|m| m.get("model").and_then(|x| x.as_str()).map(str::to_owned))
                     .collect()
-            })
-            .unwrap_or_default(),
-        _ => Vec::new(),
+            }),
+        _ => None,
     }
 }
 

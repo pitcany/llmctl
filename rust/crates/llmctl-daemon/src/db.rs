@@ -101,7 +101,53 @@ enum DbMsg {
         Option<String>,
         oneshot::Sender<Result<bool, DbError>>,
     ),
+    InsertFinding(Box<FindingRow>, oneshot::Sender<Result<(), DbError>>),
+    /// (since, limit): findings at or after `since`, newest first.
+    ListFindings(
+        Option<DateTime<Utc>>,
+        usize,
+        oneshot::Sender<Result<Vec<FindingRow>, DbError>>,
+    ),
+    /// Operations updated at or after `since`, oldest first (M5a: which
+    /// transitions an admitted operation already explains).
+    OpsUpdatedSince(
+        DateTime<Utc>,
+        oneshot::Sender<Result<Vec<OpRow>, DbError>>,
+    ),
+    SeenAll(oneshot::Sender<Result<Vec<SeenRow>, DbError>>),
+    SetSeen(String, String, DateTime<Utc>, oneshot::Sender<Result<(), DbError>>),
+    /// Keep `audit_seen` rows only for these workloads (inventory left one).
+    PruneSeen(Vec<String>, oneshot::Sender<Result<(), DbError>>),
 }
+
+/// One foreign-write finding (M5a, decision 1): a managed workload's
+/// state changed and no admitted operation explains it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingRow {
+    pub id: i64,
+    pub host: String,
+    pub workload: String,
+    /// Always `foreign_transition` in M5.
+    pub kind: String,
+    /// What changed: `unit` (process/pid/served model) or `lanes`.
+    pub what: String,
+    pub before_state: String,
+    pub after_state: String,
+    /// Who did it when the manager names an actor; `None` = unknown.
+    pub actor: Option<String>,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Last state an audit pass saw for one workload (its comparison baseline).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeenRow {
+    pub workload: String,
+    pub state: String,
+    pub at: DateTime<Utc>,
+}
+
+/// Findings older than this are pruned as each new one lands.
+pub const FINDING_RETENTION_DAYS: i64 = 30;
 
 /// One staged/promoted upgrade of one workload (plan D.6: history).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,6 +331,55 @@ impl Db {
         ))?;
         rx.await.map_err(|_| DbError::Closed)?
     }
+
+    /// Record one finding, pruning rows past the retention bound in the
+    /// same transaction.
+    pub async fn insert_finding(&self, row: FindingRow) -> Result<(), DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::InsertFinding(Box::new(row), tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    /// Findings at or after `since` (all when `None`), newest first.
+    pub async fn list_findings(
+        &self,
+        since: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<FindingRow>, DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::ListFindings(since, limit, tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    /// Operations updated at or after `since`, oldest first.
+    pub async fn ops_updated_since(&self, since: DateTime<Utc>) -> Result<Vec<OpRow>, DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::OpsUpdatedSince(since, tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    pub async fn seen_all(&self) -> Result<Vec<SeenRow>, DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::SeenAll(tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    pub async fn set_seen(
+        &self,
+        workload: &str,
+        state: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(), DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::SetSeen(workload.into(), state.into(), at, tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    pub async fn prune_seen(&self, keep: Vec<String>) -> Result<(), DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::PruneSeen(keep, tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
 }
 
 /// One recorded recovery attempt.
@@ -339,6 +434,23 @@ CREATE TABLE IF NOT EXISTS upgrades(
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_upgrades_workload ON upgrades(workload, created_at);
+CREATE TABLE IF NOT EXISTS audit_findings(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  host TEXT NOT NULL,
+  workload TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  what TEXT NOT NULL,
+  before_state TEXT NOT NULL,
+  after_state TEXT NOT NULL,
+  actor TEXT,
+  observed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_findings_time ON audit_findings(observed_at);
+CREATE TABLE IF NOT EXISTS audit_seen(
+  workload TEXT PRIMARY KEY,
+  state TEXT NOT NULL,
+  at TEXT NOT NULL
+);
 "#;
 
 fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::Error>> {
@@ -588,8 +700,139 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
                 .map_err(DbError::from);
             let _ = tx.send(out);
         }
+        DbMsg::InsertFinding(boxed, tx) => {
+            let row = *boxed;
+            let out = conn
+                .execute_batch("BEGIN")
+                .and_then(|_| {
+                    let cutoff = (Utc::now() - chrono::Duration::days(FINDING_RETENTION_DAYS))
+                        .to_rfc3339();
+                    conn.execute("DELETE FROM audit_findings WHERE observed_at < ?1", params![cutoff])?;
+                    conn.execute(
+                        "INSERT INTO audit_findings(
+                           host, workload, kind, what, before_state, after_state, actor, observed_at)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                        params![
+                            row.host,
+                            row.workload,
+                            row.kind,
+                            row.what,
+                            row.before_state,
+                            row.after_state,
+                            row.actor,
+                            row.observed_at.to_rfc3339(),
+                        ],
+                    )?;
+                    conn.execute_batch("COMMIT")?;
+                    Ok(())
+                })
+                .map_err(|e| {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    DbError::Sql(e)
+                });
+            let _ = tx.send(out);
+        }
+        DbMsg::ListFindings(since, limit, tx) => {
+            let mut stmt = match since {
+                Some(_) => conn.prepare(
+                    "SELECT id, host, workload, kind, what, before_state, after_state, actor, observed_at
+                     FROM audit_findings WHERE observed_at >= ?1
+                     ORDER BY observed_at DESC, id DESC LIMIT ?2",
+                )?,
+                None => conn.prepare(
+                    "SELECT id, host, workload, kind, what, before_state, after_state, actor, observed_at
+                     FROM audit_findings
+                     ORDER BY observed_at DESC, id DESC LIMIT ?1",
+                )?,
+            };
+            let out = match since {
+                Some(s) => stmt
+                    .query_map(params![s.to_rfc3339(), limit as i64], finding_row_from)
+                    .map_err(DbError::from)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from),
+                None => stmt
+                    .query_map(params![limit as i64], finding_row_from)
+                    .map_err(DbError::from)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from),
+            };
+            let _ = tx.send(out);
+        }
+        DbMsg::OpsUpdatedSince(since, tx) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, idempotency_key, kind, workload, status,
+                        plan, phases, result, recovery, acknowledged,
+                        created_at, updated_at
+                 FROM operations WHERE updated_at >= ?1 ORDER BY updated_at",
+            )?;
+            let out = stmt
+                .query_map(params![since.to_rfc3339()], op_row_from)
+                .map_err(DbError::from)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from);
+            let _ = tx.send(out);
+        }
+        DbMsg::SeenAll(tx) => {
+            let mut stmt =
+                conn.prepare("SELECT workload, state, at FROM audit_seen ORDER BY workload")?;
+            let out = stmt
+                .query_map([], |r| {
+                    Ok(SeenRow {
+                        workload: r.get(0)?,
+                        state: r.get(1)?,
+                        at: parse_rfc3339(r.get(2)?),
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from);
+            let _ = tx.send(out);
+        }
+        DbMsg::SetSeen(workload, state, at, tx) => {
+            let out = conn
+                .execute(
+                    "INSERT INTO audit_seen(workload, state, at) VALUES(?1,?2,?3)
+                     ON CONFLICT(workload) DO UPDATE SET state = excluded.state, at = excluded.at",
+                    params![workload, state, at.to_rfc3339()],
+                )
+                .map(|_| ())
+                .map_err(DbError::from);
+            let _ = tx.send(out);
+        }
+        DbMsg::PruneSeen(keep, tx) => {
+            // A short IN list of enrolled workload names; an empty keep
+            // list clears the table (an inventory with no managed units).
+            let placeholders = keep.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = if keep.is_empty() {
+                "DELETE FROM audit_seen".to_string()
+            } else {
+                format!("DELETE FROM audit_seen WHERE workload NOT IN ({placeholders})")
+            };
+            let out = conn
+                .execute(
+                    &sql,
+                    rusqlite::params_from_iter(keep.iter()),
+                )
+                .map(|_| ())
+                .map_err(DbError::from);
+            let _ = tx.send(out);
+        }
     }
     Ok(())
+}
+
+fn finding_row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<FindingRow> {
+    Ok(FindingRow {
+        id: r.get(0)?,
+        host: r.get(1)?,
+        workload: r.get(2)?,
+        kind: r.get(3)?,
+        what: r.get(4)?,
+        before_state: r.get(5)?,
+        after_state: r.get(6)?,
+        actor: r.get(7)?,
+        observed_at: parse_rfc3339(r.get(8)?),
+    })
 }
 
 fn upgrade_row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<UpgradeRow> {
