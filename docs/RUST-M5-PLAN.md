@@ -1,7 +1,8 @@
 # Rust successor — M5 plan (daily-use replacement)
 
-Status 2026-11-18: **draft, waiting for the owner's decisions** (end of
-this file). Nothing of M5 is built yet.
+Status 2026-11-18: **plan agreed — all seven owner decisions taken, each
+as recommended** (end of this file). Nothing of M5 is built yet; the
+owner asked for M3's sleep/wake drill first.
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table,
 M5 row; "Outcome and scope"; "Cutover and reversal"). Builds on M4
 ([plan and exit check](RUST-M4-PLAN.md)): every day-one engine has an
@@ -247,9 +248,12 @@ findings, anything that needed the old tools).
 | No legacy lifecycle writes | `audit` shows zero unexplained foreign writes for owned workloads across the pilot |
 | Seven consecutive days | seven counted days in `RUST-M5-PILOT.md` |
 
-## Owner decisions (to take before M5a starts)
+## Owner decisions (2026-11-18, all as recommended)
 
-Each has a recommendation; "as recommended" for all is a valid answer.
+The owner took all seven as recommended: M5a–M5f; a `ratatui` TUI;
+legacy writers delegate and refuse when the agent is down; presets edited
+in place; catalog imported with a reverse export; a bad pilot day restarts
+the count; `hf` installed on m5 in M5c.
 
 1. **Split M5 into M5a–M5f** as above, a check at the end of each.
    *Recommended.*
