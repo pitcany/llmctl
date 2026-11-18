@@ -5,7 +5,8 @@ recommended (end of this file). **M4a done 2026-11-17 — see
 [the pilot note](RUST-M4A-PILOT-2026-11-17.md). M4b steps 1–5 done:
 [progress](RUST-M4B-PROGRESS-2026-11-17.md). M4c: all seven items have a
 first version: [progress](RUST-M4C-PROGRESS.md). Exit check 2026-11-17:
-1 row met, 4 partly, 1 not met — see "Exit check" below.**
+1 row met, 4 partly, 1 not met. Version pinning closed 2026-11-18, so it
+now stands at 2 met, 4 partly — see "Exit check" below.**
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table,
 M4 row; "Engine support and ownership"). Builds on M2 (one owned Linux
 workload, staged vLLM upgrade — [plan](RUST-M2-PLAN.md)) and M3 (Mac agent,
@@ -272,26 +273,83 @@ exit yet.**
 | Criterion | Verdict | Evidence | Missing |
 |---|---|---|---|
 | Installation | **Partly** (2 of 5 kinds on a real engine) | `python_env`: vLLM 0.32.0 staged into a versioned env on `vllm-engine2` (M2 window 2). `source_build`: llama.cpp `a9d43ecc3` built, validated, manifest and build log kept (M4a). `release_archive`: real-systemd test `release_archive_stages_promotes_verifies_and_rolls_back` with a tiny archive | `release_archive` has installed no real engine (the mlx-serve dirs on m5 were already there) and has no launchd run. `vendor_app` installs nothing by design (it prints an owner-run plan) and that plan was never carried out. `external` is a record only |
-| Version pinning | **Not met** (2 of 10 enrolled workloads pinned) | Pinned: `gpt-oss-120b` (binary digests), m5 `ollama` (vendor fact 0.34.3). Drift is reported: test `vendor_app_version_is_observed_pinned_and_drifts`; M4a saw m5 Ollama 0.34.3 against brew 0.40.16 | `version` says "no recipe; version pinning is off" for `vllm-engine`, `ollama`, `ollama-gpu1`, `llmster`, `strata-fast` and for `llama-swap` on both Macs. m5 `ds4` has a recipe with the fork SHA but `pinned: null`. The 15 lanes have no version records (an engine version is a macro path). m5 Ollama shows no drift today because its pin was set to the running 0.34.3 |
+| Version pinning | **Not met** on 2026-11-17 (2 of 10 enrolled workloads pinned). **Met since 2026-11-18**, see the update below | Pinned: `gpt-oss-120b` (binary digests), m5 `ollama` (vendor fact 0.34.3). Drift is reported: test `vendor_app_version_is_observed_pinned_and_drifts`; M4a saw m5 Ollama 0.34.3 against brew 0.40.16 | `version` says "no recipe; version pinning is off" for `vllm-engine`, `ollama`, `ollama-gpu1`, `llmster`, `strata-fast` and for `llama-swap` on both Macs. m5 `ds4` has a recipe with the fork SHA but `pinned: null`. The 15 lanes have no version records (an engine version is a macro path). m5 Ollama shows no drift today because its pin was set to the running 0.34.3 |
 | Launch / readiness / stop / logs | **Partly** (6 of 9 engines on a host) | Workstation, through admitted operations: vLLM (`vllm-engine`), llama.cpp (`gpt-oss-120b`, last 21:15), Ollama (`ollama-gpu1`), LM Studio (`llmster`), Strata (`strata-fast`). m5: MTPLX lanes loaded and evicted by `lanes swap` (20:22). `logs` answers for all six workstation workloads and for `llama-swap` (both Macs) and `ollama` (m5) | mlx-serve: restarted by a config reload and health-checked, never loaded by `lanes swap`. mlx-vlm and ds4 lanes: never loaded through llmctl-next; `logs ds4` is `unsupported` (the record has no plist). mbp2's MTPLX lanes: records and a rewrite only. m5 Ollama: never stopped or started (a restart would upgrade it). LM Studio on both Macs and Ollama on mbp2 are not enrolled. Lanes have no logs of their own (llama-swap's log). The per-row disposable spikes of M4b open item 5 were not written |
 | Upgrade / recovery | **Partly** | `python_env`: promote, rollback, and a promote killed mid-load that rolled back by itself (M2 window 2). `source_build`: stage → promote → rollback on `gpt-oss-120b` (M4a). `release_archive`: real-systemd test. Interrupted stage: never promotable and removed by gc (real-systemd tests). mlx-serve 26.10.1 → 26.9.5 on m5 as a lane macro change | `release_archive` upgrade and rollback on a real engine. The vendor-app backup/reinstall path "tested once": never run. The mlx-serve swap back was not run |
 | Request safety | **Met** | Live 19:05: `restart vllm-engine` without `--force` refused with 12 real requests in flight after the 20 s wait; the engine's pid did not change. e2e `stops_wait_for_in_flight_requests_or_refuse_without_force`; lane swaps wait on llama-swap's in-flight count (e2e) | The "requests finish inside the wait, then the stop goes ahead" path is covered by tests only |
 | Manual-stop protection | **Partly** | Agent restart: `ollama-gpu1` was stopped at 14:06 and still carries the mark after every daemon restart since (last 21:01). Swap rollback: e2e `a_manual_stop_is_reported_survives_eviction_and_is_not_restored`. Healers: llm-heal's check against the real agent answers correctly; 58 + 16 healer tests | No live rollback past a manual stop. No live healer drill where it matters: llm-heal does not repair a cleanly stopped lane anyway, so its 2-minute runs prove nothing; the case the plan names (mac-heal kickstarting a manually stopped `llama-swap` on mbp2) was not run |
 
-**To pass, in order of weight:**
+### Update 2026-11-18, 00:56 PST: version pinning is met
 
-1. **Pins** (row 2, about half a day, no GPU time): attach a recipe and pin
-   to the five unpinned workstation workloads and to `llama-swap` on both
-   Macs; pin m5 `ds4`; decide whether lanes get version records or the
-   macro path counts.
-2. **Mac lanes and vendor services** (row 3, 1–2 hours, evicts the
+`6d33af6`, `0dfb880`. Every enrolled workload and every lane has a pin, and
+`version <name>` / `lanes version <workload>` report drift against it
+(exit 4). Read live from all three hosts after the last deploy, drift 0
+everywhere:
+
+| Host | Instance | Recipe kind | Pinned |
+|---|---|---|---|
+| workstation | `vllm-engine` | python_env | vllm 0.30.0, torch 2.13.0, transformers 5.17.0, the env's freeze digest, the launcher script |
+| workstation | `strata-fast` | python_env | the venv (numpy 2.5.3, cublas 13.0.2.14, cuda-runtime 13.0.96, freeze digest), `server.py`, the engine binary and its library |
+| workstation | `ollama` | vendor_app | running 0.33.1, the binary |
+| workstation | `ollama-gpu1` | vendor_app | the binary. The running version is open: it is manually stopped |
+| workstation | `llmster` | vendor_app | 0.0.18-1, the binary |
+| workstation | `gpt-oss-120b` | source_build | as before (binary digest, `--version` output, guard script) |
+| m5 | `llama-swap` | vendor_app | version 230, the binary |
+| m5 | `ds4` | source_build | commit `bd450f844e37`, the `ds4-server` digest |
+| m5 | `ollama` | vendor_app | running 0.34.3 (as before) |
+| mbp2 | `llama-swap` | vendor_app | version 230, the binary |
+| m5 | 13 lanes | per lane | mtplx 2.12.0 (5 lanes) and 2.11.0 (1), mlx-vlm 0.6.6, the mlx-serve binary, `ds4-server`, the helper scripts, the M1 forwarder script |
+| mbp2 | 2 lanes | per lane | mtplx 2.11.2 |
+
+What it took (`6d33af6`):
+
+- **A latent refusal, fixed.** A vendor app pinned through its HTTP probe
+  could not be started again once stopped: the start guard read "no
+  answer" as drift. An unanswered HTTP probe is no longer drift and is
+  never stored as a pin.
+- **Pins for an install llmctl-next does not manage** (`ds4` on m5,
+  `llama-swap` on mbp2): the facts live on the record.
+- **Lane version records.** A lane's install is what its shell line runs:
+  every program the command names and, for an engine in a Python env, the
+  packages plus the content of the engine package's own files (mtplx on m5
+  carries a patch that a reinstall of the same version reverts). A version
+  swap written through `lanes macro` moves the pins; a hand edit does not.
+- **`version <name> --repin`** and **`lanes version <workload> --pin`**
+  accept a change and list what moved. `pin_files` on a workload pins
+  extra files (a binary under `/usr/local`, an engine a script starts).
+
+Evidence that drift is reported: real-systemd test
+`vendor_app_version_is_observed_pinned_and_drifts` (now also: stop the
+pinned app, no drift, start it again); e2e
+`version_repin_records_the_pin_and_names_what_changed`; lanes e2e
+`lane_versions_are_pinned_drift_is_reported_and_a_macro_swap_repins`.
+
+Limits, said plainly:
+
+- No drift was provoked on a real install (that would mean altering one).
+  m5 Ollama is pinned to the 0.34.3 it runs, so hazard 1 (brew holds
+  0.40.16) shows as drift only after the restart that upgrades it.
+- `ollama-gpu1`: only its binary is pinned until it next serves (the agent
+  pins the running version at its next start, or `--repin` does).
+- The `deepseek41-1017-mxfp4-m5` lane starts through `serve.sh`, so its
+  pin is that script; the `ds4-server` it execs is pinned on the `ds4`
+  record and by the `glm53-m5` lane.
+- Recipes are still attached by editing the inventory file with the agent
+  stopped; there is no verb for it.
+- On systemd a managed workload whose version facts drift is refused at
+  start (llm-router then falls back to its own switch). launchd checks
+  the program digest only.
+
+**To pass, in order of weight** (item 1, the pins, is done):
+
+1. **Mac lanes and vendor services** (row 3, 1–2 hours, evicts the
    always-on lanes on m5 for some minutes): load the mlx-vlm lane, one ds4
    lane and mlx-serve by `lanes swap`; load one lane on mbp2; enroll LM
    Studio on both Macs and Ollama on mbp2 observe-only.
-3. **Manual-stop drills** (row 6, about 20 minutes): mac-heal on mbp2 with
+2. **Manual-stop drills** (row 6, about 20 minutes): mac-heal on mbp2 with
    `llama-swap` manually stopped; one forced rollback on the workstation
    with a manually stopped neighbour in the eviction set.
-4. **A real `release_archive` install and the vendor-app path once** (rows
+3. **A real `release_archive` install and the vendor-app path once** (rows
    1 and 4, about 2 hours; owner's call): m5 Ollama 0.34.3 → 0.40.16 is the
    natural vendor-app case and ends hazard 1.
 
