@@ -210,6 +210,126 @@ pub fn plan_run(
     })
 }
 
+/// One env-file profile switch (M4c): which `EnvironmentFile` of the target
+/// is replaced, by what, and what the workload serves afterwards. The
+/// daemon fills it from the files on disk; the planner only arranges steps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileSwap {
+    /// The unit's env file.
+    pub path: String,
+    /// The profile whose bytes replace it.
+    pub source: String,
+    pub source_digest: String,
+    /// Digest of `path` now: what the restore must put back.
+    pub current_digest: String,
+    /// Where the forward step keeps the replaced bytes.
+    pub backup: String,
+    /// Served-model identity under the new profile.
+    pub model: String,
+}
+
+/// Build a run plan that switches the target to another env-file profile:
+/// the run plan (unload on-demand models, stop conflicts, stop the target
+/// if it runs), then swap the env file, start, and verify the *profile's*
+/// model. On failure the old env goes back; a target that was serving
+/// before is started again on it and verified, otherwise it stays down and
+/// the evicted workloads return.
+pub fn plan_run_profile(
+    inventory: &crate::inventory::HostInventory,
+    observations: &[Observation],
+    target: &WorkloadName,
+    profile: &ProfileSwap,
+) -> CoreResult<Plan> {
+    let mut plan = plan_run(inventory, observations, target)?;
+    let def = inventory
+        .workload(target)
+        .ok_or_else(|| CoreError::UnknownWorkload(target.to_string()))?;
+    let model = profile.model.trim();
+    if model.is_empty() {
+        return Err(CoreError::InvalidConfig {
+            workload: target.to_string(),
+            reason: "a profile switch needs the model the profile serves".into(),
+        });
+    }
+    let is_target_start =
+        |s: &PlanStep| matches!(s, PlanStep::StartUnit { workload, .. } if workload == target);
+    let start = plan
+        .steps
+        .iter()
+        .position(is_target_start)
+        .expect("a run plan starts its target");
+    plan.steps.insert(
+        start,
+        PlanStep::ApplyEnvFile {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+            path: profile.path.clone(),
+            source: profile.source.clone(),
+            source_digest: profile.source_digest.clone(),
+            backup: Some(profile.backup.clone()),
+            model: model.to_string(),
+        },
+    );
+    for step in &mut plan.steps {
+        if let PlanStep::VerifyServedModel {
+            workload, model: m, ..
+        } = step
+        {
+            if workload == target {
+                *m = model.to_string();
+            }
+        }
+    }
+    plan.expected_model = model.to_string();
+
+    let was_running = observations
+        .iter()
+        .any(|o| &o.workload == target && o.process == ProcessState::Running);
+    // The run plan's rollback is "evicted workloads back, then stop the
+    // target". Here the target is stopped first, so nothing restarts onto
+    // cards a half-started engine still holds and the env is restored
+    // under a stopped unit.
+    let evicted_back: Vec<PlanStep> = plan
+        .rollback
+        .drain(..)
+        .filter(|s| s.workload() != target)
+        .collect();
+    let mut rollback = vec![
+        PlanStep::StopUnit {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+        },
+        PlanStep::ApplyEnvFile {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+            path: profile.path.clone(),
+            source: profile.backup.clone(),
+            source_digest: profile.current_digest.clone(),
+            backup: None,
+            model: def.model.clone(),
+        },
+    ];
+    if was_running {
+        rollback.push(PlanStep::StartUnit {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+        });
+        rollback.push(PlanStep::AwaitReadiness {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+            timeout_secs: def.readiness_timeout_secs(),
+        });
+        rollback.push(PlanStep::VerifyServedModel {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+            model: def.model.clone(),
+        });
+    }
+    rollback.extend(evicted_back);
+    plan.rollback = rollback;
+    Ok(plan)
+}
+
 /// Build a restart plan: the run plan of an observed-running target (stop,
 /// start, await readiness, re-verify the served model), kept as its own
 /// kind so the journal says what the owner asked for. A target that is

@@ -290,6 +290,18 @@ pub struct GpuView {
 pub struct PlanRequest {
     pub kind: OpKind,
     pub workload: String,
+    /// Run only: switch the workload to this env-file profile (M4c).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProfileRequest>,
+}
+
+/// An env-file profile switch (M4c): make `env_source` the workload's
+/// `EnvironmentFile` and expect it to serve `model` afterwards. The file
+/// must sit next to the env file it replaces; its contents never travel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileRequest {
+    pub env_source: String,
+    pub model: String,
 }
 
 /// Dry-run response: the plan the daemon would execute now, against fresh
@@ -326,6 +338,9 @@ pub struct AdmitRequest {
     /// time, then refuses with `requests_in_flight`.
     #[serde(default)]
     pub force: bool,
+    /// Run only: switch the workload to this env-file profile (M4c).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ProfileRequest>,
 }
 
 // ---- llama-swap lane records (M4b step 4) ----------------------------------------

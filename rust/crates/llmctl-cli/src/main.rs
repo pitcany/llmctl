@@ -9,8 +9,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use llmctl_client::wire::{
     codes, AdmitRequest, AdoptRequest, AdoptionPreview, CheckStatus, LogEntry, LogSource,
-    LogsRequest, OpStatus, OperationView, PlanRequest, DEFAULT_LOG_LINES, MAX_LOG_LINES,
-    PROTOCOL_VERSION,
+    LogsRequest, OpStatus, OperationView, PlanRequest, ProfileRequest, DEFAULT_LOG_LINES,
+    MAX_LOG_LINES, PROTOCOL_VERSION,
 };
 use llmctl_client::{ClientError, ControlClient};
 use llmctl_core::{OpKind, Plan};
@@ -65,6 +65,14 @@ enum Command {
         /// workloads this stops; cut them.
         #[arg(long)]
         force: bool,
+        /// Switch the workload to this env-file profile first: the file
+        /// (next to the unit's EnvironmentFile) becomes that env file, and
+        /// the old one comes back if the start fails. Needs --model.
+        #[arg(long, value_name = "PATH", requires = "model")]
+        profile_env: Option<String>,
+        /// The model the workload serves under --profile-env.
+        #[arg(long, value_name = "NAME", requires = "profile_env")]
+        model: Option<String>,
     },
     /// Stop a workload (records a manual-stop intent that recovery respects).
     Stop {
@@ -529,13 +537,25 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             wait,
             key,
             force,
-        } => cmd_mutate(cli, OpKind::Run, &name, dry_run, wait, key, force).await,
+            profile_env,
+            model,
+        } => {
+            let profile = profile_env.zip(model).map(|(env_source, model)| ProfileRequest {
+                // The agent resolves the path on its own host; a relative
+                // one would mean this shell's directory, so make it absolute.
+                env_source: std::path::absolute(&env_source)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or(env_source),
+                model,
+            });
+            cmd_mutate(cli, OpKind::Run, &name, dry_run, wait, key, force, profile).await
+        }
         Command::Stop {
             name,
             wait,
             key,
             force,
-        } => cmd_mutate(cli, OpKind::Stop, &name, false, wait, key, force).await,
+        } => cmd_mutate(cli, OpKind::Stop, &name, false, wait, key, force, None).await,
         Command::Unload {
             name,
             model,
@@ -549,7 +569,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             wait,
             key,
             force,
-        } => cmd_mutate(cli, OpKind::Restart, &name, dry_run, wait, key, force).await,
+        } => cmd_mutate(cli, OpKind::Restart, &name, dry_run, wait, key, force, None).await,
         Command::Ops { json } => cmd_ops(cli, json).await,
         Command::Op { id, watch } => cmd_op(cli, &id, watch).await,
         Command::Cancel { id } => cmd_cancel(cli, &id).await,
@@ -983,6 +1003,7 @@ fn print_preview(p: &AdoptionPreview) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_mutate(
     cli: &Cli,
     kind: OpKind,
@@ -991,6 +1012,7 @@ async fn cmd_mutate(
     wait: bool,
     key: Option<String>,
     force: bool,
+    profile: Option<ProfileRequest>,
 ) -> Result<u8, CliError> {
     let client = connect(cli)?;
     ensure_protocol(&client).await?;
@@ -1000,6 +1022,7 @@ async fn cmd_mutate(
         .plan(PlanRequest {
             kind,
             workload: name.to_string(),
+            profile: profile.clone(),
         })
         .await?;
     if dry_run {
@@ -1031,6 +1054,7 @@ async fn cmd_mutate(
             expected_revision: Some(plan_resp.revision),
             expected_stop_targets: Some(plan_resp.stop_targets.clone()),
             force,
+            profile: profile.clone(),
         })
         .await
     {
@@ -1065,6 +1089,7 @@ async fn cmd_mutate(
                             expected_revision: Some(plan_resp.revision),
                             expected_stop_targets: Some(plan_resp.stop_targets.clone()),
                             force,
+                            profile: profile.clone(),
                         })
                         .await?
                 }

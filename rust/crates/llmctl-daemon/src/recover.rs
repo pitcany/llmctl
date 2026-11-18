@@ -149,6 +149,7 @@ async fn maybe_recover(
                 expected_revision: None,
                 expected_stop_targets: None,
                 force: false,
+                profile: None,
                 plan_override: None,
             })
             .await

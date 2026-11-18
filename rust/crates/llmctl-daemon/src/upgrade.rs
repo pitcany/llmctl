@@ -991,6 +991,7 @@ pub async fn promote(
             expected_revision: None,
             expected_stop_targets: None,
             force: false,
+            profile: None,
             plan_override: Some(plan),
         })
         .await;
@@ -1257,6 +1258,7 @@ async fn rollback_admit(
             expected_revision: None,
             expected_stop_targets: None,
             force: false,
+            profile: None,
             plan_override: Some(plan),
         })
         .await;

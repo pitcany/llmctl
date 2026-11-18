@@ -37,4 +37,6 @@ pub use recipe::{
 };
 pub use observation::{Observation, ProcessState, Readiness, ServedModel};
 pub use plan::{BinaryCheck, OpKind, Plan, PlanStep};
-pub use planner::{plan_restart, plan_run, plan_stop, plan_unload, plan_upgrade};
+pub use planner::{
+    plan_restart, plan_run, plan_run_profile, plan_stop, plan_unload, plan_upgrade, ProfileSwap,
+};

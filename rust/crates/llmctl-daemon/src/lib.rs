@@ -31,6 +31,7 @@ pub mod ops;
 pub mod own;
 pub mod plistdef;
 pub mod probe_http;
+pub mod profile;
 pub mod recover;
 pub mod supervisor;
 pub mod upgrade;

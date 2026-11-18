@@ -236,7 +236,10 @@ async fn create_plan(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PlanRequest>,
 ) -> Result<Json<PlanResponse>, ApiError> {
-    let (plan, _obs) = state.ops.build_plan(req.kind, &req.workload).await?;
+    let (plan, _obs) = state
+        .ops
+        .build_plan(req.kind, &req.workload, req.profile.as_ref())
+        .await?;
     let stop_targets: Vec<String> = plan
         .steps
         .iter()
@@ -305,6 +308,7 @@ async fn admit_operation(
             expected_revision: req.expected_revision,
             expected_stop_targets: req.expected_stop_targets,
             force: req.force,
+            profile: req.profile,
             plan_override: None,
         })
         .await?;
@@ -355,6 +359,7 @@ async fn admit_unload(
             expected_revision: None,
             expected_stop_targets: None,
             force: false,
+            profile: None,
             plan_override: Some(provisional),
         })
         .await?;

@@ -472,6 +472,7 @@ pub async fn apply(
             expected_revision: None,
             expected_stop_targets: None,
             force: false,
+            profile: None,
             plan_override: Some(plan),
         })
         .await?)

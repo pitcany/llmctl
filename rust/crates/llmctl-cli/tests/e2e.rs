@@ -148,6 +148,7 @@ fn admit_req(kind: OpKind, workload: &str, key: &str) -> AdmitRequest {
         expected_revision: None,
         expected_stop_targets: None,
         force: false,
+        profile: None,
     }
 }
 
@@ -543,6 +544,7 @@ async fn stale_destructive_footprint_returns_revised_plan() {
         .plan(PlanRequest {
             kind: OpKind::Run,
             workload: "big".into(),
+            profile: None,
         })
         .await
         .unwrap();
@@ -562,6 +564,7 @@ async fn stale_destructive_footprint_returns_revised_plan() {
             expected_revision: Some(plan.revision),
             expected_stop_targets: Some(plan.stop_targets.clone()),
             force: false,
+            profile: None,
         })
         .await;
     match stale {
@@ -890,6 +893,7 @@ async fn foreign_gpu_occupant_refuses_run_before_anything_is_journaled() {
         .plan(PlanRequest {
             kind: OpKind::Run,
             workload: "coder".into(),
+            profile: None,
         })
         .await
     {
@@ -1083,7 +1087,7 @@ async fn swap_plan_unloads_on_demand_models_then_evicts_and_rolls_back() {
         {"gpu": 0, "pid": 4101, "unit": "user/llmctl-next-fake-old.service", "memory_mib": 20000}
     ]));
     let plan = client
-        .plan(PlanRequest { kind: OpKind::Run, workload: "coder".into() })
+        .plan(PlanRequest { kind: OpKind::Run, workload: "coder".into(), profile: None })
         .await
         .unwrap();
     assert!(
@@ -1100,7 +1104,7 @@ async fn swap_plan_unloads_on_demand_models_then_evicts_and_rolls_back() {
 
     // The preview names the unloads, before the eviction; only `old` stops.
     let plan = client
-        .plan(PlanRequest { kind: OpKind::Run, workload: "coder".into() })
+        .plan(PlanRequest { kind: OpKind::Run, workload: "coder".into(), profile: None })
         .await
         .expect("the swap plan passes the occupancy guard");
     let labels: Vec<String> = plan.plan.steps.iter().map(|s| s.label()).collect();
@@ -1377,6 +1381,172 @@ async fn stops_wait_for_in_flight_requests_or_refuse_without_force() {
     set(serde_json::json!({upstream("helper"): 4, "http://127.0.0.1:1": 9}));
     let resp = client.admit(admit_req(OpKind::Stop, "big", "rs-5")).await.unwrap();
     assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
+}
+
+// ---- M4c: env-file profiles ---------------------------------------------------
+
+/// A run that names a profile swaps the workload's env file inside the
+/// operation, verifies the profile's model, re-pins the workload, and puts
+/// everything back — env, model, a serving target — when the start fails.
+#[tokio::test]
+async fn a_profile_run_swaps_the_env_repins_and_rolls_back() {
+    use llmctl_client::wire::ProfileRequest;
+    use llmctl_core::launch::{EnvFileRef, LaunchDefinition};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("control.sock");
+    let services = dir.path().canonicalize().unwrap().join("services");
+    std::fs::create_dir_all(&services).unwrap();
+    let env = services.join("coder.env");
+    let file = |name: &str| services.join(name).display().to_string();
+    std::fs::write(&env, "MODEL=base\n").unwrap();
+    std::fs::write(file("coder.env.fast"), "MODEL=fast\n").unwrap();
+    std::fs::write(file("coder.env.slow"), "MODEL=slow\n").unwrap();
+    let sha = |bytes: &[u8]| {
+        use sha2::Digest;
+        format!("sha256:{:x}", sha2::Sha256::digest(bytes))
+    };
+
+    // `coder` is adopted with one pinned env file; `helper` is not adopted.
+    let definition = LaunchDefinition {
+        environment_files: vec![EnvFileRef {
+            path: env.display().to_string(),
+            optional: false,
+            content_digest: sha(b"MODEL=base\n"),
+        }],
+        ..Default::default()
+    };
+    let host = "workstation";
+    let wl = |name: &str, port: u16| {
+        serde_json::json!({
+            "name": name, "engine": "fake", "model": format!("fake/{name}"),
+            "gpus": [{"host": host, "index": 0}], "port": port,
+            "unit": {"scope": "user", "name": format!("llmctl-next-fake-{name}.service")},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": format!("llmctl-next-fake-{name}.service")},
+            "ownership": {"kind": "external"}
+        })
+    };
+    let mut coder = wl("coder", 8100);
+    coder["ownership"] = serde_json::json!({
+        "kind": "managed", "definition": definition, "digest": definition.digest(),
+        "adopted_at": "2026-11-17T00:00:00Z", "provenance": []
+    });
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [coder, wl("helper", 8101)],
+        "revision": 1
+    }});
+    std::fs::write(dir.path().join("inventory.json"), inv.to_string()).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(&socket).arg("--data-dir").arg(dir.path()).arg("daemon")
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let client = d.client();
+    let profile = |name: &str, model: &str| {
+        Some(ProfileRequest { env_source: file(name), model: model.into() })
+    };
+    let run_with = |key: &str, p: Option<ProfileRequest>| {
+        let mut req = admit_req(OpKind::Run, "coder", key);
+        req.profile = p;
+        req
+    };
+    let coder_view = || async {
+        let st = client.status().await.unwrap();
+        let w = st.workloads.into_iter().find(|w| w.name == "coder").unwrap();
+        (st.inventory_revision, w.model, w.served_model, w.served_model_verified, w.process)
+    };
+    let backup = file("coder.env.llmctl-previous");
+
+    run_to_success(&d, "coder", "prof-setup").await;
+    let (rev0, model, ..) = coder_view().await;
+    assert_eq!(model, "fake/coder");
+
+    // The preview: stop, swap, start, verify the profile's model.
+    let plan = client
+        .plan(PlanRequest {
+            kind: OpKind::Run,
+            workload: "coder".into(),
+            profile: profile("coder.env.fast", "fake/coder-fast"),
+        })
+        .await
+        .unwrap();
+    let labels: Vec<String> = plan.plan.steps.iter().map(|s| s.label()).collect();
+    assert_eq!(
+        labels[1..],
+        [
+            "stop coder",
+            "apply profile coder.env.fast to coder (serves fake/coder-fast)",
+            "start coder",
+            "wait for coder readiness",
+            "verify coder serves fake/coder-fast",
+        ],
+        "{labels:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&env).unwrap(), "MODEL=base\n", "a preview changes nothing");
+
+    // 1. The switch: env swapped, old env kept, workload re-pinned.
+    let resp = client.admit(run_with("prof-1", profile("coder.env.fast", "fake/coder-fast"))).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Succeeded, "{op:?}");
+    assert_eq!(std::fs::read_to_string(&env).unwrap(), "MODEL=fast\n");
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), "MODEL=base\n");
+    let (rev1, model, served, verified, _) = coder_view().await;
+    assert!(rev1 > rev0, "the re-pin is an inventory revision");
+    assert_eq!((model.as_str(), served.as_deref(), verified), ("fake/coder-fast", Some("fake/coder-fast"), true));
+    // The journal says what happened and never what the env contains.
+    let journal = serde_json::to_string(&op).unwrap();
+    assert!(journal.contains("swapped") && !journal.contains("MODEL="), "{journal}");
+
+    //    Later operations run on the new pin: a plain restart verifies the
+    //    profile's model, and naming the same profile again is a plain run.
+    let resp = client.admit(admit_req(OpKind::Restart, "coder", "prof-1r")).await.unwrap();
+    assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
+    let again = client
+        .plan(PlanRequest {
+            kind: OpKind::Run,
+            workload: "coder".into(),
+            profile: profile("coder.env.fast", "fake/coder-fast"),
+        })
+        .await
+        .unwrap();
+    assert!(!again.plan.steps.iter().any(|s| s.label().starts_with("apply profile")));
+
+    // 2. A switch whose start fails: the old env is back, coder serves the
+    //    previous profile again (verified), and the pin is the previous one.
+    d.write_faults(serde_json::json!({"fail_effects": [
+        {"unit": "user/llmctl-next-fake-coder.service", "kind": "start", "mode": "before"}
+    ]}));
+    let resp = client.admit(run_with("prof-2", profile("coder.env.slow", "fake/coder-slow"))).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Failed, "{op:?}");
+    assert_eq!(op.recovery.expect("restoration recorded")["outcome"], "restored");
+    assert_eq!(std::fs::read_to_string(&env).unwrap(), "MODEL=fast\n");
+    let (_, model, served, verified, process) = coder_view().await;
+    assert_eq!((model.as_str(), served.as_deref(), verified), ("fake/coder-fast", Some("fake/coder-fast"), true));
+    assert!(process.contains("Running"), "{process}");
+
+    // 3. Requests the agent refuses before anything happens.
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("x.env"), "MODEL=x\n").unwrap();
+    let bad = [
+        (run_with("prof-b1", Some(ProfileRequest {
+            env_source: outside.path().join("x.env").display().to_string(), model: "m".into() })), "next to the env file"),
+        (run_with("prof-b2", profile("missing.env", "m")), "missing.env"),
+        (run_with("prof-b3", profile("coder.env.slow", " ")), "needs the model"),
+        ({ let mut r = run_with("prof-b4", profile("coder.env.slow", "m")); r.workload = "helper".into(); r }, "not adopted"),
+        ({ let mut r = run_with("prof-b5", profile("coder.env.slow", "m")); r.kind = OpKind::Restart; r }, "is a `run`"),
+    ];
+    for (req, why) in bad {
+        match client.admit(req).await {
+            Err(ClientError::Api { code, message, .. }) => {
+                assert_eq!(code, codes::INVALID_REQUEST, "{message}");
+                assert!(message.contains(why), "{message}");
+            }
+            other => panic!("expected a refusal mentioning {why:?}, got {other:?}"),
+        }
+    }
+    assert_eq!(std::fs::read_to_string(&env).unwrap(), "MODEL=fast\n");
 }
 
 // ---- B: bounded recovery ----------------------------------------------------

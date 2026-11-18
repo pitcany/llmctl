@@ -116,6 +116,7 @@ async fn pilot_lost_ack_restart_resolves_by_key_once() {
         .plan(PlanRequest {
             kind: OpKind::Restart,
             workload: p.workload.clone(),
+            profile: None,
         })
         .await
         .expect("plan");
@@ -128,6 +129,7 @@ async fn pilot_lost_ack_restart_resolves_by_key_once() {
         expected_revision: Some(plan.revision),
         expected_stop_targets: Some(plan.stop_targets.clone()),
         force: false,
+        profile: None,
     };
     let body = serde_json::to_vec(&admit).unwrap();
     let mut process = BridgeProcess::spawn_ssh(&p.alias).expect("ssh bridge spawns");
@@ -269,6 +271,7 @@ async fn pilot_stale_plan_and_protocol_mismatch_refused() {
             expected_revision: Some(0),
             expected_stop_targets: None,
             force: false,
+            profile: None,
         })
         .await
         .expect_err("stale plan refused");
@@ -282,6 +285,7 @@ async fn pilot_stale_plan_and_protocol_mismatch_refused() {
             expected_revision: Some(status.inventory_revision),
             expected_stop_targets: None,
             force: false,
+            profile: None,
         })
         .await
         .expect_err("protocol mismatch refused");

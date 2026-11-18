@@ -532,7 +532,7 @@ async fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), OwnError> {
 }
 
 /// Persist the new inventory (file first, then swap) exactly like adoption.
-async fn bump_revision(
+pub(crate) async fn bump_revision(
     ctx: &OwnCtx,
     ops: &crate::ops::OpManager,
     next: llmctl_core::HostInventory,

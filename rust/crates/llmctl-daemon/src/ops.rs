@@ -187,6 +187,8 @@ pub struct AdmitParams {
     pub expected_stop_targets: Option<Vec<String>>,
     /// Skip the in-flight request wait (M4c request safety).
     pub force: bool,
+    /// Run only: switch the workload to this env-file profile (M4c).
+    pub profile: Option<llmctl_client::wire::ProfileRequest>,
     /// Upgrade promotions carry their plan (built by the upgrade module
     /// against fresh observations under the admission lock); required for
     /// `OpKind::Upgrade`, ignored otherwise.
@@ -285,12 +287,22 @@ impl OpManager {
         &self,
         kind: OpKind,
         def: &llmctl_core::WorkloadDefinition,
+        profile_switch: bool,
     ) -> Result<(), OpsError> {
         if !matches!(kind, OpKind::Run | OpKind::Restart) {
             return Ok(());
         }
         match self.engine.verify_definition(def).await {
             Ok(()) => Ok(()),
+            // A profile switch overwrites the env file anyway: its contents
+            // having changed since adoption (a switch made by llm-router's
+            // own path) is not a reason to refuse the very operation that
+            // re-pins it. Any other difference still is.
+            Err(EngineError::Drift { diffs, .. })
+                if profile_switch && crate::profile::only_env_content_differs(&diffs) =>
+            {
+                Ok(())
+            }
             Err(EngineError::Drift { diffs, .. }) => Err(OpsError::DefinitionDrift {
                 workload: def.name.to_string(),
                 diffs,
@@ -455,23 +467,93 @@ impl OpManager {
         }
     }
 
+    /// Plan a run, restart or stop. A run that names an env-file profile
+    /// (M4c) becomes a profile switch unless that profile is already in
+    /// place; a profile on anything but a run is a malformed request.
+    async fn plan_lifecycle(
+        &self,
+        inv: &HostInventory,
+        observations: &[llmctl_core::Observation],
+        def: &llmctl_core::WorkloadDefinition,
+        kind: OpKind,
+        profile: Option<&llmctl_client::wire::ProfileRequest>,
+    ) -> Result<Plan, OpsError> {
+        let name = &def.name;
+        let swap = match (kind, profile) {
+            (_, None) => None,
+            (OpKind::Run, Some(p)) => crate::profile::resolve(def, &p.env_source, &p.model)
+                .await
+                .map_err(OpsError::Invalid)?,
+            (other, Some(_)) => {
+                return Err(OpsError::Invalid(format!(
+                    "a profile switch is a `run`, not a {other}"
+                )))
+            }
+        };
+        match (kind, &swap) {
+            (OpKind::Run, Some(swap)) => {
+                llmctl_core::plan_run_profile(inv, observations, name, swap)
+            }
+            (OpKind::Run, None) => llmctl_core::plan_run(inv, observations, name),
+            (OpKind::Stop, _) => llmctl_core::plan_stop(inv, observations, name),
+            (OpKind::Restart, _) => llmctl_core::plan_restart(inv, observations, name),
+            (other, _) => {
+                return Err(OpsError::Invalid(format!("{other} is not a lifecycle plan")))
+            }
+        }
+        .map_err(plan_error)
+    }
+
+    /// One `ApplyEnvFile` step, forward or restore (M4c profiles): the
+    /// file, then the pin — the env digest and the model the workload
+    /// serves — so the next operation sees no drift and verifies the right
+    /// model. Returns a line for the journal; never the env's contents.
+    async fn apply_env_file(&self, step: &PlanStep) -> Result<String, String> {
+        let PlanStep::ApplyEnvFile {
+            workload,
+            path,
+            source,
+            source_digest,
+            backup,
+            model,
+            ..
+        } = step
+        else {
+            return Err("not an env-file step".into());
+        };
+        let Some(ctx) = self.own_ctx.clone() else {
+            return Err("this daemon cannot re-pin definitions (no ownership context)".into());
+        };
+        let outcome =
+            crate::profile::apply_file(path, source, source_digest, backup.as_deref()).await?;
+        let inv = self.inventory().await;
+        if let Some(next) = crate::profile::repinned(&inv, workload, path, source_digest, model) {
+            crate::own::bump_revision(&ctx, self, next)
+                .await
+                .map_err(|e| format!("env file {outcome}, but re-pinning {workload} failed: {e}"))?;
+        }
+        Ok(format!("{path}: {outcome}; {workload} pinned to {source_digest}, serves {model}"))
+    }
+
     /// Fresh observations + a plan for `kind`/`workload` (dry-run path).
     pub async fn build_plan(
         &self,
         kind: OpKind,
         workload: &str,
+        profile: Option<&llmctl_client::wire::ProfileRequest>,
     ) -> Result<(Plan, Vec<ObservationLite>), OpsError> {
         let inv = self.inventory().await;
         let name = WorkloadName::new(workload).map_err(|e| OpsError::Invalid(e.to_string()))?;
         let Some(def) = inv.workload(&name) else {
             return Err(OpsError::UnknownWorkload(workload.to_string()));
         };
-        self.check_definition(kind, def).await?;
+        self.check_definition(kind, def, profile.is_some()).await?;
         let observations = self.observe_for(&inv, kind, def).await?;
         let plan = match kind {
-            OpKind::Run => llmctl_core::plan_run(&inv, &observations, &name),
-            OpKind::Stop => llmctl_core::plan_stop(&inv, &observations, &name),
-            OpKind::Restart => llmctl_core::plan_restart(&inv, &observations, &name),
+            OpKind::Run | OpKind::Stop | OpKind::Restart => {
+                self.plan_lifecycle(&inv, &observations, def, kind, profile)
+                    .await?
+            }
             // Upgrade plans are built by the upgrade module and admitted
             // through `admit`; they cannot be dry-run planned generically.
             OpKind::Upgrade => {
@@ -489,8 +571,7 @@ impl OpManager {
                     "lane writes are planned by `lanes set`/`lanes macro`".into(),
                 ))
             }
-        }
-        .map_err(plan_error)?;
+        };
         self.guard_gpus(&inv, &plan).await?;
         Ok((
             plan,
@@ -609,7 +690,8 @@ impl OpManager {
         let Some(def) = inv.workload(&name) else {
             return Err(OpsError::UnknownWorkload(params.workload));
         };
-        self.check_definition(params.kind, def).await?;
+        self.check_definition(params.kind, def, params.profile.is_some())
+            .await?;
         // Taken before observing: the plan is built on a world no other
         // controller is changing. Any refusal below drops the hold.
         let hold = self.coordinate(&inv, def, params.kind).await?;
@@ -632,13 +714,10 @@ impl OpManager {
                     params.kind
                 )))
             }
-            (kind, _) => match kind {
-                OpKind::Run => llmctl_core::plan_run(&inv, &observations, &name),
-                OpKind::Stop => llmctl_core::plan_stop(&inv, &observations, &name),
-                OpKind::Restart => llmctl_core::plan_restart(&inv, &observations, &name),
-                OpKind::Upgrade | OpKind::Unload | OpKind::LaneWrite => unreachable!(),
+            (kind, _) => {
+                self.plan_lifecycle(&inv, &observations, def, *kind, params.profile.as_ref())
+                    .await?
             }
-            .map_err(plan_error)?,
         };
         self.guard_gpus(&inv, &plan).await?;
 
@@ -985,6 +1064,24 @@ impl OpManager {
                     Err(e) => StepOutcome::Failed(format!("applying definition: {e}")),
                 }
             }
+            PlanStep::ApplyEnvFile { workload, .. } => {
+                // Effect boundary first, as for every external step: a
+                // crash mid-swap is resolved by looking, never assumed.
+                set_phase(&mut row.phases, index, |p| {
+                    p.status = PhaseStatus::EffectPending
+                });
+                if self.persist(row).await.is_err() {
+                    return StepOutcome::Failed("journaling effect boundary failed".into());
+                }
+                match self.apply_env_file(step).await {
+                    Ok(report) => {
+                        applied.push(format!("env-file:{workload}"));
+                        set_phase(&mut row.phases, index, |p| p.detail = Some(report.clone()));
+                        StepOutcome::Done
+                    }
+                    Err(e) => StepOutcome::Failed(format!("applying the profile: {e}")),
+                }
+            }
             PlanStep::VerifyVersion {
                 workload,
                 unit,
@@ -1147,6 +1244,7 @@ impl OpManager {
         applied: &[String],
     ) -> Result<(), OpsError> {
         let rollback = row.plan.rollback.clone();
+        let rollback_steps = rollback.clone();
         if rollback.is_empty() {
             row.status = OpStatus::Failed;
             row.result = Some(json!({
@@ -1193,8 +1291,18 @@ impl OpManager {
                     .map(|o| Some(o.identity))
                     .map_err(|e| e.to_string()),
                 PlanStep::StartUnit { workload, unit, .. } => {
-                    let model = self
-                        .model_for(row, workload)
+                    // What this restoration expects the unit to serve: a
+                    // profile rollback starts the target on its *previous*
+                    // model, not the one the failed plan was after.
+                    let model = rollback_steps[offset + 1..]
+                        .iter()
+                        .find_map(|s| match s {
+                            PlanStep::VerifyServedModel {
+                                workload: w, model, ..
+                            } if w == workload => Some(model.clone()),
+                            _ => None,
+                        })
+                        .or_else(|| self.model_for(row, workload))
                         .unwrap_or_else(|| "unknown".into());
                     let gpus = self.gpus_for(row, workload).unwrap_or_default();
                     self.engine
@@ -1261,6 +1369,7 @@ impl OpManager {
                 PlanStep::UnloadModel { .. } => {
                     Err("an unload is not a restoration step".to_string())
                 }
+                PlanStep::ApplyEnvFile { .. } => self.apply_env_file(&step).await.map(Some),
                 PlanStep::WriteSwapConfig { .. } => run_swap_write(&step).await.map(Some),
             };
             match outcome {
@@ -1410,6 +1519,7 @@ impl OpManager {
                         row.plan.steps[p.index],
                         PlanStep::StopUnit { .. }
                             | PlanStep::StartUnit { .. }
+                            | PlanStep::ApplyEnvFile { .. }
                             | PlanStep::WriteSwapConfig { .. }
                     )
             });

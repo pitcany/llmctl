@@ -511,3 +511,128 @@ fn observations_without_a_loaded_list_still_parse() {
     let back: Observation = serde_json::from_value(v).unwrap();
     assert_eq!(back.loaded_models, None);
 }
+
+// ---- M4c: env-file profiles ---------------------------------------------------
+
+fn profile(model: &str) -> llmctl_core::ProfileSwap {
+    llmctl_core::ProfileSwap {
+        path: "/srv/coder.env".into(),
+        source: "/srv/coder.env.fast".into(),
+        source_digest: "sha256:new".into(),
+        current_digest: "sha256:old".into(),
+        backup: "/srv/coder.env.llmctl-previous".into(),
+        model: model.into(),
+    }
+}
+
+#[test]
+fn profile_run_swaps_the_env_between_stop_and_start_and_verifies_the_new_model() {
+    let inv = inventory();
+    // coder serves; helper is an at_start neighbour on another card.
+    let observations = [obs("coder", &[0], true), obs("helper", &[1], true)];
+    let plan =
+        llmctl_core::plan_run_profile(&inv, &observations, &wn("coder"), &profile("fake/coder-fast"))
+            .unwrap();
+    assert_eq!(plan.kind, llmctl_core::OpKind::Run);
+    assert_eq!(plan.expected_model, "fake/coder-fast");
+    assert_eq!(
+        labels(&plan.steps),
+        vec![
+            "record intent: coder → Running",
+            "stop coder",
+            "apply profile coder.env.fast to coder (serves fake/coder-fast)",
+            "start coder",
+            "wait for coder readiness",
+            "verify coder serves fake/coder-fast",
+        ]
+    );
+    // The way back: stop the failed start, put the old env back, and bring
+    // the target up again on what it served before, verified.
+    assert_eq!(
+        labels(&plan.rollback),
+        vec![
+            "stop coder",
+            "restore the previous env of coder (serves fake/coder)",
+            "start coder",
+            "wait for coder readiness",
+            "verify coder serves fake/coder",
+        ]
+    );
+    // The restore names the backup the forward step writes, and expects the
+    // bytes that were live when the plan was made.
+    let forward = plan.steps.iter().find_map(|s| match s {
+        PlanStep::ApplyEnvFile { source, source_digest, backup, path, .. } => {
+            Some((source.clone(), source_digest.clone(), backup.clone(), path.clone()))
+        }
+        _ => None,
+    });
+    assert_eq!(
+        forward,
+        Some((
+            "/srv/coder.env.fast".into(),
+            "sha256:new".into(),
+            Some("/srv/coder.env.llmctl-previous".into()),
+            "/srv/coder.env".into()
+        ))
+    );
+    let restore = plan.rollback.iter().find_map(|s| match s {
+        PlanStep::ApplyEnvFile { source, source_digest, backup, .. } => {
+            Some((source.clone(), source_digest.clone(), backup.clone()))
+        }
+        _ => None,
+    });
+    assert_eq!(
+        restore,
+        Some(("/srv/coder.env.llmctl-previous".into(), "sha256:old".into(), None))
+    );
+}
+
+#[test]
+fn profile_run_of_a_stopped_target_evicts_and_restores_like_any_run() {
+    let inv = inventory();
+    // big (both cards) is down; coder holds card 0.
+    let observations = [obs("coder", &[0], true), obs("big", &[], false)];
+    let plan =
+        llmctl_core::plan_run_profile(&inv, &observations, &wn("big"), &profile("fake/big-awq"))
+            .unwrap();
+    assert_eq!(
+        labels(&plan.steps),
+        vec![
+            "record intent: big → Running",
+            "record intent: coder → Stopped { manual: false }",
+            "stop coder",
+            "apply profile coder.env.fast to big (serves fake/big-awq)",
+            "start big",
+            "wait for big readiness",
+            "verify big serves fake/big-awq",
+        ]
+    );
+    // The target was not serving before: it stays down, the old env goes
+    // back, and the evicted workload returns.
+    assert_eq!(
+        labels(&plan.rollback),
+        vec![
+            "stop big",
+            "restore the previous env of big (serves fake/big)",
+            "record intent: coder → Running",
+            "start coder",
+        ]
+    );
+    // The plan still round-trips through the journal.
+    let back: Plan = serde_json::from_str(&serde_json::to_string(&plan).unwrap()).unwrap();
+    assert_eq!(back, plan);
+}
+
+#[test]
+fn profile_run_needs_a_model_and_lifecycle_authority() {
+    let mut inv = inventory();
+    let err = llmctl_core::plan_run_profile(&inv, &[], &wn("coder"), &profile("  ")).unwrap_err();
+    assert!(matches!(err, CoreError::InvalidConfig { .. }), "{err:?}");
+    let err = llmctl_core::plan_run_profile(&inv, &[], &wn("nope"), &profile("m")).unwrap_err();
+    assert!(matches!(err, CoreError::UnknownWorkload(_)), "{err:?}");
+    inv.workloads[0].authority = ControlAuthority::ObserveOnly {
+        endpoint: "http://127.0.0.1:8100".into(),
+    };
+    let err = llmctl_core::plan_run_profile(&inv, &[], &wn("coder"), &profile("m")).unwrap_err();
+    assert!(matches!(err, CoreError::InvalidConfig { .. }), "{err:?}");
+}

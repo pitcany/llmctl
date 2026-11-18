@@ -101,6 +101,24 @@ pub enum PlanStep {
         unit: UnitName,
         model: String,
     },
+    /// External: make `source`'s bytes the unit's `EnvironmentFile` at
+    /// `path` (a profile switch, M4c) and re-pin the workload to it: the
+    /// pinned digest of that env file and the model the workload serves.
+    /// `source` must still have `source_digest`. A no-op on the file when
+    /// `path` already has that digest, so a restore after a failure that
+    /// came before the swap changes nothing. The forward step keeps the
+    /// bytes it replaces in `backup`; the restore step reads them from
+    /// there (`backup: None`). Env contents never enter the journal.
+    ApplyEnvFile {
+        workload: WorkloadName,
+        unit: UnitName,
+        path: String,
+        source: String,
+        source_digest: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backup: Option<String>,
+        model: String,
+    },
     /// External: atomically replace a llama-swap config with `content`,
     /// refusing when the file is no longer the one planned against
     /// (`expect_digest`), then confirm llama-swap reloaded it (its log, then
@@ -142,6 +160,7 @@ impl PlanStep {
             | PlanStep::ApplyDefinition { workload, .. }
             | PlanStep::VerifyVersion { workload, .. }
             | PlanStep::UnloadModel { workload, .. }
+            | PlanStep::ApplyEnvFile { workload, .. }
             | PlanStep::WriteSwapConfig { workload, .. } => workload,
         }
     }
@@ -185,6 +204,20 @@ impl PlanStep {
             PlanStep::UnloadModel {
                 workload, model, ..
             } => format!("unload {model} from {workload}"),
+            PlanStep::ApplyEnvFile {
+                workload,
+                source,
+                backup,
+                model,
+                ..
+            } => {
+                if backup.is_some() {
+                    let name = source.rsplit('/').next().unwrap_or(source);
+                    format!("apply profile {name} to {workload} (serves {model})")
+                } else {
+                    format!("restore the previous env of {workload} (serves {model})")
+                }
+            }
             PlanStep::WriteSwapConfig {
                 workload, lanes, summary, ..
             } => format!(
