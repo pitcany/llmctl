@@ -1023,6 +1023,21 @@ async fn cmd_status(cli: &Cli, json: bool) -> Result<u8, CliError> {
     Ok(0)
 }
 
+/// How long `status --all` waits for one enrolled host before showing its
+/// cached observations as STALE: `LLMCTL_NEXT_STATUS_TIMEOUT_S` (whole
+/// seconds, at least 1), default 10.
+fn remote_status_timeout() -> std::time::Duration {
+    parse_status_timeout(std::env::var("LLMCTL_NEXT_STATUS_TIMEOUT_S").ok().as_deref())
+}
+
+fn parse_status_timeout(v: Option<&str>) -> std::time::Duration {
+    let secs = v
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|s| *s >= 1)
+        .unwrap_or(10);
+    std::time::Duration::from_secs(secs)
+}
+
 /// `status --all`: local host first, then every enrolled host, each with
 /// freshness. An unreachable host shows its last cached observations
 /// marked STALE — never as "stopped" (M3-E.2).
@@ -1096,7 +1111,19 @@ async fn cmd_status_all(cli: &Cli, json: bool) -> Result<u8, CliError> {
     let mut dirty = false;
     for h in &mut hosts.hosts {
         let client = ControlClient::connect_bridge(&h.ssh_alias);
-        match client.status().await {
+        // A sleeping Mac does not refuse the bridge, it lets ssh wait (and a
+        // Wi-Fi wake can follow a minute later). Bound the wait so the view
+        // shows the cached observations as STALE instead of hanging; the
+        // dropped future drops the bridge, whose ssh is killed on drop.
+        let limit = remote_status_timeout();
+        let answer = match tokio::time::timeout(limit, client.status()).await {
+            Ok(r) => r.map_err(|e| e.to_string()),
+            Err(_) => Err(format!(
+                "no answer within {} s: asleep or unreachable (LLMCTL_NEXT_STATUS_TIMEOUT_S sets the limit)",
+                limit.as_secs()
+            )),
+        };
+        match answer {
             Ok(status) => {
                 h.last_seen = Some(chrono::Utc::now());
                 dirty = true;
@@ -2599,6 +2626,17 @@ fn print_operation(op: &OperationView) {
 #[cfg(test)]
 mod tests {
     use super::printable;
+
+    #[test]
+    fn the_remote_status_limit_defaults_to_ten_seconds_and_rejects_nonsense() {
+        use super::parse_status_timeout as p;
+        use std::time::Duration;
+        assert_eq!(p(None), Duration::from_secs(10));
+        assert_eq!(p(Some("3")), Duration::from_secs(3));
+        assert_eq!(p(Some(" 25 ")), Duration::from_secs(25));
+        assert_eq!(p(Some("0")), Duration::from_secs(10));
+        assert_eq!(p(Some("soon")), Duration::from_secs(10));
+    }
 
     #[test]
     fn control_characters_in_log_text_are_made_visible() {
