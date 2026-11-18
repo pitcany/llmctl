@@ -1093,7 +1093,7 @@ async fn cmd_mutate(
         println!("progress: llmctl-next op {} --watch", op.id);
         return Ok(0);
     }
-    watch_and_report(&client, &op.id).await
+    watch_and_report(&client, &op.id, watch_budget(&plan_resp.plan)).await
 }
 
 async fn cmd_logs(
@@ -1288,7 +1288,7 @@ async fn cmd_upgrade(cli: &Cli, cmd: UpgradeCmd) -> Result<u8, CliError> {
             let view = client.promote(&name, &version, wait).await?;
             let id = view["id"].as_str().unwrap_or("?");
             if wait {
-                watch_and_report(&client, id).await
+                watch_and_report(&client, id, DEFAULT_WATCH).await
             } else {
                 println!("promote admitted: llmctl-next op {id} --watch");
                 Ok(0)
@@ -1298,7 +1298,7 @@ async fn cmd_upgrade(cli: &Cli, cmd: UpgradeCmd) -> Result<u8, CliError> {
             let view = client.rollback_upgrade(&name, wait).await?;
             let id = view["id"].as_str().unwrap_or("?");
             if wait {
-                watch_and_report(&client, id).await
+                watch_and_report(&client, id, DEFAULT_WATCH).await
             } else {
                 println!("rollback admitted: llmctl-next op {id} --watch");
                 Ok(0)
@@ -1368,7 +1368,7 @@ async fn cmd_ops(cli: &Cli, json: bool) -> Result<u8, CliError> {
 async fn cmd_op(cli: &Cli, id: &str, watch: bool) -> Result<u8, CliError> {
     let client = connect(cli)?;
     if watch {
-        return watch_and_report(&client, id).await;
+        return watch_and_report(&client, id, DEFAULT_WATCH).await;
     }
     let op = client.operation(id).await?;
     print_operation(&op);
@@ -1533,7 +1533,7 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
         println!("progress: llmctl-next op {} --watch", op.id);
         return Ok(0);
     }
-    watch_and_report(&client, &op.id).await
+    watch_and_report(&client, &op.id, DEFAULT_WATCH).await
 }
 
 async fn cmd_unload(
@@ -1595,7 +1595,7 @@ async fn cmd_unload(
         println!("progress: llmctl-next op {} --watch", op.id);
         return Ok(0);
     }
-    watch_and_report(&client, &op.id).await
+    watch_and_report(&client, &op.id, DEFAULT_WATCH).await
 }
 
 async fn cmd_engine(cli: &Cli, name: &str, json: bool) -> Result<u8, CliError> {
@@ -1620,10 +1620,35 @@ async fn cmd_engine(cli: &Cli, name: &str, json: bool) -> Result<u8, CliError> {
     Ok(if r.state == "ready" { 0 } else { 1 })
 }
 
-async fn watch_and_report(client: &ControlClient, id: &str) -> Result<u8, CliError> {
+/// How long `--wait` watches by default.
+const DEFAULT_WATCH: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// A watch long enough for this plan: every readiness wait it can run
+/// (forward and rollback) plus a margin for stops and starts, never less
+/// than the default. A Strata lane needs ~615 s to load and its workload
+/// allows up to an hour; a caller that waits (llm-router's handoff) must
+/// not give up while the operation is still on its way.
+fn watch_budget(plan: &Plan) -> std::time::Duration {
+    let readiness: u64 = plan
+        .steps
+        .iter()
+        .chain(plan.rollback.iter())
+        .map(|s| match s {
+            llmctl_core::PlanStep::AwaitReadiness { timeout_secs, .. } => *timeout_secs,
+            _ => 0,
+        })
+        .sum();
+    DEFAULT_WATCH.max(std::time::Duration::from_secs(readiness + 300))
+}
+
+async fn watch_and_report(
+    client: &ControlClient,
+    id: &str,
+    budget: std::time::Duration,
+) -> Result<u8, CliError> {
     let mut last_signature = String::new();
     let final_op: Option<OperationView>;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10 * 60);
+    let deadline = tokio::time::Instant::now() + budget;
     loop {
         let op = client.operation(id).await?;
         let signature = format!(
@@ -1763,6 +1788,36 @@ mod tests {
         assert_eq!(
             printable("\u{1b}]0;pwned\u{7}\u{1b}[2Jok\rX\u{9b}31m"),
             "\\x1b]0;pwned\\x07\\x1b[2Jok\\x0dX\\x9b31m"
+        );
+    }
+
+    #[test]
+    fn a_waited_run_watches_for_as_long_as_its_plan_can_take() {
+        use super::{watch_budget, DEFAULT_WATCH};
+        use llmctl_core::{identity, OpKind, OperationId, Plan, PlanStep, UnitName, WorkloadName};
+        let name = WorkloadName::new("strata-fast").unwrap();
+        let unit = UnitName::systemd(identity::UnitScopeMarker::User, "x.service").unwrap();
+        let wait = |secs| PlanStep::AwaitReadiness {
+            workload: name.clone(),
+            unit: unit.clone(),
+            timeout_secs: secs,
+        };
+        let plan = |steps: Vec<PlanStep>, rollback: Vec<PlanStep>| Plan {
+            id: OperationId::generate(),
+            kind: OpKind::Run,
+            target: name.clone(),
+            revision: 1,
+            expected_model: "m".into(),
+            affected_gpus: vec![],
+            steps,
+            rollback,
+        };
+        // A two-minute start still gets the default ten minutes.
+        assert_eq!(watch_budget(&plan(vec![wait(120)], vec![])), DEFAULT_WATCH);
+        // An hour-long cold start, plus a rollback that waits too.
+        assert_eq!(
+            watch_budget(&plan(vec![wait(3600)], vec![wait(600)])),
+            std::time::Duration::from_secs(3600 + 600 + 300)
         );
     }
 }
