@@ -237,7 +237,7 @@ pub fn log_path(data_dir: &Path, op_id: &str) -> PathBuf {
 /// rewrite one line with `\r`, so only the final state of each is kept.
 pub async fn log_tail(path: &Path, max: usize) -> String {
     let bytes = tokio::fs::read(path).await.unwrap_or_default();
-    let text = String::from_utf8_lossy(&bytes);
+    let text = strip_ansi(&String::from_utf8_lossy(&bytes));
     let lines: Vec<&str> = text
         .lines()
         .map(|l| l.rsplit('\r').next().unwrap_or(l).trim())
@@ -248,6 +248,26 @@ pub async fn log_tail(path: &Path, max: usize) -> String {
         tail = tail[tail.len() - max..].to_string();
     }
     tail
+}
+
+/// Drop terminal colour sequences (`ESC [ … letter`): the journal is read
+/// as plain text.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for d in chars.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -291,5 +311,7 @@ mod tests {
         std::fs::write(&log, "Fetching 12 files\n  1%|\r 50%|\r100%|done\n\nDownloaded to /store\n").unwrap();
         assert_eq!(log_tail(&log, 500).await, "Fetching 12 files | 100%|done | Downloaded to /store");
         assert_eq!(log_tail(&dir.path().join("absent"), 500).await, "");
+        std::fs::write(&log, "\u{1b}[32m✓ Downloaded\u{1b}[0m\n  path: /store\n").unwrap();
+        assert_eq!(log_tail(&log, 500).await, "✓ Downloaded | path: /store");
     }
 }
