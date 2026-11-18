@@ -33,7 +33,11 @@ pub fn workload(name: &str, process: &str, readiness: &str, intent: &str, serves
         gpus: vec![],
         port: 8000,
         unit: format!("{name}.service"),
-        intent: intent.into(),
+        intent: match intent {
+            "unmanaged" => intent.into(),
+            "stopped (manual)" => r#"{"state":"stopped","manual":true}"#.into(),
+            s => format!(r#"{{"state":"{s}"}}"#),
+        },
         process: process.into(),
         readiness: readiness.into(),
         served_model: serves.map(String::from),
@@ -54,9 +58,9 @@ pub fn workstation_status() -> StatusResponse {
         inventory_revision: 42,
         generated_at: t0() - chrono::Duration::seconds(2),
         workloads: vec![
-            workload("vllm-engine", "running", "ready", "running", Some("qwen3.8-27b")),
-            workload("llama-router", "running", "ready", "running", Some("router")),
-            workload("ollama-gpu1", "stopped", "unknown", "stopped", None),
+            workload("vllm-engine", "Running", "Ready", "running", Some("qwen3.8-27b")),
+            workload("llama-router", "Running", "Ready", "running", Some("router")),
+            workload("ollama-gpu1", "Stopped", "NotReady", "stopped (manual)", None),
         ],
         gpus: vec![
             GpuView { index: 0, enrolled: vec!["vllm-engine".into()], foreign: vec![], error: None },
@@ -76,7 +80,7 @@ pub fn mac_status(host: &str) -> StatusResponse {
         platform: "macos".into(),
         inventory_revision: 7,
         generated_at: t0() - chrono::Duration::seconds(3),
-        workloads: vec![workload("llama-swap", "running", "ready", "running", None)],
+        workloads: vec![workload("llama-swap", "Running", "Ready", "running", None)],
         gpus: vec![],
     }
 }

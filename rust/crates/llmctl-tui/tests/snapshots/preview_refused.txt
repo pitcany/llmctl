@@ -10,7 +10,7 @@ Until then this runs workloads: enter shows the plan, y admits it, progress foll
 │  llama-swap     │                                                                                              │                 │
 │mbp2         STAL│plan: run vllm-engine on workstation @ inventory revision 43                                  │                 │
 │  (no answer with│expected model: qwen3.8-27b  gpus: workstation/gpu/0                                          │                 │
-│  llama-swap     │STOP TARGETS: ollama-gpu1, llama-router                                                       │e]               │
+│  llama-swap     │STOP TARGETS: ollama-gpu1, llama-router                                                       │ [stale]         │
 │                 │steps:                                                                                        │                 │
 │                 │   1. stop ollama-gpu1                                                                        │                 │
 │                 │   2. stop llama-router                                                                       │                 │

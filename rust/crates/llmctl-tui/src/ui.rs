@@ -116,18 +116,18 @@ fn workload_line(app: &App, w: &WorkloadView, stale: bool) -> Line<'static> {
     } else {
         ""
     };
-    let ready_style = match (stale, w.readiness.as_str()) {
+    let ready_style = match (stale, w.readiness.to_ascii_lowercase().replace('_', "").as_str()) {
         (true, _) => STALE,
         (_, "ready") => GOOD,
         (_, "unknown") => DIM,
-        (_, "not_ready" | "failed") => BAD,
+        (_, "notready" | "failed") if w.process.eq_ignore_ascii_case("running") => BAD,
         _ => Style::new(),
     };
     Line::from(vec![
         Span::raw(format!("  {:<20} ", truncate(&w.name, 20))),
         Span::styled(format!("{:<9}", w.process), if stale { STALE } else { Style::new() }),
         Span::styled(format!("{:<10}", w.readiness), ready_style),
-        Span::raw(format!("intent {:<10} ", truncate(&w.intent, 10))),
+        Span::raw(format!("intent {:<16} ", truncate(&fmt_intent(&w.intent), 16))),
         Span::raw(format!("{:<30} ", truncate(&serves, 30))),
         Span::styled(format!("{:<8} ", w.ownership), DIM),
         Span::styled(format!("{seen}{fresh_mark}"), if stale { STALE } else { DIM }),
@@ -719,6 +719,19 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
 }
 
 // ---- helpers ------------------------------------------------------------
+
+/// The recorded intent for one cell: the agent sends JSON for a desired
+/// state (`{"state":"stopped","manual":true}`) and a bare word otherwise.
+pub fn fmt_intent(raw: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return raw.to_string();
+    };
+    match v.get("state").and_then(|s| s.as_str()) {
+        Some(state) if v.get("manual").and_then(|m| m.as_bool()) == Some(true) => format!("{state} (manual)"),
+        Some(state) => state.to_string(),
+        None => raw.to_string(),
+    }
+}
 
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
