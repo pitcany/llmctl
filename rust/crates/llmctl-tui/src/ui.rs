@@ -36,6 +36,31 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Some(m) = &app.modal {
         draw_modal(f, app, m, area);
     }
+    scrub(f);
+}
+
+/// Last pass over the frame: no cell may carry a control character to
+/// the terminal. Agent text (engine log lines above all, but also errors,
+/// phase details, audit states) can contain escape sequences; ratatui's
+/// paragraph path writes them through as-is.
+fn scrub(f: &mut Frame) {
+    for cell in f.buffer_mut().content.iter_mut() {
+        if cell.symbol().chars().any(char::is_control) {
+            cell.set_symbol("?");
+        }
+    }
+}
+
+/// Agent text made safe to keep: tabs become spaces, other control
+/// characters `?`.
+pub fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\t' => ' ',
+            c if c.is_control() => '?',
+            c => c,
+        })
+        .collect()
 }
 
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {

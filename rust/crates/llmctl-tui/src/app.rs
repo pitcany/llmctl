@@ -883,7 +883,7 @@ impl App {
                     }
                     Ok(LogPage::Lane { lines }) => {
                         self.logs.error = None;
-                        self.logs.lines = lines;
+                        self.logs.lines = lines.iter().map(|l| crate::ui::clean(l)).collect();
                         trim_front(&mut self.logs.lines, LOG_KEEP);
                     }
                     Err(e) => self.logs.error = Some(e.to_string()),
@@ -1000,7 +1000,8 @@ impl App {
             LogSource::Unit => "",
         };
         let cut = if e.truncated { " […truncated]" } else { "" };
-        self.logs.lines.push(format!("{est}{when} {who}{}{cut}", e.message));
+        let msg = crate::ui::clean(&e.message);
+        self.logs.lines.push(format!("{est}{when} {who}{msg}{cut}"));
     }
 }
 

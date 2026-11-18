@@ -218,3 +218,30 @@ fn confirm_modal() {
     });
     assert_snapshot("confirm", &render(&app, W, H));
 }
+
+/// Agent text (engine log lines, errors, phase details, audit states) can
+/// carry terminal escapes; none may reach the terminal as a control byte.
+#[test]
+fn agent_text_never_puts_control_characters_on_the_terminal() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let evil = "a\u{1b}]0;pwned\u{07}b\u{1b}[2Jc\u{9b}31md\re\tf";
+    let mut app = base_app();
+    app.message = Some(format!("not admitted: {evil}"));
+    app.logs.target = Some(LogTarget { host: "workstation".into(), workload: "vllm-engine".into(), lane: None });
+    app.logs.lines = vec![evil.to_string()];
+    app.logs.error = Some(evil.to_string());
+    let mut o = op("op-x", OpKind::Run, "vllm-engine", OpStatus::Failed, &[("start", PhaseStatus::Failed)]);
+    o.phases[0].detail = Some(evil.to_string());
+    app.ops = vec![("workstation".into(), o)];
+    app.audit = vec![HostResult { host: "workstation".into(), result: Err(evil.to_string()) }];
+    for screen in [Screen::Logs, Screen::Ops, Screen::Audit, Screen::Hosts] {
+        app.screen = screen;
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| llmctl_tui::ui::draw(f, &app)).unwrap();
+        let buf = term.backend().buffer();
+        for cell in buf.content() {
+            assert!(!cell.symbol().chars().any(char::is_control), "{screen:?}: control char {:?} in a cell", cell.symbol());
+        }
+    }
+}
