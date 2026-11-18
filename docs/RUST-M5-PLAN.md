@@ -4,7 +4,7 @@ Status 2026-11-18: **plan agreed — all seven owner decisions taken, each
 as recommended** (end of this file). M3's sleep/wake drill is done
 ([report](RUST-M3-SLEEP-DRILL-2026-11-18.md)). **Added the same day at
 the owner's request: M5d, llama.cpp on the Macs and llama.cpp serving
-several models**; its decisions 8–10 were taken as recommended. Nothing of M5 is
+several models**; its decisions 8–9 were taken as recommended; 10 was changed: `gpt-oss-120b` moves into the router at the end of M5d. Nothing of M5 is
 built yet.
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table,
 M5 row; "Outcome and scope"; "Cutover and reversal"). Builds on M4
@@ -242,7 +242,8 @@ Design (defaults; decisions 8–10 below):
    unit `llamacpp-router` on the CUDA build that serves any GGUF in the
    stores. A model load claims cards like the M4c on-demand claim, so it
    is planned against `vllm-engine` and the others (evict or refuse).
-   `gpt-oss-120b` stays its own unit in M5 (decision 10). Candidate
+   `gpt-oss-120b` moves into the router at the end of M5d (decision 10,
+   step 7 below). Candidate
    models (sizes on disk, 2026-11-18):
 
    | Model | Size | Fits the two cards (2 × 32 GiB) |
@@ -264,6 +265,27 @@ Design (defaults; decisions 8–10 below):
    rollback). That closes M4 carry-over 4 (release archives on launchd).
    brew's 1.0.0 stays installed but no lane runs it. The workstation keeps
    its source build directories.
+7. **`gpt-oss-120b` moves into the router, last** (decision 10), only
+   after the router has passed its pilot with the two Qwen models. What
+   moves with it (read from `gpt-oss-120b.service` and llm-router's
+   `router.yaml`, 2026-11-18):
+   - its launch arguments go into its preset section unchanged (131k
+     context, `--n-cpu-moe 6`, `--tensor-split 56,44`, `--parallel 1`,
+     slot save path, `--cache-reuse 256`, alias `gpt-oss-120b`);
+   - the `ds4-llmctl-sync adopt/detach` hooks (now `ExecStartPost` /
+     `ExecStopPost`) become llmctl-next companion hooks on that model's
+     load and unload;
+   - `llama-server-guarded`'s checks (every shard present, no live
+     `.incomplete` download, free VRAM above `LLAMA_GUARD_MIN_FREE_MIB`)
+     become the router's pre-load check, since the router starts model
+     processes with its own binary;
+   - llm-router's `gptoss` backend points at the router's port with
+     `llmctl_next` naming the router model, and its fallback `start_cmd`
+     loads the model through the router instead of starting the old unit;
+   - its version pin moves to the router workload's recipe.
+   The old unit is kept disabled (not deleted) for one week as the way
+   back. Cost: about half a day plus one GPU window (`longjob … --router`)
+   for a live switch `qwen27b` → `gptoss` → `qwen27b` through llm-router.
 
 Tests: a stand-in router endpoint (load, unload, status, reload, a load
 that fails) for the verbs; preset INI round-trip fixtures; a refused load
@@ -272,7 +294,10 @@ not load it. **Pilot:** workstation router with `Qwen3.5-0.8B` and
 `Qwen3.6-35B-A3B` loaded and unloaded by verb, each answering one request,
 planned against `vllm-engine` (`longjob … --router`); m5 a llama.cpp lane
 on a Qwen GGUF; mbp2 a llama.cpp lane on an embedding GGUF (an embedding
-request answered). The workflow matrix (M5a) and the catalog (M5c) list
+request answered). Then the `gpt-oss-120b` move (step 7): one live
+switch through llm-router to it and back, one request answered, the
+hooks seen to run, and the guard check refusing a model with a missing
+shard (a stand-in directory). The workflow matrix (M5a) and the catalog (M5c) list
 router models and llama.cpp lanes like any other model.
 
 ### M5e. Minimal multi-host TUI (~4–5 days)
@@ -328,7 +353,7 @@ findings, anything that needed the old tools).
 | Minimal multi-host TUI | the M5e screens work against all three agents; UI budget measured |
 | Config/preset parity | every preset round-trips and renders the same launch as Python; `run <preset>` used in the pilot |
 | Catalog operations | real registry imported with a mapping report; add/rm/scan used live; export accepted by Python |
-| llama.cpp on every host, several models | router models loaded and unloaded by verb on the workstation; a llama.cpp lane on m5 and on mbp2 from a pinned release archive; each answered a request |
+| llama.cpp on every host, several models | router models loaded and unloaded by verb on the workstation; `gpt-oss-120b` served by the router through llm-router; a llama.cpp lane on m5 and on mbp2 from a pinned release archive; each answered a request |
 | Migration/reversal rehearsal | both directions pass on temp state; procedure written |
 | Daily workflows across hosts | every row of the workflow matrix has a passing llmctl-next path on its host, or an owner-accepted gap |
 | No legacy lifecycle writes | `audit` shows zero unexplained foreign writes for owned workloads across the pilot |
@@ -373,6 +398,7 @@ the count; `hf` installed on m5 in M5c.
 9. **Autoload:** off, loads only through llmctl-next (recommended: the
    fit and the budget run before every load), or on (a request loads its
    model by itself; convenient, but behind the planner's back).
-10. **`gpt-oss-120b`:** stays its own unit in M5 (recommended: it is
-   handed over by llm-router today and works), or becomes a model of the
-   workstation router.
+10. **`gpt-oss-120b`:** ~~stays its own unit in M5~~. **Changed by the
+   owner the same day: it moves into the workstation router at the end of
+   M5d**, after the router's pilot, so llama.cpp on the workstation ends
+   M5d as one engine for every GGUF model (step 7 of M5d).
