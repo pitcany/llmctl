@@ -18,6 +18,7 @@ M4b: [RUST-M4B-PROGRESS-2026-11-17.md](RUST-M4B-PROGRESS-2026-11-17.md).
 | 2026-11-17 | **Router handoff, vLLM profiles** (item 4, complete in code). llm-router `1c1c566`: with `switch.llmctl_next_cmd` and `switch.llmctl_next_workload`, a profile switch is one `llmctl-next run <workload> --profile-env <profile> --model <served> --wait --force`; exit 3/4/5/6 falls through to the router's own switch; a failed operation fails the switch and the router's rollback does not run on top of llmctl-next's. **Off by default.** | 17 router tests in `tests/test_switcher_llmctl_next.py`; router suite 363 pass, 1 known failure. No handoff has run for real |
 | 2026-11-17 | **Pilot: vLLM handoff enabled on the workstation.** `router.yaml` (`0d214e6` in `~/AI/llm-router`): `switch.llmctl_next_cmd` = the pilot daemon's own binary + data dir, `switch.llmctl_next_workload: vllm-engine`; llm-router restarted 17:59. Lane backends are not handed over. Pilot inventory: `vllm-engine` readiness 600 s (was the 120 s default, too short for an AWQ load). **Found and fixed:** `d07dabc` — the systemd adapter cleared the start-rate counter only for a `failed` unit; `vllm-engine` allows 3 starts per 30 min, the fourth was the rollback's and was refused (`start-limit-hit`). Also `46b2eca` (the ack hint named a command that does not exist) | Three jobs, all through `longjob … --router`. (1) `m4c-router-pilot` 18:03–18:07: `llmctl run qwen27b` went through llm-router, which handed it to llmctl-next (`model.switch.llmctl_next` in the router log; operation `Run vllm-engine Succeeded`, 6 phases, 122 s) — from an env the Python llmctl had just written itself, so the drift tolerance, a real file swap and the re-pin all ran. (2) `m4c-forced-rollback` 18:07–18:09: verify failed as intended, env restored, restart refused by systemd → `needs_attention`, engine down until a manual `llm-unit reset-failed` + `start` (serving again 18:11:28). (3) `m4c-forced-rollback-2` 18:17–18:20 on the fixed daemon: verify failed, env restored from `.llmctl-previous`, engine restarted on the default and verified, `recovery: restored`, 177 s. Spike suite 21/21 (`--test-threads=1`). End state: default profile, `qwen3.8-27b` serving, lock and lease free, `ccl --ask local` answered. Tutor downtime about 10 min in total |
 | 2026-11-17 | **Handoff rollout finished.** (a) The pilot daemon is `llmctl-next.service` (user unit, enabled, `~/AI/services/user/`, `d4d09d41` in `~/AI`); same binary and data dir. (b) Lane handoff on: `llmctl_next: strata-fast` on `flash-fast`, `llmctl_next: gpt-oss-120b` on `gptoss` (`238d34c` in llm-router). | Restarting the unit left `vllm-engine`'s pid unchanged; `Linger=yes`. Job `m4c-loose-ends` 19:05–19:28, all four steps passed: (1) with 12 requests in flight, `restart vllm-engine` without `--force` was refused `requests_in_flight` after 20 s (exit 4), engine pid unchanged; (2) `llmctl run qwen27b-uncensored` → router → llmctl-next profile run, succeeded (535 s, a cold load); (3) `llmctl run flash-fast` → router → `llmctl-next run strata-fast`, succeeded (729 s: vllm-engine evicted, lane started and verified); (4) `llmctl run qwen27b` → router → llmctl-next, succeeded (100 s: lane evicted, default profile swapped back). Router log: 3 × `model.switch.llmctl_next`, no fallback. End state: default profile, lock and lease free. The default model was away for about 23 min |
+| 2026-11-17 | **Three small defects closed.** `4ffa37b`: an unload of a model that was not loaded on this machine is journaled `not-loaded:…` instead of `unloaded:…` (Ollama's `name:latest` matches `name`); `tests/launchd_spike.rs` sets `engine_kind`. The Mac agents run today's binary | macOS type-check clean for daemon, client and the CLI tests; suite green. Live on the workstation: a second `unload ollama qwen3-embedding:0.6b` reported `not-loaded:…`. mbp2 upgraded from source (`host upgrade mbp2 --source`, 40 s), m5 with mbp2's binary (`--binary`); both binaries sha256 `59f07e24…`, both agents refuse a profile request with the new messages, workloads still Running |
 
 ## Next, in order
 
@@ -42,16 +43,11 @@ M4b: [RUST-M4B-PROGRESS-2026-11-17.md](RUST-M4B-PROGRESS-2026-11-17.md).
 - **Ollama swaps on its own:** the main Ollama runs
   `OLLAMA_MAX_LOADED_MODELS=1`, so loading one model evicts the other (seen
   in the live check: the test model replaced `qwen3-embedding:0.6b`).
-- The Mac agents were not upgraded for this change (no cards there, so
-  the plan is the same).
 - **Dry runs do not look at the lock or the lease:** a preview changes
   nothing; the refusal comes at admission.
 - **Recovery under a lease:** the watcher's recovery run is refused like
   any other operation and logs `recovery refused` each tick until the
   lease ends (the same stand-down llm-heal does).
-- `tests/launchd_spike.rs` does not compile under `--cfg=llmctl_macos`
-  (`WorkloadDefinition` gained `engine_kind` in M4a). Not caused by M4c;
-  the daemon-only macOS check is clean.
 - **Request safety, limits:** an explicit `unload` is exempt (it names
   one model on purpose). `upgrade promote` waits like a stop but has no
   force flag. Requests that bypass llm-router are not counted.
@@ -72,3 +68,6 @@ M4b: [RUST-M4B-PROGRESS-2026-11-17.md](RUST-M4B-PROGRESS-2026-11-17.md).
   acknowledged) and the failed forced-rollback runs stay in the pilot
   journal on purpose; `inventory.json.bak-m4c-pilot` is the inventory
   before the readiness change.
+- **Agent versions:** every build reports `0.1.0`, so `host list` cannot
+  tell an upgraded agent from an old one (checked by binary hash and
+  behaviour instead).
