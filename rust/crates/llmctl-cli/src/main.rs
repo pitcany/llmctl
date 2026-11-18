@@ -16,6 +16,7 @@ use llmctl_client::{ClientError, ControlClient};
 use llmctl_core::{OpKind, Plan};
 
 mod enroll;
+mod catalog_cmds;
 mod preset_cmds;
 
 #[derive(Parser)]
@@ -87,6 +88,11 @@ enum Command {
         /// host's only one).
         #[arg(long, conflicts_with = "profile_env")]
         workload: Option<String>,
+    },
+    /// The model catalog: import a Python registry bundle, export one back.
+    Catalog {
+        #[command(subcommand)]
+        cmd: catalog_cmds::CatalogCmd,
     },
     /// Presets (`~/.config/llmctl/presets/*.yaml`), edited in place.
     Preset {
@@ -405,6 +411,8 @@ enum ModelCmd {
         #[arg(long)]
         json: bool,
     },
+    #[command(flatten)]
+    Catalog(catalog_cmds::ModelCatalogCmd),
 }
 
 #[derive(Subcommand, Clone)]
@@ -835,6 +843,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Stores { cmd, json } => cmd_stores(cli, cmd, json).await,
         Command::Model { cmd } => cmd_model(cli, cmd).await,
         Command::Preset { cmd } => preset_cmds::cmd_preset(cli, cmd).await,
+        Command::Catalog { cmd } => catalog_cmds::cmd_catalog(cli, cmd).await,
         Command::Vram { measure, json } => cmd_vram(cli, measure.as_deref(), json).await,
         Command::Ops { json } => cmd_ops(cli, json).await,
         Command::Op { id, watch } => cmd_op(cli, &id, watch).await,
@@ -1850,6 +1859,9 @@ async fn cmd_stores(cli: &Cli, cmd: Option<StoresCmd>, json: bool) -> Result<u8,
 }
 
 async fn cmd_model(cli: &Cli, cmd: ModelCmd) -> Result<u8, CliError> {
+    if let ModelCmd::Catalog(c) = cmd {
+        return catalog_cmds::cmd_model_catalog(cli, c).await;
+    }
     let client = connect(cli)?;
     ensure_protocol(&client).await?;
     let (source, store, for_workload, size_gib, dry_run, wait, key) = match cmd {
@@ -1862,6 +1874,7 @@ async fn cmd_model(cli: &Cli, cmd: ModelCmd) -> Result<u8, CliError> {
             wait,
             key,
         } => (source, store, for_workload, size_gib, dry_run, wait, key),
+        ModelCmd::Catalog(_) => unreachable!("handled above"),
         ModelCmd::Rm {
             target,
             store,

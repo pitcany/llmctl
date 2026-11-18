@@ -7,6 +7,7 @@
 //! use; unknown external state must stay representable.
 
 pub mod acquire;
+pub mod catalog;
 pub mod error;
 pub mod fit;
 pub mod identity;

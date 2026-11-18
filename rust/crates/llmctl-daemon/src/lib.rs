@@ -21,6 +21,7 @@ pub mod adopt;
 pub mod api;
 pub mod api_m5c;
 pub mod audit;
+pub mod catalog;
 pub mod app;
 pub mod coord;
 pub mod db;

@@ -56,12 +56,10 @@ fn spans(lines: &[String]) -> std::collections::BTreeMap<String, (usize, usize)>
         for (j, line) in lines.iter().enumerate().take(limit).skip(start + 1) {
             let body = line.trim_end_matches(['\n', '\r']);
             let first = body.as_bytes().first().copied().unwrap_or(b' ');
-            if (first == b' ' || first == b'\t')
+            let indented = (first == b' ' || first == b'\t')
                 && !body.trim().is_empty()
-                && !body.trim_start().starts_with('#')
-            {
-                end = j + 1;
-            } else if body.trim_end() == "-" || body.starts_with("- ") {
+                && !body.trim_start().starts_with('#');
+            if indented || body.trim_end() == "-" || body.starts_with("- ") {
                 end = j + 1;
             } else if body.trim().is_empty() || body.trim_start().starts_with('#') {
                 continue;

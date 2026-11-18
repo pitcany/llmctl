@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -15,6 +15,7 @@ use llmctl_client::catalog::{self as cat, codes as ccodes};
 use llmctl_client::wire::{codes, ApiError as WireError, ApiErrorBody, PROTOCOL_VERSION};
 
 use crate::app::AppState;
+use crate::catalog::CatalogError;
 use crate::presets::PresetsError;
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -25,6 +26,14 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/presets/run", post(presets_run))
         .route("/v1/presets/settle", post(presets_settle))
         .route("/v1/presets/{alias}", get(presets_show))
+        .route("/v1/catalog/models", get(catalog_list))
+        .route("/v1/catalog/model", get(catalog_show))
+        .route("/v1/catalog/import", post(catalog_import))
+        .route("/v1/catalog/export", get(catalog_export))
+        .route("/v1/catalog/models/add", post(catalog_add))
+        .route("/v1/catalog/models/edit", post(catalog_edit))
+        .route("/v1/catalog/models/enable", post(catalog_enable))
+        .route("/v1/catalog/scan", post(catalog_scan))
 }
 
 pub struct M5cError {
@@ -124,4 +133,85 @@ async fn presets_settle(
 ) -> Result<Json<cat::PresetSettleResponse>, M5cError> {
     check_protocol(req.protocol)?;
     Ok(Json(crate::presets::settle(&state, &req).await?))
+}
+
+impl From<CatalogError> for M5cError {
+    fn from(e: CatalogError) -> Self {
+        match e {
+            CatalogError::Unknown(m) => M5cError::new(StatusCode::NOT_FOUND, ccodes::UNKNOWN_MODEL, m),
+            CatalogError::Invalid(m) => M5cError::new(StatusCode::BAD_REQUEST, codes::INVALID_REQUEST, m),
+            CatalogError::Refused(m) => M5cError::new(StatusCode::CONFLICT, ccodes::CATALOG_REFUSED, m),
+            CatalogError::Io(m) => M5cError::new(StatusCode::INTERNAL_SERVER_ERROR, codes::DAEMON_ERROR, m),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ListQuery {
+    #[serde(default)]
+    all: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ModelQuery {
+    m: String,
+}
+
+async fn catalog_list(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ListQuery>,
+) -> Result<Json<cat::CatalogListResponse>, M5cError> {
+    let all = q.all.as_deref().is_some_and(|v| v != "0" && v != "false");
+    Ok(Json(crate::catalog::list(&state, all).await?))
+}
+
+async fn catalog_show(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ModelQuery>,
+) -> Result<Json<cat::CatalogModel>, M5cError> {
+    Ok(Json(crate::catalog::show(&state, &q.m).await?))
+}
+
+async fn catalog_import(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<cat::CatalogImportRequest>,
+) -> Result<Json<cat::CatalogImportResponse>, M5cError> {
+    check_protocol(req.protocol)?;
+    Ok(Json(crate::catalog::import(&state, &req).await?))
+}
+
+async fn catalog_export(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, M5cError> {
+    Ok(Json(crate::catalog::export(&state).await?))
+}
+
+async fn catalog_add(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<cat::ModelAddRequest>,
+) -> Result<Json<cat::ModelWriteResponse>, M5cError> {
+    check_protocol(req.protocol)?;
+    Ok(Json(crate::catalog::add(&state, &req).await?))
+}
+
+async fn catalog_edit(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<cat::ModelEditRequest>,
+) -> Result<Json<cat::ModelWriteResponse>, M5cError> {
+    check_protocol(req.protocol)?;
+    Ok(Json(crate::catalog::edit(&state, &req).await?))
+}
+
+async fn catalog_enable(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<cat::ModelEnableRequest>,
+) -> Result<Json<cat::ModelWriteResponse>, M5cError> {
+    check_protocol(req.protocol)?;
+    Ok(Json(crate::catalog::enable(&state, &req).await?))
+}
+
+async fn catalog_scan(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<cat::ScanRequest>,
+) -> Result<Json<cat::ScanResponse>, M5cError> {
+    check_protocol(req.protocol)?;
+    Ok(Json(crate::catalog::scan(&state, &req).await?))
 }

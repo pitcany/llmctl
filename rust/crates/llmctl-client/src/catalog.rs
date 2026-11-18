@@ -236,3 +236,162 @@ impl ControlClient {
         self.post_json("/v1/presets/settle", req).await
     }
 }
+
+// ---- model catalog ---------------------------------------------------------------
+
+pub use llmctl_core::catalog::{CatalogModel, RowOutcome, RowReport};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogListResponse {
+    pub host: String,
+    /// Names the registry knows this host by (from imports).
+    pub host_names: Vec<String>,
+    pub revision: u64,
+    pub models: Vec<CatalogModel>,
+    /// Records hidden because they are disabled (without `all`).
+    pub disabled_hidden: usize,
+    /// Bundle rows kept verbatim for the export but not records here.
+    pub unmapped: usize,
+    pub profiles: usize,
+}
+
+/// Import a registry bundle (`llmctl export-registry`). Without `confirm`
+/// it only reports; with the report's `confirm` token it applies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogImportRequest {
+    pub protocol: u32,
+    pub bundle: serde_json::Value,
+    /// Registry host names that mean this host (`--as yannik-desktop`).
+    #[serde(default)]
+    pub host_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogImportResponse {
+    pub rows: Vec<RowReport>,
+    /// Counts by outcome: new, no_store, present, unmapped.
+    pub counts: std::collections::BTreeMap<String, usize>,
+    pub profiles: usize,
+    /// Pass back as `confirm` to apply exactly this report.
+    pub confirm: String,
+    pub applied: bool,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelAddRequest {
+    pub protocol: u32,
+    pub name: String,
+    pub engine: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
+    /// Other fields, values as YAML text.
+    #[serde(default)]
+    pub set: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelEditRequest {
+    pub protocol: u32,
+    /// Id, or a name that is unique on this host.
+    pub model: String,
+    #[serde(default)]
+    pub set: Vec<(String, String)>,
+    #[serde(default)]
+    pub unset: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelEnableRequest {
+    pub protocol: u32,
+    pub model: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelWriteResponse {
+    pub model: CatalogModel,
+    /// `(field, before, after)` as JSON text.
+    pub changes: Vec<(String, Option<String>, Option<String>)>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanRequest {
+    pub protocol: u32,
+    /// One store (default: every declared store).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
+    /// Add what is found and not cataloged as records.
+    #[serde(default)]
+    pub add: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanFound {
+    pub store: String,
+    pub engine: String,
+    /// What the engine calls it (repo, tag, key, path).
+    pub source: String,
+    pub path: String,
+    /// The record that already points at it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanResponse {
+    pub stores: Vec<String>,
+    pub found: Vec<ScanFound>,
+    /// Records in a scanned store whose weights are not there.
+    pub missing: Vec<CatalogModel>,
+    pub added: usize,
+    pub revision: u64,
+}
+
+impl ControlClient {
+    pub async fn catalog_models(&self, all: bool) -> Result<CatalogListResponse, ClientError> {
+        self.get_json(if all { "/v1/catalog/models?all=1" } else { "/v1/catalog/models" }).await
+    }
+
+    pub async fn catalog_model(&self, model: &str) -> Result<CatalogModel, ClientError> {
+        let q: String = model
+            .bytes()
+            .map(|b| match b {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
+        self.get_json(&format!("/v1/catalog/model?m={q}")).await
+    }
+
+    pub async fn catalog_import(&self, req: &CatalogImportRequest) -> Result<CatalogImportResponse, ClientError> {
+        self.post_json("/v1/catalog/import", req).await
+    }
+
+    pub async fn catalog_export(&self) -> Result<serde_json::Value, ClientError> {
+        self.get_json("/v1/catalog/export").await
+    }
+
+    pub async fn model_add(&self, req: &ModelAddRequest) -> Result<ModelWriteResponse, ClientError> {
+        self.post_json("/v1/catalog/models/add", req).await
+    }
+
+    pub async fn model_edit(&self, req: &ModelEditRequest) -> Result<ModelWriteResponse, ClientError> {
+        self.post_json("/v1/catalog/models/edit", req).await
+    }
+
+    pub async fn model_enable(&self, req: &ModelEnableRequest) -> Result<ModelWriteResponse, ClientError> {
+        self.post_json("/v1/catalog/models/enable", req).await
+    }
+
+    pub async fn model_scan(&self, req: &ScanRequest) -> Result<ScanResponse, ClientError> {
+        self.post_json("/v1/catalog/scan", req).await
+    }
+}
