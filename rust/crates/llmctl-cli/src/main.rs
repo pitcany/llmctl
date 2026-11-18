@@ -146,6 +146,11 @@ enum Command {
         /// --model ollama / --model lmstudio for the service itself.
         #[arg(long)]
         engine_kind: Option<String>,
+        /// When it holds its GPUs: at_start (evicts and is evicted) or
+        /// on_demand (a vendor service that loads per request; the default
+        /// for ollama and lm_studio).
+        #[arg(long, value_parser = ["at_start", "on_demand"])]
+        gpu_claim: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -538,6 +543,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             confirm,
             allow_unverified,
             engine_kind,
+            gpu_claim,
             json,
         } => {
             let req = AdoptRequest {
@@ -550,6 +556,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
                 confirm_digest: confirm,
                 allow_unverified,
                 engine_kind,
+                gpu_claim,
             };
             cmd_adopt(cli, req, json).await
         }

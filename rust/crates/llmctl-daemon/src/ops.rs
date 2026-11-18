@@ -332,6 +332,14 @@ impl OpManager {
         if !starts_units || plan.affected_gpus.is_empty() {
             return Ok(());
         }
+        // An on-demand target (LM Studio, the main Ollama) holds no VRAM at
+        // start, so who is on the cards does not matter to its start (M4c).
+        if inv
+            .workload(&plan.target)
+            .is_some_and(|d| !d.gpu_claim.is_at_start())
+        {
+            return Ok(());
+        }
         let touched: Vec<&WorkloadName> = plan
             .steps
             .iter()
@@ -359,9 +367,20 @@ impl OpManager {
             if allowed_here {
                 continue;
             }
-            let desc = match &occ.unit {
-                Some(u) => format!("pid {} in unit {u}, {} MiB", occ.pid, occ.memory_mib),
-                None => format!("pid {} (no unit), {} MiB", occ.pid, occ.memory_mib),
+            // An enrolled on-demand service with a model loaded: real VRAM,
+            // never stopped by this plan — name the unload instead.
+            let on_demand = occ.unit.as_ref().and_then(|u| {
+                inv.workloads
+                    .iter()
+                    .find(|w| &w.unit.to_string() == u && !w.gpu_claim.is_at_start())
+            });
+            let desc = match (&occ.unit, on_demand) {
+                (Some(u), Some(w)) => format!(
+                    "{} (on-demand, unit {u}) has a model loaded there, {} MiB; unload it first: llmctl-next engine {} / llmctl-next unload {} <model>",
+                    w.name, occ.memory_mib, w.name, w.name
+                ),
+                (Some(u), None) => format!("pid {} in unit {u}, {} MiB", occ.pid, occ.memory_mib),
+                (None, _) => format!("pid {} (no unit), {} MiB", occ.pid, occ.memory_mib),
             };
             return Err(OpsError::GpuOccupied {
                 workload: plan.target.to_string(),

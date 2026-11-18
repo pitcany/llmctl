@@ -106,6 +106,7 @@ pub fn sample_inventory(host: &HostId) -> HostInventory {
         recovery: None,
         recipe: None,
         readiness_timeout_secs: None,
+        gpu_claim: Default::default(),
     };
     let mut inv = HostInventory {
         host: host.clone(),

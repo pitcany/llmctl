@@ -184,6 +184,7 @@ fn write_inventory(dir: &Path, unit: &str, port: u16, model: &str) {
             recovery: None,
             recipe: None,
             readiness_timeout_secs: None,
+            gpu_claim: Default::default(),
         }],
         revision: 1,
     };

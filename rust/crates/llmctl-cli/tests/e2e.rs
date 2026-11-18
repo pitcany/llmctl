@@ -952,6 +952,70 @@ async fn enrolled_workload_the_plan_stops_is_not_foreign_but_a_stale_one_is() {
     }
 }
 
+/// M4c: an on-demand vendor service claims nothing at start, so a foreign
+/// process on its card does not block it; an at_start workload on a card
+/// where an on-demand service has a model loaded is refused with the unload.
+#[tokio::test]
+async fn on_demand_claims_pass_the_guard_and_name_the_unload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("control.sock");
+    let host = "workstation";
+    let wl = |name: &str, claim: Option<&str>| {
+        let mut w = serde_json::json!({
+            "name": name, "engine": "fake", "model": format!("fake/{name}"),
+            "gpus": [{"host": host, "index": 0}], "port": 8100,
+            "unit": {"scope": "user", "name": format!("llmctl-next-fake-{name}.service")},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": format!("llmctl-next-fake-{name}.service")},
+            "ownership": {"kind": "external"}
+        });
+        if let Some(c) = claim {
+            w["gpu_claim"] = c.into();
+        }
+        w
+    };
+    let mut svc = wl("svc", Some("on_demand"));
+    svc["port"] = 8101.into();
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [wl("coder", None), svc],
+        "revision": 1
+    }});
+    std::fs::write(dir.path().join("inventory.json"), inv.to_string()).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(&socket).arg("--data-dir").arg(dir.path()).arg("daemon")
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let client = d.client();
+
+    // A foreign process on the card: the on-demand service still starts.
+    write_gpus(&d, serde_json::json!([{"gpu": 0, "pid": 4242, "unit": null, "memory_mib": 9000}]));
+    run_to_success(&d, "svc", "ondemand-1").await;
+
+    // The service now has a model loaded on the card (its unit holds VRAM):
+    // an at_start workload is refused, and told what to unload.
+    write_gpus(&d, serde_json::json!([{"gpu": 0, "pid": 5151, "unit": "user/llmctl-next-fake-svc.service", "memory_mib": 17000}]));
+    match client.admit(admit_req(OpKind::Run, "coder", "ondemand-2")).await {
+        Err(ClientError::Api { code, message, .. }) => {
+            assert_eq!(code, codes::GPU_OCCUPIED, "{message}");
+            assert!(message.contains("llmctl-next unload svc"), "{message}");
+        }
+        other => panic!("expected gpu_occupied with the unload hint, got {other:?}"),
+    }
+
+    // Once unloaded (card empty) coder starts and the service keeps running.
+    write_gpus(&d, serde_json::json!([]));
+    run_to_success(&d, "coder", "ondemand-3").await;
+    let st = client.status().await.unwrap();
+    let svc = st.workloads.iter().find(|w| w.name == "svc").unwrap();
+    assert!(
+        format!("{:?}", svc.process).contains("Running"),
+        "the on-demand service was evicted: {:?}",
+        svc.process
+    );
+}
+
 // ---- B: bounded recovery ----------------------------------------------------
 
 /// A daemon whose inventory gives `coder` a recovery budget and whose

@@ -24,10 +24,16 @@ pub fn gpu_conflicts<'a>(
     let Some(def) = inventory.workload(target) else {
         return Vec::new();
     };
+    // An on-demand target claims nothing at start; an on-demand neighbour
+    // is never stopped for someone else's start (M4c).
+    if !def.gpu_claim.is_at_start() {
+        return Vec::new();
+    }
     inventory
         .workloads
         .iter()
         .filter(|w| w.name != *target)
+        .filter(|w| w.gpu_claim.is_at_start())
         .filter(|w| {
             observations
                 .iter()

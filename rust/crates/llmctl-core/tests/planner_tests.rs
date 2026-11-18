@@ -39,6 +39,7 @@ fn workload(name: &str, gpus: &[u32], port: u16) -> WorkloadDefinition {
         recovery: None,
         recipe: None,
         readiness_timeout_secs: None,
+        gpu_claim: Default::default(),
     }
 }
 
@@ -344,4 +345,37 @@ fn unload_is_planned_only_for_a_running_vendor_service() {
 
 fn wn(s: &str) -> WorkloadName {
     WorkloadName::new(s).unwrap()
+}
+
+// ---- M4c: on-demand GPU claims ------------------------------------------------
+
+#[test]
+fn on_demand_services_neither_evict_nor_get_evicted() {
+    use llmctl_core::GpuClaim;
+    let mut inv = inventory();
+    // `helper` (GPU 1) becomes an on-demand vendor service on both cards.
+    inv.workloads[1].gpus = vec![gpu(0), gpu(1)];
+    inv.workloads[1].gpu_claim = GpuClaim::OnDemand;
+    let all_up = [obs("coder", &[0], true), obs("helper", &[0, 1], true), obs("big", &[], false)];
+
+    // Starting the two-card engine stops coder (at_start) but never helper.
+    let plan = plan_run(&inv, &all_up, &wn("big")).unwrap();
+    let stopped: Vec<String> = plan
+        .steps
+        .iter()
+        .filter_map(|s| match s {
+            PlanStep::StopUnit { workload, .. } => Some(workload.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stopped, vec!["coder"]);
+
+    // Starting the on-demand service stops nobody, although it shares cards.
+    let plan = plan_run(&inv, &[obs("coder", &[0], true), obs("helper", &[], false)], &wn("helper")).unwrap();
+    assert!(!plan.steps.iter().any(|s| matches!(s, PlanStep::StopUnit { .. })));
+    assert!(plan.rollback.iter().all(|s| s.workload() == &wn("helper")));
+
+    assert_eq!(GpuClaim::default_for(&EngineKind::LmStudio), GpuClaim::OnDemand);
+    assert_eq!(GpuClaim::default_for(&EngineKind::Ollama), GpuClaim::OnDemand);
+    assert_eq!(GpuClaim::default_for(&EngineKind::Vllm), GpuClaim::AtStart);
 }

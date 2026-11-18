@@ -87,6 +87,37 @@ fn default_min_interval() -> u64 {
 /// version, how a new environment is staged, and how promote rewrites the
 /// definition to use it.
 
+/// When a workload holds its GPUs (M4c, from the M4b window finding).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuClaim {
+    /// The process takes its cards when it starts (vLLM, llama.cpp, Strata,
+    /// MLX servers): starting it evicts running conflicts, and it is
+    /// evicted in turn.
+    #[default]
+    AtStart,
+    /// A vendor service that holds no VRAM until a request loads a model
+    /// (LM Studio, the main Ollama). Starting it claims nothing: no
+    /// conflicts are stopped and the foreign-occupancy guard does not
+    /// apply. Other plans never stop it; if it has models loaded on their
+    /// cards they are refused with the unload to run first.
+    OnDemand,
+}
+
+impl GpuClaim {
+    pub fn is_at_start(&self) -> bool {
+        matches!(self, GpuClaim::AtStart)
+    }
+
+    /// The default for a kind when adoption does not say.
+    pub fn default_for(kind: &EngineKind) -> Self {
+        match kind {
+            EngineKind::LmStudio | EngineKind::Ollama => GpuClaim::OnDemand,
+            _ => GpuClaim::AtStart,
+        }
+    }
+}
+
 /// One workload definition: stable identity plus effective launch
 /// configuration. GPU ids are host-qualified and must exist in the host
 /// inventory.
@@ -122,6 +153,9 @@ pub struct WorkloadDefinition {
     /// minutes; a fake or tiny server is ready in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness_timeout_secs: Option<u64>,
+    /// Absent → `at_start` (every pre-M4c record).
+    #[serde(default, skip_serializing_if = "GpuClaim::is_at_start")]
+    pub gpu_claim: GpuClaim,
 }
 
 impl WorkloadDefinition {
@@ -306,6 +340,7 @@ mod tests {
                 recovery: None,
                 recipe: None,
                 readiness_timeout_secs: None,
+                gpu_claim: Default::default(),
             }],
             revision: 7,
         }

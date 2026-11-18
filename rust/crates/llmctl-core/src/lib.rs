@@ -23,7 +23,8 @@ pub use identity::{
 };
 pub use intent::DesiredIntent;
 pub use inventory::{
-    ControlAuthority, HostInventory, Platform, RecoveryPolicy, UnitScope, WorkloadDefinition,
+    ControlAuthority, GpuClaim, HostInventory, Platform, RecoveryPolicy, UnitScope,
+    WorkloadDefinition,
 };
 pub use launch::{
     looks_secret, EnvFileRef, ExecCommand, FieldDiff, FileProvenance, KeepAliveValue,

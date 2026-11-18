@@ -87,6 +87,10 @@ pub struct AdoptRequest {
     /// later from a recipe; probed as an OpenAI-style server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_kind: Option<String>,
+    /// `at_start` or `on_demand` (M4c). Absent → the kind's default:
+    /// on_demand for Ollama and LM Studio, at_start otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_claim: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

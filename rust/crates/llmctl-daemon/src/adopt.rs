@@ -356,6 +356,7 @@ pub async fn transfer(state: &AppState, req: AdoptRequest) -> Result<AdoptRespon
         recovery: None,
         recipe: None,
         readiness_timeout_secs: None,
+        gpu_claim: requested_claim(&req),
     });
     next.revision += 1;
     next.validate()
@@ -378,6 +379,16 @@ pub async fn transfer(state: &AppState, req: AdoptRequest) -> Result<AdoptRespon
         preview,
         inventory_revision: revision,
     })
+}
+
+/// The GPU claim the request names, else the kind's default (vendor
+/// services load on demand).
+fn requested_claim(req: &AdoptRequest) -> llmctl_core::GpuClaim {
+    match req.gpu_claim.as_deref() {
+        Some("on_demand") | Some("on-demand") => llmctl_core::GpuClaim::OnDemand,
+        Some(_) => llmctl_core::GpuClaim::AtStart,
+        None => llmctl_core::GpuClaim::default_for(&requested_kind(req)),
+    }
 }
 
 /// The engine kind the adoption request names, or legacy.
