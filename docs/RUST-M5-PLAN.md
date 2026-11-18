@@ -4,7 +4,7 @@ Status 2026-11-18: **plan agreed — all seven owner decisions taken, each
 as recommended** (end of this file). M3's sleep/wake drill is done
 ([report](RUST-M3-SLEEP-DRILL-2026-11-18.md)). **Added the same day at
 the owner's request: M5d, llama.cpp on the Macs and llama.cpp serving
-several models**; its three decisions (8–10) are open. Nothing of M5 is
+several models**; its decisions 8–10 were taken as recommended. Nothing of M5 is
 built yet.
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table,
 M5 row; "Outcome and scope"; "Cutover and reversal"). Builds on M4
