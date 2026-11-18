@@ -85,10 +85,10 @@ fn fake_swap(config: PathBuf, log: PathBuf) -> FakeSwap {
                 );
                 continue;
             }
-            if req.starts_with("GET /logs/stream/") {
+            if let Some(rest) = req.strip_prefix("GET /logs/stream/") {
                 // The lane's buffer, then the connection stays open like
                 // the real stream: the reader must not wait for the end.
-                let lane = req["GET /logs/stream/".len()..].split_whitespace().next().unwrap_or("").to_string();
+                let lane = rest.split_whitespace().next().unwrap_or("").to_string();
                 if !l3.lock().unwrap().contains(&lane) {
                     let _ = write!(s, "HTTP/1.0 404 Not Found\r\n\r\nmodel not found");
                     continue;
@@ -104,8 +104,8 @@ fn fake_swap(config: PathBuf, log: PathBuf) -> FakeSwap {
                 });
                 continue;
             }
-            if req.starts_with("POST /api/models/unload/") {
-                let lane = req["POST /api/models/unload/".len()..].split_whitespace().next().unwrap_or("").to_string();
+            if let Some(rest) = req.strip_prefix("POST /api/models/unload/") {
+                let lane = rest.split_whitespace().next().unwrap_or("").to_string();
                 r2.lock().unwrap().retain(|m| m != &lane);
                 let _ = write!(s, "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n\r\nOK");
                 continue;
