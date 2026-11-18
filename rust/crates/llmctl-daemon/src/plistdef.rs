@@ -680,6 +680,35 @@ mod runtime {
 #[cfg(any(target_os = "macos", llmctl_macos))]
 pub use runtime::*;
 
+/// The log to read for a path a record names: the file itself, or the
+/// newest regular file below a directory (two levels: LM Studio keeps
+/// `server-logs/<month>/<day>.<n>.log`).
+pub fn newest_log(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.is_file() {
+        return Some(path.to_path_buf());
+    }
+    fn walk(dir: &std::path::Path, depth: u32, best: &mut Option<(std::time::SystemTime, std::path::PathBuf)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let Ok(meta) = e.metadata() else { continue };
+            if meta.is_dir() {
+                if depth > 0 {
+                    walk(&e.path(), depth - 1, best);
+                }
+            } else if meta.is_file() {
+                let Ok(modified) = meta.modified() else { continue };
+                if best.as_ref().is_none_or(|(t, _)| modified > *t) {
+                    *best = Some((modified, e.path()));
+                }
+            }
+        }
+    }
+    let mut best = None;
+    walk(path, 2, &mut best);
+    best.map(|(_, p)| p)
+}
+
 /// Labels launchd gives to apps it starts for LaunchServices (the Dock,
 /// a login item, `open -a`).
 pub const APP_LABEL_PREFIX: &str = "application.";
@@ -927,6 +956,25 @@ mod tests {
         // A different app whose bundle id merely starts the same way.
         assert_eq!(app_instance_label(list, "application.ai.elementlabs"), None);
         assert_eq!(app_instance_label(list, "application.com.absent"), None);
+    }
+
+    #[test]
+    fn the_newest_file_below_a_log_directory_is_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let month = dir.path().join("2026-11");
+        std::fs::create_dir(&month).unwrap();
+        let old = month.join("2026-11-17.1.log");
+        let new = month.join("2026-11-18.1.log");
+        std::fs::write(&old, "old").unwrap();
+        std::fs::write(&new, "new").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(past).unwrap();
+        assert_eq!(newest_log(dir.path()), Some(new.clone()));
+        // A file is its own answer; nothing there is no answer.
+        assert_eq!(newest_log(&old), Some(old));
+        assert_eq!(newest_log(&dir.path().join("absent")), None);
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(newest_log(empty.path()), None);
     }
 
 }

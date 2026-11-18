@@ -590,3 +590,90 @@ fn a_job_that_exits_slowly_is_stopped_and_restarted() {
     assert!(ok, "{text}");
     assert_eq!(job.pid(), None);
 }
+
+/// A vendor app has no launchd job of its own to ask: it is started and
+/// stopped with its own commands, and the endpoint says whether that
+/// took. Here the "app" is the test server behind a start and a stop
+/// script; launchd is never asked about it.
+#[test]
+#[ignore = "starts a local test server: run with --ignored"]
+fn a_vendor_app_is_started_stopped_and_read_through_its_own_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let script = dir.path().join("server.py");
+    std::fs::write(&script, SERVER_PY).unwrap();
+    let log = dir.path().join("app.log");
+    let pidfile = dir.path().join("app.pid");
+    let start = format!(
+        "nohup /usr/bin/python3 {} {port} >> {} 2>&1 & echo $! > {}",
+        script.display(),
+        log.display(),
+        pidfile.display()
+    );
+    let stop = format!("kill $(cat {})", pidfile.display());
+    let host = "mac-spike";
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "macos",
+        "gpus": [{"host": host, "index": SPIKE_GPU}],
+        "workloads": [{
+            "name": "spike", "engine": "launchd", "engine_kind": "fake_engine",
+            // What its endpoint must serve, not a program path: there is
+            // no job to read a program from.
+            "model": "spike/model",
+            "gpus": [{"host": host, "index": SPIKE_GPU}], "port": port,
+            "unit": {"scope": "launchd", "name": "com.pitcany.llmctl-next-spike-vendor"},
+            "authority": {
+                "kind": "vendor_command",
+                "start": ["/bin/sh", "-c", start],
+                "stop": ["/bin/sh", "-c", stop],
+                "log": log
+            },
+            "ownership": {"kind": "external"},
+            "gpu_claim": "on_demand",
+            "readiness_timeout_secs": 30
+        }],
+        "revision": 1
+    }});
+    std::fs::write(dir.path().join("inventory.json"), inv.to_string()).unwrap();
+    let d = spawn_daemon(dir.path());
+    let pid = || std::fs::read_to_string(&pidfile).ok().and_then(|p| p.trim().parse::<u32>().ok());
+    struct Kill<'a>(&'a Path);
+    impl Drop for Kill<'_> {
+        fn drop(&mut self) {
+            if let Ok(p) = std::fs::read_to_string(self.0) {
+                let _ = Command::new("kill").arg(p.trim()).output();
+            }
+        }
+    }
+    let _cleanup = Kill(&pidfile);
+
+    let before = spike_status(&d.socket);
+    assert_eq!(before["process"], "Stopped", "nothing answers yet: {before}");
+
+    let (ok, text) = cli(&d.socket, &["run", "spike", "--wait", "--key", "vendor-run"]);
+    assert!(ok, "{text}");
+    let up = spike_status(&d.socket);
+    assert_eq!(up["process"], "Running", "{up}");
+    assert_eq!(up["readiness"], "Ready", "{up}");
+    assert_eq!(up["served_model"], "spike/model", "{up}");
+    let first = pid().expect("the start command ran");
+
+    // Its own log, through llmctl-next.
+    let (ok, text) = cli(&d.socket, &["logs", "spike", "-n", "5"]);
+    assert!(ok, "{text}");
+    assert!(text.contains(&format!("serving on {port}")), "{text}");
+
+    // A restart goes through both commands and gets a new process.
+    let (ok, text) = cli(&d.socket, &["restart", "spike", "--wait", "--key", "vendor-restart"]);
+    assert!(ok, "{text}");
+    let second = pid().expect("started again");
+    assert_ne!(first, second, "the process was replaced");
+
+    // Stop: the endpoint goes quiet and the stop is a manual one.
+    let (ok, text) = cli(&d.socket, &["stop", "spike", "--wait", "--key", "vendor-stop"]);
+    assert!(ok, "{text}");
+    let down = spike_status(&d.socket);
+    assert_eq!(down["process"], "Stopped", "{down}");
+    let (ok, text) = cli(&d.socket, &["intent", "spike", "--json"]);
+    assert!(ok && text.contains("\"manual_stop\": true"), "{text}");
+}

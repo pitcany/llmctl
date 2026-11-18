@@ -44,6 +44,15 @@ struct Target {
     /// Readiness protocol (M4b): vendor services (Ollama, LM Studio) answer
     /// their own API, not `/health`/`/v1/models`.
     protocol: EngineProtocol,
+    /// A vendor app's own controls: no launchd job is asked or touched.
+    vendor: Option<VendorControls>,
+}
+
+#[derive(Debug, Clone)]
+struct VendorControls {
+    start: Vec<String>,
+    stop: Vec<String>,
+    log: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +113,16 @@ impl LaunchdEngine {
                         model: w.model.clone(),
                         plist_path,
                         protocol: EngineProtocol::for_kind(&w.engine_kind),
+                        vendor: match &w.authority {
+                            llmctl_core::ControlAuthority::VendorCommand { start, stop, log } => {
+                                Some(VendorControls {
+                                    start: start.clone(),
+                                    stop: stop.clone(),
+                                    log: log.clone(),
+                                })
+                            }
+                            _ => None,
+                        },
                     },
                 )
             })
@@ -162,7 +181,99 @@ impl LaunchdEngine {
         combine(&ps, health, models.as_ref(), model)
     }
 
+    /// A vendor app is what its endpoint says: answering = running. The
+    /// app's window process may outlive its server (LM Studio), so the
+    /// process list would say nothing about the service.
+    async fn probe_vendor(&self, target: &Target) -> UnitProbe {
+        match engine_api::probe(target.protocol, target.port, self.http_timeout).await.probe {
+            HttpProbe::Models(ids) => UnitProbe {
+                process: ProcessState::Running,
+                readiness: Readiness::Ready,
+                served_model: if ids.iter().any(|id| id == &target.model) {
+                    ServedModel::Verified { model: target.model.clone() }
+                } else {
+                    ServedModel::Unverified { model: ids.first().cloned().unwrap_or_default() }
+                },
+            },
+            HttpProbe::Garbled => UnitProbe {
+                process: ProcessState::Running,
+                readiness: Readiness::Unknown,
+                served_model: ServedModel::Unknown,
+            },
+            _ => UnitProbe {
+                process: ProcessState::Stopped,
+                readiness: Readiness::NotReady,
+                served_model: ServedModel::NotServing,
+            },
+        }
+    }
+
+    async fn vendor_answers(&self, target: &Target) -> bool {
+        self.probe_vendor(target).await.process == ProcessState::Running
+    }
+
+    /// Run one of a vendor app's own control commands.
+    async fn vendor_run(&self, unit: &UnitName, what: &str, argv: &[String]) -> Result<(), EngineError> {
+        let Some((program, args)) = argv.split_first() else {
+            return Err(EngineError::Unsupported(format!("{unit}: no {what} command is declared")));
+        };
+        let mut cmd = Command::new(program);
+        cmd.args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
+        match tokio::time::timeout(Duration::from_secs(120), cmd.output()).await {
+            Ok(Ok(out)) if out.status.success() => Ok(()),
+            Ok(Ok(out)) => Err(EngineError::Io(format!(
+                "{what} {unit}: {program} exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim().chars().take(300).collect::<String>()
+            ))),
+            Ok(Err(e)) => Err(EngineError::Io(format!("{what} {unit}: running {program}: {e}"))),
+            Err(_) => Err(EngineError::Unconfirmed(format!("{what} {unit}: {program} did not return in 120 s"))),
+        }
+    }
+
+    async fn vendor_start(&self, unit: &UnitName, workload: &str, target: &Target, v: &VendorControls) -> Result<String, EngineError> {
+        if self.vendor_answers(target).await {
+            return Ok(format!("started:{unit}:{workload}:noop:0:0"));
+        }
+        self.vendor_run(unit, "start", &v.start).await?;
+        // Readiness proper is the plan's next step; here only "the
+        // command took": the endpoint begins to answer.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while !self.vendor_answers(target).await {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(EngineError::Unconfirmed(format!(
+                    "start {unit}: its command returned, but port {} does not answer after 60 s",
+                    target.port
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Ok(format!("started:{unit}:{workload}:vendor:0:0"))
+    }
+
+    async fn vendor_stop(&self, unit: &UnitName, workload: &str, target: &Target, v: &VendorControls) -> Result<String, EngineError> {
+        if !self.vendor_answers(target).await {
+            return Ok(format!("stopped:{unit}:{workload}:0"));
+        }
+        self.vendor_run(unit, "stop", &v.stop).await?;
+        let deadline = tokio::time::Instant::now() + self.effect_timeout;
+        while self.vendor_answers(target).await {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(EngineError::Unconfirmed(format!(
+                    "stop {unit}: its command returned, but port {} still answers after {} s",
+                    target.port,
+                    self.effect_timeout.as_secs()
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Ok(format!("stopped:{unit}:{workload}:0"))
+    }
+
     async fn probe_target(&self, unit: &UnitName, target: &Target) -> UnitProbe {
+        if target.vendor.is_some() {
+            return self.probe_vendor(target).await;
+        }
         let ps = match print_job(&unit.name, self.show_timeout).await {
             Ok(p) => p,
             Err(e) => {
@@ -194,6 +305,9 @@ impl LaunchdEngine {
     /// or kickstart (loaded). An already-running job is a no-op whose
     /// identity is the current run.
     async fn start(&self, unit: &UnitName, workload: &str, target: &Target) -> Result<String, EngineError> {
+        if let Some(v) = &target.vendor {
+            return self.vendor_start(unit, workload, target, v).await;
+        }
         // enable clears a durable stop; failing to clear it is a real
         // error, not noise (a start that stays disabled is a lie).
         enable(&unit.name, self.show_timeout).await?;
@@ -237,7 +351,10 @@ impl LaunchdEngine {
     /// Stop: bootout (KeepAlive would respawn a mere signal), then disable
     /// so RunAtLoad does not revive it at the next login. Stopping a
     /// not-loaded job only ensures the disable.
-    async fn stop(&self, unit: &UnitName, workload: &str) -> Result<String, EngineError> {
+    async fn stop(&self, unit: &UnitName, workload: &str, target: &Target) -> Result<String, EngineError> {
+        if let Some(v) = &target.vendor {
+            return self.vendor_stop(unit, workload, target, v).await;
+        }
         let before = print_job(&unit.name, self.show_timeout).await?;
         let runs = before.runs.unwrap_or(0);
         if before.loaded {
@@ -314,7 +431,7 @@ impl Engine for LaunchdEngine {
                     Ok(EffectOutcome { identity })
                 }
                 Effect::StopUnit { workload, .. } => {
-                    let identity = this.stop(&unit, workload.as_str()).await?;
+                    let identity = this.stop(&unit, workload.as_str(), &target).await?;
                     Ok(EffectOutcome { identity })
                 }
                 Effect::UnloadModel { workload, model, .. } => {
@@ -503,7 +620,23 @@ impl Engine for LaunchdEngine {
     ) -> BoxFut<Result<LogPage, EngineError>> {
         let unit = workload.unit.clone();
         let timeout = self.show_timeout;
+        let vendor_log = match &workload.authority {
+            llmctl_core::ControlAuthority::VendorCommand { log, .. } => Some(log.clone()),
+            _ => None,
+        };
         Box::pin(async move {
+            // A vendor app writes its own log; there is no plist to ask.
+            if let Some(log) = vendor_log {
+                let Some(log) = log else {
+                    return Err(EngineError::Unsupported(format!(
+                        "{unit}: its record names no log (authority.log)"
+                    )));
+                };
+                let path = plistdef::newest_log(std::path::Path::new(&log)).ok_or_else(|| {
+                    EngineError::Unsupported(format!("{unit}: no log file at {log}"))
+                })?;
+                return crate::logfile::read(&path, lines, after.as_deref(), None).await;
+            }
             let imported = plistdef::import_job(&unit, timeout).await?;
             let extras = imported
                 .definition

@@ -51,6 +51,21 @@ pub enum ControlAuthority {
     /// An endpoint we can observe but not move. Lifecycle ownership requires
     /// a known engine recipe on an enrolled host; until then, observe-only.
     ObserveOnly { endpoint: String },
+    /// A vendor app with its own controls (LM Studio's `lms server
+    /// start|stop`, opening or quitting Ollama.app). llmctl runs these
+    /// commands and takes the endpoint's word for the result: the app has
+    /// no job of its own to ask the service manager about. Implemented by
+    /// the launchd adapter.
+    VendorCommand {
+        /// Absolute program and arguments that start the service.
+        start: Vec<String>,
+        /// Absolute program and arguments that stop it.
+        stop: Vec<String>,
+        /// The app's own log: a file, or a directory whose newest file is
+        /// the current log (LM Studio rotates by day).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        log: Option<String>,
+    },
 }
 
 impl ControlAuthority {
@@ -461,6 +476,28 @@ impl HostInventory {
                     });
                 }
             }
+            if let ControlAuthority::VendorCommand { start, stop, log } = &w.authority {
+                let absolute = |argv: &Vec<String>| argv.first().is_some_and(|p| p.starts_with('/'));
+                if !absolute(start) || !absolute(stop) {
+                    return Err(CoreError::InvalidConfig {
+                        workload: w.name.to_string(),
+                        reason: "vendor_command needs a start and a stop command, each with an absolute program path"
+                            .into(),
+                    });
+                }
+                if log.as_ref().is_some_and(|l| !l.starts_with('/')) {
+                    return Err(CoreError::InvalidConfig {
+                        workload: w.name.to_string(),
+                        reason: "vendor_command log must be an absolute path".into(),
+                    });
+                }
+                if w.engine != "launchd" {
+                    return Err(CoreError::InvalidConfig {
+                        workload: w.name.to_string(),
+                        reason: "vendor_command is implemented by the launchd adapter only".into(),
+                    });
+                }
+            }
             if let Some(bad) = w.pin_files.iter().find(|p| !p.starts_with('/')) {
                 return Err(CoreError::InvalidConfig {
                     workload: w.name.to_string(),
@@ -716,6 +753,31 @@ mod tests {
             "explicit kind is kept as written"
         );
     }
+    #[test]
+    fn a_vendor_command_names_absolute_programs_and_runs_on_launchd() {
+        let vendor = |start: &str, engine: &str| {
+            let mut inv = inv();
+            inv.workloads[0].engine = engine.into();
+            inv.workloads[0].authority = ControlAuthority::VendorCommand {
+                start: vec![start.into(), "server".into(), "start".into()],
+                stop: vec!["/Users/u/.lmstudio/bin/lms".into(), "server".into(), "stop".into()],
+                log: None,
+            };
+            inv
+        };
+        vendor("/Users/u/.lmstudio/bin/lms", "launchd").validate().unwrap();
+        assert!(vendor("/Users/u/.lmstudio/bin/lms", "launchd").workloads[0].authority.supports_lifecycle());
+        let err = vendor("lms", "launchd").validate().unwrap_err().to_string();
+        assert!(err.contains("absolute program path"), "{err}");
+        let err = vendor("/Users/u/.lmstudio/bin/lms", "systemd").validate().unwrap_err().to_string();
+        assert!(err.contains("launchd adapter only"), "{err}");
+        // It round-trips through the inventory file.
+        let json = serde_json::to_value(&vendor("/a/b", "launchd").workloads[0].authority).unwrap();
+        assert_eq!(json["kind"], "vendor_command");
+        let back: ControlAuthority = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, ControlAuthority::VendorCommand { log: None, .. }));
+    }
+
     #[test]
     fn pin_files_are_absolute_and_need_a_recipe() {
         let mut inv = inv();
