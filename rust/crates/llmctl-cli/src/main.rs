@@ -303,6 +303,9 @@ enum LanesCmd {
         wait: bool,
         #[arg(long)]
         key: Option<String>,
+        /// Evict even while llama-swap has requests in flight.
+        #[arg(long)]
+        force: bool,
     },
     /// Preview (or, with --confirm, persist) the records of a llama-swap
     /// workload's config. Never writes the config.
@@ -1500,6 +1503,7 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
             dry_run,
             wait,
             key,
+            force,
         } => {
             let resp = client
                 .lanes_swap(&llmctl_client::wire::LaneSwapRequest {
@@ -1507,6 +1511,7 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
                     workload,
                     lane,
                     dry_run,
+                    force,
                     idempotency_key: key,
                 })
                 .await?;

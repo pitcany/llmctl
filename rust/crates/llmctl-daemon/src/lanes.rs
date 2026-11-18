@@ -524,6 +524,29 @@ pub async fn swap(
     if req.dry_run {
         return Ok((resp, None));
     }
+    // Request safety (M4c item 6) for lanes: an eviction cuts whatever the
+    // evicted lane is answering. llama-swap only reports a router-wide
+    // count, so any request in flight holds an evicting swap: wait the
+    // usual bound, then refuse unless forced. A swap that evicts nothing,
+    // or a llama-swap that cannot say, is not held.
+    if !req.force && !resp.evicts.is_empty() {
+        let budget = crate::inflight::wait_budget();
+        let deadline = tokio::time::Instant::now() + budget;
+        while let Some(n) = llama_swap_inflight(def.port, Duration::from_secs(3)).await {
+            if n == 0 {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(OpsError::RequestsInFlight {
+                    workload: req.workload.clone(),
+                    busy: vec![(format!("{} (all lanes)", req.workload), n)],
+                    waited_ms: budget.as_millis() as u64,
+                }
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
     let plan = Plan {
         id: llmctl_core::OperationId::generate(),
         kind: OpKind::LaneSwap,
@@ -565,6 +588,46 @@ pub async fn swap(
         .await?;
     resp.replayed = matches!(outcome, AdmitOutcome::Replayed(_));
     Ok((resp, Some(outcome)))
+}
+
+/// Requests llama-swap has in flight, all lanes together: the first
+/// `inflight` event of its never-ending event stream (`GET /api/events`,
+/// `data:{"type":"inflight","data":"{\"total\":N}"}`). `None` when it
+/// cannot be read in time — unknown, which holds nothing.
+pub async fn llama_swap_inflight(port: u16, timeout: Duration) -> Option<u64> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let read = async {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+        stream
+            .write_all(
+                format!("GET /api/events HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .ok()?;
+        let mut lines = tokio::io::BufReader::new(stream).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(total) = parse_inflight_event(&line) {
+                return Some(total);
+            }
+        }
+        None
+    };
+    tokio::time::timeout(timeout, read).await.ok().flatten()
+}
+
+/// `N` from one SSE line when it is llama-swap's `inflight` event.
+fn parse_inflight_event(line: &str) -> Option<u64> {
+    let event: serde_json::Value = serde_json::from_str(line.strip_prefix("data:")?.trim()).ok()?;
+    if event.get("type")?.as_str()? != "inflight" {
+        return None;
+    }
+    let data = event.get("data")?;
+    let payload = match data.as_str() {
+        Some(text) => serde_json::from_str(text).ok()?,
+        None => data.clone(),
+    };
+    payload.get("total")?.as_u64()
 }
 
 /// The effect of a `LoadLane` step: a one-token request makes llama-swap
@@ -831,6 +894,23 @@ async fn git_commit(path: &str, message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_inflight_event_is_read_and_everything_else_is_skipped() {
+        use super::parse_inflight_event as p;
+        assert_eq!(p(r#"data:{"type":"inflight","data":"{\"total\":3}"}"#), Some(3));
+        assert_eq!(p(r#"data: {"type":"inflight","data":{"total":0}}"#), Some(0));
+        for other in [
+            "event:message",
+            "",
+            r#"data:{"type":"logData","data":"{\"data\":\"x\"}"}"#,
+            r#"data:{"type":"inflight","data":"{\"total\":-1}"}"#,
+            r#"data:{"type":"inflight","data":"nonsense"}"#,
+            "data:not json",
+        ] {
+            assert_eq!(p(other), None, "{other}");
+        }
+    }
+
     use super::*;
 
     #[tokio::test]

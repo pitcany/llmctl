@@ -466,6 +466,9 @@ pub struct LaneSwapRequest {
     pub lane: String,
     #[serde(default)]
     pub dry_run: bool,
+    /// Evict even while llama-swap has requests in flight.
+    #[serde(default)]
+    pub force: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
 }

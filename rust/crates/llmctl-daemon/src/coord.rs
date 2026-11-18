@@ -57,13 +57,21 @@ pub fn caller_holds(path: &Path) -> bool {
     claimed.is_some() && claimed == flock_owner_pid(path, Path::new("/proc/locks"))
 }
 
-/// Operations that change what holds the cards. Lane writes (llama-swap
-/// config) and anything on a workload without cards are not GPU operations.
+/// Operations that change what holds the cards: every operation kind on a
+/// workload that has cards. That includes the two lane operations — a
+/// lane swap makes llama-swap evict and load models, and a lane write
+/// reloads llama-swap, which restarts its running lanes.
 pub fn is_gpu_operation(kind: OpKind, def: &WorkloadDefinition) -> bool {
     !def.gpus.is_empty()
         && matches!(
             kind,
-            OpKind::Run | OpKind::Stop | OpKind::Restart | OpKind::Upgrade | OpKind::Unload
+            OpKind::Run
+                | OpKind::Stop
+                | OpKind::Restart
+                | OpKind::Upgrade
+                | OpKind::Unload
+                | OpKind::LaneSwap
+                | OpKind::LaneWrite
         )
 }
 

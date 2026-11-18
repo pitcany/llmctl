@@ -33,6 +33,8 @@ struct FakeSwap {
     running: Arc<Mutex<Vec<String>>>,
     /// Lanes the fake drops when it loads one (the test plays the matrix).
     evict_on_load: Arc<Mutex<Vec<String>>>,
+    /// The router-wide in-flight count its event stream reports.
+    inflight: Arc<Mutex<u64>>,
 }
 
 /// Start the fake llama-swap on a free port, watching `config`, logging to
@@ -66,12 +68,23 @@ fn fake_swap(config: PathBuf, log: PathBuf) -> FakeSwap {
     let running = Arc::new(Mutex::new(vec!["fast".to_string()]));
     let evict_on_load = Arc::new(Mutex::new(Vec::<String>::new()));
     let (r2, e2) = (running.clone(), evict_on_load.clone());
+    let inflight = Arc::new(Mutex::new(0u64));
+    let i2 = inflight.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { continue };
             let mut buf = [0u8; 2048];
             let n = s.read(&mut buf).unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            if req.starts_with("GET /api/events") {
+                // The first events of llama-swap's stream, then close.
+                let n = *i2.lock().unwrap();
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\nevent:message\ndata:{{\"type\":\"logData\",\"data\":\"x\"}}\n\nevent:message\ndata:{{\"type\":\"inflight\",\"data\":\"{{\\\"total\\\":{n}}}\"}}\n\n"
+                );
+                continue;
+            }
             let body = if req.starts_with("GET /running") {
                 let rows: Vec<String> = r2
                     .lock()
@@ -112,7 +125,7 @@ fn fake_swap(config: PathBuf, log: PathBuf) -> FakeSwap {
             );
         }
     });
-    FakeSwap { port, lanes, running, evict_on_load }
+    FakeSwap { port, lanes, running, evict_on_load, inflight }
 }
 
 fn lane_ids(text: &str) -> Vec<String> {
@@ -162,6 +175,7 @@ fn spawn(dir: &Path, port: u16) -> Daemon {
         .arg("--data-dir")
         .arg(dir)
         .arg("daemon")
+        .env("LLMCTL_NEXT_INFLIGHT_WAIT_MS", "400")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -374,7 +388,17 @@ models:
     assert!(text.contains("coder running; llama-swap evicted nothing, as the records predicted"), "{text}");
     assert_eq!(*fake.running.lock().unwrap(), vec!["fast", "coder"]);
 
-    // `big` runs alone: both go, and llama-swap (the fake) does evict both.
+    // `big` runs alone: both go. With requests in flight an evicting swap
+    // is held, then refused; a swap that evicts nothing is not.
+    *fake.inflight.lock().unwrap() = 2;
+    let (ok, text) = cli(s, &["lanes", "swap", "swap", "big", "--wait"]);
+    assert!(!ok && text.contains("requests_in_flight") && text.contains("(2)"), "{text}");
+    assert_eq!(*fake.running.lock().unwrap(), vec!["fast", "coder"], "nothing was evicted");
+    let (ok, text) = cli(s, &["lanes", "swap", "swap", "coder", "--wait"]);
+    assert!(ok && text.contains("already running"), "{text}");
+    *fake.inflight.lock().unwrap() = 0;
+
+    // Quiet again: llama-swap (the fake) does evict both.
     *fake.evict_on_load.lock().unwrap() = vec!["fast".into(), "coder".into()];
     let (ok, text) = cli(s, &["lanes", "swap", "swap", "big", "--wait"]);
     assert!(ok, "{text}");
@@ -385,6 +409,16 @@ models:
     // Already running: admitted, but nothing is loaded or evicted.
     let (ok, text) = cli(s, &["lanes", "swap", "swap", "big", "--wait"]);
     assert!(ok && text.contains("already running"), "{text}");
+
+    // --force evicts with requests in flight.
+    *fake.inflight.lock().unwrap() = 5;
+    *fake.evict_on_load.lock().unwrap() = vec!["big".into()];
+    let (ok, text) = cli(s, &["lanes", "swap", "swap", "coder", "--wait", "--force"]);
+    assert!(ok && text.contains("evicted big, as the records predicted"), "{text}");
+    *fake.inflight.lock().unwrap() = 0;
+    *fake.evict_on_load.lock().unwrap() = vec!["coder".into()];
+    let (ok, text) = cli(s, &["lanes", "swap", "swap", "big", "--wait"]);
+    assert!(ok, "{text}");
 
     // The records say `fast` evicts `big`; this llama-swap keeps it. The
     // lane is up, and the journal flags the wrong prediction.
