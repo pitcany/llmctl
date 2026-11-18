@@ -680,6 +680,41 @@ mod runtime {
 #[cfg(any(target_os = "macos", llmctl_macos))]
 pub use runtime::*;
 
+/// Labels launchd gives to apps it starts for LaunchServices (the Dock,
+/// a login item, `open -a`).
+pub const APP_LABEL_PREFIX: &str = "application.";
+
+/// The running instance of an app in `launchctl list` output, given the
+/// stable part of its label (`application.ai.elementlabs.lmstudio`). The
+/// full label ends in two numbers that change with every launch. A line
+/// with a pid wins over one without (an instance that already exited).
+pub fn app_instance_label(list_output: &str, stable: &str) -> Option<String> {
+    let mut exited: Option<String> = None;
+    for line in list_output.lines() {
+        let mut cols = line.split_whitespace();
+        let (Some(pid), Some(_status), Some(label)) = (cols.next(), cols.next(), cols.next())
+        else {
+            continue;
+        };
+        let Some(rest) = label.strip_prefix(stable).and_then(|r| r.strip_prefix('.')) else {
+            continue;
+        };
+        let numbered = !rest.is_empty()
+            && rest
+                .split('.')
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+        if !numbered {
+            // `application.com.foo` must not match `application.com.foo.helper.1.2`.
+            continue;
+        }
+        if pid.chars().all(|c| c.is_ascii_digit()) {
+            return Some(label.to_string());
+        }
+        exited.get_or_insert_with(|| label.to_string());
+    }
+    exited
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -872,4 +907,26 @@ mod tests {
             Some(&["/bin/echo".to_string(), "two words".to_string()][..])
         );
     }
+    #[test]
+    fn an_app_instance_is_found_by_the_stable_part_of_its_label() {
+        let list = "PID\tStatus\tLabel\n\
+            -\t0\tapplication.ai.elementlabs.lmstudio.111.222\n\
+            37069\t0\tapplication.ai.elementlabs.lmstudio.13994546.64849245\n\
+            500\t0\tapplication.ai.elementlabs.lmstudio.helper.1.2\n\
+            3387\t0\tcom.pitcany.ollama\n";
+        assert_eq!(
+            app_instance_label(list, "application.ai.elementlabs.lmstudio").as_deref(),
+            Some("application.ai.elementlabs.lmstudio.13994546.64849245")
+        );
+        // Only an exited instance is listed: still the app's label.
+        let exited = "-\t0\tapplication.com.example.app.7.9\n";
+        assert_eq!(
+            app_instance_label(exited, "application.com.example.app").as_deref(),
+            Some("application.com.example.app.7.9")
+        );
+        // A different app whose bundle id merely starts the same way.
+        assert_eq!(app_instance_label(list, "application.ai.elementlabs"), None);
+        assert_eq!(app_instance_label(list, "application.com.absent"), None);
+    }
+
 }

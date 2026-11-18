@@ -666,6 +666,21 @@ pub async fn print_job(label: &str, timeout: Duration) -> Result<PrintState, Eng
     if out.status.success() {
         return Ok(plistdef::parse_print(&String::from_utf8_lossy(&out.stdout)));
     }
+    // An app started from the Dock or as a login item (LM Studio) has no
+    // fixed label: launchd names it `application.<bundle id>.<n>.<n>` and
+    // the numbers change with every launch. A record names the stable
+    // part; the running instance is looked up in the job list.
+    if label.starts_with(plistdef::APP_LABEL_PREFIX) {
+        let listed = launchctl(&["list"], timeout).await?;
+        let text = String::from_utf8_lossy(&listed.stdout);
+        if let Some(full) = plistdef::app_instance_label(&text, label) {
+            let target = format!("gui/{}/{}", uid(), full);
+            let out = launchctl(&["print", &target], timeout).await?;
+            if out.status.success() {
+                return Ok(plistdef::parse_print(&String::from_utf8_lossy(&out.stdout)));
+            }
+        }
+    }
     Ok(PrintState {
         loaded: false,
         ..Default::default()
