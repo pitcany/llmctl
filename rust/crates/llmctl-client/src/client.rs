@@ -98,6 +98,9 @@ pub struct ControlClient {
     /// Sent as [`crate::lease::UNDER_LEASE_HEADER`]: this caller runs
     /// inside the lane-lease holder with that pid.
     under_lease: Option<u32>,
+    /// Sent as [`crate::oplock::LOCK_HOLDER_HEADER`]: this caller holds the
+    /// host operation lock with that pid.
+    holding_lock: Option<u32>,
 }
 
 impl ControlClient {
@@ -105,6 +108,14 @@ impl ControlClient {
     /// job that drives llmctl-next is not refused by its own lease.
     pub fn under_lease(mut self, pid: u32) -> Self {
         self.under_lease = Some(pid);
+        self
+    }
+
+    /// Tell the agent the caller `pid` holds the host operation lock and
+    /// keeps it until the admitted operation is terminal (llm-router's
+    /// handoff). The agent checks the claim against the real holder.
+    pub fn holding_lock(mut self, pid: u32) -> Self {
+        self.holding_lock = Some(pid);
         self
     }
 
@@ -127,6 +138,7 @@ impl ControlClient {
             bridge: None,
             path: Arc::new(path),
             under_lease: None,
+            holding_lock: None,
         })
     }
 
@@ -145,6 +157,7 @@ impl ControlClient {
             bridge: Some(bridge),
             path: Arc::new(PathBuf::from(format!("bridge:{alias}"))),
             under_lease: None,
+            holding_lock: None,
         }
     }
 
@@ -400,6 +413,9 @@ impl ControlClient {
             .header("llmctl-protocol", PROTOCOL_VERSION.to_string());
         if let Some(pid) = self.under_lease {
             builder = builder.header(crate::lease::UNDER_LEASE_HEADER, pid.to_string());
+        }
+        if let Some(pid) = self.holding_lock {
+            builder = builder.header(crate::oplock::LOCK_HOLDER_HEADER, pid.to_string());
         }
         let request = match body {
             Some(payload) => {

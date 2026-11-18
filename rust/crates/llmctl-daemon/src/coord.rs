@@ -24,10 +24,7 @@ use std::time::Duration;
 use llmctl_client::lease::{self, Override};
 use llmctl_core::{OpKind, Platform, WorkloadDefinition};
 
-/// `off` disables the lock, a path replaces the legacy file (any engine).
-pub const OP_LOCK_ENV: &str = "LLMCTL_NEXT_OP_LOCK";
-/// The override Python llmctl itself honours for the legacy file.
-pub const LEGACY_OP_LOCK_ENV: &str = "LLMCTL_OP_LOCK";
+pub use llmctl_client::oplock::{flock_owner_pid, OP_LOCK_ENV};
 /// How long admission waits for the lock before refusing (default 5 s,
 /// Python llmctl's `DEFAULT_TIMEOUT_S`).
 pub const OP_LOCK_WAIT_ENV: &str = "LLMCTL_NEXT_OP_LOCK_WAIT_MS";
@@ -42,6 +39,22 @@ tokio::task_local! {
 /// that sent one. Internal callers (the recovery watcher) have none.
 pub fn under_lease() -> Option<u32> {
     UNDER_LEASE.try_with(|v| *v).ok().flatten()
+}
+
+tokio::task_local! {
+    /// The pid the current API request says holds the operation lock for
+    /// it (set by the API layer from `llmctl-lock-holder`).
+    pub static LOCK_HOLDER: Option<u32>;
+}
+
+/// True when the caller of this API request claims to hold the lock at
+/// `path` and the kernel agrees (`/proc/locks`). The operation then runs
+/// under the caller's hold: taking the lock again would only refuse the
+/// caller's own request. A claim that cannot be verified counts for
+/// nothing.
+pub fn caller_holds(path: &Path) -> bool {
+    let claimed = LOCK_HOLDER.try_with(|v| *v).ok().flatten();
+    claimed.is_some() && claimed == flock_owner_pid(path, Path::new("/proc/locks"))
 }
 
 /// Operations that change what holds the cards. Lane writes (llama-swap
@@ -64,22 +77,9 @@ pub fn op_lock_path(platform: &Platform, def: &WorkloadDefinition) -> Option<Pat
         Override::Off => None,
         Override::Path(p) => Some(p),
         Override::Unset => real_engine_on_linux(platform, def)
-            .then(legacy_op_lock_path)
+            .then(llmctl_client::oplock::legacy_path)
             .flatten(),
     }
-}
-
-/// Where Python llmctl and llm-router keep the lock: `LLMCTL_OP_LOCK`, else
-/// the XDG data dir.
-pub fn legacy_op_lock_path() -> Option<PathBuf> {
-    if let Override::Path(p) = lease::env_override(LEGACY_OP_LOCK_ENV) {
-        return Some(p);
-    }
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-    Some(data.join("llmctl/operations.lock"))
 }
 
 /// The lane-lease file for this workload, if one applies.
@@ -225,26 +225,6 @@ pub fn describe_holder(path: &Path) -> String {
         text("interface"),
         text("purpose")
     )
-}
-
-/// Pid holding the exclusive flock on `path` per a `/proc/locks` listing
-/// (`None` when unknown: not Linux, unreadable, or nobody holds it). Lines
-/// look like `12: FLOCK  ADVISORY  WRITE 4242 103:02:21664095 0 EOF`;
-/// blocked waiters carry `->` in the second column and are skipped.
-pub fn flock_owner_pid(path: &Path, proc_locks: &Path) -> Option<u32> {
-    use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(path).ok()?;
-    let dev = meta.dev();
-    // glibc's dev_t layout.
-    let major = ((dev >> 32) & 0xffff_f000) | ((dev >> 8) & 0xfff);
-    let minor = ((dev >> 12) & 0xffff_ff00) | (dev & 0xff);
-    let key = format!("{major:02x}:{minor:02x}:{}", meta.ino());
-    std::fs::read_to_string(proc_locks).ok()?.lines().find_map(|line| {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        (parts.len() >= 6 && parts[1] == "FLOCK" && parts[3] == "WRITE" && parts[5] == key)
-            .then(|| parts[4].parse().ok())
-            .flatten()
-    })
 }
 
 fn unix_now() -> f64 {

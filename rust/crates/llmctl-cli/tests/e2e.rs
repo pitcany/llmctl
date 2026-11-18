@@ -1198,6 +1198,16 @@ async fn gpu_operations_take_the_host_lock_and_honour_the_lane_lease() {
         codes::HOST_LOCK_BUSY,
     );
     assert!(msg.contains("llm-router") && msg.contains("switch qwen27b"), "{msg}");
+
+    //    The holder itself may drive llmctl-next (llm-router's handoff):
+    //    a caller that really holds the lock is let through under its own
+    //    hold, and the record stays the holder's. A false claim is not.
+    let wrong = d.client().holding_lock(1);
+    refused(wrong.admit(admit_req(OpKind::Run, "helper", "lock-pass-0")).await, codes::HOST_LOCK_BUSY);
+    let holder = d.client().holding_lock(std::process::id());
+    let resp = holder.admit(admit_req(OpKind::Run, "helper", "lock-pass-1")).await.unwrap();
+    assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
+    assert!(std::fs::read_to_string(&lock_path).unwrap().contains("switch qwen27b"));
     drop(held);
 
     // 2. Free: the run goes through under our own hold, recorded in the

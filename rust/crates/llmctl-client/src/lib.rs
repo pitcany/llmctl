@@ -6,6 +6,7 @@
 pub mod bridge;
 pub mod client;
 pub mod lease;
+pub mod oplock;
 pub mod wire;
 
 pub use client::{ClientError, ControlClient};

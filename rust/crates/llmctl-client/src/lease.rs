@@ -166,7 +166,7 @@ pub fn is_ancestor(ancestor: u32, pid: u32, parent: impl Fn(u32) -> Option<u32>)
 
 /// Parent pid from `/proc/<pid>/stat` (field 4; the command name before
 /// it may contain spaces and parentheses, so split after the last `)`).
-fn parent_of(pid: u32) -> Option<u32> {
+pub fn parent_of(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let rest = &stat[stat.rfind(')')? + 1..];
     rest.split_whitespace().nth(1)?.parse().ok()

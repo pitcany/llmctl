@@ -385,6 +385,11 @@ impl OpManager {
         let Some(path) = coord::op_lock_path(&inv.platform, def) else {
             return Ok(None);
         };
+        // The caller already holds it for this operation (llm-router's
+        // handoff): run under that hold.
+        if coord::caller_holds(&path) {
+            return Ok(None);
+        }
         let wait = coord::op_lock_wait();
         match coord::acquire(&path, &format!("{kind} {}", def.name), wait).await {
             Ok(lock) => Ok(Some(lock)),

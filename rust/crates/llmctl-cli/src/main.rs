@@ -429,8 +429,14 @@ fn connect(cli: &Cli) -> Result<ControlClient, ClientError> {
     let client = ControlClient::connect(socket_path(cli))?;
     // Inside a lane-lease holder (a longjob job that drives llmctl-next):
     // say so, or the agent would refuse the job's own commands (M4c).
-    Ok(match llmctl_client::lease::holder_ancestor() {
+    let client = match llmctl_client::lease::holder_ancestor() {
         Some(pid) => client.under_lease(pid),
+        None => client,
+    };
+    // Called by whoever holds the host operation lock (llm-router during a
+    // switch): work under that hold instead of being refused by it.
+    Ok(match llmctl_client::oplock::holder_ancestor() {
+        Some(pid) => client.holding_lock(pid),
         None => client,
     })
 }
