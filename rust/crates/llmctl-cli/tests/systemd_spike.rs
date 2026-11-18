@@ -285,6 +285,52 @@ fn run_and_stop_a_disposable_user_unit() {
     assert_eq!(down["process"], "Stopped", "{down}");
 }
 
+/// Found by the M4c router pilot (2026-11-17): `vllm-engine` allows 3 starts
+/// per 30 minutes, the pilot's fourth start was the *rollback's*, and
+/// systemd refused it with start-limit-hit — the engine stayed down. An
+/// admitted start is an operator decision, not a crash loop: the start-rate
+/// counter is cleared before every start, as llm-router does.
+#[test]
+#[ignore = "touches the user's systemd: run with --ignored"]
+fn admitted_starts_are_not_refused_by_the_units_start_rate_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("server.py");
+    std::fs::write(&script, SERVER_PY).unwrap();
+    let port = free_port();
+    let model = "spike/model";
+    let unit = SpikeUnit::create_with(
+        dir.path(),
+        &format!("/usr/bin/python3 {} {port} {model}", script.display()),
+        // The limit lives in [Unit]; a second [Unit] section is merged.
+        "\n[Unit]\nStartLimitIntervalSec=600\nStartLimitBurst=2\n\n[Install]\nWantedBy=default.target\n",
+    );
+    let shown = systemctl(&["show", &unit.name, "--property=StartLimitBurst", "--value"]);
+    assert_eq!(String::from_utf8_lossy(&shown.stdout).trim(), "2", "the limit is in force");
+    // systemd forgets the counter when it unloads an inactive unit nothing
+    // refers to, which is what a bare spike unit is. A real engine unit is
+    // enabled, so `default.target` keeps it loaded across a stop: same here.
+    struct Enabled(String);
+    impl Drop for Enabled {
+        fn drop(&mut self) {
+            let _ = systemctl(&["disable", &self.0]);
+        }
+    }
+    assert!(systemctl(&["enable", &unit.name]).status.success());
+    let _enabled = Enabled(unit.name.clone());
+    write_inventory(dir.path(), &unit.name, port, model);
+    let d = spawn_daemon(dir.path());
+
+    let (ok, text) = cli(&d.socket, &["run", "spike", "--wait", "--key", "limit-run"]);
+    assert!(ok, "{text}");
+    // Three more starts inside the interval: well past the burst of 2.
+    for i in 0..3 {
+        let key = format!("limit-restart-{i}");
+        let (ok, text) = cli(&d.socket, &["restart", "spike", "--wait", "--key", &key]);
+        assert!(ok, "start {} was refused: {text}", i + 2);
+        assert_eq!(unit.active_state(), "active");
+    }
+}
+
 #[test]
 #[ignore = "touches the user's systemd: run with --ignored"]
 fn restart_replaces_the_process_and_reverifies() {

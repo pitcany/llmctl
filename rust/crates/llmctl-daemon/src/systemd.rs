@@ -172,10 +172,18 @@ impl SystemdEngine {
                 "{unit} is enrolled but systemd has no such unit"
             )));
         }
-        // A start after start-limit-hit is refused by the manager until the
-        // failure bookkeeping is cleared. `reset-failed` only resets that
-        // bookkeeping — it never starts or stops anything.
-        if verb == "start" && before.active_state == "failed" {
+        // Every start counts toward the unit's StartLimitBurst, and the
+        // counter survives a stop for as long as the unit stays loaded (an
+        // enabled unit always does). An admitted start is an operator
+        // decision, not a crash loop, so the counter is cleared before each
+        // one — otherwise a few switches make the next start refused with
+        // start-limit-hit, and the first casualty is a rollback's restart
+        // (M4c router pilot, 2026-11-17: vllm-engine allows 3 starts per 30
+        // minutes; the fourth was the rollback's and the engine stayed
+        // down). `reset-failed` only resets bookkeeping — it never starts
+        // or stops anything — and llm-router does the same before its own
+        // restarts. The manager's own retries (Restart=) stay rate limited.
+        if verb == "start" {
             let _ = systemctl(unit.scope, &["reset-failed", &unit.name], self.show_timeout).await;
         }
         // `--no-block` on start: a queued start job is the effect. Waiting
