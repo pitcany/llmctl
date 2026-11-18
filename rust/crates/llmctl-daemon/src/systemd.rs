@@ -429,8 +429,9 @@ impl Engine for SystemdEngine {
         })
     }
 
-    /// Device-aware loaded list of a vendor service (`probe_local`: LM
-    /// Studio models on an LM Link device are not this machine's).
+    /// Models of a vendor service that hold GPU memory on this machine
+    /// (Ollama: `size_vram`; LM Studio: loaded on this device, not on an
+    /// LM Link device).
     fn loaded_models(
         &self,
         workload: &llmctl_core::WorkloadDefinition,
@@ -439,10 +440,7 @@ impl Engine for SystemdEngine {
         let port = workload.port;
         let timeout = self.http_timeout;
         Box::pin(async move {
-            if !protocol.supports_unload() {
-                return None;
-            }
-            engine_api::probe_local(protocol, port, timeout).await.loaded
+            engine_api::loaded_on_gpu(protocol, port, timeout).await
         })
     }
 

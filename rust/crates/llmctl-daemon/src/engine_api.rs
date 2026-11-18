@@ -198,6 +198,41 @@ pub async fn probe_local(protocol: EngineProtocol, port: u16, timeout: Duration)
     ans
 }
 
+/// Names in Ollama's `/api/ps` that hold GPU memory (`size_vram` > 0). A
+/// model without the field counts: the caller asks only when the service
+/// is known to sit on a card, so the unknown case leans towards freeing.
+pub fn ollama_vram_names(ps: &Value) -> Vec<String> {
+    ps.get("models")
+        .and_then(Value::as_array)
+        .map(|ms| {
+            ms.iter()
+                .filter(|m| m.get("size_vram").and_then(Value::as_u64) != Some(0))
+                .filter_map(|m| m.get("name").or_else(|| m.get("model")))
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Models that hold GPU memory on this machine — what a swap plan unloads
+/// (M4c). Ollama says per model; LM Studio does not, so every model loaded
+/// on this device counts. `None` = the engine could not say.
+pub async fn loaded_on_gpu(
+    protocol: EngineProtocol,
+    port: u16,
+    timeout: Duration,
+) -> Option<Vec<String>> {
+    match protocol {
+        EngineProtocol::OpenAi => None,
+        EngineProtocol::Ollama => get_json(port, "/api/ps", timeout)
+            .await
+            .ok()
+            .map(|ps| ollama_vram_names(&ps)),
+        EngineProtocol::LmStudio => probe_local(protocol, port, timeout).await.loaded,
+    }
+}
+
 /// From `lms ls --json` and `lms ps --json`: (model keys that exist only
 /// on other devices, identifiers loaded on this machine).
 pub fn lmstudio_devices(ls: &Value, ps: &Value) -> (Vec<String>, Vec<String>) {
@@ -462,6 +497,34 @@ mod tests {
         assert!(loaded.lock().unwrap().is_empty());
         // Already unloaded: still Ok.
         unload(EngineProtocol::Ollama, port, "qwen3:8b", T, T).await.unwrap();
+    }
+
+    #[test]
+    fn ollama_vram_names_skip_models_held_in_ram() {
+        // Seen live 2026-11-17: a pinned embedding model with size_vram 0.
+        let ps = json!({"models": [
+            {"name": "qwen3-embedding:0.6b", "size": 5777045585u64, "size_vram": 0},
+            {"name": "qwen3-coder:30b", "size": 19000000000u64, "size_vram": 18500000000u64},
+            {"name": "old-server-model"}
+        ]});
+        assert_eq!(ollama_vram_names(&ps), vec!["qwen3-coder:30b", "old-server-model"]);
+        assert!(ollama_vram_names(&json!({})).is_empty());
+    }
+
+    #[tokio::test]
+    async fn loaded_on_gpu_asks_ollama_ps_and_knows_openai_has_none() {
+        let (port, _) = fake(vec![]).await;
+        assert_eq!(
+            loaded_on_gpu(EngineProtocol::Ollama, port, T).await,
+            Some(vec!["qwen3:8b".to_string()])
+        );
+        assert_eq!(loaded_on_gpu(EngineProtocol::OpenAi, port, T).await, None);
+        // A dead port: unknown, not "nothing loaded".
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        assert_eq!(loaded_on_gpu(EngineProtocol::Ollama, dead, T).await, None);
     }
 
     #[tokio::test]

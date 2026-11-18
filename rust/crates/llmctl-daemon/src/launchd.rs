@@ -524,18 +524,13 @@ impl Engine for LaunchdEngine {
         })
     }
 
-    /// Device-aware loaded list of a vendor service (`probe_local`).
+    /// Models of a vendor service that hold GPU memory on this machine.
     fn loaded_models(&self, workload: &WorkloadDefinition) -> BoxFut<Option<Vec<String>>> {
         let target = self.target(&workload.unit);
         let timeout = self.http_timeout;
         Box::pin(async move {
             let target = target.ok()?;
-            if !target.protocol.supports_unload() {
-                return None;
-            }
-            engine_api::probe_local(target.protocol, target.port, timeout)
-                .await
-                .loaded
+            engine_api::loaded_on_gpu(target.protocol, target.port, timeout).await
         })
     }
 

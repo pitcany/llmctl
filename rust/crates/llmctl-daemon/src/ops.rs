@@ -268,33 +268,49 @@ impl OpManager {
         }
     }
 
-    /// Fresh observations for planning `kind`. A run or restart also asks
-    /// each running on-demand vendor service what it holds in memory, so
-    /// the plan can name those unloads (M4c swap plans); an engine that
-    /// cannot say leaves the list unknown and the occupancy guard decides.
+    /// Fresh observations for planning `kind` on `target`. A run or restart
+    /// of an at_start workload also asks each running on-demand vendor
+    /// service that really sits on one of the target's cards which models
+    /// hold VRAM, so the plan can name those unloads (M4c swap plans). A
+    /// service that holds nothing there is not asked: a model in RAM, or
+    /// on another card, stays loaded. An occupancy probe or an engine that
+    /// cannot answer leaves the list unknown and the guard decides.
     async fn observe_for(
         &self,
         inv: &HostInventory,
         kind: OpKind,
+        target: &llmctl_core::WorkloadDefinition,
     ) -> Result<Vec<llmctl_core::Observation>, OpsError> {
         let mut observations = self
             .engine
             .observe(inv)
             .await
             .map_err(|e| OpsError::Engine(e.to_string()))?;
-        if matches!(kind, OpKind::Run | OpKind::Restart) {
-            for o in observations.iter_mut() {
-                if o.process != ProcessState::Running {
-                    continue;
-                }
-                let Some(def) = inv.workload(&o.workload) else {
-                    continue;
-                };
-                if def.gpu_claim.is_at_start() || !def.engine_kind.has_engine_unload() {
-                    continue;
-                }
-                o.loaded_models = self.engine.loaded_models(def).await;
+        if !matches!(kind, OpKind::Run | OpKind::Restart)
+            || !target.gpu_claim.is_at_start()
+            || target.gpus.is_empty()
+        {
+            return Ok(observations);
+        }
+        let Ok(occupants) = self.engine.gpu_occupancy(&target.gpus).await else {
+            return Ok(observations);
+        };
+        let on_cards: std::collections::BTreeSet<String> =
+            occupants.into_iter().filter_map(|o| o.unit).collect();
+        for o in observations.iter_mut() {
+            if o.process != ProcessState::Running {
+                continue;
             }
+            let Some(def) = inv.workload(&o.workload) else {
+                continue;
+            };
+            if def.gpu_claim.is_at_start()
+                || !def.engine_kind.has_engine_unload()
+                || !on_cards.contains(&def.unit.to_string())
+            {
+                continue;
+            }
+            o.loaded_models = self.engine.loaded_models(def).await;
         }
         Ok(observations)
     }
@@ -311,7 +327,7 @@ impl OpManager {
             return Err(OpsError::UnknownWorkload(workload.to_string()));
         };
         self.check_definition(kind, def).await?;
-        let observations = self.observe_for(&inv, kind).await?;
+        let observations = self.observe_for(&inv, kind, def).await?;
         let plan = match kind {
             OpKind::Run => llmctl_core::plan_run(&inv, &observations, &name),
             OpKind::Stop => llmctl_core::plan_stop(&inv, &observations, &name),
@@ -454,7 +470,7 @@ impl OpManager {
             return Err(OpsError::UnknownWorkload(params.workload));
         };
         self.check_definition(params.kind, def).await?;
-        let observations = self.observe_for(&inv, params.kind).await?;
+        let observations = self.observe_for(&inv, params.kind, def).await?;
         let plan = match (&params.kind, params.plan_override) {
             (OpKind::Upgrade | OpKind::LaneWrite, Some(prebuilt)) => prebuilt,
             // Re-planned against the observations taken under the admission

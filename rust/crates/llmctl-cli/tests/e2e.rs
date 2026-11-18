@@ -1074,6 +1074,23 @@ async fn swap_plan_unloads_on_demand_models_then_evicts_and_rolls_back() {
     run_to_success(&d, "old", "swap-setup-1").await;
     run_to_success(&d, "svc", "swap-setup-2").await;
     set_loaded(&d, "svc", &["qwen3:8b", "nomic-embed"]);
+
+    // The service holds nothing on the card (its models sit in RAM): the
+    // plan leaves them alone.
+    write_gpus(&d, serde_json::json!([
+        {"gpu": 0, "pid": 4101, "unit": "user/llmctl-next-fake-old.service", "memory_mib": 20000}
+    ]));
+    let plan = client
+        .plan(PlanRequest { kind: OpKind::Run, workload: "coder".into() })
+        .await
+        .unwrap();
+    assert!(
+        !plan.plan.steps.iter().any(|s| s.label().starts_with("unload")),
+        "{:?}",
+        plan.plan.steps
+    );
+
+    // Now it does occupy the card.
     write_gpus(&d, serde_json::json!([
         {"gpu": 0, "pid": 4101, "unit": "user/llmctl-next-fake-old.service", "memory_mib": 20000},
         {"gpu": 0, "pid": 4102, "unit": "user/llmctl-next-fake-svc.service", "memory_mib": 17000}

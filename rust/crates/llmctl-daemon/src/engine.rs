@@ -186,11 +186,12 @@ pub trait Engine: Send + Sync {
         Box::pin(async { Ok(Vec::new()) })
     }
 
-    /// Models a vendor service holds in memory on this machine right now
-    /// (M4c swap plans name them as unload steps). `None` = this engine
-    /// cannot say for that workload; it is never read as "nothing loaded".
-    /// Asked only when a plan needs it: for LM Studio it runs the `lms`
-    /// CLI, too slow for every observation.
+    /// Models of a vendor service that hold GPU memory on this machine
+    /// right now (M4c swap plans name them as unload steps). `None` = this
+    /// engine cannot say for that workload; never read as "nothing loaded".
+    /// Asked only when a plan needs it and the service sits on a card the
+    /// plan wants: for LM Studio it runs the `lms` CLI, too slow for every
+    /// observation.
     fn loaded_models(
         &self,
         _workload: &llmctl_core::WorkloadDefinition,
