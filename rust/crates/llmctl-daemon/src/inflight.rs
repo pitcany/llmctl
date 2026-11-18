@@ -146,4 +146,18 @@ mod tests {
         };
         assert_eq!(in_flight(port, Duration::from_millis(300)).await, None);
     }
+
+    /// Live, read-only: the real llm-router answers `/running` in the shape
+    /// this module parses. `cargo test -p llmctl-daemon live_router -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "needs the workstation's llm-router on :4100 (or LLMCTL_NEXT_LIVE_ROUTER)"]
+    async fn live_router_reports_in_flight_counts() {
+        let port = std::env::var("LLMCTL_NEXT_LIVE_ROUTER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_ROUTER_PORT);
+        let counts = in_flight(port, Duration::from_secs(3)).await;
+        println!("llm-router :{port} in flight per local port: {counts:?}");
+        assert!(counts.is_some(), "llm-router on :{port} gave no in-flight counts");
+    }
 }
