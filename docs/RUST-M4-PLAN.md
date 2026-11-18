@@ -386,7 +386,7 @@ Said plainly: mac-heal left it alone by its **own** rule for a job that is
 not loaded, which comes before its llmctl-next check. A llmctl-next stop
 on launchd always boots the job out, so mac-heal's intent check is a
 second line that this path never reaches; it is covered by its tests
-(`test_mac_heal.py`) only. llm-heal's check is the one that ran live.
+(`~/AI/tests/test_mac_heal.py`) only. llm-heal's check is the one that ran live.
 
 **To pass, in order of weight** (the pins and the manual-stop drills are
 done):
