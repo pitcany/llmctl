@@ -245,7 +245,13 @@ pub async fn log_tail(path: &Path, max: usize) -> String {
         .collect();
     let mut tail = lines.iter().rev().take(4).rev().cloned().collect::<Vec<_>>().join(" | ");
     if tail.len() > max {
-        tail = tail[tail.len() - max..].to_string();
+        // Cut on a character boundary: progress bars are made of
+        // multi-byte characters, and a byte offset inside one would panic.
+        let mut start = tail.len() - max;
+        while !tail.is_char_boundary(start) {
+            start += 1;
+        }
+        tail = tail[start..].to_string();
     }
     tail
 }
@@ -313,5 +319,11 @@ mod tests {
         assert_eq!(log_tail(&dir.path().join("absent"), 500).await, "");
         std::fs::write(&log, "\u{1b}[32m✓ Downloaded\u{1b}[0m\n  path: /store\n").unwrap();
         assert_eq!(log_tail(&log, 500).await, "✓ Downloaded | path: /store");
+        // A long line of multi-byte progress blocks, cut at every offset.
+        std::fs::write(&log, format!("{}\n", "█".repeat(300))).unwrap();
+        for max in 1..40 {
+            let tail = log_tail(&log, max).await;
+            assert!(tail.len() <= max && tail.chars().all(|c| c == '█'), "max {max}: {tail:?}");
+        }
     }
 }
