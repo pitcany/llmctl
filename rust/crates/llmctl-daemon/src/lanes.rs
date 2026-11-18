@@ -99,7 +99,7 @@ pub(crate) async fn read_store(path: &Path) -> Result<Option<LaneStore>, LanesEr
     }
 }
 
-async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
     let dir = path.parent().ok_or_else(|| format!("{} has no parent", path.display()))?;
     tokio::fs::create_dir_all(dir)
@@ -1136,7 +1136,7 @@ async fn read_from(path: &str, offset: u64) -> String {
 
 /// Commit just this file when it lives in a git work tree. Never pushes;
 /// a failure is reported, not fatal (the journal is the record).
-async fn git_commit(path: &str, message: &str) -> String {
+pub(crate) async fn git_commit(path: &str, message: &str) -> String {
     let p = Path::new(path);
     let (Some(dir), Some(file)) = (p.parent(), p.file_name()) else {
         return String::new();

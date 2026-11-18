@@ -29,6 +29,12 @@ pub enum OpKind {
     /// Download model weights into a declared store (M4c item 1). Runs
     /// beside lifecycle operations: a long download must not block a swap.
     Acquire,
+    /// Load or unload one model on a llama.cpp router and confirm it
+    /// through `GET /models` (M5d). The router keeps running.
+    RouterModel,
+    /// Write a llama.cpp router preset rendered from model records, reload
+    /// it (`GET /models?reload=1`) and confirm the model list (M5d).
+    RouterWrite,
 }
 
 impl std::fmt::Display for OpKind {
@@ -42,6 +48,8 @@ impl std::fmt::Display for OpKind {
             OpKind::LaneWrite => "lane_write",
             OpKind::LaneSwap => "lane_swap",
             OpKind::Acquire => "acquire",
+            OpKind::RouterModel => "router_model",
+            OpKind::RouterWrite => "router_write",
         })
     }
 }
@@ -197,6 +205,46 @@ pub enum PlanStep {
         store_path: String,
         summary: String,
     },
+    /// External: ask the llama.cpp router on `port` to load `model`
+    /// (`POST /models/load`) and confirm `GET /models` lists it loaded. A
+    /// load the router reports failed fails the step with its exit code.
+    /// `measure_gpus`: cards whose VRAM drop is recorded as the model's
+    /// measured need in the router store at `store_path`.
+    LoadRouterModel {
+        workload: WorkloadName,
+        port: u16,
+        model: String,
+        timeout_secs: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        measure_gpus: Vec<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        store_path: Option<String>,
+        /// Why the load was allowed (fit or budget), for the journal.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        reason: String,
+    },
+    /// External: unload `model` from the router (`POST /models/unload`)
+    /// and confirm it is listed unloaded. The router keeps running.
+    UnloadRouterModel {
+        workload: WorkloadName,
+        port: u16,
+        model: String,
+        timeout_secs: u64,
+    },
+    /// External: write a router preset rendered from records (the file
+    /// must still be `expect_digest`, the previous bytes are kept beside
+    /// it), reload it and confirm the router lists exactly `models`.
+    WriteRouterPreset {
+        workload: WorkloadName,
+        path: String,
+        content: String,
+        expect_digest: String,
+        port: u16,
+        models: Vec<String>,
+        timeout_secs: u64,
+        store_path: String,
+        summary: String,
+    },
 }
 
 /// A binary's own version self-check (M4a): run `path arg`, the first
@@ -224,7 +272,10 @@ impl PlanStep {
             | PlanStep::UnloadLane { workload, .. }
             | PlanStep::RunHook { workload, .. }
             | PlanStep::Acquire { workload, .. }
-            | PlanStep::WriteSwapConfig { workload, .. } => workload,
+            | PlanStep::WriteSwapConfig { workload, .. }
+            | PlanStep::LoadRouterModel { workload, .. }
+            | PlanStep::UnloadRouterModel { workload, .. }
+            | PlanStep::WriteRouterPreset { workload, .. } => workload,
         }
     }
 
@@ -311,6 +362,18 @@ impl PlanStep {
             } => format!(
                 "write {workload} config ({} lanes): {summary}; confirm the reload",
                 lanes.len()
+            ),
+            PlanStep::LoadRouterModel { workload, model, .. } => {
+                format!("load {model} on {workload}")
+            }
+            PlanStep::UnloadRouterModel { workload, model, .. } => {
+                format!("unload {model} from {workload}")
+            }
+            PlanStep::WriteRouterPreset {
+                workload, models, summary, ..
+            } => format!(
+                "write {workload} preset ({} models): {summary}; reload and confirm",
+                models.len()
             ),
         }
     }

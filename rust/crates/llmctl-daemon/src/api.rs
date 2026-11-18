@@ -69,6 +69,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/lanes/memory", post(lanes_memory))
         .route("/v1/lanes/{workload}", get(lanes_status))
         .route("/v1/logs", post(logs))
+        .merge(crate::llamacpp::routes())
         .layer(axum::middleware::from_fn(under_lease_scope))
         .with_state(state)
 }
@@ -745,7 +746,7 @@ async fn lanes_swap(
     Ok((status, Json(resp)).into_response())
 }
 
-fn check_protocol(got: u32) -> Result<(), ApiError> {
+pub(crate) fn check_protocol(got: u32) -> Result<(), ApiError> {
     if got == llmctl_client::wire::PROTOCOL_VERSION {
         Ok(())
     } else {
@@ -1165,7 +1166,7 @@ impl ApiError {
 }
 
 impl ApiError {
-    fn from_lanes(e: crate::lanes::LanesError) -> Self {
+    pub(crate) fn from_lanes(e: crate::lanes::LanesError) -> Self {
         let (status, code, message) = match e {
             crate::lanes::LanesError::Ops(e) => return ApiError::from_ops(&e),
             crate::lanes::LanesError::Refused(m) => (StatusCode::CONFLICT, codes::LANES_REFUSED, m),

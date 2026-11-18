@@ -581,12 +581,12 @@ impl ControlClient {
         Ok(value)
     }
 
-    async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
+    pub(crate) async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
         let value = self.send_raw(Method::GET, path, None).await?;
         serde_json::from_value(value).map_err(|e| ClientError::BadResponse(e.to_string()))
     }
 
-    async fn post_json<T: DeserializeOwned, B: Serialize>(
+    pub(crate) async fn post_json<T: DeserializeOwned, B: Serialize>(
         &self,
         path: &str,
         body: &B,

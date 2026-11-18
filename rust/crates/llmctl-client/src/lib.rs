@@ -6,6 +6,7 @@
 pub mod bridge;
 pub mod client;
 pub mod lease;
+pub mod llamacpp;
 pub mod oplock;
 pub mod wire;
 
