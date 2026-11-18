@@ -310,29 +310,69 @@ pub enum UnloadError {
     StillLoaded { model: String, waited: Duration },
 }
 
+/// What an unload did. Both are success — the model is not loaded
+/// afterwards — but the journal must not claim freed memory that was never
+/// held (a model on an LM Link device, or one that was simply not loaded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unloaded {
+    /// The model was loaded here and is gone now.
+    Freed,
+    /// It was not loaded on this machine; nothing changed.
+    NotLoaded,
+}
+
+impl Unloaded {
+    /// The word the effect identity starts with.
+    pub fn label(self) -> &'static str {
+        match self {
+            Unloaded::Freed => "unloaded",
+            Unloaded::NotLoaded => "not-loaded",
+        }
+    }
+}
+
+/// True when `listed` (a name from the engine's loaded list) is `model`.
+/// Ollama lists `name:latest` for a model asked for as `name`.
+fn same_model(protocol: EngineProtocol, listed: &str, model: &str) -> bool {
+    listed == model
+        || (protocol == EngineProtocol::Ollama
+            && (listed.strip_suffix(":latest") == Some(model)
+                || model.strip_suffix(":latest") == Some(listed)))
+}
+
 /// Ask the engine to unload `model`, then confirm through the engine's own
 /// loaded list. Unloading a model that is not loaded succeeds (the end state
-/// is what was asked for).
+/// is what was asked for) and says so: [`Unloaded::NotLoaded`].
 pub async fn unload(
     protocol: EngineProtocol,
     port: u16,
     model: &str,
     timeout: Duration,
     confirm_within: Duration,
-) -> Result<(), UnloadError> {
+) -> Result<Unloaded, UnloadError> {
     if !protocol.supports_unload() {
         return Err(UnloadError::Unsupported(protocol.name()));
     }
     if model.is_empty() || Some(model) == protocol.service_identity() {
         return Err(UnloadError::ServiceIdentity(model.to_string()));
     }
-    // Not loaded on this machine (or loaded only on a linked device): the
-    // end state already holds here, and nothing is sent anywhere.
-    if protocol == EngineProtocol::LmStudio {
-        let before = probe_local(protocol, port, timeout).await;
-        if matches!(&before.loaded, Some(l) if !l.iter().any(|m| m == model)) {
-            return Ok(());
-        }
+    // Was it loaded here? `None` = the engine could not say, and then the
+    // unload is reported as one (it is still sent and confirmed).
+    let was_loaded = probe_local(protocol, port, timeout)
+        .await
+        .loaded
+        .map(|l| l.iter().any(|m| same_model(protocol, m, model)));
+    let outcome = if was_loaded == Some(false) {
+        Unloaded::NotLoaded
+    } else {
+        Unloaded::Freed
+    };
+    // LM Studio, not loaded on this machine (or loaded only on a linked
+    // device): the end state already holds here, and nothing is sent
+    // anywhere. Ollama still gets the request: it resolves names itself,
+    // and an unload of something not loaded is harmless there.
+    if protocol == EngineProtocol::LmStudio && outcome == Unloaded::NotLoaded {
+        return Ok(outcome);
     }
     match protocol {
         EngineProtocol::Ollama => {
@@ -357,7 +397,7 @@ pub async fn unload(
     loop {
         let ans = probe_local(protocol, port, timeout).await;
         match ans.loaded {
-            Some(l) if !l.iter().any(|m| m == model) => return Ok(()),
+            Some(l) if !l.iter().any(|m| same_model(protocol, m, model)) => return Ok(outcome),
             _ if tokio::time::Instant::now() >= deadline => {
                 return Err(UnloadError::StillLoaded {
                     model: model.to_string(),
@@ -493,10 +533,27 @@ mod tests {
             unload(EngineProtocol::Ollama, port, "ollama", T, T).await,
             Err(UnloadError::ServiceIdentity(_))
         ));
-        unload(EngineProtocol::Ollama, port, "qwen3:8b", T, T).await.unwrap();
+        assert_eq!(
+            unload(EngineProtocol::Ollama, port, "qwen3:8b", T, T).await.unwrap(),
+            Unloaded::Freed
+        );
         assert!(loaded.lock().unwrap().is_empty());
-        // Already unloaded: still Ok.
-        unload(EngineProtocol::Ollama, port, "qwen3:8b", T, T).await.unwrap();
+        // Already unloaded: still Ok, and it says nothing was freed.
+        assert_eq!(
+            unload(EngineProtocol::Ollama, port, "qwen3:8b", T, T).await.unwrap(),
+            Unloaded::NotLoaded
+        );
+        assert_eq!((Unloaded::Freed.label(), Unloaded::NotLoaded.label()), ("unloaded", "not-loaded"));
+        // Ollama lists `name:latest` for a model asked for as `name`.
+        loaded.lock().unwrap().push("nomic-embed-text:latest".into());
+        assert_eq!(
+            unload(EngineProtocol::Ollama, port, "nomic-embed-text", T, T).await.unwrap(),
+            Unloaded::Freed
+        );
+        assert!(same_model(EngineProtocol::Ollama, "a:latest", "a"));
+        assert!(same_model(EngineProtocol::Ollama, "a", "a:latest"));
+        assert!(!same_model(EngineProtocol::Ollama, "a:8b", "a"));
+        assert!(!same_model(EngineProtocol::LmStudio, "a:latest", "a"));
     }
 
     #[test]

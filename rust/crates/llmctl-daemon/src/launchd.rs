@@ -307,7 +307,7 @@ impl Engine for LaunchdEngine {
                 }
                 Effect::UnloadModel { workload, model, .. } => {
                     let ep = this.target(&unit)?;
-                    crate::engine_api::unload(
+                    let outcome = crate::engine_api::unload(
                         ep.protocol,
                         ep.port,
                         model,
@@ -323,7 +323,7 @@ impl Engine for LaunchdEngine {
                         other => EngineError::Io(other.to_string()),
                     })?;
                     Ok(EffectOutcome {
-                        identity: format!("unloaded:{unit}:{workload}:{model}"),
+                        identity: format!("{}:{unit}:{workload}:{model}", outcome.label()),
                     })
                 }
             }

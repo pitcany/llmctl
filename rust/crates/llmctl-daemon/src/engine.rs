@@ -472,8 +472,10 @@ impl Engine for FakeEngine {
                 Effect::UnloadModel {
                     workload, model, ..
                 } => {
+                    let held = entry.loaded.iter().any(|m| m == model);
                     entry.loaded.retain(|m| m != model);
-                    format!("unloaded:{}:{}:{}", effect.unit(), workload, model)
+                    let what = if held { "unloaded" } else { "not-loaded" };
+                    format!("{what}:{}:{}:{}", effect.unit(), workload, model)
                 }
             };
             this.write_world(&world).await?;

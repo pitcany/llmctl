@@ -160,6 +160,8 @@ fn write_inventory(dir: &Path, label: &str, port: u16, program_identity: &str) {
         workloads: vec![WorkloadDefinition {
             name: WorkloadName::new("spike").unwrap(),
             engine: "launchd".into(),
+            // A plain HTTP test server: no engine-specific protocol.
+            engine_kind: llmctl_core::EngineKind::FakeEngine,
             // For launchd workloads the model field carries the expected
             // program path (M3-B.4 identity).
             model: program_identity.into(),
