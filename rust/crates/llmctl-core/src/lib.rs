@@ -16,6 +16,7 @@ pub mod launch;
 pub mod observation;
 pub mod plan;
 pub mod planner;
+pub mod presets;
 pub mod recipe;
 pub mod swap;
 
