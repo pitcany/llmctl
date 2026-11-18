@@ -2560,3 +2560,54 @@ fn version_repin_records_the_pin_and_names_what_changed() {
     assert!(text.contains("no recipe"), "{text}");
     stop_daemon(child);
 }
+
+/// A remote archive's binary runs on this host, so a version without a
+/// declared sha256 is refused before anything is fetched: each release
+/// has its own digest, and an upgrade must add its own.
+#[test]
+fn a_remote_archive_version_without_its_checksum_is_never_fetched() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("releases");
+    let host = "workstation";
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [{
+            "name": "eng", "engine": "fake", "model": "fake/eng",
+            "gpus": [{"host": host, "index": 0}], "port": 8100,
+            "unit": {"scope": "user", "name": "llmctl-next-fake-eng.service"},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": "llmctl-next-fake-eng.service"},
+            // Staging is for managed workloads only.
+            "ownership": {
+                "kind": "managed",
+                "definition": llmctl_core::LaunchDefinition::default(),
+                "digest": "sha256:00",
+                "adopted_at": "2026-01-01T00:00:00Z",
+                "provenance": []
+            },
+            "recipe": {
+                "kind": "release_archive", "name": "eng", "root": root,
+                // Nothing listens here: a fetch attempt would fail differently.
+                "url": "https://127.0.0.1:9/eng-{version}.tar.gz",
+                "checksums": {"1.0": "sha256:00"},
+                "binary": "eng"
+            }
+        }],
+        "revision": 1
+    }});
+    std::fs::write(dir.path().join("inventory.json"), inv.to_string()).unwrap();
+    let child = start_daemon_in(dir.path(), &[]);
+    let out = cli(&dir.path().join("control.sock"), &["install", "stage", "eng", "2.0"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stop_daemon(child);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("no sha256 is declared for eng 2.0"), "{text}");
+    let fetched = std::fs::read_dir(&root)
+        .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().ends_with(".archive")))
+        .unwrap_or(false);
+    assert!(!fetched, "nothing was downloaded");
+}

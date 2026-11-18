@@ -161,6 +161,12 @@ pub struct ReleaseArchiveRecipe {
     /// the digest is recorded but not verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
+    /// `sha256:<hex>` per version. Every release has its own digest, so
+    /// an upgrade adds an entry here and the installed version's entry
+    /// stays (the directory to roll back to keeps its provenance). Wins
+    /// over `checksum`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub checksums: std::collections::BTreeMap<String, String>,
     /// `tar --strip-components` (archives usually wrap one directory).
     #[serde(default = "default_strip")]
     pub strip_components: u32,
@@ -240,6 +246,21 @@ pub struct ExternalRecipe {
     pub note: Option<String>,
 }
 
+impl ReleaseArchiveRecipe {
+    /// The digest the archive of `version` must have, when one is
+    /// declared: its own entry, else the single templated `checksum`.
+    pub fn checksum_for(&self, version: &str) -> Option<String> {
+        self.checksums
+            .get(version)
+            .cloned()
+            .or_else(|| self.checksum.as_ref().map(|c| c.replace("{version}", version)))
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.url.starts_with("https://") || self.url.starts_with("http://")
+    }
+}
+
 impl InstallRecipe {
     pub fn name(&self) -> &str {
         match self {
@@ -309,12 +330,15 @@ impl InstallRecipe {
                         "refuses plaintext http URLs (use https with a sha256 checksum)",
                     ));
                 }
-                if r.url.starts_with("https://")
-                    && !r
-                        .checksum
-                        .as_deref()
-                        .is_some_and(|c| c.starts_with("sha256:"))
-                {
+                let declared = r.checksum.iter().chain(r.checksums.values());
+                let mut any = false;
+                for c in declared {
+                    any = true;
+                    if !c.starts_with("sha256:") {
+                        return Err(kind("checksums must be sha256:<hex>"));
+                    }
+                }
+                if r.url.starts_with("https://") && !any {
                     return Err(kind(
                         "https URLs require a sha256 checksum (the archive's binary runs here)",
                     ));
@@ -493,6 +517,38 @@ mod tests {
             .unwrap()
             .validate()
             .is_ok());
+    }
+
+    #[test]
+    fn each_version_can_carry_its_own_checksum() {
+        let json = serde_json::json!({
+            "kind": "release_archive",
+            "name": "llama.cpp",
+            "root": "/home/u/releases",
+            "url": "https://example.com/llama-{version}.tar.gz",
+            "checksums": {"b1": "sha256:aa", "b2": "sha256:bb"},
+            "binary": "llama-server"
+        });
+        let recipe: InstallRecipe = serde_json::from_value(json.clone()).unwrap();
+        recipe.validate().expect("a per-version map satisfies the https rule");
+        let InstallRecipe::ReleaseArchive(r) = &recipe else { panic!("{recipe:?}") };
+        assert_eq!(r.checksum_for("b1").as_deref(), Some("sha256:aa"));
+        assert_eq!(r.checksum_for("b2").as_deref(), Some("sha256:bb"));
+        assert_eq!(r.checksum_for("b3"), None, "an undeclared version has none");
+
+        // The single field still works, and the map wins over it.
+        let mut both = json.clone();
+        both["checksum"] = "sha256:{version}".into();
+        let InstallRecipe::ReleaseArchive(r) = InstallRecipe::deserialize_flexible(&both).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(r.checksum_for("b1").as_deref(), Some("sha256:aa"));
+        assert_eq!(r.checksum_for("b9").as_deref(), Some("sha256:b9"));
+
+        let mut bad = json;
+        bad["checksums"]["b2"] = "md5:bb".into();
+        assert!(InstallRecipe::deserialize_flexible(&bad).unwrap().validate().is_err());
     }
 
     #[test]

@@ -427,6 +427,15 @@ async fn stage_release_archive(
         )));
     }
     refuse_restage_of_live_or_rollback_dir(state, name, wl, recipe, &dir).await?;
+    // A remote archive is unpacked and its binary run here: no digest
+    // declared for this version means nothing is fetched at all.
+    let expected_digest = r.checksum_for(version);
+    if r.is_remote() && expected_digest.is_none() {
+        return Err(refuse(format!(
+            "no sha256 is declared for {name} {version}; add it to the recipe's `checksums` \
+             (take it from the release page) before staging a remote archive"
+        )));
+    }
 
     let _ = tokio::fs::remove_file(dir.join("staged.json")).await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -448,8 +457,7 @@ async fn stage_release_archive(
     // Checksum: recorded always, verified when the recipe declares one.
     // Streamed — llama.cpp archives run to gigabytes.
     let digest = hash_file(&archive).await?;
-    if let Some(expected) = &r.checksum {
-        let expected = expected.replace("{version}", version);
+    if let Some(expected) = expected_digest {
         if expected != digest {
             let _ = tokio::fs::remove_file(&staging).await;
             record_row(

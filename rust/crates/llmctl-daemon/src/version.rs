@@ -1075,6 +1075,7 @@ mod tests {
             root: "/d/llama.cpp".into(),
             url: "https://x/llama-{version}.tgz".into(),
             checksum: None,
+            checksums: Default::default(),
             strip_components: 1,
             binary: "build/bin/llama-server".into(),
             version_arg: Some("--version".into()),

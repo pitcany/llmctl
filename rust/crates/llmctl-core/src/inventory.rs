@@ -682,6 +682,7 @@ mod tests {
                 root: "/home/u/llama-builds".into(),
                 url: "https://github.com/ggml-org/llama.cpp/releases/download/b{version}/llama-{version}-bin-ubuntu-x64.tar.gz".into(),
                 checksum: Some("sha256:abcd".into()),
+                checksums: Default::default(),
                 strip_components: 1,
                 binary: "bin/llama-server".into(),
                 version_arg: Some("--version".into()),
