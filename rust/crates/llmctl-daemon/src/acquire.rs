@@ -3,7 +3,7 @@
 //! cancellable, and running beside lifecycle operations so a long download
 //! never blocks a swap.
 //!
-//! The tools do the downloading (`hf download`, `ollama pull`); this
+//! The tools do the downloading (`hf download`, `ollama pull`, `lms get`); this
 //! module decides whether there is room, builds the command, and watches.
 //! Credentials stay with the tools: the Hugging Face CLI reads its own
 //! cached token, and nothing here reads or prints one.
@@ -18,9 +18,11 @@ use llmctl_core::{ModelStore, OpKind, Plan, PlanStep, Source, StoreKind, Workloa
 use crate::app::AppState;
 use crate::ops::{AdmitOutcome, AdmitParams, OpsError};
 
-/// Test hooks / overrides for the two tools (default: found on `PATH`).
+/// Test hooks / overrides for the tools (default: found on `PATH`; `lms`
+/// in LM Studio's own install path first).
 pub const HF_BIN_ENV: &str = "LLMCTL_NEXT_HF_BIN";
 pub const OLLAMA_BIN_ENV: &str = "LLMCTL_NEXT_OLLAMA_BIN";
+pub const LMS_BIN_ENV: &str = "LLMCTL_NEXT_LMS_BIN";
 
 /// Longest one download may run.
 const TIMEOUT_SECS: u64 = 12 * 3600;
@@ -51,6 +53,7 @@ fn kind_name(kind: StoreKind) -> &'static str {
         StoreKind::HfCache => "hf_cache",
         StoreKind::Directory => "directory",
         StoreKind::Ollama => "ollama",
+        StoreKind::Lmstudio => "lmstudio",
     }
 }
 
@@ -94,6 +97,17 @@ pub fn command(source: &Source, store: &ModelStore, port: Option<u16>) -> (Vec<S
             vec![tool(OLLAMA_BIN_ENV, "ollama"), "pull".into(), tag.clone()],
             port.map(|p| ("OLLAMA_HOST".to_string(), format!("127.0.0.1:{p}"))).into_iter().collect(),
         ),
+        // `--yes`: no prompt may wait on a terminal that is not there. The
+        // name is an exact catalog entry (see `Source::parse`), so "the
+        // first match" cannot pick something else.
+        Source::Lms { model, variant } => {
+            let lms = tool(LMS_BIN_ENV, &crate::engine_api::lms_binary().to_string_lossy());
+            let name = match variant {
+                Some(v) => format!("{model}@{v}"),
+                None => model.clone(),
+            };
+            (vec![lms, "get".into(), name, "--yes".into()], Vec::new())
+        }
     }
 }
 
@@ -155,12 +169,39 @@ pub async fn acquire(
         _ => None,
     };
 
+    // `lms` talks to the LM Studio service and may start one of its own
+    // when none answers. A download must not bring up a service this
+    // daemon manages, least of all one that was stopped on purpose.
+    if store.kind == StoreKind::Lmstudio {
+        let Some(service) = store.workload.as_ref() else {
+            return Err(OpsError::Invalid(format!(
+                "store {} names no LM Studio workload to download through",
+                store.name
+            )));
+        };
+        let running = state
+            .ops
+            .engine()
+            .observe(&inv)
+            .await
+            .map_err(|e| OpsError::Engine(e.to_string()))?
+            .iter()
+            .any(|o| &o.workload == service && o.process == llmctl_core::ProcessState::Running);
+        if !running {
+            return Err(OpsError::InvalidState(format!(
+                "{source} into {}: {service} is not running, and `lms get` downloads through it; start it first (llmctl-next run {service})",
+                store.name
+            )));
+        }
+    }
+
     let (argv, env) = command(&source, store, port);
     // The disk check comes first: nothing is fetched into a full disk.
     let need = match (req.size_gib, &source) {
         (Some(g), _) => Some(g.saturating_mul(GIB)),
         (None, Source::Hf { .. }) => hf_size(&argv).await,
-        (None, Source::Ollama { .. }) => None,
+        // Neither tool can say a size without starting the download.
+        (None, Source::Ollama { .. } | Source::Lms { .. }) => None,
     };
     let free = free_bytes(Path::new(&store.path)).await.ok_or_else(|| {
         OpsError::InvalidState(format!(
@@ -244,6 +285,9 @@ pub async fn log_tail(path: &Path, max: usize) -> String {
         .lines()
         .map(|l| l.rsplit('\r').next().unwrap_or(l).trim())
         .filter(|l| !l.is_empty())
+        // `lms` redraws spinner lines (braille frames) on fresh lines;
+        // they say nothing once the run is over.
+        .filter(|l| !l.chars().next().is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c)))
         .collect();
     let mut tail = lines.iter().rev().take(4).rev().cloned().collect::<Vec<_>>().join(" | ");
     if tail.len() > max {
@@ -302,6 +346,13 @@ mod tests {
         let (argv, env) = command(&ol, &store(StoreKind::Ollama, "/ollama"), Some(11434));
         assert_eq!(argv[1..], ["pull", "qwen3-embedding:0.6b"]);
         assert_eq!(env, vec![("OLLAMA_HOST".to_string(), "127.0.0.1:11434".to_string())]);
+
+        let lms = Source::parse("lms:qwen/qwen3.5-9b@q8_0").unwrap();
+        let (argv, env) = command(&lms, &store(StoreKind::Lmstudio, "/lmstudio/models"), None);
+        assert_eq!(argv[1..], ["get", "qwen/qwen3.5-9b@q8_0", "--yes"]);
+        assert!(env.is_empty());
+        let (argv, _) = command(&Source::parse("lms:openai/gpt-oss-20b").unwrap(), &store(StoreKind::Lmstudio, "/m"), None);
+        assert_eq!(argv[1..], ["get", "openai/gpt-oss-20b", "--yes"]);
     }
 
     #[tokio::test]
@@ -321,6 +372,14 @@ mod tests {
         assert_eq!(log_tail(&dir.path().join("absent"), 500).await, "");
         std::fs::write(&log, "\u{1b}[32m✓ Downloaded\u{1b}[0m\n  path: /store\n").unwrap();
         assert_eq!(log_tail(&log, 500).await, "✓ Downloaded | path: /store");
+        // `lms get` without a terminal: spinner frames on their own lines,
+        // then the line that matters.
+        std::fs::write(
+            &log,
+            "\u{1b}[?25l\u{1b}[0K\n\r   \u{2839} a/b - Resolving...\u{1b}[0K\n\r\u{1b}[0K\n\r\u{2827} Resolving download plan...\u{1b}[0K\n\u{1b}[?25hError: Failed to resolve artifact \"a/b\"\n",
+        )
+        .unwrap();
+        assert_eq!(log_tail(&log, 500).await, "Error: Failed to resolve artifact \"a/b\"");
         // A long line of multi-byte progress blocks, cut at every offset.
         std::fs::write(&log, format!("{}\n", "█".repeat(300))).unwrap();
         for max in 1..40 {

@@ -410,7 +410,7 @@ pub async fn unload(
 }
 
 /// The `lms` CLI: LM Studio's own install path first, then `PATH`.
-fn lms_binary() -> std::path::PathBuf {
+pub(crate) fn lms_binary() -> std::path::PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         let p = std::path::Path::new(&home).join(".lmstudio/bin/lms");
         if p.exists() {

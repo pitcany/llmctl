@@ -391,6 +391,12 @@ impl HostInventory {
                         store.name
                     )))
                 }
+                None if store.kind == crate::acquire::StoreKind::Lmstudio => {
+                    return Err(CoreError::Validation(format!(
+                        "store {} is an LM Studio store and must name the LM Studio workload that downloads into it",
+                        store.name
+                    )))
+                }
                 _ => {}
             }
         }

@@ -1964,6 +1964,125 @@ mkdir -p "$dest" && head -c 2000000 /dev/zero > "$dest/model.safetensors" && ech
     assert_eq!(op.status, OpStatus::Canceled, "{op:?}");
 }
 
+/// LM Studio models come through `lms get` into an `lmstudio` store: an
+/// exact catalog entry, a size given by the caller, and only while the LM
+/// Studio service runs (`lms` would otherwise start one of its own).
+#[tokio::test]
+async fn lm_studio_models_are_fetched_through_lms_while_the_service_runs() {
+    use llmctl_client::wire::AcquireRequest;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().canonicalize().unwrap();
+    let socket = root.join("control.sock");
+    let ctl = root.join("fake-ctl");
+    let bin = root.join("fake-bin");
+    std::fs::create_dir_all(&ctl).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    // A stand-in for `lms`: records its arguments, draws spinner lines the
+    // way the real one does without a terminal, then succeeds or fails.
+    let lms = bin.join("lms");
+    std::fs::write(
+        &lms,
+        "#!/bin/sh\necho \"$*\" > \"$FAKE_CTL/lms-call\"\n\
+         printf '\\r   \\342\\240\\271 %s - Resolving...\\033[0K\\n\\r\\342\\240\\247 Resolving download plan...\\033[0K\\n' \"$2\"\n\
+         if [ -f \"$FAKE_CTL/fail\" ]; then echo \"Error: Failed to resolve artifact \\\"$2\\\"\" >&2; exit 1; fi\n\
+         echo 'Download completed.'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&lms, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let host = "workstation";
+    let wl = |name: &str, port: u16| {
+        serde_json::json!({
+            "name": name, "engine": "fake", "model": format!("fake/{name}"),
+            "gpus": [{"host": host, "index": 0}], "port": port,
+            "unit": {"scope": "user", "name": format!("llmctl-next-fake-{name}.service")},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": format!("llmctl-next-fake-{name}.service")},
+            "ownership": {"kind": "external"}
+        })
+    };
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [wl("studio", 8100)],
+        "stores": [
+            {"name": "hub", "kind": "hf_cache", "path": root.join("hub"), "reserve_gib": 1, "workload": "studio"},
+            {"name": "lmstudio", "kind": "lmstudio", "path": root.join("lmstudio"), "reserve_gib": 1, "workload": "studio"}
+        ],
+        "revision": 1
+    }});
+    std::fs::write(root.join("inventory.json"), inv.to_string()).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(&socket).arg("--data-dir").arg(&root).arg("daemon")
+        .env("LLMCTL_NEXT_LMS_BIN", &lms)
+        .env("FAKE_CTL", &ctl)
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let client = d.client();
+    let req = |source: &str, store: &str, size_gib: Option<u64>| AcquireRequest {
+        protocol: PROTOCOL_VERSION,
+        source: source.into(),
+        store: store.into(),
+        for_workload: None,
+        size_gib,
+        dry_run: false,
+        idempotency_key: None,
+    };
+    let refused = |r: Result<llmctl_client::wire::AcquireResponse, ClientError>, code_want: &str, why: &str| match r {
+        Err(ClientError::Api { code, message, .. }) => {
+            assert_eq!(code, code_want, "{message}");
+            assert!(message.contains(why), "{message}");
+        }
+        other => panic!("expected {code_want} ({why}), got {other:?}"),
+    };
+    let called = || std::fs::read_to_string(ctl.join("lms-call")).ok().map(|s| s.trim().to_string());
+
+    assert!(client.stores().await.unwrap().stores.iter().any(|s| s.name == "lmstudio" && s.kind == "lmstudio"));
+
+    // Each source only goes into its own kind of store, and an LM Studio
+    // source is an exact catalog entry, never a search term.
+    refused(client.acquire(&req("lms:pub/model", "hub", Some(0))).await, codes::INVALID_REQUEST, "cannot go into store hub");
+    refused(client.acquire(&req("hf:org/tiny", "lmstudio", Some(0))).await, codes::INVALID_REQUEST, "kind lmstudio");
+    refused(client.acquire(&req("lms:llama3.2", "lmstudio", Some(0))).await, codes::INVALID_REQUEST, "catalog entry");
+
+    // The service is not running: nothing is run, so `lms` cannot start one.
+    refused(client.acquire(&req("lms:pub/model", "lmstudio", Some(0))).await, codes::INVALID_STATE, "studio is not running");
+    assert_eq!(called(), None);
+
+    run_to_success(&d, "studio", "lms-studio-up").await;
+
+    // `lms` cannot say a size in advance: the caller gives the bound.
+    refused(client.acquire(&req("lms:pub/model", "lmstudio", None)).await, codes::INVALID_STATE, "--size-gib");
+    refused(client.acquire(&req("lms:pub/model", "lmstudio", Some(9_000_000_000))).await, codes::INVALID_STATE, "not enough disk");
+
+    // A preview names the command and runs nothing.
+    let mut dry = req("lms:pub/model@q4_k_m", "lmstudio", Some(0));
+    dry.dry_run = true;
+    let p = client.acquire(&dry).await.unwrap();
+    assert_eq!(p.command[1..], ["get", "pub/model@q4_k_m", "--yes"]);
+    assert!(p.operation.is_none());
+    assert_eq!(called(), None);
+
+    // The download: one `lms get`, non-interactive, filed under the service.
+    let r = client.acquire(&req("lms:pub/model@q4_k_m", "lmstudio", Some(0))).await.unwrap();
+    let op = d.wait_terminal(&r.operation.expect("admitted").id).await;
+    assert_eq!(op.status, OpStatus::Succeeded, "{op:?}");
+    assert_eq!(op.workload, "studio");
+    assert_eq!(called().as_deref(), Some("get pub/model@q4_k_m --yes"));
+    let detail = op.phases[0].detail.clone().unwrap_or_default();
+    assert!(detail.contains("lms:pub/model@q4_k_m is in") && detail.contains("Download completed."), "{detail}");
+    assert!(!detail.contains("Resolving"), "spinner frames stay out of the journal: {detail}");
+
+    // A model the catalog does not have: the operation fails with what
+    // `lms` said.
+    std::fs::write(ctl.join("fail"), "1").unwrap();
+    let r = client.acquire(&req("lms:pub/absent", "lmstudio", Some(0))).await.unwrap();
+    let op = d.wait_terminal(&r.operation.unwrap().id).await;
+    assert_eq!(op.status, OpStatus::Failed, "{op:?}");
+    let text = serde_json::to_string(&op).unwrap();
+    assert!(text.contains("Failed to resolve artifact") && !text.contains("Resolving download plan"), "{op:?}");
+}
+
 // ---- B: bounded recovery ----------------------------------------------------
 
 /// A daemon whose inventory gives `coder` a recovery budget and whose

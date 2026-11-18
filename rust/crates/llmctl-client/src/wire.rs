@@ -363,7 +363,7 @@ pub struct StoreView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcquireRequest {
     pub protocol: u32,
-    /// `hf:org/name[@revision]` or `ollama:tag`.
+    /// `hf:org/name[@revision]`, `ollama:tag` or `lms:publisher/model[@variant]`.
     pub source: String,
     pub store: String,
     /// The workload whose journal this is filed under (default: the

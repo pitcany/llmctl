@@ -312,7 +312,9 @@ enum HostCmd {
 enum ModelCmd {
     /// Download weights into a declared store: `hf:org/name[@revision]`
     /// into an hf_cache or directory store, `ollama:tag` into an ollama
-    /// store. The disk is checked first (size + the store's reserve); the
+    /// store, `lms:publisher/model[@variant]` into an lmstudio store (LM
+    /// Studio must be running; pass --size-gib, `lms` cannot say a size
+    /// in advance). The disk is checked first (size + the store's reserve); the
     /// download runs as an operation beside swaps, shows progress, and can
     /// be cancelled (`llmctl-next cancel <id>`).
     Get {

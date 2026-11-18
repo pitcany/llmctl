@@ -19,6 +19,9 @@ pub enum StoreKind {
     Directory,
     /// An Ollama server's model store; filled through that server.
     Ollama,
+    /// LM Studio's downloads folder; filled through `lms get`, which talks
+    /// to the running LM Studio service.
+    Lmstudio,
 }
 
 /// A place model weights live, declared in the inventory. Stores are
@@ -51,10 +54,14 @@ pub enum Source {
     Hf { repo: String, revision: Option<String> },
     /// `ollama:tag`
     Ollama { tag: String },
+    /// `lms:publisher/model[@variant]` — an exact LM Studio catalog entry,
+    /// never a search term (`lms get --yes` would take the first hit).
+    Lms { model: String, variant: Option<String> },
 }
 
 impl Source {
-    /// Parse `hf:org/name[@rev]` or `ollama:tag`. Refuses anything that
+    /// Parse `hf:org/name[@rev]`, `ollama:tag` or
+    /// `lms:publisher/model[@variant]`. Refuses anything that
     /// could be read as an option or a path by the tool that receives it.
     pub fn parse(text: &str) -> Result<Source, String> {
         let plain = |s: &str, what: &str| -> Result<(), String> {
@@ -83,7 +90,28 @@ impl Source {
                 plain(tag, "tag")?;
                 Ok(Source::Ollama { tag: tag.to_string() })
             }
-            _ => Err(format!("{text:?} is not a source: use hf:org/name[@revision] or ollama:tag")),
+            Some(("lms", rest)) => {
+                let (model, variant) = match rest.split_once('@') {
+                    Some((m, v)) => (m, Some(v)),
+                    None => (rest, None),
+                };
+                plain(model, "model")?;
+                if model.matches('/').count() != 1 || model.contains(':') {
+                    return Err(format!(
+                        "{model:?} is not a `publisher/model` catalog entry (a bare name is a search, and a URL goes through hf:)"
+                    ));
+                }
+                if let Some(v) = variant {
+                    plain(v, "variant")?;
+                    if v.contains('/') || v.contains(':') {
+                        return Err(format!("variant {v:?} is not a plain quantization name"));
+                    }
+                }
+                Ok(Source::Lms { model: model.to_string(), variant: variant.map(str::to_owned) })
+            }
+            _ => Err(format!(
+                "{text:?} is not a source: use hf:org/name[@revision], ollama:tag or lms:publisher/model[@variant]"
+            )),
         }
     }
 
@@ -93,6 +121,7 @@ impl Source {
             (self, kind),
             (Source::Hf { .. }, StoreKind::HfCache | StoreKind::Directory)
                 | (Source::Ollama { .. }, StoreKind::Ollama)
+                | (Source::Lms { .. }, StoreKind::Lmstudio)
         )
     }
 }
@@ -103,6 +132,8 @@ impl std::fmt::Display for Source {
             Source::Hf { repo, revision: Some(r) } => write!(f, "hf:{repo}@{r}"),
             Source::Hf { repo, revision: None } => write!(f, "hf:{repo}"),
             Source::Ollama { tag } => write!(f, "ollama:{tag}"),
+            Source::Lms { model, variant: Some(v) } => write!(f, "lms:{model}@{v}"),
+            Source::Lms { model, variant: None } => write!(f, "lms:{model}"),
         }
     }
 }
@@ -185,6 +216,30 @@ mod tests {
         let ol = Source::parse("ollama:x").unwrap();
         assert!(hf.fits_store(StoreKind::HfCache) && hf.fits_store(StoreKind::Directory) && !hf.fits_store(StoreKind::Ollama));
         assert!(ol.fits_store(StoreKind::Ollama) && !ol.fits_store(StoreKind::HfCache));
+    }
+
+    #[test]
+    fn an_lm_studio_source_is_an_exact_catalog_entry() {
+        assert_eq!(
+            Source::parse("lms:qwen/qwen3.5-9b@q8_0").unwrap(),
+            Source::Lms { model: "qwen/qwen3.5-9b".into(), variant: Some("q8_0".into()) }
+        );
+        let s = Source::parse("lms:openai/gpt-oss-20b").unwrap();
+        assert_eq!(s, Source::Lms { model: "openai/gpt-oss-20b".into(), variant: None });
+        assert_eq!(s.to_string(), "lms:openai/gpt-oss-20b");
+        assert_eq!(Source::parse("lms:a/b@q4_k_m").unwrap().to_string(), "lms:a/b@q4_k_m");
+        // A bare name is a search term, a URL belongs to hf:, and nothing
+        // may read as an option.
+        for bad in [
+            "lms:", "lms:llama3.2", "lms:a/b/c", "lms:https://huggingface.co/a/b", "lms:--yes/x",
+            "lms:a/b@", "lms:a/b@--select", "lms:a/b@q/8", "lms:a/b@q:8", "lms:a/../b", "lms:a/b c",
+        ] {
+            assert!(Source::parse(bad).is_err(), "{bad}");
+        }
+        assert!(s.fits_store(StoreKind::Lmstudio));
+        assert!(!s.fits_store(StoreKind::HfCache) && !s.fits_store(StoreKind::Directory) && !s.fits_store(StoreKind::Ollama));
+        assert!(!Source::parse("hf:a/b").unwrap().fits_store(StoreKind::Lmstudio));
+        assert!(!Source::parse("ollama:x").unwrap().fits_store(StoreKind::Lmstudio));
     }
 
     #[test]
