@@ -1064,6 +1064,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/llamacpp/edit", post(h_edit))
         .route("/v1/llamacpp/facts", post(h_facts))
         .route("/v1/llamacpp/loads", post(h_load))
+        .route("/v1/llamacpp/install", post(h_install))
         .route("/v1/llamacpp/{workload}/models", get(h_models))
 }
 
@@ -1074,6 +1075,15 @@ async fn h_import(
     crate::api::check_protocol(req.protocol)?;
     let _one_at_a_time = state.adopt_lock.lock().await;
     Ok(Json(import(&state, req).await.map_err(ApiError::from_lanes)?))
+}
+
+async fn h_install(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::llamacpp::LaneEngineInstallRequest>,
+) -> Result<Json<llmctl_client::llamacpp::LaneEngineInstallResponse>, ApiError> {
+    crate::api::check_protocol(req.protocol)?;
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    Ok(Json(crate::llamacpp_engine::install(&state, req).await.map_err(ApiError::from_lanes)?))
 }
 
 async fn h_models(

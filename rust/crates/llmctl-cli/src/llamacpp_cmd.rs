@@ -134,6 +134,51 @@ pub enum LlamacppCmd {
         #[arg(long, value_delimiter = ',')]
         clear: Vec<String>,
     },
+    /// A llama.cpp lane on a llama-swap workload (the Macs, decision 8):
+    /// `llama-server -m <gguf>` started by llama-swap, its binary named by
+    /// a macro (the pinned release, `llamacpp install`). Plans a lane
+    /// write; apply with `--confirm <digest>`.
+    Lane {
+        workload: String,
+        lane: String,
+        /// Absolute GGUF path (required unless --remove).
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long = "macro", default_value = "llamacpp")]
+        binary_macro: String,
+        #[arg(long)]
+        mmproj: Option<String>,
+        /// Extra flag, `NAME=VALUE` or `NAME` (repeatable): `--arg embedding`.
+        #[arg(long = "arg")]
+        args: Vec<String>,
+        #[arg(long)]
+        ttl: Option<i64>,
+        #[arg(long)]
+        name: Option<String>,
+        /// Remove the lane instead.
+        #[arg(long)]
+        remove: bool,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Stage a llama.cpp release archive into its own versioned dir for a
+    /// llama-swap workload's lanes (checksum checked, binary version
+    /// checked). Prints the `lanes macro` write that switches to it.
+    Install {
+        workload: String,
+        /// Release tag (`b12527`).
+        version: String,
+        #[arg(long = "macro", default_value = "llamacpp")]
+        binary_macro: String,
+        /// Recipe JSON (a release-archive recipe); saved for the macro.
+        #[arg(long)]
+        recipe: Option<std::path::PathBuf>,
+        /// `sha256:<hex>` of this version's archive (from the release page).
+        #[arg(long)]
+        checksum: Option<String>,
+    },
     /// The router's log; with a model, only lines that name it.
     Logs {
         workload: String,
@@ -414,6 +459,101 @@ pub async fn cmd_llamacpp(cli: &Cli, cmd: LlamacppCmd) -> Result<u8, CliError> {
             print_models(&m);
             Ok(0)
         }
+        LlamacppCmd::Lane {
+            workload,
+            lane,
+            model,
+            binary_macro,
+            mmproj,
+            args,
+            ttl,
+            name,
+            remove,
+            confirm,
+            wait,
+        } => {
+            let edit = if remove {
+                llmctl_client::wire::LaneEdit::RemoveLane { lane }
+            } else {
+                let Some(model) = model else {
+                    eprintln!("error: --model <gguf> is required (or --remove)");
+                    return Ok(2);
+                };
+                let parsed = args
+                    .iter()
+                    .map(|a| match a.split_once('=') {
+                        Some((k, v)) => (k.trim_start_matches('-').to_string(), v.to_string()),
+                        None => (a.trim_start_matches('-').to_string(), "true".to_string()),
+                    })
+                    .collect();
+                let l = llmctl_core::llamacpp::LlamaLane {
+                    binary_macro,
+                    model,
+                    mmproj,
+                    args: parsed,
+                    ttl,
+                    name,
+                };
+                let problems = l.validate();
+                if !problems.is_empty() {
+                    for p in problems {
+                        eprintln!("error: {p}");
+                    }
+                    return Ok(2);
+                }
+                println!("cmd: {}", l.cmd());
+                llmctl_client::wire::LaneEdit::AddLane {
+                    lane,
+                    fields: l.fields(),
+                }
+            };
+            lane_write(cli, workload, edit, confirm, wait).await
+        }
+        LlamacppCmd::Install {
+            workload,
+            version,
+            binary_macro,
+            recipe,
+            checksum,
+        } => {
+            let recipe = match recipe {
+                Some(path) => match std::fs::read(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|b| serde_json::from_slice::<llmctl_core::ReleaseArchiveRecipe>(&b).map_err(|e| e.to_string()))
+                {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        eprintln!("error: recipe {}: {e}", path.display());
+                        return Ok(2);
+                    }
+                },
+                None => None,
+            };
+            let client = connect(cli)?;
+            ensure_protocol(&client).await?;
+            let r = client
+                .llamacpp_install(&llmctl_client::llamacpp::LaneEngineInstallRequest {
+                    protocol: PROTOCOL_VERSION,
+                    workload,
+                    macro_name: binary_macro,
+                    version,
+                    recipe,
+                    checksum,
+                })
+                .await?;
+            println!("{} {}: staged {} into {}", r.workload, r.macro_name, r.version, r.dir);
+            println!("  binary: {}", r.executable);
+            if let Some(d) = &r.archive_sha256 {
+                println!("  archive: {d}");
+            }
+            println!("  validation: {}", r.validation);
+            println!("  the lanes run now: {}", r.current.clone().unwrap_or_else(|| "(macro not set)".into()));
+            println!("switch (re-pins the lanes): {}", r.next);
+            if let Some(b) = &r.rollback {
+                println!("back, after switching: {b}");
+            }
+            Ok(0)
+        }
         LlamacppCmd::Logs {
             workload,
             model,
@@ -435,6 +575,55 @@ pub async fn cmd_llamacpp(cli: &Cli, cmd: LlamacppCmd) -> Result<u8, CliError> {
             Ok(0)
         }
     }
+}
+
+async fn lane_write(
+    cli: &Cli,
+    workload: String,
+    edit: llmctl_client::wire::LaneEdit,
+    confirm: Option<String>,
+    wait: bool,
+) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    ensure_protocol(&client).await?;
+    let req = llmctl_client::wire::LaneEditRequest {
+        protocol: PROTOCOL_VERSION,
+        workload,
+        edits: vec![edit],
+        confirm: None,
+        idempotency_key: None,
+    };
+    let Some(confirm) = confirm else {
+        let plan = client.lanes_plan(&req).await?;
+        println!("{}: {}", plan.workload, plan.summary);
+        for c in &plan.changes {
+            println!("  {c}");
+        }
+        if !plan.reload_restarts.is_empty() {
+            println!("  reload restarts running lanes: {}", plan.reload_restarts.join(", "));
+        }
+        for v in &plan.validation {
+            println!("  INVALID: {v}");
+        }
+        if !plan.validation.is_empty() {
+            return Ok(1);
+        }
+        println!("apply: add --confirm {}", plan.plan_digest);
+        return Ok(0);
+    };
+    let admitted = client
+        .lanes_apply(&llmctl_client::wire::LaneEditRequest {
+            confirm: Some(confirm),
+            ..req
+        })
+        .await?;
+    let op = admitted.operation;
+    println!("admitted operation {} ({})", op.id, op.idempotency_key);
+    if !wait {
+        println!("progress: llmctl-next op {} --watch", op.id);
+        return Ok(0);
+    }
+    watch_and_report(&client, &op.id, std::time::Duration::from_secs(5 * 60)).await
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -28,6 +28,7 @@ pub mod engine_api;
 pub mod lane_version;
 pub mod lanes;
 pub mod llamacpp;
+pub mod llamacpp_engine;
 pub mod gpu;
 pub mod hooks;
 pub mod inflight;

@@ -57,6 +57,11 @@ pub struct LaneStore {
     /// Peak memory per lane id, GiB.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub peaks_gib: std::collections::BTreeMap<String, f64>,
+    /// Release-archive recipes of lane engines, by the macro that names
+    /// the installed binary (M5d: `llamacpp` → the macOS llama.cpp
+    /// release). `llamacpp install` stages a version into its own dir.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub engine_recipes: std::collections::BTreeMap<String, llmctl_core::ReleaseArchiveRecipe>,
 }
 
 impl LaneStore {
@@ -253,8 +258,8 @@ pub async fn import(state: &AppState, req: LaneImportRequest) -> Result<LaneImpo
     // A re-import follows a hand edit of the file. It changes what the
     // records say, not what the owner accepted: pins stay (for lanes that
     // still exist), so a moved engine path shows as drift, not as a pin.
-    let (mut versions, budget_gib, mut peaks_gib) = existing
-        .map(|s| (s.versions, s.budget_gib, s.peaks_gib))
+    let (mut versions, budget_gib, mut peaks_gib, engine_recipes) = existing
+        .map(|s| (s.versions, s.budget_gib, s.peaks_gib, s.engine_recipes))
         .unwrap_or_default();
     versions.retain(|id, _| cfg.lane(id).is_some());
     peaks_gib.retain(|id, _| cfg.lane(id).is_some());
@@ -271,6 +276,7 @@ pub async fn import(state: &AppState, req: LaneImportRequest) -> Result<LaneImpo
             versions,
             budget_gib,
             peaks_gib,
+            engine_recipes,
         },
     )
     .await
@@ -337,6 +343,34 @@ fn apply_edits(cfg: &mut SwapConfig, edits: &[LaneEdit]) -> Result<Vec<String>, 
             LaneEdit::SetMacro { name, value } => {
                 cfg.set_macro(name, value);
                 summary.push(format!("macro {name} = {value}"));
+            }
+            LaneEdit::AddLane { lane, fields } => {
+                if cfg.lane(lane).is_some() {
+                    return Err(refuse(format!("lane {lane} exists")));
+                }
+                if lane.is_empty() || lane.contains(|c: char| c.is_whitespace() || c == ':' || c == '#') {
+                    return Err(refuse(format!("{lane:?} is not a lane id llama-swap reads back")));
+                }
+                let mut l = swap::Lane {
+                    id: lane.clone(),
+                    engine_kind: llmctl_core::EngineKind::Other("unknown".into()),
+                    fields: Vec::new(),
+                };
+                for (k, v) in fields {
+                    let v: serde_yaml::Value = serde_yaml::to_value(v)
+                        .map_err(|e| refuse(format!("value for {lane}.{k}: {e}")))?;
+                    l.set(k, v);
+                }
+                cfg.lanes.push(l);
+                summary.push(format!("add lane {lane}"));
+            }
+            LaneEdit::RemoveLane { lane } => {
+                let before = cfg.lanes.len();
+                cfg.lanes.retain(|l| &l.id != lane);
+                if cfg.lanes.len() == before {
+                    return Err(refuse(format!("no lane {lane}")));
+                }
+                summary.push(format!("remove lane {lane}"));
             }
         }
     }

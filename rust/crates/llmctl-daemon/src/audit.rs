@@ -352,6 +352,7 @@ mod tests {
             versions: Default::default(),
             budget_gib: None,
             peaks_gib: Default::default(),
+            engine_recipes: Default::default(),
         };
         assert_eq!(
             lane_actor(&store, &["ttl-lane".into()], &[]),

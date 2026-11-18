@@ -202,7 +202,52 @@ pub struct RouterLoadResponse {
     pub replayed: bool,
 }
 
+/// Stage one llama.cpp release into its own versioned dir for a llama-swap
+/// workload's lanes (M5d item 5). The lane macro is not changed: the
+/// answer names the `lanes macro` write that switches to it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneEngineInstallRequest {
+    pub protocol: u32,
+    pub workload: String,
+    /// The macro that names the binary (`llamacpp`).
+    pub macro_name: String,
+    pub version: String,
+    /// Saved for this macro; later installs reuse it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<llmctl_core::ReleaseArchiveRecipe>,
+    /// `sha256:<hex>` of this version's archive, added to the recipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneEngineInstallResponse {
+    pub workload: String,
+    pub macro_name: String,
+    pub version: String,
+    pub dir: String,
+    pub executable: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_sha256: Option<String>,
+    pub validation: serde_json::Value,
+    /// What the macro names now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    /// The write that switches the lanes to it (re-pins them).
+    pub next: String,
+    /// The write that goes back, once switched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<String>,
+}
+
 impl ControlClient {
+    pub async fn llamacpp_install(
+        &self,
+        req: &LaneEngineInstallRequest,
+    ) -> Result<LaneEngineInstallResponse, ClientError> {
+        self.post_json("/v1/llamacpp/install", req).await
+    }
+
     pub async fn llamacpp_import(&self, req: &RouterImportRequest) -> Result<RouterImportResponse, ClientError> {
         self.post_json("/v1/llamacpp/import", req).await
     }

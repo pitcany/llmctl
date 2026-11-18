@@ -697,6 +697,15 @@ pub enum LaneEdit {
         name: String,
         value: String,
     },
+    /// A new lane with its fields in llama-swap's order (M5d: a llama.cpp
+    /// lane rendered from a model record).
+    AddLane {
+        lane: String,
+        fields: Vec<(String, serde_json::Value)>,
+    },
+    RemoveLane {
+        lane: String,
+    },
 }
 
 /// Plan (no `confirm`) or apply (with the plan's digest) lane edits.
