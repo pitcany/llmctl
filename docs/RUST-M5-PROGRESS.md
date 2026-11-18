@@ -125,9 +125,9 @@ Same two measures on both TUIs: a screen key to the next idle frame, and a
 status refresh from request to answer drawn. Rust: `llmctl-next tui
 --bench 20` (release build; screens d o l g a). Python: Textual
 `run_test` on `MissionControlApp` from `~/AI/.venv` (screens d g l s u;
-`r` on the dashboard until `render_data` ran), script kept at
-`scratchpad/bench_py_tui.py` of the M5e session — rerun it from any
-directory with `~/AI/.venv/bin/python -I`.
+`r` on the dashboard until `render_data` ran):
+`~/AI/.venv/bin/python -I rust/crates/llmctl-tui/bench/bench_py_tui.py 20`
+(`-I` so the installed llmctl is measured, not a checkout).
 
 | Measure | Python TUI | llmctl-next tui (local agent only) | llmctl-next tui (all three hosts) |
 |---|---|---|---|
