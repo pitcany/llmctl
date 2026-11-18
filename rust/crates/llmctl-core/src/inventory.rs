@@ -127,7 +127,7 @@ impl GpuClaim {
     /// The default for a kind when adoption does not say.
     pub fn default_for(kind: &EngineKind) -> Self {
         match kind {
-            EngineKind::LmStudio | EngineKind::Ollama => GpuClaim::OnDemand,
+            EngineKind::LmStudio | EngineKind::Ollama | EngineKind::LlamaCppRouter => GpuClaim::OnDemand,
             _ => GpuClaim::AtStart,
         }
     }

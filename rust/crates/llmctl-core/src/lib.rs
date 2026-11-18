@@ -13,6 +13,7 @@ pub mod identity;
 pub mod intent;
 pub mod inventory;
 pub mod launch;
+pub mod llamacpp;
 pub mod observation;
 pub mod plan;
 pub mod planner;
