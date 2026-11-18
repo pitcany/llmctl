@@ -2611,3 +2611,45 @@ fn a_remote_archive_version_without_its_checksum_is_never_fetched() {
         .unwrap_or(false);
     assert!(!fetched, "nothing was downloaded");
 }
+
+/// A restart whose start fails does not leave a serving workload down:
+/// the rollback starts it again and checks it (seen live on m5, where a
+/// failed restart of Ollama left it stopped). When that start fails too,
+/// the operation says so and waits for the owner.
+#[tokio::test]
+async fn a_failed_restart_brings_the_workload_back_or_asks_for_attention() {
+    let d = spawn_daemon();
+    let client = d.client();
+    let running = |st: &llmctl_client::wire::StatusResponse, name: &str| {
+        let w = st.workloads.iter().find(|w| w.name == name).unwrap();
+        format!("{:?}", w.process).contains("Running")
+    };
+    let start_fails = || serde_json::json!(
+        {"unit": "user/llmctl-next-fake-coder.service", "kind": "start", "mode": "before"}
+    );
+    run_to_success(&d, "coder", "fr-setup").await;
+
+    // One failing start: the restart's. The rollback's start is the next.
+    d.write_faults(serde_json::json!({"fail_effects": [start_fails()]}));
+    let resp = client.admit(admit_req(OpKind::Restart, "coder", "fr-once")).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Failed, "{op:?}");
+    let recovery = op.recovery.expect("restoration recorded");
+    assert_eq!(recovery["outcome"], "restored", "{recovery}");
+    let applied: Vec<&str> = recovery["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["outcome"] == "applied")
+        .filter_map(|s| s["step"].as_str())
+        .collect();
+    assert!(applied.contains(&"start coder"), "{recovery}");
+    assert!(running(&client.status().await.unwrap(), "coder"), "back up after the rollback");
+
+    // Two failing starts: the rollback cannot restore it either.
+    d.write_faults(serde_json::json!({"fail_effects": [start_fails(), start_fails()]}));
+    let resp = client.admit(admit_req(OpKind::Restart, "coder", "fr-twice")).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::NeedsAttention, "{op:?}");
+    assert!(!running(&client.status().await.unwrap(), "coder"));
+}

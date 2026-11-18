@@ -231,6 +231,27 @@ fn plan_run_raw(
         workload: target.clone(),
         unit: def.unit.clone(),
     });
+    // The target was serving when this plan was made (a restart, or a run
+    // of something already up): the state to go back to is "running", so
+    // the rollback starts it again and checks it, after clearing whatever
+    // the failed attempt left. A target that was stopped stays stopped.
+    // If this start fails too, the operation ends `needs_attention`.
+    if target_running {
+        rollback.push(PlanStep::StartUnit {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+        });
+        rollback.push(PlanStep::AwaitReadiness {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+            timeout_secs: def.readiness_timeout_secs(),
+        });
+        rollback.push(PlanStep::VerifyServedModel {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+            model: def.model.clone(),
+        });
+    }
 
     Ok(Plan {
         id: OperationId::generate(),

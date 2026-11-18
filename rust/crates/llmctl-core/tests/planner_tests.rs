@@ -242,6 +242,26 @@ fn restart_plan_stops_then_starts_and_reverifies_a_running_target() {
     assert!(matches!(plan.steps[4], PlanStep::VerifyServedModel { .. }));
 }
 
+/// The target was serving before a restart, so a failed restart goes back
+/// to "serving": stop what the attempt left, start it again, check it. A
+/// run of a stopped target still rolls back to stopped.
+#[test]
+fn a_failed_restart_rolls_back_to_running_and_a_failed_first_start_to_stopped() {
+    let inv = inventory();
+    let coder = WorkloadName::new("coder").unwrap();
+    let plan = plan_restart(&inv, &[obs("coder", &[0], true)], &coder).unwrap();
+    let rollback: Vec<String> = plan.rollback.iter().map(|s| s.label()).collect();
+    assert_eq!(rollback.len(), 4, "{rollback:?}");
+    assert_eq!(rollback[0], "stop coder");
+    assert_eq!(rollback[1], "start coder");
+    assert!(matches!(plan.rollback[2], PlanStep::AwaitReadiness { .. }));
+    assert!(matches!(plan.rollback[3], PlanStep::VerifyServedModel { .. }));
+
+    let plan = plan_run(&inv, &[obs("coder", &[0], false)], &coder).unwrap();
+    let rollback: Vec<String> = plan.rollback.iter().map(|s| s.label()).collect();
+    assert_eq!(rollback, vec!["stop coder"]);
+}
+
 #[test]
 fn restart_refuses_a_target_that_is_not_running() {
     let inv = inventory();
