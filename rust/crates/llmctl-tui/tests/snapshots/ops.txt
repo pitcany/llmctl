@@ -1,0 +1,30 @@
+ llmctl-next  d Hosts  w Run  o Operations  l Logs  g GPUs/memory  m Catalog  a Audit
+┌ Operations (3) · mbp2 STALE, skipped ────────────────────────────────────────────────────────────────────────────────────────────┐
+│workstation  11-18 17:55:00 9f1e0d7c restart    ollama-gpu1          executing        phases 1/2                                  │
+│workstation  11-18 17:55:00 0b5f2c9e run        vllm-engine          needs_attention  phases 1/2  [ack pending]                   │
+│m5           11-18 17:55:00 77aa0000 lane_swap  llama-swap           succeeded        phases 1/1                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Details ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│operation 0b5f2c9e-aaaa on workstation                                                                                            │
+│key run-vllm-engine-r42-1                                                                                                         │
+│run vllm-engine — needs_attention  (updated 30 s ago)                                                                             │
+│  ✓  1. stop ollama-gpu1                                                                                                          │
+│  ✗  2. start vllm-engine                                                                                                         │
+│result: {"error":"readiness timeout after 600 s"}                                                                                 │
+│recovery: {"restored":["ollama-gpu1"],"serving":true}                                                                             │
+│not acknowledged: A acknowledges (after a look)                                                                                   │
+│                                                                                                                                  │
+│                                                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+↑↓ select · C cancel · A acknowledge · r refresh · q quit

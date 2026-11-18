@@ -1,0 +1,30 @@
+ llmctl-next  d Hosts  w Run  o Operations  l Logs  g GPUs/memory  m Catalog  a Audit
+┌ Catalog ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│Catalog: pending.                                                                                                                 │
+│                                                                                                                                  │
+│This screen lands after M5c (presets and catalog) merges to main:                                                                 │
+│models per host and store; add/rm through the same previews as the CLI.                                                           │
+│                                                                                                                                  │
+│Meanwhile: `llmctl-next stores` and `llmctl-next model` from the shell.                                                           │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+r refresh · ? help · q quit

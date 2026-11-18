@@ -1,0 +1,19 @@
+[package]
+name = "llmctl-tui"
+description = "The llmctl-next TUI (M5e): a ratatui client of the agent API, nothing more."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+llmctl-core = { workspace = true }
+llmctl-client = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+ratatui = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

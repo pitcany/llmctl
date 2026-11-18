@@ -5,6 +5,7 @@ members = [
   "crates/llmctl-daemon",
   "crates/llmctl-client",
   "crates/llmctl-cli",
+  "crates/llmctl-tui",
 ]
 
 [workspace.package]
@@ -17,6 +18,7 @@ rust-version = "1.85"
 llmctl-core = { path = "crates/llmctl-core" }
 llmctl-client = { path = "crates/llmctl-client" }
 llmctl-daemon = { path = "crates/llmctl-daemon" }
+llmctl-tui = { path = "crates/llmctl-tui" }
 tokio = { version = "1", features = [
   "rt-multi-thread",
   "macros",
@@ -45,6 +47,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 sha2 = "0.10"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 
 [profile.release]
 lto = "thin"
