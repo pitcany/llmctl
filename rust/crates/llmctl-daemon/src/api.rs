@@ -61,6 +61,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/lanes/edit", post(lanes_edit))
         .route("/v1/lane-swaps", post(lanes_swap))
         .route("/v1/lanes/version", post(lanes_version))
+        .route("/v1/lanes/logs", post(lanes_logs))
         .route("/v1/lanes/{workload}", get(lanes_status))
         .route("/v1/logs", post(logs))
         .layer(axum::middleware::from_fn(under_lease_scope))
@@ -557,6 +558,19 @@ async fn lanes_status(
     Path(workload): Path<String>,
 ) -> Result<Json<llmctl_client::wire::LaneStatusResponse>, ApiError> {
     Ok(Json(crate::lanes::status(&state, &workload).await.map_err(ApiError::from_lanes)?))
+}
+
+/// The newest lines of one lane's own output.
+async fn lanes_logs(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::LaneLogsRequest>,
+) -> Result<Json<llmctl_client::wire::LaneLogsResponse>, ApiError> {
+    check_protocol(req.protocol)?;
+    Ok(Json(
+        crate::lanes::lane_logs(&state, &req)
+            .await
+            .map_err(ApiError::from_lanes)?,
+    ))
 }
 
 /// Version facts per lane; with `pin`, record the live facts as the pin.

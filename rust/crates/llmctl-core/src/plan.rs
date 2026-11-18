@@ -169,6 +169,15 @@ pub enum PlanStep {
         evicts: Vec<String>,
         timeout_secs: u64,
     },
+    /// External: ask the llama-swap on `port` to unload `lane` and confirm
+    /// it left the running list. Nothing else is touched; the lane loads
+    /// again on its next request.
+    UnloadLane {
+        workload: WorkloadName,
+        port: u16,
+        lane: String,
+        timeout_secs: u64,
+    },
     /// External: atomically replace a llama-swap config with `content`,
     /// refusing when the file is no longer the one planned against
     /// (`expect_digest`), then confirm llama-swap reloaded it (its log, then
@@ -212,6 +221,7 @@ impl PlanStep {
             | PlanStep::UnloadModel { workload, .. }
             | PlanStep::ApplyEnvFile { workload, .. }
             | PlanStep::LoadLane { workload, .. }
+            | PlanStep::UnloadLane { workload, .. }
             | PlanStep::RunHook { workload, .. }
             | PlanStep::Acquire { workload, .. }
             | PlanStep::WriteSwapConfig { workload, .. } => workload,
@@ -293,6 +303,9 @@ impl PlanStep {
                 "load lane {lane} on {workload} (evicts {})",
                 if evicts.is_empty() { "nothing".to_string() } else { evicts.join(", ") }
             ),
+            PlanStep::UnloadLane { workload, lane, .. } => {
+                format!("unload lane {lane} from {workload}")
+            }
             PlanStep::WriteSwapConfig {
                 workload, lanes, summary, ..
             } => format!(

@@ -612,6 +612,28 @@ pub struct LaneSwapRequest {
     pub force: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// `lanes stop`: unload `lane` instead of loading it. Nothing else is
+    /// evicted; `evicts` in the answer is the lane itself when it runs.
+    #[serde(default)]
+    pub unload: bool,
+}
+
+/// The newest lines of one lane's own output, as llama-swap keeps them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneLogsRequest {
+    pub protocol: u32,
+    pub workload: String,
+    pub lane: String,
+    pub lines: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaneLogsResponse {
+    pub workload: String,
+    pub lane: String,
+    pub lines: Vec<String>,
+    /// Lines llama-swap had kept for the lane, before the cut to `lines`.
+    pub available: usize,
 }
 
 /// What the lane records predict for the swap, and the operation when it
@@ -632,6 +654,9 @@ pub struct LaneSwapResponse {
     pub operation: Option<OperationView>,
     #[serde(default)]
     pub replayed: bool,
+    /// The request was a stop (`unload`), not a load.
+    #[serde(default)]
+    pub unload: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

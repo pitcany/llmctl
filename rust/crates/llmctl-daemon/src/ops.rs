@@ -1391,6 +1391,33 @@ impl OpManager {
                     Err(report) => StepOutcome::Failed(report),
                 }
             }
+            PlanStep::UnloadLane {
+                workload,
+                port,
+                lane,
+                timeout_secs,
+            } => {
+                set_phase(&mut row.phases, index, |p| {
+                    p.status = PhaseStatus::EffectPending
+                });
+                if self.persist(row).await.is_err() {
+                    return StepOutcome::Failed("journaling effect boundary failed".into());
+                }
+                match crate::lanes::unload_and_confirm(
+                    *port,
+                    lane,
+                    std::time::Duration::from_secs(*timeout_secs),
+                )
+                .await
+                {
+                    Ok(report) => {
+                        applied.push(format!("lane-unload:{workload}:{lane}"));
+                        set_phase(&mut row.phases, index, |p| p.detail = Some(report.clone()));
+                        StepOutcome::Done
+                    }
+                    Err(e) => StepOutcome::Failed(e),
+                }
+            }
             PlanStep::LoadLane {
                 workload,
                 port,
@@ -1778,6 +1805,7 @@ impl OpManager {
                 // Never planned as a restoration step: an evicted lane loads
                 // again on its next request.
                 PlanStep::LoadLane { .. } => Err("a lane load is not a restoration step".to_string()),
+                PlanStep::UnloadLane { .. } => Err("a lane unload is not a restoration step".to_string()),
                 PlanStep::WriteSwapConfig { .. } => run_swap_write(&step).await.map(Some),
             };
             match outcome {

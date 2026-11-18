@@ -396,6 +396,30 @@ enum LanesCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Unload one lane: llama-swap is asked to stop it, and it must leave
+    /// the running list. Nothing else is evicted; the lane loads again on
+    /// its next request. Held while requests are in flight unless --force.
+    Stop {
+        workload: String,
+        lane: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long)]
+        key: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    /// One lane's own output (the newest lines llama-swap keeps for it).
+    Logs {
+        workload: String,
+        lane: String,
+        #[arg(short = 'n', long, default_value_t = 100)]
+        lines: u32,
+        #[arg(long)]
+        json: bool,
+    },
     /// Preview (or, with --confirm, persist) the records of a llama-swap
     /// workload's config. Never writes the config.
     Import {
@@ -1857,6 +1881,7 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
                     dry_run,
                     force,
                     idempotency_key: key,
+                    unload: false,
                 })
                 .await?;
             let list = |v: &[String]| if v.is_empty() { "nothing".to_string() } else { v.join(", ") };
@@ -1884,6 +1909,69 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
                 std::time::Duration::from_secs(20 * 60),
             )
             .await;
+        }
+        LanesCmd::Stop {
+            workload,
+            lane,
+            dry_run,
+            wait,
+            key,
+            force,
+        } => {
+            let resp = client
+                .lanes_swap(&llmctl_client::wire::LaneSwapRequest {
+                    protocol: PROTOCOL_VERSION,
+                    workload,
+                    lane,
+                    dry_run,
+                    force,
+                    idempotency_key: key,
+                    unload: true,
+                })
+                .await?;
+            let list = |v: &[String]| if v.is_empty() { "nothing".to_string() } else { v.join(", ") };
+            println!("{}: stop lane {}", resp.workload, resp.lane);
+            println!("  running now: {}", list(&resp.running));
+            if resp.evicts.is_empty() {
+                println!("  not running: nothing to stop");
+                return Ok(0);
+            }
+            let Some(op) = resp.operation else {
+                println!("  would unload: {}", resp.lane);
+                return Ok(0);
+            };
+            println!("admitted operation {} ({})", op.id, op.idempotency_key);
+            if !wait {
+                println!("progress: llmctl-next op {} --watch", op.id);
+                return Ok(0);
+            }
+            return watch_and_report(&client, &op.id, std::time::Duration::from_secs(5 * 60)).await;
+        }
+        LanesCmd::Logs {
+            workload,
+            lane,
+            lines,
+            json,
+        } => {
+            let r = client
+                .lanes_logs(&llmctl_client::wire::LaneLogsRequest {
+                    protocol: PROTOCOL_VERSION,
+                    workload,
+                    lane,
+                    lines,
+                })
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                return Ok(0);
+            }
+            if r.lines.is_empty() {
+                println!("(llama-swap has no output for {} yet; a lane logs once it has run)", r.lane);
+            }
+            for l in &r.lines {
+                println!("{l}");
+            }
+            return Ok(0);
         }
         LanesCmd::Import {
             workload,

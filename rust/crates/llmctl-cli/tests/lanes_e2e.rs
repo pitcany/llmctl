@@ -85,6 +85,31 @@ fn fake_swap(config: PathBuf, log: PathBuf) -> FakeSwap {
                 );
                 continue;
             }
+            if req.starts_with("GET /logs/stream/") {
+                // The lane's buffer, then the connection stays open like
+                // the real stream: the reader must not wait for the end.
+                let lane = req["GET /logs/stream/".len()..].split_whitespace().next().unwrap_or("").to_string();
+                if !l3.lock().unwrap().contains(&lane) {
+                    let _ = write!(s, "HTTP/1.0 404 Not Found\r\n\r\nmodel not found");
+                    continue;
+                }
+                let _ = write!(
+                    s,
+                    "HTTP/1.0 200 OK\r\ncontent-type: text/plain\r\n\r\n[{lane}] loading weights\n[{lane}] listening\n[{lane}] request 1 done\n"
+                );
+                let _ = s.flush();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(3));
+                    drop(s);
+                });
+                continue;
+            }
+            if req.starts_with("POST /api/models/unload/") {
+                let lane = req["POST /api/models/unload/".len()..].split_whitespace().next().unwrap_or("").to_string();
+                r2.lock().unwrap().retain(|m| m != &lane);
+                let _ = write!(s, "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n\r\nOK");
+                continue;
+            }
             let body = if req.starts_with("GET /running") {
                 let rows: Vec<String> = r2
                     .lock()
@@ -409,6 +434,34 @@ models:
     // Already running: admitted, but nothing is loaded or evicted.
     let (ok, text) = cli(s, &["lanes", "swap", "swap", "big", "--wait"]);
     assert!(ok && text.contains("already running"), "{text}");
+
+    // A lane's own stop and log. The stop takes that lane away and nothing
+    // else; it is held by requests in flight like an eviction.
+    let (ok, text) = cli(s, &["lanes", "logs", "swap", "big", "-n", "2"]);
+    assert!(ok, "{text}");
+    assert_eq!(text.trim(), "[big] listening\n[big] request 1 done", "{text}");
+    let (ok, text) = cli(s, &["lanes", "logs", "swap", "nope"]);
+    assert!(!ok && text.contains("no lane nope"), "{text}");
+    let (ok, text) = cli(s, &["lanes", "stop", "swap", "big", "--dry-run"]);
+    assert!(ok && text.contains("would unload: big"), "{text}");
+    assert_eq!(*fake.running.lock().unwrap(), vec!["big"], "a dry run stops nothing");
+    *fake.inflight.lock().unwrap() = 1;
+    let (ok, text) = cli(s, &["lanes", "stop", "swap", "big", "--wait"]);
+    assert!(!ok && text.contains("requests_in_flight"), "{text}");
+    assert_eq!(*fake.running.lock().unwrap(), vec!["big"]);
+    *fake.inflight.lock().unwrap() = 0;
+    let (ok, text) = cli(s, &["lanes", "stop", "swap", "big", "--wait"]);
+    assert!(ok, "{text}");
+    assert!(text.contains("big unloaded; llama-swap no longer lists it"), "{text}");
+    assert!(fake.running.lock().unwrap().is_empty());
+    let (ok, text) = cli(s, &["lanes", "stop", "swap", "big", "--wait"]);
+    assert!(ok && text.contains("not running: nothing to stop"), "{text}");
+    let (ok, text) = cli(s, &["lanes", "stop", "swap", "nope"]);
+    assert!(!ok && text.contains("no lane nope"), "{text}");
+    // Back to the state the rest of the test expects.
+    *fake.evict_on_load.lock().unwrap() = Vec::new();
+    let (ok, text) = cli(s, &["lanes", "swap", "swap", "big", "--wait"]);
+    assert!(ok, "{text}");
 
     // --force evicts with requests in flight.
     *fake.inflight.lock().unwrap() = 5;

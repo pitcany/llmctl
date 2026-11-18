@@ -511,6 +511,8 @@ pub async fn apply(
 
 /// Longest one lane load may take: a 35B read from disk needs minutes.
 const LANE_LOAD_TIMEOUT_SECS: u64 = 900;
+/// Longest a lane may take to leave after llama-swap was asked.
+const LANE_UNLOAD_TIMEOUT_SECS: u64 = 90;
 
 /// Predict a lane swap from the records and, unless `dry_run`, admit it as
 /// an operation. llama-swap decides the eviction when the lane is
@@ -533,19 +535,41 @@ pub async fn swap(
         )));
     };
     let running = running_on(def.port).await;
-    let p = llmctl_core::swap::predict_swap(&store.records, &req.lane, &running).map_err(refuse)?;
-    let mut resp = llmctl_client::wire::LaneSwapResponse {
-        workload: req.workload.clone(),
-        lane: req.lane.clone(),
-        running,
-        evicts: p.evicts.clone(),
-        set: p.set,
-        cost: p.cost,
-        already_loaded: p.already_loaded,
-        operation: None,
-        replayed: false,
+    let mut resp = if req.unload {
+        // A stop: the lane itself leaves, nothing else. No matrix to ask.
+        if store.records.lane(&req.lane).is_none() {
+            return Err(refuse(format!("{} has no lane {}", req.workload, req.lane)));
+        }
+        let is_running = running.iter().any(|l| l == &req.lane);
+        llmctl_client::wire::LaneSwapResponse {
+            workload: req.workload.clone(),
+            lane: req.lane.clone(),
+            evicts: if is_running { vec![req.lane.clone()] } else { Vec::new() },
+            running,
+            set: String::new(),
+            cost: 0,
+            already_loaded: false,
+            operation: None,
+            replayed: false,
+            unload: true,
+        }
+    } else {
+        let p = llmctl_core::swap::predict_swap(&store.records, &req.lane, &running).map_err(refuse)?;
+        llmctl_client::wire::LaneSwapResponse {
+            workload: req.workload.clone(),
+            lane: req.lane.clone(),
+            running,
+            evicts: p.evicts.clone(),
+            set: p.set,
+            cost: p.cost,
+            already_loaded: p.already_loaded,
+            operation: None,
+            replayed: false,
+            unload: false,
+        }
     };
-    if req.dry_run {
+    // Nothing to stop: say so and admit nothing.
+    if req.dry_run || (req.unload && resp.evicts.is_empty()) {
         return Ok((resp, None));
     }
     // Request safety (M4c item 6) for lanes: an eviction cuts whatever the
@@ -578,19 +602,29 @@ pub async fn swap(
         revision: inv.revision,
         expected_model: def.model.clone(),
         affected_gpus: Vec::new(),
-        steps: vec![PlanStep::LoadLane {
-            workload: name.clone(),
-            port: def.port,
-            lane: req.lane.clone(),
-            evicts: p.evicts,
-            timeout_secs: LANE_LOAD_TIMEOUT_SECS,
+        steps: vec![if req.unload {
+            PlanStep::UnloadLane {
+                workload: name.clone(),
+                port: def.port,
+                lane: req.lane.clone(),
+                timeout_secs: LANE_UNLOAD_TIMEOUT_SECS,
+            }
+        } else {
+            PlanStep::LoadLane {
+                workload: name.clone(),
+                port: def.port,
+                lane: req.lane.clone(),
+                evicts: resp.evicts.clone(),
+                timeout_secs: LANE_LOAD_TIMEOUT_SECS,
+            }
         }],
         // Nothing to undo: an evicted lane loads again on its next request.
         rollback: Vec::new(),
     };
     let key = req.idempotency_key.clone().unwrap_or_else(|| {
         format!(
-            "laneswap-{}-{}-{}",
+            "{}-{}-{}-{}",
+            if req.unload { "lanestop" } else { "laneswap" },
             req.workload,
             req.lane.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.', "_"),
             chrono::Utc::now().timestamp_millis()
@@ -713,6 +747,110 @@ pub async fn load_and_confirm(
             list(&evicted),
             list(&expected)
         )
+    })
+}
+
+/// The effect of an `UnloadLane` step: llama-swap's own unload call, then
+/// the lane must be gone from `/running`.
+pub async fn unload_and_confirm(port: u16, lane: &str, timeout: Duration) -> Result<String, String> {
+    if !running_on(port).await.iter().any(|l| l == lane) {
+        return Ok(format!("{lane} was not running; nothing unloaded"));
+    }
+    let path = format!("/api/models/unload/{lane}");
+    match crate::probe_http::request(port, hyper::Method::POST, &path, None, Duration::from_secs(30)).await {
+        Ok((status, _)) if (200..300).contains(&status) => {}
+        Ok((status, body)) => {
+            return Err(format!(
+                "llama-swap answered {status} to the unload of {lane}: {}",
+                String::from_utf8_lossy(&body).chars().take(200).collect::<String>()
+            ))
+        }
+        Err(()) => return Err(format!("llama-swap did not answer the unload of {lane}")),
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if !running_on(port).await.iter().any(|l| l == lane) {
+            return Ok(format!("{lane} unloaded; llama-swap no longer lists it"));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "{lane} is still listed as running {}s after the unload",
+                timeout.as_secs()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// `lanes logs`: the lane's own output. llama-swap keeps a buffer per
+/// lane and serves it on `/logs/stream/<lane>`: first what it has, then
+/// new lines for as long as the connection stays open. This reads what
+/// arrives in a short window and returns the newest `lines`.
+pub async fn lane_logs(
+    state: &AppState,
+    req: &llmctl_client::wire::LaneLogsRequest,
+) -> Result<llmctl_client::wire::LaneLogsResponse, LanesError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let name = WorkloadName::new(&req.workload).map_err(|e| OpsError::Invalid(e.to_string()))?;
+    let inv = state.ops.inventory().await;
+    let def = inv
+        .workload(&name)
+        .cloned()
+        .ok_or_else(|| OpsError::UnknownWorkload(req.workload.clone()))?;
+    let Some(store) = read_store(&store_path(state, &req.workload)).await? else {
+        return Err(refuse(format!(
+            "{} has no lane records; `lanes import {}` first",
+            req.workload, req.workload
+        )));
+    };
+    if store.records.lane(&req.lane).is_none() {
+        return Err(refuse(format!("{} has no lane {}", req.workload, req.lane)));
+    }
+    let port = def.port;
+    // HTTP/1.0: the answer is not chunked and ends when we stop reading.
+    let read = async {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+        stream
+            .write_all(format!("GET /logs/stream/{} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n", req.lane).as_bytes())
+            .await
+            .ok()?;
+        let mut all = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        // The buffer comes at once; a quiet half second means it is all here.
+        loop {
+            match tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => {
+                    all.extend_from_slice(&buf[..n]);
+                    if all.len() > 8 * 1024 * 1024 {
+                        break;
+                    }
+                }
+            }
+        }
+        Some(all)
+    };
+    let raw = tokio::time::timeout(Duration::from_secs(10), read)
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| LanesError::Io(format!("{} did not answer on port {port}", req.workload)))?;
+    let text = String::from_utf8_lossy(&raw);
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_ref(), ""));
+    let status = head.split_whitespace().nth(1).unwrap_or("");
+    if status != "200" {
+        return Err(refuse(format!(
+            "llama-swap answered {status} for the log of {}; it keeps a log only for lanes it knows",
+            req.lane
+        )));
+    }
+    let all: Vec<&str> = body.lines().collect();
+    let keep = (req.lines.max(1) as usize).min(5000);
+    Ok(llmctl_client::wire::LaneLogsResponse {
+        workload: req.workload.clone(),
+        lane: req.lane.clone(),
+        lines: all[all.len().saturating_sub(keep)..].iter().map(|l| l.to_string()).collect(),
+        available: all.len(),
     })
 }
 

@@ -261,6 +261,13 @@ impl ControlClient {
         self.get_json(&format!("/v1/lanes/{workload}")).await
     }
 
+    pub async fn lanes_logs(
+        &self,
+        req: &crate::wire::LaneLogsRequest,
+    ) -> Result<crate::wire::LaneLogsResponse, ClientError> {
+        self.post_json("/v1/lanes/logs", req).await
+    }
+
     pub async fn lanes_version(
         &self,
         req: &crate::wire::LaneVersionRequest,
