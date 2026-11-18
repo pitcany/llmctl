@@ -237,10 +237,24 @@ Design (defaults; decisions 8–10 below):
    budget (Macs) runs before every load, and a request for an unloaded
    model fails fast instead of loading behind the planner.
    `--models-max` follows the fit.
-4. **Workstation:** one user unit `llamacpp-router` on the CUDA build. A
-   model load claims cards like the M4c on-demand claim, so it is planned
-   against `vllm-engine` and the others (evict or refuse). `gpt-oss-120b`
-   stays its own unit in M5 (decision 10).
+4. **Workstation: llama.cpp becomes a general engine, not one model.**
+   Today llama.cpp serves only `gpt-oss-120b` there. M5d adds one user
+   unit `llamacpp-router` on the CUDA build that serves any GGUF in the
+   stores. A model load claims cards like the M4c on-demand claim, so it
+   is planned against `vllm-engine` and the others (evict or refuse).
+   `gpt-oss-120b` stays its own unit in M5 (decision 10). Candidate
+   models (sizes on disk, 2026-11-18):
+
+   | Model | Size | Fits the two cards (2 × 32 GiB) |
+   |---|---|---|
+   | `Qwen3.5-0.8B-GGUF` (`/mnt/storage/converted`) | 1 GB | yes (pilot) |
+   | `Qwen3.6-35B-A3B-GGUF` (`/mnt/storage/converted`) | 37 GB | yes (pilot) |
+   | Qwen3.8-Flash-Next quants (`~/models`, `/mnt/storage/models`) | 89–104 GB | no: needs llama.cpp's CPU offload of MoE experts into the 128 GiB RAM; speed not measured, Strata serves them today |
+   | `Maya-M` (`/mnt/storage/models`) | 110 GB | no: same as above |
+
+   A model that needs CPU offload carries its offload arguments in its
+   record, and the fit counts its host-RAM share too; the first one is
+   measured before it is offered in the TUI.
 5. **Macs** (decision 8): llama.cpp as a llama-swap lane engine, one
    `llama-server -m <gguf>` per lane. llama-swap is already the Macs'
    multi-model scheduler, and `lanes memory` sums every lane on the one
@@ -349,7 +363,7 @@ the count; `hf` installed on m5 in M5c.
 7. **m5 `hf`:** install `huggingface_hub`'s CLI on m5 in M5c
    (recommended), or keep HF downloads workstation-only and copy over.
 
-### Open, added 2026-11-18 with M5d
+### Added 2026-11-18 with M5d (taken the same day, all as recommended)
 
 8. **llama.cpp on the Macs:** as llama-swap lanes, one `llama-server`
    per model (recommended: llama-swap already schedules every Mac engine
