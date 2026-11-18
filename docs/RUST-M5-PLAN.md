@@ -33,6 +33,16 @@ benchmark UI (later, per the parent plan); SGLang and FreeToken (M7).
 The old tools keep running in M5 so that reversal is a config change, not
 a restore.
 
+**Retires at M6:** `ds4-llmctl-sync` (`~/AI/services/ds4-llmctl-sync`).
+It only records services the Python llmctl does not start (`gpt-oss-120b`,
+the Strata lanes, `glm-5.3-flash`) as "adopted" rows in the Python session
+table, so `llmctl status`, the Python TUI and the `:8088` dashboard show
+them. It never starts or stops anything. M5 keeps it because those views
+stay in use during the pilot. At M6, when the Python llmctl is quiesced,
+the table has no reader: remove the hook from the six units and from
+`gpt-oss-120b`'s router model, and delete the script after the M6
+reversal window.
+
 ## Facts that shape the plan (checked 2026-11-18, read-only)
 
 **How the owner uses llmctl today** (shell history on the workstation,
@@ -274,7 +284,8 @@ Design (defaults; decisions 8–10 below):
      slot save path, `--cache-reuse 256`, alias `gpt-oss-120b`);
    - the `ds4-llmctl-sync adopt/detach` hooks (now `ExecStartPost` /
      `ExecStopPost`) become llmctl-next companion hooks on that model's
-     load and unload;
+     load and unload, for M5 only (they retire at M6, see "Retires at M6"
+     above);
    - `llama-server-guarded`'s checks (every shard present, no live
      `.incomplete` download, free VRAM above `LLAMA_GUARD_MIN_FREE_MIB`)
      become the router's pre-load check, since the router starts model
