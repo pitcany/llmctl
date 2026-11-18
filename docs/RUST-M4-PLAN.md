@@ -5,9 +5,9 @@ recommended (end of this file). **M4a done 2026-11-17 — see
 [the pilot note](RUST-M4A-PILOT-2026-11-17.md). M4b steps 1–5 done:
 [progress](RUST-M4B-PROGRESS-2026-11-17.md). M4c: all seven items have a
 first version: [progress](RUST-M4C-PROGRESS.md). Exit check 2026-11-17:
-1 row met, 4 partly, 1 not met. Version pinning and manual-stop
-protection closed 2026-11-18, so it now stands at 3 met, 3 partly — see
-"Exit check" below.**
+1 row met, 4 partly, 1 not met. Version pinning, manual-stop protection
+and launch/readiness/stop/logs closed 2026-11-18, so it now stands at
+4 met, 2 partly — see "Exit check" below.**
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table,
 M4 row; "Engine support and ownership"). Builds on M2 (one owned Linux
 workload, staged vLLM upgrade — [plan](RUST-M2-PLAN.md)) and M3 (Mac agent,
@@ -275,7 +275,7 @@ exit yet.**
 |---|---|---|---|
 | Installation | **Partly** (2 of 5 kinds on a real engine) | `python_env`: vLLM 0.32.0 staged into a versioned env on `vllm-engine2` (M2 window 2). `source_build`: llama.cpp `a9d43ecc3` built, validated, manifest and build log kept (M4a). `release_archive`: real-systemd test `release_archive_stages_promotes_verifies_and_rolls_back` with a tiny archive | `release_archive` has installed no real engine (the mlx-serve dirs on m5 were already there) and has no launchd run. `vendor_app` installs nothing by design (it prints an owner-run plan) and that plan was never carried out. `external` is a record only |
 | Version pinning | **Not met** on 2026-11-17 (2 of 10 enrolled workloads pinned). **Met since 2026-11-18**, see the update below | Pinned: `gpt-oss-120b` (binary digests), m5 `ollama` (vendor fact 0.34.3). Drift is reported: test `vendor_app_version_is_observed_pinned_and_drifts`; M4a saw m5 Ollama 0.34.3 against brew 0.40.16 | `version` says "no recipe; version pinning is off" for `vllm-engine`, `ollama`, `ollama-gpu1`, `llmster`, `strata-fast` and for `llama-swap` on both Macs. m5 `ds4` has a recipe with the fork SHA but `pinned: null`. The 15 lanes have no version records (an engine version is a macro path). m5 Ollama shows no drift today because its pin was set to the running 0.34.3 |
-| Launch / readiness / stop / logs | **Partly** (6 of 9 engines on a host) | Workstation, through admitted operations: vLLM (`vllm-engine`), llama.cpp (`gpt-oss-120b`, last 21:15), Ollama (`ollama-gpu1`), LM Studio (`llmster`), Strata (`strata-fast`). m5: MTPLX lanes loaded and evicted by `lanes swap` (20:22). `logs` answers for all six workstation workloads and for `llama-swap` (both Macs) and `ollama` (m5) | mlx-serve: restarted by a config reload and health-checked, never loaded by `lanes swap`. mlx-vlm and ds4 lanes: never loaded through llmctl-next; `logs ds4` is `unsupported` (the record has no plist). mbp2's MTPLX lanes: records and a rewrite only. m5 Ollama: never stopped or started (a restart would upgrade it). LM Studio on both Macs and Ollama on mbp2 are not enrolled. Lanes have no logs of their own (llama-swap's log). The per-row disposable spikes of M4b open item 5 were not written |
+| Launch / readiness / stop / logs | **Partly** on 2026-11-17 (6 of 9 engines on a host). **Met since 2026-11-18** (9 of 9), see the third update below | Workstation, through admitted operations: vLLM (`vllm-engine`), llama.cpp (`gpt-oss-120b`, last 21:15), Ollama (`ollama-gpu1`), LM Studio (`llmster`), Strata (`strata-fast`). m5: MTPLX lanes loaded and evicted by `lanes swap` (20:22). `logs` answers for all six workstation workloads and for `llama-swap` (both Macs) and `ollama` (m5) | mlx-serve: restarted by a config reload and health-checked, never loaded by `lanes swap`. mlx-vlm and ds4 lanes: never loaded through llmctl-next; `logs ds4` is `unsupported` (the record has no plist). mbp2's MTPLX lanes: records and a rewrite only. m5 Ollama: never stopped or started (a restart would upgrade it). LM Studio on both Macs and Ollama on mbp2 are not enrolled. Lanes have no logs of their own (llama-swap's log). The per-row disposable spikes of M4b open item 5 were not written |
 | Upgrade / recovery | **Partly** | `python_env`: promote, rollback, and a promote killed mid-load that rolled back by itself (M2 window 2). `source_build`: stage → promote → rollback on `gpt-oss-120b` (M4a). `release_archive`: real-systemd test. Interrupted stage: never promotable and removed by gc (real-systemd tests). mlx-serve 26.10.1 → 26.9.5 on m5 as a lane macro change | `release_archive` upgrade and rollback on a real engine. The vendor-app backup/reinstall path "tested once": never run. The mlx-serve swap back was not run |
 | Request safety | **Met** | Live 19:05: `restart vllm-engine` without `--force` refused with 12 real requests in flight after the 20 s wait; the engine's pid did not change. e2e `stops_wait_for_in_flight_requests_or_refuse_without_force`; lane swaps wait on llama-swap's in-flight count (e2e) | The "requests finish inside the wait, then the stop goes ahead" path is covered by tests only |
 | Manual-stop protection | **Partly** on 2026-11-17. **Met since 2026-11-18**, see the second update below | Agent restart: `ollama-gpu1` was stopped at 14:06 and still carries the mark after every daemon restart since (last 21:01). Swap rollback: e2e `a_manual_stop_is_reported_survives_eviction_and_is_not_restored`. Healers: llm-heal's check against the real agent answers correctly; 58 + 16 healer tests | No live rollback past a manual stop. No live healer drill where it matters: llm-heal does not repair a cleanly stopped lane anyway, so its 2-minute runs prove nothing; the case the plan names (mac-heal kickstarting a manually stopped `llama-swap` on mbp2) was not run |
@@ -388,14 +388,58 @@ on launchd always boots the job out, so mac-heal's intent check is a
 second line that this path never reaches; it is covered by its tests
 (`~/AI/tests/test_mac_heal.py`) only. llm-heal's check is the one that ran live.
 
-**To pass, in order of weight** (the pins and the manual-stop drills are
-done):
+### Update 2026-11-18, 01:54 PST: launch / readiness / stop / logs is met
 
-1. **Mac lanes and vendor services** (row 3, 1–2 hours, evicts the
-   always-on lanes on m5 for some minutes): load the mlx-vlm lane, one ds4
-   lane and mlx-serve by `lanes swap`; load one lane on mbp2; enroll LM
-   Studio on both Macs and Ollama on mbp2 observe-only.
-2. **A real `release_archive` install and the vendor-app path once** (rows
+Jobs `m4-lanes-m5` and `m4-lanes-mbp2` (01:51–01:52), each lane through
+`llmctl-next --host <mac> lanes swap llama-swap <lane> --wait`, then one
+real chat request through llama-swap, then the log through `llmctl-next
+logs llama-swap`:
+
+| Host | Lane | Engine | Load | Evicted, as predicted | Request |
+|---|---|---|---|---|---|
+| m5 | `qwen27b-vision-m5` | mlx-vlm 0.6.6 | 7 s | `qwen35b-m5` | answered |
+| m5 | `glm53-m5` | ds4 | 14 s | `mimo9b-m5`, `qwen27b-vision-m5` | answered |
+| m5 | `mimo9b-m5` | mlx-serve 26.9.5 | 3 s | `glm53-m5` | answered |
+| mbp2 | `qwen4b-m1` | mtplx 2.11.2 | 26 s | nothing | answered |
+
+Every operation succeeded and each lane's stop was the next swap's
+eviction, confirmed against the matrix. m5 was put back on `mimo9b-m5` +
+`qwen35b-m5` by a fourth swap; mbp2 had nothing loaded before, and
+`qwen4b-m1` leaves by its own 10-minute ttl. With the six engines shown on
+2026-11-17 that is nine of nine: vLLM, llama.cpp, Ollama, LM Studio and
+Strata on the workstation; MTPLX, mlx-vlm, mlx-serve and ds4 on the Macs.
+
+**Vendor apps on the Macs, enrolled observe-only** (`f2c6b6e`; backups
+`inventory.json.bak-m4-vendors`): `lm-studio` on m5 and mbp2, `ollama` on
+mbp2. Each is observed (`status`), answers `engine` where its server is
+on, and is pinned: LM Studio 0.4.28+2 (m5) and 0.4.26+4 (mbp2), Ollama
+0.40.16 (mbp2). They are `on_demand`, so no plan stops or unloads them.
+LM Studio has no fixed launchd label (`application.<bundle id>.<n>.<n>`,
+new numbers at every launch); the record names the stable part and the
+adapter finds the running instance.
+
+Limits, said plainly:
+
+- A lane has no stop of its own in llmctl-next: it leaves by eviction or
+  by its ttl. Its log is llama-swap's log (the lines that name it).
+- `deepseek41-1017-mxfp4-m5` (the other ds4 lane, started through
+  `serve.sh`) was not loaded; `logs ds4` is still unsupported.
+- The three observe-only records refuse `stop` and `run` (by design) and
+  have no log (`logs`: no plist to take the paths from). Starting and
+  stopping them stays with their own controls; llmctl-next does not call
+  those. On m5 the LM Studio app runs but its server is off, so it shows
+  running and not ready.
+- mbp2's Ollama job (`com.ollama.ollama`) reports no program path, so its
+  served identity shows as unknown (`~`).
+- m5 Ollama was still never stopped or started (hazard 1).
+- The per-row disposable spikes of M4b open item 5 were not written; the
+  rows above are live runs.
+
+**To pass, what is left** (the pins, the manual-stop drills and the Mac
+lanes are done). Both remaining rows, installation and upgrade/recovery,
+wait on the same item:
+
+1. **A real `release_archive` install and the vendor-app path once** (rows
    1 and 4, about 2 hours; owner's call): m5 Ollama 0.34.3 → 0.40.16 is the
    natural vendor-app case and ends hazard 1.
 
