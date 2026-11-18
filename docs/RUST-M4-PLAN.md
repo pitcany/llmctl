@@ -5,9 +5,10 @@ recommended (end of this file). **M4a done 2026-11-17 — see
 [the pilot note](RUST-M4A-PILOT-2026-11-17.md). M4b steps 1–5 done:
 [progress](RUST-M4B-PROGRESS-2026-11-17.md). M4c: all seven items have a
 first version: [progress](RUST-M4C-PROGRESS.md). Exit check 2026-11-17:
-1 row met, 4 partly, 1 not met. Version pinning, manual-stop protection
-and launch/readiness/stop/logs closed 2026-11-18, so it now stands at
-4 met, 2 partly — see "Exit check" below.**
+1 row met, 4 partly, 1 not met. The other five rows closed on
+2026-11-18, the last two at 02:13 PST: **all six rows are met**, each
+with limits that are written down — see "Exit check" below. Whether that
+closes M4 is the owner's call.**
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table,
 M4 row; "Engine support and ownership"). Builds on M2 (one owned Linux
 workload, staged vLLM upgrade — [plan](RUST-M2-PLAN.md)) and M3 (Mac agent,
@@ -273,10 +274,10 @@ exit yet.**
 
 | Criterion | Verdict | Evidence | Missing |
 |---|---|---|---|
-| Installation | **Partly** (2 of 5 kinds on a real engine) | `python_env`: vLLM 0.32.0 staged into a versioned env on `vllm-engine2` (M2 window 2). `source_build`: llama.cpp `a9d43ecc3` built, validated, manifest and build log kept (M4a). `release_archive`: real-systemd test `release_archive_stages_promotes_verifies_and_rolls_back` with a tiny archive | `release_archive` has installed no real engine (the mlx-serve dirs on m5 were already there) and has no launchd run. `vendor_app` installs nothing by design (it prints an owner-run plan) and that plan was never carried out. `external` is a record only |
+| Installation | **Partly** on 2026-11-17 (2 of 5 kinds on a real engine). **Met since 2026-11-18**, see the fourth update below | `python_env`: vLLM 0.32.0 staged into a versioned env on `vllm-engine2` (M2 window 2). `source_build`: llama.cpp `a9d43ecc3` built, validated, manifest and build log kept (M4a). `release_archive`: real-systemd test `release_archive_stages_promotes_verifies_and_rolls_back` with a tiny archive | `release_archive` has installed no real engine (the mlx-serve dirs on m5 were already there) and has no launchd run. `vendor_app` installs nothing by design (it prints an owner-run plan) and that plan was never carried out. `external` is a record only |
 | Version pinning | **Not met** on 2026-11-17 (2 of 10 enrolled workloads pinned). **Met since 2026-11-18**, see the update below | Pinned: `gpt-oss-120b` (binary digests), m5 `ollama` (vendor fact 0.34.3). Drift is reported: test `vendor_app_version_is_observed_pinned_and_drifts`; M4a saw m5 Ollama 0.34.3 against brew 0.40.16 | `version` says "no recipe; version pinning is off" for `vllm-engine`, `ollama`, `ollama-gpu1`, `llmster`, `strata-fast` and for `llama-swap` on both Macs. m5 `ds4` has a recipe with the fork SHA but `pinned: null`. The 15 lanes have no version records (an engine version is a macro path). m5 Ollama shows no drift today because its pin was set to the running 0.34.3 |
 | Launch / readiness / stop / logs | **Partly** on 2026-11-17 (6 of 9 engines on a host). **Met since 2026-11-18** (9 of 9), see the third update below | Workstation, through admitted operations: vLLM (`vllm-engine`), llama.cpp (`gpt-oss-120b`, last 21:15), Ollama (`ollama-gpu1`), LM Studio (`llmster`), Strata (`strata-fast`). m5: MTPLX lanes loaded and evicted by `lanes swap` (20:22). `logs` answers for all six workstation workloads and for `llama-swap` (both Macs) and `ollama` (m5) | mlx-serve: restarted by a config reload and health-checked, never loaded by `lanes swap`. mlx-vlm and ds4 lanes: never loaded through llmctl-next; `logs ds4` is `unsupported` (the record has no plist). mbp2's MTPLX lanes: records and a rewrite only. m5 Ollama: never stopped or started (a restart would upgrade it). LM Studio on both Macs and Ollama on mbp2 are not enrolled. Lanes have no logs of their own (llama-swap's log). The per-row disposable spikes of M4b open item 5 were not written |
-| Upgrade / recovery | **Partly** | `python_env`: promote, rollback, and a promote killed mid-load that rolled back by itself (M2 window 2). `source_build`: stage → promote → rollback on `gpt-oss-120b` (M4a). `release_archive`: real-systemd test. Interrupted stage: never promotable and removed by gc (real-systemd tests). mlx-serve 26.10.1 → 26.9.5 on m5 as a lane macro change | `release_archive` upgrade and rollback on a real engine. The vendor-app backup/reinstall path "tested once": never run. The mlx-serve swap back was not run |
+| Upgrade / recovery | **Partly** on 2026-11-17. **Met since 2026-11-18**, see the fourth update below | `python_env`: promote, rollback, and a promote killed mid-load that rolled back by itself (M2 window 2). `source_build`: stage → promote → rollback on `gpt-oss-120b` (M4a). `release_archive`: real-systemd test. Interrupted stage: never promotable and removed by gc (real-systemd tests). mlx-serve 26.10.1 → 26.9.5 on m5 as a lane macro change | `release_archive` upgrade and rollback on a real engine. The vendor-app backup/reinstall path "tested once": never run. The mlx-serve swap back was not run |
 | Request safety | **Met** | Live 19:05: `restart vllm-engine` without `--force` refused with 12 real requests in flight after the 20 s wait; the engine's pid did not change. e2e `stops_wait_for_in_flight_requests_or_refuse_without_force`; lane swaps wait on llama-swap's in-flight count (e2e) | The "requests finish inside the wait, then the stop goes ahead" path is covered by tests only |
 | Manual-stop protection | **Partly** on 2026-11-17. **Met since 2026-11-18**, see the second update below | Agent restart: `ollama-gpu1` was stopped at 14:06 and still carries the mark after every daemon restart since (last 21:01). Swap rollback: e2e `a_manual_stop_is_reported_survives_eviction_and_is_not_restored`. Healers: llm-heal's check against the real agent answers correctly; 58 + 16 healer tests | No live rollback past a manual stop. No live healer drill where it matters: llm-heal does not repair a cleanly stopped lane anyway, so its 2-minute runs prove nothing; the case the plan names (mac-heal kickstarting a manually stopped `llama-swap` on mbp2) was not run |
 
@@ -435,18 +436,88 @@ Limits, said plainly:
 - The per-row disposable spikes of M4b open item 5 were not written; the
   rows above are live runs.
 
-**To pass, what is left** (the pins, the manual-stop drills and the Mac
-lanes are done). Both remaining rows, installation and upgrade/recovery,
-wait on the same item:
+### Update 2026-11-18, 02:13 PST: installation and upgrade / recovery are met
 
-1. **A real `release_archive` install and the vendor-app path once** (rows
-   1 and 4, about 2 hours; owner's call): m5 Ollama 0.34.3 → 0.40.16 is the
-   natural vendor-app case and ends hazard 1.
+**Vendor-app path, once: Ollama on m5, 0.34.3 → 0.40.16** (ends hazard 1).
+
+1. *Backup.* brew had already removed the 0.34.3 keg, so there was no
+   way back on disk. The official v0.34.3 release (`ollama-darwin.tgz`,
+   sha256 `2c45865f…3d36e`, checked) now lies in
+   `~/local-llm/runtimes/ollama-0.34.3`. It was run on a spare port with
+   `OLLAMA_NOPRUNE=1` against the model store: version 0.34.3, all 4
+   models listed, an embedding answered. The path is in the recipe
+   (`backup_path`) and `install plan ollama` prints it.
+2. *Reinstall.* The recorded command's first half, `brew reinstall
+   ollama` (auto-update off, so it stayed on 0.40.16).
+3. *Restart* through llmctl-next. **The first `restart ollama` failed**
+   and left Ollama down for 13 s (02:05:17–02:05:30) until `run ollama`:
+   see the fix below. On the fixed agent the same restart took 1 s.
+4. *Drift, live on a real install:* `version ollama` exit 4, `version.fact`
+   pinned 0.34.3, now 0.40.16; `install plan ollama` the same.
+5. *Check:* 4 models, an embedding and a `llama3.2:3b` generation answered.
+6. *Accept:* `version ollama --repin` listed the one change; drift 0.
+
+**Bug found and fixed (`7a10a5c`).** A launchd stop read "still loaded"
+right after `bootout`, which returns while the process is shutting down.
+A restart then failed at its stop step and its rollback left the service
+stopped. The stop now asks launchd until the job is gone. Real-launchd
+test `a_job_that_exits_slowly_is_stopped_and_restarted`; suite 6 of 6 on
+mbp2. Not checked: that the new test fails on the old code.
+
+**A real release-archive install, upgrade and rollback** (workstation,
+systemd). A pilot unit `llamacpp-release` ran the official llama.cpp CPU
+release on port 8011 with `gemma-3-270m` (CPU only, `on_demand`, no GPU
+and no neighbour touched):
+
+| Step | Command | Result |
+|---|---|---|
+| install | `install stage llamacpp-release 12500`, `upgrade promote … 12500` | fetched from GitHub, sha256 verified against the recipe, unpacked to `~/AI/llama.cpp-releases/llamacpp-release-12500-0552b75a` with `staged.json` (url, archive digest, validation); unit restarted from it; served model and `--version` (build 12500) verified; a chat request answered |
+| upgrade | the same for `12503` | `…-12503-480dd892`, build 12503 verified, request answered |
+| refusal | `install stage … 12502` | "no sha256 is declared for llamacpp-release 12502"; nothing fetched |
+| rollback | `upgrade rollback llamacpp-release` | back on the 12500 directory, verified, request answered |
+
+It needed `b35d63a`: a recipe had one checksum for every version, which
+no real release series can satisfy; `checksums` maps version to sha256.
+
+The pilot unit was removed afterwards (record, unit file); the two
+versioned directories, their archives, logs and manifests stay in
+`~/AI/llama.cpp-releases` (217 MB). Backups: `inventory.json.bak-m4-archive`
+(before), `…-pilot` (with the record).
+
+Row by row:
+
+- **Installation — met.** `python_env` (vLLM, M2), `source_build`
+  (llama.cpp, M4a), `release_archive` (above), `vendor_app` (installs
+  nothing by design; its owner-run plan was carried out on m5). `external`
+  is a record with nothing to install.
+- **Upgrade / recovery — met.** Staged upgrade and rollback for
+  `python_env`, `source_build` and now `release_archive`; an interrupted
+  stage is never promotable and is removed by gc (real-systemd tests);
+  the vendor-app backup and reinstall path was run once.
+
+Limits, said plainly:
+
+- The release-archive run was on a pilot unit made for it, not on a
+  production lane, and only on systemd. No launchd workload has a
+  release-archive recipe (the Mac engines of that kind run as lanes,
+  where a version swap is a macro path change).
+- The 0.34.3 backup was proven to run and to read the model store; the
+  service itself was not switched back to it.
+- `release` refuses after a promote (the original unit file points at the
+  first directory, the pin at the promoted one). The pilot record was
+  removed by an inventory edit instead.
+- The mlx-serve swap back to 26.10.1 on m5 was not run.
+
+**To pass: nothing is left on the table.** All six rows are met as read
+here; the limits in the four updates are the honest remainder. Closing M4
+in the parent plan is the owner's call.
 
 ## Hazards found by the sweep (not M4 work, owner's call)
 
 1. m5 Ollama runs 0.34.3 while brew installed 0.40.16 — the next restart
    (or a mac-heal kickstart) silently upgrades it.
+   **Closed 2026-11-18:** upgraded on purpose and re-pinned at 0.40.16;
+   a 0.34.3 binary is kept in `~/local-llm/runtimes/ollama-0.34.3`.
 2. mbp2's disk is 93 % full (144 GiB free) — blocks any model download there.
 3. Three different vLLM versions are named for `vllm-engine`; the env
    header points at a preset file (`qwen3.8-27b.yaml`) that does not exist.
