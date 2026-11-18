@@ -436,27 +436,17 @@ pub fn digest(bytes: &[u8]) -> String {
     crate::profile::digest(bytes)
 }
 
-/// Write through a temp file and a rename in the target's own directory
-/// (a symlinked preset stays a symlink: the target is written). The
-/// previous bytes are kept at `<target>.llmctl-previous`.
-fn write_keeping(path: &Path, bytes: &[u8], new_mode: u32) -> Result<(PathBuf, Option<PathBuf>), PresetsError> {
+/// Write `bytes` to `path` through a private (0600, `create_new`) temp file
+/// in the same directory, set `mode`, fsync, rename. A reader never sees a
+/// half-written file, and the bytes are never readable beyond `mode`, not
+/// even for a moment (env profiles may hold credentials).
+fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), PresetsError> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let io = |what: &str, e: std::io::Error| PresetsError::Io(format!("{what} {}: {e}", target.display()));
-    let (mode, backup) = match std::fs::read(&target) {
-        Ok(old) => {
-            let mode = std::fs::metadata(&target).map(|m| m.permissions().mode() & 0o777).unwrap_or(new_mode);
-            let backup = PathBuf::from(format!("{}{BACKUP_SUFFIX}", target.display()));
-            std::fs::write(&backup, &old).map_err(|e| io("keeping the previous", e))?;
-            let _ = std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(mode));
-            (mode, Some(backup))
-        }
-        Err(_) => (new_mode, None),
-    };
-    let tmp = PathBuf::from(format!("{}.llmctl-tmp-{}", target.display(), std::process::id()));
+    let io = |what: &str, e: std::io::Error| PresetsError::Io(format!("{what} {}: {e}", path.display()));
+    let tmp = PathBuf::from(format!("{}.llmctl-tmp-{}", path.display(), std::process::id()));
     let _ = std::fs::remove_file(&tmp);
-    {
+    let result = (|| {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -464,13 +454,36 @@ fn write_keeping(path: &Path, bytes: &[u8], new_mode: u32) -> Result<(PathBuf, O
             .open(&tmp)
             .map_err(|e| io("creating a temp file for", e))?;
         f.write_all(bytes).map_err(|e| io("writing", e))?;
+        f.set_permissions(std::fs::Permissions::from_mode(mode))
+            .map_err(|e| io("setting the mode of", e))?;
         f.sync_all().map_err(|e| io("syncing", e))?;
-    }
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).map_err(|e| io("setting the mode of", e))?;
-    if let Err(e) = std::fs::rename(&tmp, &target) {
+        std::fs::rename(&tmp, path).map_err(|e| io("replacing", e))
+    })();
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
-        return Err(io("replacing", e));
     }
+    result
+}
+
+/// Write through [`atomic_write`] in the target's own directory (a
+/// symlinked preset stays a symlink: the target is written). The previous
+/// bytes are kept at `<target>.llmctl-previous`, written the same way and
+/// with the previous file's mode.
+fn write_keeping(path: &Path, bytes: &[u8], new_mode: u32) -> Result<(PathBuf, Option<PathBuf>), PresetsError> {
+    use std::os::unix::fs::PermissionsExt;
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let (mode, backup) = match std::fs::read(&target) {
+        Ok(old) => {
+            let mode = std::fs::metadata(&target)
+                .map(|m| m.permissions().mode() & 0o777)
+                .map_err(|e| PresetsError::Io(format!("reading the mode of {}: {e}", target.display())))?;
+            let backup = PathBuf::from(format!("{}{BACKUP_SUFFIX}", target.display()));
+            atomic_write(&backup, &old, mode)?;
+            (mode, Some(backup))
+        }
+        Err(_) => (new_mode, None),
+    };
+    atomic_write(&target, bytes, mode)?;
     Ok((target, backup))
 }
 
@@ -777,6 +790,26 @@ mod tests {
         assert!(!is_profile_name("vllm-engine.env", "vllm-engine.env.qwen38.llmctl-previous"));
         assert!(!is_profile_name("vllm-engine.env", "vllm-engine.env.llmctl-tmp-12"));
         assert!(!is_profile_name("vllm-engine.env", "vllm-engine2.env.x"));
+    }
+
+    #[test]
+    fn writes_keep_the_previous_bytes_with_the_previous_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("e.env.p");
+        std::fs::write(&f, "SECRET=1\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (target, backup) = write_keeping(&f, b"SECRET=2\n", 0o644).unwrap();
+        let backup = backup.unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "SECRET=2\n");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "SECRET=1\n");
+        assert_eq!((mode(&target), mode(&backup)), (0o600, 0o600));
+        // No temp file left; a new file gets the mode asked for.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        let (fresh, none) = write_keeping(&dir.path().join("new"), b"x", 0o640).unwrap();
+        assert!(none.is_none());
+        assert_eq!(mode(&fresh), 0o640);
     }
 
     #[test]
