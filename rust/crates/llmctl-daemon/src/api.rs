@@ -363,7 +363,8 @@ async fn workload_engine(
         .workload(&wl)
         .ok_or_else(|| crate::ops::OpsError::UnknownWorkload(name.clone()))?;
     let protocol = EngineProtocol::for_kind(&def.engine_kind);
-    let ans = crate::engine_api::probe(protocol, def.port, std::time::Duration::from_secs(3)).await;
+    let ans =
+        crate::engine_api::probe_local(protocol, def.port, std::time::Duration::from_secs(3)).await;
     let (state_s, servable) = match ans.probe {
         HttpProbe::Models(ids) => ("ready".to_string(), ids),
         HttpProbe::Unreachable => ("unreachable".to_string(), Vec::new()),

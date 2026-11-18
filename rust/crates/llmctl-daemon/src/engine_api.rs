@@ -173,6 +173,95 @@ pub fn lmstudio_models(v: &Value) -> Option<(Vec<String>, Vec<String>)> {
     Some((servable, loaded))
 }
 
+/// The engine's answer with device awareness (M4c): LM Studio's REST lists
+/// models on LM Link devices (another Mac) next to local ones, and
+/// `/api/v0/models` cannot tell them apart. `lms ls/ps --json` can — local
+/// entries have a null `deviceIdentifier` — so the engine report and
+/// `unload` use this view; the readiness probe stays REST-only (cheap).
+/// When `lms` cannot answer, the REST view is returned unchanged.
+pub async fn probe_local(protocol: EngineProtocol, port: u16, timeout: Duration) -> EngineAnswer {
+    let mut ans = probe(protocol, port, timeout).await;
+    if protocol != EngineProtocol::LmStudio {
+        return ans;
+    }
+    let (Some(ls), Some(ps)) = (
+        lms_json(&["ls", "--json"], timeout).await,
+        lms_json(&["ps", "--json"], timeout).await,
+    ) else {
+        return ans;
+    };
+    let (remote, local_loaded) = lmstudio_devices(&ls, &ps);
+    if let HttpProbe::Models(ids) = &mut ans.probe {
+        ids.retain(|id| !remote.contains(id));
+    }
+    ans.loaded = Some(local_loaded);
+    ans
+}
+
+/// From `lms ls --json` and `lms ps --json`: (model keys that exist only
+/// on other devices, identifiers loaded on this machine).
+pub fn lmstudio_devices(ls: &Value, ps: &Value) -> (Vec<String>, Vec<String>) {
+    let is_remote = |m: &Value| m.get("deviceIdentifier").is_some_and(|d| !d.is_null());
+    let key = |m: &Value| {
+        m.get("modelKey")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let empty = Vec::new();
+    let ls = ls.as_array().unwrap_or(&empty);
+    let local: std::collections::BTreeSet<String> =
+        ls.iter().filter(|m| !is_remote(m)).filter_map(key).collect();
+    let mut remote: Vec<String> = ls
+        .iter()
+        .filter(|m| is_remote(m))
+        .filter_map(key)
+        .filter(|k| !local.contains(k))
+        .collect();
+    remote.sort();
+    remote.dedup();
+    let loaded = ps
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|m| !is_remote(m))
+        .filter_map(|m| {
+            m.get("identifier")
+                .or_else(|| m.get("modelKey"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    (remote, loaded)
+}
+
+/// Run `lms <args>` and parse its JSON. stdout goes to a file: `lms`
+/// truncates long JSON at ~8 KB when writing to a pipe (seen 2026-11-17).
+async fn lms_json(args: &[&str], timeout: Duration) -> Option<Value> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let path = std::env::temp_dir().join(format!("llmctl-next-lms-{}-{nanos}.json", std::process::id()));
+    let out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .ok()?;
+    let mut cmd = tokio::process::Command::new(lms_binary());
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let status = tokio::time::timeout(timeout.max(Duration::from_secs(10)), cmd.status()).await;
+    let text = tokio::fs::read_to_string(&path).await;
+    let _ = tokio::fs::remove_file(&path).await;
+    if !status.ok()?.ok()?.success() {
+        return None;
+    }
+    serde_json::from_str(&text.ok()?).ok()
+}
+
 /// Why an unload did not happen.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UnloadError {
@@ -202,6 +291,14 @@ pub async fn unload(
     if model.is_empty() || Some(model) == protocol.service_identity() {
         return Err(UnloadError::ServiceIdentity(model.to_string()));
     }
+    // Not loaded on this machine (or loaded only on a linked device): the
+    // end state already holds here, and nothing is sent anywhere.
+    if protocol == EngineProtocol::LmStudio {
+        let before = probe_local(protocol, port, timeout).await;
+        if matches!(&before.loaded, Some(l) if !l.iter().any(|m| m == model)) {
+            return Ok(());
+        }
+    }
     match protocol {
         EngineProtocol::Ollama => {
             let body = json!({"model": model, "keep_alive": 0});
@@ -223,7 +320,7 @@ pub async fn unload(
     }
     let deadline = tokio::time::Instant::now() + confirm_within;
     loop {
-        let ans = probe(protocol, port, timeout).await;
+        let ans = probe_local(protocol, port, timeout).await;
         match ans.loaded {
             Some(l) if !l.iter().any(|m| m == model) => return Ok(()),
             _ if tokio::time::Instant::now() >= deadline => {
@@ -403,6 +500,24 @@ mod tests {
         // An older server without /api/v0 → a status, not a guess.
         let (old, _) = fake(vec![]).await;
         assert_eq!(probe(EngineProtocol::LmStudio, old, T).await.probe, HttpProbe::Status(404));
+    }
+
+    #[test]
+    fn lmstudio_devices_separate_local_from_linked() {
+        let ls = json!([
+            {"modelKey": "qwen3-coder", "deviceIdentifier": null},
+            {"modelKey": "nomic", "deviceIdentifier": null},
+            {"modelKey": "nomic", "deviceIdentifier": "abc"},
+            {"modelKey": "huihui-mlx", "deviceIdentifier": "abc"}
+        ]);
+        let ps = json!([
+            {"identifier": "huihui-mlx", "modelKey": "huihui-mlx", "deviceIdentifier": "abc"},
+            {"identifier": "nomic", "modelKey": "nomic", "deviceIdentifier": null}
+        ]);
+        let (remote, loaded) = lmstudio_devices(&ls, &ps);
+        // `nomic` exists locally too, so it stays servable here.
+        assert_eq!(remote, vec!["huihui-mlx"]);
+        assert_eq!(loaded, vec!["nomic"]);
     }
 
     #[tokio::test]
