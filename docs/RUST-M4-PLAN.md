@@ -2,9 +2,10 @@
 
 Status 2026-11-17: plan agreed — all eight owner decisions taken, each as
 recommended (end of this file). **M4a done 2026-11-17 — see
-[the pilot note](RUST-M4A-PILOT-2026-11-17.md). M4b in progress — steps 1,
-4 and 5 built and proven live on both Macs, steps 2–3 wait for GPU windows:
-[progress](RUST-M4B-PROGRESS-2026-11-17.md).**
+[the pilot note](RUST-M4A-PILOT-2026-11-17.md). M4b steps 1–5 done:
+[progress](RUST-M4B-PROGRESS-2026-11-17.md). M4c: all seven items have a
+first version: [progress](RUST-M4C-PROGRESS.md). Exit check 2026-11-17:
+1 row met, 4 partly, 1 not met — see "Exit check" below.**
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table,
 M4 row; "Engine support and ownership"). Builds on M2 (one owned Linux
 workload, staged vLLM upgrade — [plan](RUST-M2-PLAN.md)) and M3 (Mac agent,
@@ -260,6 +261,39 @@ rollback forced, and one Mac lane swap that evicts by matrix.
 | Upgrade / recovery | staged upgrade + rollback per kind; interrupted stage recovers; vendor-app backup/reinstall path tested once |
 | Request safety | in-flight requests block or delay a stop/swap; proven with a real request on a real engine |
 | Manual-stop protection | a manual stop survives a swap rollback, an agent restart and a healer run |
+
+## Exit check (2026-11-17, 21:40 PST)
+
+Each row checked against the pilot notes, the test suites and live output
+(`status`, `version`, `logs`, `lanes show`, `intent` on the workstation, m5
+and mbp2). **Result: 1 row met, 4 partly, 1 not met. M4 has not passed its
+exit yet.**
+
+| Criterion | Verdict | Evidence | Missing |
+|---|---|---|---|
+| Installation | **Partly** (2 of 5 kinds on a real engine) | `python_env`: vLLM 0.32.0 staged into a versioned env on `vllm-engine2` (M2 window 2). `source_build`: llama.cpp `a9d43ecc3` built, validated, manifest and build log kept (M4a). `release_archive`: real-systemd test `release_archive_stages_promotes_verifies_and_rolls_back` with a tiny archive | `release_archive` has installed no real engine (the mlx-serve dirs on m5 were already there) and has no launchd run. `vendor_app` installs nothing by design (it prints an owner-run plan) and that plan was never carried out. `external` is a record only |
+| Version pinning | **Not met** (2 of 10 enrolled workloads pinned) | Pinned: `gpt-oss-120b` (binary digests), m5 `ollama` (vendor fact 0.34.3). Drift is reported: test `vendor_app_version_is_observed_pinned_and_drifts`; M4a saw m5 Ollama 0.34.3 against brew 0.40.16 | `version` says "no recipe; version pinning is off" for `vllm-engine`, `ollama`, `ollama-gpu1`, `llmster`, `strata-fast` and for `llama-swap` on both Macs. m5 `ds4` has a recipe with the fork SHA but `pinned: null`. The 15 lanes have no version records (an engine version is a macro path). m5 Ollama shows no drift today because its pin was set to the running 0.34.3 |
+| Launch / readiness / stop / logs | **Partly** (6 of 9 engines on a host) | Workstation, through admitted operations: vLLM (`vllm-engine`), llama.cpp (`gpt-oss-120b`, last 21:15), Ollama (`ollama-gpu1`), LM Studio (`llmster`), Strata (`strata-fast`). m5: MTPLX lanes loaded and evicted by `lanes swap` (20:22). `logs` answers for all six workstation workloads and for `llama-swap` (both Macs) and `ollama` (m5) | mlx-serve: restarted by a config reload and health-checked, never loaded by `lanes swap`. mlx-vlm and ds4 lanes: never loaded through llmctl-next; `logs ds4` is `unsupported` (the record has no plist). mbp2's MTPLX lanes: records and a rewrite only. m5 Ollama: never stopped or started (a restart would upgrade it). LM Studio on both Macs and Ollama on mbp2 are not enrolled. Lanes have no logs of their own (llama-swap's log). The per-row disposable spikes of M4b open item 5 were not written |
+| Upgrade / recovery | **Partly** | `python_env`: promote, rollback, and a promote killed mid-load that rolled back by itself (M2 window 2). `source_build`: stage → promote → rollback on `gpt-oss-120b` (M4a). `release_archive`: real-systemd test. Interrupted stage: never promotable and removed by gc (real-systemd tests). mlx-serve 26.10.1 → 26.9.5 on m5 as a lane macro change | `release_archive` upgrade and rollback on a real engine. The vendor-app backup/reinstall path "tested once": never run. The mlx-serve swap back was not run |
+| Request safety | **Met** | Live 19:05: `restart vllm-engine` without `--force` refused with 12 real requests in flight after the 20 s wait; the engine's pid did not change. e2e `stops_wait_for_in_flight_requests_or_refuse_without_force`; lane swaps wait on llama-swap's in-flight count (e2e) | The "requests finish inside the wait, then the stop goes ahead" path is covered by tests only |
+| Manual-stop protection | **Partly** | Agent restart: `ollama-gpu1` was stopped at 14:06 and still carries the mark after every daemon restart since (last 21:01). Swap rollback: e2e `a_manual_stop_is_reported_survives_eviction_and_is_not_restored`. Healers: llm-heal's check against the real agent answers correctly; 58 + 16 healer tests | No live rollback past a manual stop. No live healer drill where it matters: llm-heal does not repair a cleanly stopped lane anyway, so its 2-minute runs prove nothing; the case the plan names (mac-heal kickstarting a manually stopped `llama-swap` on mbp2) was not run |
+
+**To pass, in order of weight:**
+
+1. **Pins** (row 2, about half a day, no GPU time): attach a recipe and pin
+   to the five unpinned workstation workloads and to `llama-swap` on both
+   Macs; pin m5 `ds4`; decide whether lanes get version records or the
+   macro path counts.
+2. **Mac lanes and vendor services** (row 3, 1–2 hours, evicts the
+   always-on lanes on m5 for some minutes): load the mlx-vlm lane, one ds4
+   lane and mlx-serve by `lanes swap`; load one lane on mbp2; enroll LM
+   Studio on both Macs and Ollama on mbp2 observe-only.
+3. **Manual-stop drills** (row 6, about 20 minutes): mac-heal on mbp2 with
+   `llama-swap` manually stopped; one forced rollback on the workstation
+   with a manually stopped neighbour in the eviction set.
+4. **A real `release_archive` install and the vendor-app path once** (rows
+   1 and 4, about 2 hours; owner's call): m5 Ollama 0.34.3 → 0.40.16 is the
+   natural vendor-app case and ends hazard 1.
 
 ## Hazards found by the sweep (not M4 work, owner's call)
 
