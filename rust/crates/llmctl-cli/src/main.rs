@@ -1720,7 +1720,7 @@ async fn watch_and_report(
     }
     if matches!(op.status, OpStatus::NeedsAttention | OpStatus::Interrupted) && !op.acknowledged {
         eprintln!(
-            "\nthis operation blocks new mutations until acknowledged: llmctl-next op ack {}",
+            "\nthis operation blocks new mutations until acknowledged: llmctl-next ack {}",
             op.id
         );
     }

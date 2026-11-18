@@ -51,7 +51,7 @@ pub enum OpsError {
         existing_workload: String,
         existing_status: OpStatus,
     },
-    #[error("operation {existing} needs attention and is unacknowledged; run `llmctl-next op ack {existing}` after reviewing it")]
+    #[error("operation {existing} needs attention and is unacknowledged; run `llmctl-next ack {existing}` after reviewing it")]
     NeedsAttentionBlock { existing: String },
     #[error("{workload}: unit drifted from its adopted definition; differing: {}", diffs.iter().map(|d| d.field.as_str()).collect::<Vec<_>>().join(", "))]
     DefinitionDrift {
