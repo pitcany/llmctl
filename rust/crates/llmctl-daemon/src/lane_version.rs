@@ -207,10 +207,14 @@ pub async fn probe_lane(cfg: &SwapConfig, lane: &Lane, cache: &mut ProbeCache) -
     }
 }
 
-/// A one-line name for a pin: `mtplx 2.11.0`, else the engine program
-/// and the start of its digest.
-pub fn label(pin: &VersionRef) -> String {
-    if let Some((name, version)) = pin.packages.first() {
+/// A one-line name for a pin: the engine's own package (`mtplx 2.11.0`),
+/// else the engine program and the start of its digest.
+pub fn label(pin: &VersionRef, kind: &EngineKind) -> String {
+    let engine_package = engine_packages(kind)
+        .first()
+        .and_then(|main| pin.packages.iter().find(|(name, _)| name == main))
+        .or_else(|| pin.packages.first());
+    if let Some((name, version)) = engine_package {
         return format!("{name} {version}");
     }
     match pin.exec_digests.last() {
@@ -285,7 +289,7 @@ pub async fn versions(
             LaneVersion {
                 id: l.id.clone(),
                 engine_kind: l.engine_kind.to_string(),
-                label: live.as_ref().map(label),
+                label: live.as_ref().map(|v| label(v, &l.engine_kind)),
                 pinned,
                 live,
                 drift,
@@ -336,6 +340,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_pin_is_named_after_the_engine_package_not_the_first_one() {
+        let pin = VersionRef {
+            interpreter: Some("/w/.venv/bin/python".into()),
+            // Sorted by name, as the probe stores them.
+            packages: vec![
+                ("mlx".into(), "0.32.2".into()),
+                ("mlx-lm".into(), "0.31.3".into()),
+                ("mtplx".into(), "2.12.0".into()),
+            ],
+            cuda: None,
+            lock_digest: "sha256:00".into(),
+            exec_digests: vec![("/w/.venv/bin/mtplx".into(), "sha256:abcdef0123456789".into())],
+            fact: None,
+        };
+        assert_eq!(label(&pin, &EngineKind::Mtplx), "mtplx 2.12.0");
+        // An engine with no known package: the first one listed.
+        assert_eq!(label(&pin, &EngineKind::Ds4), "mlx 0.32.2");
+        let binary = VersionRef { packages: vec![], ..pin };
+        assert_eq!(label(&binary, &EngineKind::MlxServe), "mtplx abcdef012345");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_lane_is_pinned_by_the_programs_its_command_runs() {
@@ -363,7 +389,8 @@ mod tests {
         let pinned = probe_lane(&cfg, lane, &mut cache).await;
         let paths: Vec<&str> = pinned.exec_digests.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(paths, vec![helper.as_str(), engine.as_str()]);
-        assert!(label(&pinned).starts_with("engine-1.0 "), "{}", label(&pinned));
+        let named = label(&pinned, &lane.engine_kind);
+        assert!(named.starts_with("engine-1.0 "), "{named}");
 
         // The engine is replaced in place: same path, new content.
         std::fs::write(&engine, b"two").unwrap();

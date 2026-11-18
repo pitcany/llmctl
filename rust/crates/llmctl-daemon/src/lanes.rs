@@ -131,8 +131,11 @@ fn summaries(cfg: &SwapConfig) -> Vec<LaneSummary> {
 /// The summaries with each lane's pinned version named (no probing).
 fn summaries_with_pins(store: &LaneStore) -> Vec<LaneSummary> {
     let mut out = summaries(&store.records);
-    for s in &mut out {
-        s.pinned = store.versions.get(&s.id).map(crate::lane_version::label);
+    for (s, lane) in out.iter_mut().zip(&store.records.lanes) {
+        s.pinned = store
+            .versions
+            .get(&s.id)
+            .map(|pin| crate::lane_version::label(pin, &lane.engine_kind));
     }
     out
 }
