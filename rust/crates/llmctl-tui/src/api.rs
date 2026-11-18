@@ -180,3 +180,39 @@ impl AgentApi for ClientApi {
         Box::pin(async move { self.0.acknowledge(&id, None).await.map_err(ApiErr::from) })
     }
 }
+
+/// An agent that cannot be reached at all (no local socket): every call
+/// fails at once, so the host shows STALE instead of being left out.
+pub struct Unreachable(pub String);
+
+macro_rules! down {
+    ($($name:ident($($arg:ident: $t:ty),*) -> $r:ty;)*) => {
+        $(fn $name(&self, $($arg: $t),*) -> BoxFut<'_, $r> {
+            $(let _ = $arg;)*
+            let e = ApiErr::transport(self.0.clone());
+            Box::pin(async move { Err(e) })
+        })*
+    };
+}
+
+impl AgentApi for Unreachable {
+    down! {
+        health() -> HealthResponse;
+        status() -> StatusResponse;
+        operations() -> OperationListResponse;
+        operation(id: String) -> OperationView;
+        operation_by_key(key: String) -> OperationView;
+        logs(req: LogsRequest) -> LogsResponse;
+        lane_logs(req: LaneLogsRequest) -> LaneLogsResponse;
+        vram() -> VramResponse;
+        audit() -> AuditResponse;
+        lanes_status(workload: String) -> LaneStatusResponse;
+        lanes_memory(workload: String) -> LaneMemoryResponse;
+        lanes_running(workload: String, lane: String) -> Vec<String>;
+        engine_report(workload: String) -> EngineReport;
+        plan(req: PlanRequest) -> PlanResponse;
+        admit(req: AdmitRequest) -> AdmitResponse;
+        cancel(id: String) -> OperationView;
+        acknowledge(id: String) -> OperationView;
+    }
+}

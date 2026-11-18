@@ -755,6 +755,7 @@ dependencies = [
  "llmctl-client",
  "llmctl-core",
  "llmctl-daemon",
+ "llmctl-tui",
  "serde",
  "serde_json",
  "sha2",
