@@ -514,24 +514,57 @@ here; the limits in the four updates are the honest remainder.
 
 ### Closed 2026-11-18, 02:56 PST
 
-The owner closed M4 with those limits accepted. Carried over (to M5 or
-to be picked up on their own), by how much they matter in daily use:
+The owner closed M4 with those limits accepted, then asked for the five
+carried-over items that matter most in daily use. They were done the same
+night (next section). What still carries over:
 
-1. **No verb to attach a recipe or to remove a workload record.** Both
-   are inventory edits with the agent stopped.
-2. **Lanes:** no stop verb (eviction or ttl only), no log of their own,
-   and `deepseek41-1017-mxfp4-m5` was never loaded through llmctl-next.
-3. **Vendor apps on the Macs** (`lm-studio` on both, `ollama` on mbp2)
-   are observe-only: no start, stop or logs through llmctl-next.
-4. **A failed restart leaves the workload stopped** (the rollback of a
-   run is "stop the target"). The cause seen on m5 is fixed; the rule
-   itself is unchanged, and mac-heal does not restart a job that is not
-   loaded.
-5. **Release archives on launchd** and `release` after a promote.
-6. **M4c gaps:** the Mac unified-memory budget, removing weights, model
-   stores on the Macs, profiles combined with the VRAM fit, per-lane
-   in-flight counts.
-7. **From M3:** the sleep/wake drill (blocked by Acronis' sleep lock).
+1. **Enrolling a workload that cannot be adopted** (a vendor app record,
+   an observe-only record) and changing a record's authority are still
+   inventory edits. `recipe set`, `forget` and `stores add` cover the rest.
+2. **The matrix cannot be changed by a verb**, so the memory budget is a
+   report today; its write guard waits for that.
+3. **`deepseek41-1017-mxfp4-m5`** was never loaded through llmctl-next.
+4. **Release archives on launchd**, and `release` after a promote.
+5. **Profiles combined with the VRAM fit; per-lane in-flight counts.**
+6. **From M3:** the sleep/wake drill (blocked by Acronis' sleep lock).
+
+### After the close: five carried-over items (2026-11-18, 03:26 PST)
+
+| Item | What exists now | Commits | Live |
+|---|---|---|---|
+| No verb for recipes or records | `recipe show/set/clear` (set pins in the same step), `forget <workload> [--yes]` (preview first; refused for a running managed workload) | `2d603ae` | workstation: recipe of `llmster` re-applied by verb, `forget vllm-engine` refused |
+| Lanes: no stop, no log | `lanes stop <workload> <lane>` (an admitted operation, held by requests in flight), `lanes logs <workload> <lane>` (llama-swap's per-lane buffer) | `78f1bcf` | m5: `qwen4b-m5` loaded then stopped, `mimo9b-m5` log read |
+| Mac vendor apps observe-only | authority `vendor_command`: the app's own start and stop commands and its log; running = the endpoint answers | `7dc5403`, `f2c6b6e` | m5: LM Studio's server started, log read, stopped (it was off before). mbp2: Ollama.app stopped and started (down 9 s) |
+| A failed restart leaves it stopped | the rollback of a restart starts the workload again and verifies it; if that fails too: `needs_attention` | `3102b7d` | not provoked on a real service; e2e with injected faults |
+| M4c gaps | `stores add/remove`; `model rm` (preview, token, never while referenced); `lanes memory` (budget and per-lane peaks, summed over every matrix set) | `5770cf2`, `c246571`, `10b6584` | both Macs: four stores each; mbp2: a tiny model downloaded and removed; m5: weights two lanes run were refused; m5 budget 104 GiB from the Mac registry: 6 sets fit (largest 102G), 3 `risky*` sets over on purpose |
+
+The healers follow: mac-heal and llm-heal ask llmctl-next about an app
+without a launchd job by its workload name (`~/AI` `120f8548`,
+`4eba5128`; 74 healer tests).
+
+Found on the way: an agent started by launchd has a short `PATH` and did
+not find `hf`, so every download size was "unknown" on the Macs
+(`10b6584`). m5 has no `hf` at all: `model get hf:` does not work there
+yet.
+
+Checks at the end: workspace suites (e2e 40, lanes 4, core 31, planner
+27, swap 11, daemon 84), real-systemd 22 of 22, real-launchd 7 of 7 on
+mbp2, clippy at the 24-warning baseline, macOS type check.
+
+Limits, said plainly:
+
+- `model rm` deletes for good; the only guards are the reference scan and
+  the token. The scan reads workload records, launch commands,
+  environments, env files with the profiles beside them, and lanes. It
+  does not know about benchmark scripts, Hermes configs or anything else
+  that names a model path.
+- A `directory` store downloads to `<store>/<name>`; the Macs keep
+  `~/Models/huggingface/<org>/<name>`. `model rm path:<org>/<name>`
+  works there; `model get` into that store would not match the layout.
+- LM Studio's `stop` stops its server, not the app. Ollama's `stop`
+  quits the app.
+- Lane peaks are the registry's figures (measured or estimated), not
+  measured by llmctl-next.
 
 ## Hazards found by the sweep (not M4 work, owner's call)
 
