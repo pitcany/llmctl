@@ -411,7 +411,13 @@ fn connect(cli: &Cli) -> Result<ControlClient, ClientError> {
         })?;
         return Ok(ControlClient::connect_bridge(&record.ssh_alias));
     }
-    ControlClient::connect(socket_path(cli))
+    let client = ControlClient::connect(socket_path(cli))?;
+    // Inside a lane-lease holder (a longjob job that drives llmctl-next):
+    // say so, or the agent would refuse the job's own commands (M4c).
+    Ok(match llmctl_client::lease::holder_ancestor() {
+        Some(pid) => client.under_lease(pid),
+        None => client,
+    })
 }
 
 /// Mutations require a protocol match; reads (status, logs, ops) still

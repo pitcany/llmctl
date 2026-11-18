@@ -673,4 +673,9 @@ pub mod codes {
     pub const UPGRADE_REFUSED: &str = "upgrade_refused";
     pub const UNSUPPORTED: &str = "unsupported";
     pub const LANES_REFUSED: &str = "lanes_refused";
+    /// Another controller (llm-router, Python llmctl, llm-heal) holds the
+    /// host-wide GPU operation lock (M4c).
+    pub const HOST_LOCK_BUSY: &str = "host_lock_busy";
+    /// A tool holds a fresh lane lease this operation would disturb (M4c).
+    pub const LANE_LEASED: &str = "lane_leased";
 }

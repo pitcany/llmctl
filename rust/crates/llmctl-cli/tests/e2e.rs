@@ -1138,6 +1138,126 @@ async fn swap_plan_unloads_on_demand_models_then_evicts_and_rolls_back() {
     assert_eq!(loaded_of(&d, "svc"), serde_json::json!([]));
 }
 
+// ---- M4c: legacy host flock + lane lease -------------------------------------
+
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+}
+
+/// Non-blocking exclusive flock, as llm-router and Python llmctl take it.
+fn try_flock(file: &std::fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+/// Every GPU operation holds the host-wide operation lock that llm-router
+/// and Python llmctl share, and is refused under another tool's fresh lane
+/// lease unless the lease names the workload or the caller runs inside the
+/// lease holder.
+#[tokio::test]
+async fn gpu_operations_take_the_host_lock_and_honour_the_lane_lease() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("control.sock");
+    let lock_path = dir.path().join("operations.lock");
+    let lease_path = dir.path().join("lane-lease.json");
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(&socket).arg("--data-dir").arg(dir.path()).arg("daemon")
+        .env("LLMCTL_NEXT_OP_LOCK", &lock_path)
+        .env("LLMCTL_NEXT_LANE_LEASE", &lease_path)
+        .env("LLMCTL_NEXT_OP_LOCK_WAIT_MS", "300")
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let client = d.client();
+    let refused = |r: Result<llmctl_client::wire::AdmitResponse, ClientError>, want: &str| match r {
+        Err(ClientError::Api { code, message, .. }) => {
+            assert_eq!(code, want, "{message}");
+            message
+        }
+        other => panic!("expected {want}, got {other:?}"),
+    };
+
+    // 1. Another controller holds the lock: refused, naming the holder, and
+    //    nothing is journaled (the same key is free afterwards).
+    std::fs::write(
+        &lock_path,
+        serde_json::json!({"pid": std::process::id(), "hostname": "desk", "interface": "llm-router",
+            "purpose": "switch qwen27b", "acquired_at": unix_now(), "thread": 0})
+        .to_string(),
+    )
+    .unwrap();
+    let held = std::fs::OpenOptions::new().read(true).write(true).open(&lock_path).unwrap();
+    assert!(try_flock(&held));
+    let msg = refused(
+        client.admit(admit_req(OpKind::Run, "coder", "lock-1")).await,
+        codes::HOST_LOCK_BUSY,
+    );
+    assert!(msg.contains("llm-router") && msg.contains("switch qwen27b"), "{msg}");
+    drop(held);
+
+    // 2. Free: the run goes through under our own hold, recorded in the
+    //    format the other controllers read; the lock is free afterwards.
+    let resp = client.admit(admit_req(OpKind::Run, "coder", "lock-1")).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Succeeded, "{op:?}");
+    let holder: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+    assert_eq!(holder["interface"], "llmctl-next");
+    assert_eq!(holder["purpose"], "run coder");
+    assert_eq!(holder["pid"], d.child.id());
+    let probe = std::fs::OpenOptions::new().read(true).write(true).open(&lock_path).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !try_flock(&probe) {
+        assert!(std::time::Instant::now() < deadline, "lock still held after the operation");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    drop(probe);
+
+    // 3. A fresh lease of a live tool on another lane: refused.
+    let lease = |lanes: &[&str], updated: f64| {
+        std::fs::write(
+            &lease_path,
+            serde_json::json!({"holder": "longjob", "pid": std::os::unix::process::parent_id(),
+                "lanes": lanes, "updated": updated})
+            .to_string(),
+        )
+        .unwrap();
+    };
+    lease(&["bench-x"], unix_now());
+    let msg = refused(
+        client.admit(admit_req(OpKind::Stop, "coder", "lease-1")).await,
+        codes::LANE_LEASED,
+    );
+    assert!(msg.contains("longjob") && msg.contains("bench-x"), "{msg}");
+
+    //    A caller that runs inside the lease holder passes (a job that
+    //    drives llmctl-next itself).
+    let inside = d.client().under_lease(std::os::unix::process::parent_id());
+    let resp = inside.admit(admit_req(OpKind::Stop, "coder", "lease-2")).await.unwrap();
+    assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
+    //    ... but not one that names the wrong holder.
+    let wrong = d.client().under_lease(1);
+    refused(wrong.admit(admit_req(OpKind::Run, "coder", "lease-3")).await, codes::LANE_LEASED);
+
+    //    A lease that names the workload, a stale lease and a dead holder
+    //    all let the operation through.
+    lease(&["coder"], unix_now());
+    run_to_success(&d, "coder", "lease-4").await;
+    lease(&["bench-x"], unix_now() - 3600.0);
+    run_to_success(&d, "coder", "lease-5").await;
+    std::fs::write(
+        &lease_path,
+        serde_json::json!({"holder": "longjob", "pid": 2147483646, "lanes": ["bench-x"],
+            "updated": unix_now()})
+        .to_string(),
+    )
+    .unwrap();
+    run_to_success(&d, "coder", "lease-6").await;
+}
+
 // ---- B: bounded recovery ----------------------------------------------------
 
 /// A daemon whose inventory gives `coder` a recovery budget and whose

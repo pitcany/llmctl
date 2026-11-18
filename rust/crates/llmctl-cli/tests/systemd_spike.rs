@@ -203,6 +203,10 @@ fn spawn_daemon(dir: &Path) -> Daemon {
         .arg("--data-dir")
         .arg(dir)
         .arg("daemon")
+        // Spike units are transient and hold no real card: stay out of the
+        // host's GPU operation lock and lane lease (M4c).
+        .env("LLMCTL_NEXT_OP_LOCK", "off")
+        .env("LLMCTL_NEXT_LANE_LEASE", "off")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -719,7 +723,9 @@ fn spawn_daemon_env(dir: &Path, envs: &[(&str, &str)]) -> Daemon {
         .arg(&socket)
         .arg("--data-dir")
         .arg(dir)
-        .arg("daemon");
+        .arg("daemon")
+        .env("LLMCTL_NEXT_OP_LOCK", "off")
+        .env("LLMCTL_NEXT_LANE_LEASE", "off");
     for (k, v) in envs {
         cmd.env(k, v);
     }

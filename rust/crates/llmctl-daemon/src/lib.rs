@@ -11,12 +11,15 @@
 //!   revalidation), phase execution with an explicit effect boundary,
 //!   rollback/needs_attention handling, cancellation, acknowledgement and
 //!   startup reconciliation.
+//! - [`coord`]: the host-wide GPU operation lock and the lane lease shared
+//!   with llm-router, Python llmctl and llm-heal (M4c).
 //! - [`api`]: the versioned local HTTP/JSON API over the Unix socket.
 //! - [`app`]: paths, inventory bootstrap, host identity, serve loop.
 
 pub mod adopt;
 pub mod api;
 pub mod app;
+pub mod coord;
 pub mod db;
 pub mod engine;
 pub mod engine_api;

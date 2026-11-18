@@ -53,7 +53,22 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/lanes/edit", post(lanes_edit))
         .route("/v1/lanes/{workload}", get(lanes_status))
         .route("/v1/logs", post(logs))
+        .layer(axum::middleware::from_fn(under_lease_scope))
         .with_state(state)
+}
+
+/// Carry the caller's `llmctl-under-lease` claim (a pid) to admission
+/// without threading it through every handler (M4c lane lease).
+async fn under_lease_scope(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let pid = req
+        .headers()
+        .get(llmctl_client::lease::UNDER_LEASE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+    crate::coord::UNDER_LEASE.scope(pid, next.run(req)).await
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {

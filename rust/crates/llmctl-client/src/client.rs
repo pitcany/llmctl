@@ -95,9 +95,19 @@ pub struct ControlClient {
     http: Client<UnixConnector, Full<Bytes>>,
     bridge: Option<Client<crate::bridge::BridgeConnector, Full<Bytes>>>,
     path: Arc<PathBuf>,
+    /// Sent as [`crate::lease::UNDER_LEASE_HEADER`]: this caller runs
+    /// inside the lane-lease holder with that pid.
+    under_lease: Option<u32>,
 }
 
 impl ControlClient {
+    /// Tell the agent this caller runs inside the lease holder `pid`, so a
+    /// job that drives llmctl-next is not refused by its own lease.
+    pub fn under_lease(mut self, pid: u32) -> Self {
+        self.under_lease = Some(pid);
+        self
+    }
+
     pub fn connect(socket_path: impl AsRef<Path>) -> Result<Self, ClientError> {
         let path = socket_path.as_ref().to_path_buf();
         if !path.exists() {
@@ -116,6 +126,7 @@ impl ControlClient {
             http,
             bridge: None,
             path: Arc::new(path),
+            under_lease: None,
         })
     }
 
@@ -133,6 +144,7 @@ impl ControlClient {
             }),
             bridge: Some(bridge),
             path: Arc::new(PathBuf::from(format!("bridge:{alias}"))),
+            under_lease: None,
         }
     }
 
@@ -386,6 +398,9 @@ impl ControlClient {
             .uri(format!("http://local.control{path}"))
             .header(HOST, "local.control")
             .header("llmctl-protocol", PROTOCOL_VERSION.to_string());
+        if let Some(pid) = self.under_lease {
+            builder = builder.header(crate::lease::UNDER_LEASE_HEADER, pid.to_string());
+        }
         let request = match body {
             Some(payload) => {
                 builder = builder.header(CONTENT_TYPE, "application/json");

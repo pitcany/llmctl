@@ -70,6 +70,18 @@ pub enum OpsError {
     },
     #[error("gpu occupancy could not be determined: {0}; unknown is never free")]
     GpuProbe(String),
+    #[error("another GPU operation is active ({holder}); waited {waited_ms} ms. Retry when it finishes")]
+    HostLockBusy { holder: String, waited_ms: u64 },
+    #[error("the host GPU operation lock could not be taken ({0}); unknown is never free")]
+    HostLockUnavailable(String),
+    #[error("{workload}: {holder} (pid {pid}) holds a lane lease on '{what}' and this operation would disturb it. Retry when it finishes, or remove {path} if the holder is gone")]
+    LaneLeased {
+        workload: String,
+        holder: String,
+        pid: u32,
+        what: String,
+        path: String,
+    },
     #[error("unknown operation: {0}")]
     UnknownOperation(String),
     #[error("invalid state: {0}")]
@@ -103,6 +115,10 @@ impl OpsError {
             OpsError::StalePlan { .. } => (llmctl_client::wire::codes::STALE_PLAN, 409),
             OpsError::GpuOccupied { .. } => (llmctl_client::wire::codes::GPU_OCCUPIED, 409),
             OpsError::GpuProbe(_) => (llmctl_client::wire::codes::GPU_PROBE_FAILED, 409),
+            OpsError::HostLockBusy { .. } | OpsError::HostLockUnavailable(_) => {
+                (llmctl_client::wire::codes::HOST_LOCK_BUSY, 409)
+            }
+            OpsError::LaneLeased { .. } => (llmctl_client::wire::codes::LANE_LEASED, 409),
             OpsError::DefinitionDrift { .. } => (llmctl_client::wire::codes::DEFINITION_DRIFT, 409),
             OpsError::UnknownOperation(_) => (llmctl_client::wire::codes::UNKNOWN_OPERATION, 404),
             OpsError::InvalidState(_) => (llmctl_client::wire::codes::INVALID_STATE, 409),
@@ -135,6 +151,10 @@ impl OpsError {
                 desc,
                 ..
             } => Some(json!({ "workload": workload, "gpu": gpu, "occupant": desc })),
+            OpsError::HostLockBusy { holder, .. } => Some(json!({ "holder": holder })),
+            OpsError::LaneLeased {
+                holder, pid, what, path, ..
+            } => Some(json!({ "holder": holder, "pid": pid, "lease": what, "path": path })),
             _ => None,
         }
     }
@@ -315,6 +335,53 @@ impl OpManager {
         Ok(observations)
     }
 
+    /// Coexistence with the other GPU controllers (M4c, decision 6). A GPU
+    /// operation stands down under another tool's fresh lane lease — unless
+    /// the lease is on this workload or the caller runs inside the holder —
+    /// and then takes the host-wide operation lock that llm-router, Python
+    /// llmctl and llm-heal share. The returned hold lives until the
+    /// operation is terminal. `None` = not a GPU operation, or no lock
+    /// applies here (Macs, the fake engine).
+    async fn coordinate(
+        &self,
+        inv: &HostInventory,
+        def: &llmctl_core::WorkloadDefinition,
+        kind: OpKind,
+    ) -> Result<Option<crate::coord::OpLock>, OpsError> {
+        use crate::coord::{self, LockRefusal};
+        use llmctl_client::lease;
+        if !coord::is_gpu_operation(kind, def) {
+            return Ok(None);
+        }
+        if let Some(path) = coord::lease_path(&inv.platform, def) {
+            if let Some(l) = lease::read_active(&path, lease::MAX_AGE_S) {
+                let on_this = l.names(def.name.as_str(), &def.unit.name);
+                let inside_holder = coord::under_lease() == Some(l.pid);
+                if !on_this && !inside_holder {
+                    return Err(OpsError::LaneLeased {
+                        workload: def.name.to_string(),
+                        what: l.what(),
+                        holder: l.holder,
+                        pid: l.pid,
+                        path: path.display().to_string(),
+                    });
+                }
+            }
+        }
+        let Some(path) = coord::op_lock_path(&inv.platform, def) else {
+            return Ok(None);
+        };
+        let wait = coord::op_lock_wait();
+        match coord::acquire(&path, &format!("{kind} {}", def.name), wait).await {
+            Ok(lock) => Ok(Some(lock)),
+            Err(LockRefusal::Busy(holder)) => Err(OpsError::HostLockBusy {
+                holder,
+                waited_ms: wait.as_millis() as u64,
+            }),
+            Err(LockRefusal::Io(e)) => Err(OpsError::HostLockUnavailable(e)),
+        }
+    }
+
     /// Fresh observations + a plan for `kind`/`workload` (dry-run path).
     pub async fn build_plan(
         &self,
@@ -470,6 +537,9 @@ impl OpManager {
             return Err(OpsError::UnknownWorkload(params.workload));
         };
         self.check_definition(params.kind, def).await?;
+        // Taken before observing: the plan is built on a world no other
+        // controller is changing. Any refusal below drops the hold.
+        let hold = self.coordinate(&inv, def, params.kind).await?;
         let observations = self.observe_for(&inv, params.kind, def).await?;
         let plan = match (&params.kind, params.plan_override) {
             (OpKind::Upgrade | OpKind::LaneWrite, Some(prebuilt)) => prebuilt,
@@ -563,6 +633,9 @@ impl OpManager {
         let manager = Arc::clone(self);
         let op_id = row.id.clone();
         tokio::spawn(async move {
+            // The host lock is held until the operation is terminal
+            // (rollback included), then released by the drop.
+            let _hold = hold;
             if let Err(e) = manager.execute(op_id).await {
                 tracing::error!(error = %e, "operation execution failed");
             }
