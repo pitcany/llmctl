@@ -23,6 +23,10 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from llmctl.integrations.llmctl_next import NextDelegation
 
 
 class SystemctlVerb(StrEnum):
@@ -106,10 +110,13 @@ class SystemctlRunner:
         *,
         systemctl_bin: str = "systemctl",
         sudo_bin: str = "sudo",
+        next_delegation: NextDelegation | None = None,
     ) -> None:
         self._runner = runner
         self.systemctl_bin = systemctl_bin
         self.sudo_bin = sudo_bin
+        #: Fixed llmctl-next delegation for tests; ``None`` = read settings.
+        self._next_delegation = next_delegation
 
     def available(self) -> bool:
         """``True`` when ``systemctl`` is on PATH (false in most containers)."""
@@ -123,7 +130,22 @@ class SystemctlRunner:
         Adds ``sudo`` for write verbs, except in user scope where the
         caller already owns the manager. Always captures stdout/stderr as
         text. Never raises on non-zero exit — caller inspects ``.ok``.
+
+        Write verbs on a unit llmctl-next owns are delegated to the
+        llmctl-next CLI instead (Rust M5b): the CLI, TUI and the ``:8088``
+        dashboard all pass through here. A down or refusing agent is a
+        failed result with the refusal in ``stderr`` — never a silent
+        fallback to systemctl.
         """
+        if verb not in self._READ_ONLY:
+            from llmctl.integrations.llmctl_next import delegate, load_delegation
+
+            result = delegate(
+                verb.value, unit, self._next_delegation or load_delegation()
+            )
+            if result is not None:
+                rc, out, err = result
+                return SystemctlResult(returncode=rc, stdout=out, stderr=err)
         argv: list[str] = []
         lu = None if user else llm_unit_for(unit)
         if lu is not None:

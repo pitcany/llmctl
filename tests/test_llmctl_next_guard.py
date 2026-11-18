@@ -1,0 +1,177 @@
+"""The llmctl-next delegation guard (Rust M5b item 1, plan decision 2).
+
+A write verb on a unit llmctl-next owns goes to the llmctl-next CLI; an
+agent that is down or refuses is an honest failure, never a silent
+fallback; unowned units keep the systemctl path; one setting reverses it.
+The stand-in llmctl-next records its argv so the tests can see exactly
+what the guard ran.
+"""
+
+from __future__ import annotations
+
+import stat
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from llmctl.integrations.llmctl_next import NextDelegation, load_delegation
+from llmctl.integrations.systemctl import SystemctlRunner, SystemctlVerb
+
+STANDIN = """#!/usr/bin/env python3
+import sys, pathlib, os
+pathlib.Path(sys.argv[2]).open('a').write(' '.join(sys.argv[3:]) + '\\n')
+os._exit(int(sys.argv[1]))
+"""
+
+
+@pytest.fixture()
+def standin(tmp_path: Path) -> Path:
+    """Stand-in llmctl-next: ``standin <rc> <marker> <guard argv...>``."""
+    script = tmp_path / "standin"
+    script.write_text(STANDIN)
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script
+
+
+def _cmd(standin: Path, tmp_path: Path, rc: int) -> tuple[str, ...]:
+    """A delegation cmd prefix that exits ``rc`` and logs the guard argv."""
+    return (str(standin), str(rc), str(tmp_path / f"argv-{rc}.txt"))
+
+
+def _argv(tmp_path: Path, rc: int) -> list[str]:
+    return (tmp_path / f"argv-{rc}.txt").read_text().splitlines()
+
+
+def _fake_systemctl(seen: list[list[str]]):
+    def runner(argv: list[str]) -> subprocess.CompletedProcess:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    return runner
+
+
+def test_write_verb_on_owned_unit_is_delegated(tmp_path, standin):
+    delegation = NextDelegation(
+        enabled=True, cmd=_cmd(standin, tmp_path, 0), units={"vllm-engine.service": "vllm-engine"}
+    )
+    seen: list[list[str]] = []
+    runner = SystemctlRunner(runner=_fake_systemctl(seen), next_delegation=delegation)
+
+    result = runner.run(SystemctlVerb.START, "vllm-engine.service", user=True)
+
+    assert result.ok, result.stderr
+    assert seen == [], "systemctl must not run when the unit is delegated"
+    assert _argv(tmp_path, 0) == ["run vllm-engine --wait"]
+
+    # The settings map may key by the bare name too.
+    bare = NextDelegation(
+        enabled=True, cmd=_cmd(standin, tmp_path, 0), units={"vllm-engine": "vllm-engine"}
+    )
+    runner2 = SystemctlRunner(runner=_fake_systemctl(seen), next_delegation=bare)
+    assert runner2.stop("vllm-engine.service").ok
+    assert _argv(tmp_path, 0) == ["run vllm-engine --wait", "stop vllm-engine --wait"]
+
+
+def test_refused_agent_down_is_an_honest_failure_not_a_fallback(tmp_path, standin):
+    delegation = NextDelegation(
+        enabled=True, cmd=_cmd(standin, tmp_path, 3), units={"gpt-oss-120b.service": "gpt-oss-120b"}
+    )
+    seen: list[list[str]] = []
+    runner = SystemctlRunner(runner=_fake_systemctl(seen), next_delegation=delegation)
+
+    result = runner.run(SystemctlVerb.STOP, "gpt-oss-120b.service")
+
+    assert not result.ok and result.returncode == 3
+    assert "refused before anything changed" in result.stderr, result.stderr
+    assert "Not falling back to systemctl" in result.stderr
+    assert "llmctl_next.enabled: false" in result.stderr  # the reversal lever
+    assert seen == [], "a refusal must not silently write through systemctl"
+
+
+def test_admitted_but_failed_operation_is_a_failure_with_detail(tmp_path, standin):
+    delegation = NextDelegation(
+        enabled=True, cmd=_cmd(standin, tmp_path, 7), units={"vllm-engine.service": "vllm-engine"}
+    )
+    runner = SystemctlRunner(
+        runner=_fake_systemctl([]), next_delegation=delegation
+    )
+    result = runner.run(SystemctlVerb.RESTART, "vllm-engine.service")
+    assert not result.ok and result.returncode == 7
+    assert "did not succeed" in result.stderr
+
+
+def test_unowned_unit_keeps_the_systemctl_path(tmp_path, standin):
+    delegation = NextDelegation(
+        enabled=True, cmd=_cmd(standin, tmp_path, 0), units={"vllm-engine.service": "vllm-engine"}
+    )
+    seen: list[list[str]] = []
+    runner = SystemctlRunner(runner=_fake_systemctl(seen), next_delegation=delegation)
+
+    assert runner.run(SystemctlVerb.START, "some-other-unit.service", user=True).ok
+    assert seen and seen[0][:3] == ["systemctl", "--user", "start"], seen
+    assert not (tmp_path / "argv-0.txt").exists(), "the stand-in must not run for an unowned unit"
+
+    # Read verbs never delegate, even for owned units.
+    assert runner.run(SystemctlVerb.IS_ACTIVE, "vllm-engine.service").ok
+    assert len(seen) == 2 and seen[1][0] == "systemctl"
+
+
+def test_disabled_or_absent_settings_delegate_nothing(tmp_path, monkeypatch):
+    settings = tmp_path / "settings.yaml"
+    monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(tmp_path))
+
+    settings.write_text("app:\n  name: llmctl\n")
+    assert load_delegation().enabled is False
+
+    seen: list[list[str]] = []
+    runner = SystemctlRunner(runner=_fake_systemctl(seen))
+    assert runner.stop("vllm-engine.service", user=True).ok
+    assert seen[0][:3] == ["systemctl", "--user", "stop"]
+
+    settings.write_text(
+        "llmctl_next:\n  enabled: false\n  units: {vllm-engine.service: vllm-engine}\n"
+    )
+    assert load_delegation().enabled is False
+
+    monkeypatch.setenv("LLMCTL_NEXT_DISABLED", "1")
+    settings.write_text(
+        "llmctl_next:\n  enabled: true\n  units: {vllm-engine.service: vllm-engine}\n"
+    )
+    assert load_delegation().enabled is False
+
+
+def test_settings_shape_and_env_cmd_override(tmp_path, monkeypatch):
+    settings = tmp_path / "settings.yaml"
+    monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(tmp_path))
+    settings.write_text(
+        "llmctl_next:\n"
+        "  enabled: true\n"
+        "  cmd: [/from/settings, --data-dir, /data]\n"
+        "  units: {vllm-engine.service: vllm-engine}\n"
+    )
+    delegation = load_delegation()
+    assert delegation.enabled
+    assert delegation.cmd == ("/from/settings", "--data-dir", "/data")
+    assert delegation.workload_for("vllm-engine.service") == "vllm-engine"
+
+    monkeypatch.setenv("LLMCTL_NEXT_CMD", "/tmp/standin --data-dir /tmp/x")
+    assert load_delegation().cmd == ("/tmp/standin", "--data-dir", "/tmp/x")
+
+
+def test_both_unit_name_forms_hit_the_map(tmp_path, standin):
+    """Bare (`vllm-engine`) and suffixed (`vllm-engine.service`) lookups
+    both resolve against either key form — a near-miss key must never
+    silently fall through to systemctl (security review 2026-11-18)."""
+    suffixed = NextDelegation(
+        enabled=True, cmd=_cmd(standin, tmp_path, 0), units={"vllm-engine.service": "vllm-engine"}
+    )
+    bare = NextDelegation(
+        enabled=True, cmd=_cmd(standin, tmp_path, 0), units={"vllm-engine": "vllm-engine"}
+    )
+    for delegation in (suffixed, bare):
+        seen: list[list[str]] = []
+        runner = SystemctlRunner(runner=_fake_systemctl(seen), next_delegation=delegation)
+        assert runner.stop("vllm-engine").ok, delegation.units
+        assert runner.stop("vllm-engine.service").ok, delegation.units
+        assert seen == [], "both forms must delegate regardless of the key form"
