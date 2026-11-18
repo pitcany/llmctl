@@ -283,6 +283,7 @@ impl Engine for LaunchdEngine {
                     process: probe.process,
                     readiness: probe.readiness,
                     served_model: probe.served_model,
+                    loaded_models: None,
                     observed_at: Utc::now(),
                 });
             }
@@ -520,6 +521,21 @@ impl Engine for LaunchdEngine {
                 invocation,
             )
             .await
+        })
+    }
+
+    /// Device-aware loaded list of a vendor service (`probe_local`).
+    fn loaded_models(&self, workload: &WorkloadDefinition) -> BoxFut<Option<Vec<String>>> {
+        let target = self.target(&workload.unit);
+        let timeout = self.http_timeout;
+        Box::pin(async move {
+            let target = target.ok()?;
+            if !target.protocol.supports_unload() {
+                return None;
+            }
+            engine_api::probe_local(target.protocol, target.port, timeout)
+                .await
+                .loaded
         })
     }
 

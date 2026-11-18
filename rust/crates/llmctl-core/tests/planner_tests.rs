@@ -81,6 +81,7 @@ fn obs(name: &str, gpus: &[u32], running: bool) -> Observation {
             ServedModel::NotServing
         },
         gpus: gpus.iter().map(|i| gpu(*i)).collect(),
+        loaded_models: None,
         observed_at: Utc.with_ymd_and_hms(2026, 11, 15, 12, 0, 0).unwrap(),
     }
 }
@@ -378,4 +379,135 @@ fn on_demand_services_neither_evict_nor_get_evicted() {
     assert_eq!(GpuClaim::default_for(&EngineKind::LmStudio), GpuClaim::OnDemand);
     assert_eq!(GpuClaim::default_for(&EngineKind::Ollama), GpuClaim::OnDemand);
     assert_eq!(GpuClaim::default_for(&EngineKind::Vllm), GpuClaim::AtStart);
+}
+
+// ---- M4c: swap plans (unload on-demand models, then evict) ------------------
+
+/// A running observation with an engine-reported loaded list.
+fn obs_loaded(name: &str, gpus: &[u32], models: &[&str]) -> Observation {
+    let mut o = obs(name, gpus, true);
+    o.loaded_models = Some(models.iter().map(|m| m.to_string()).collect());
+    o
+}
+
+/// `helper` as an on-demand Ollama service that may use both cards.
+fn inventory_with_on_demand_helper() -> HostInventory {
+    let mut inv = inventory();
+    inv.workloads[1].gpus = vec![gpu(0), gpu(1)];
+    inv.workloads[1].gpu_claim = llmctl_core::GpuClaim::OnDemand;
+    inv.workloads[1].engine_kind = EngineKind::Ollama;
+    inv.workloads[1].model = "ollama".into();
+    inv.validate().unwrap();
+    inv
+}
+
+fn labels(steps: &[PlanStep]) -> Vec<String> {
+    steps.iter().map(|s| s.label()).collect()
+}
+
+#[test]
+fn swap_plan_unloads_on_demand_models_before_stopping_conflicts() {
+    let inv = inventory_with_on_demand_helper();
+    let observations = [
+        obs("coder", &[0], true),
+        obs_loaded("helper", &[0, 1], &["qwen3:8b", "nomic-embed"]),
+        obs("big", &[], false),
+    ];
+    let plan = plan_run(&inv, &observations, &wn("big")).unwrap();
+    // One plan: unload (model-name order), evict, start, verify. The
+    // on-demand service itself is never stopped.
+    assert_eq!(
+        labels(&plan.steps),
+        vec![
+            "record intent: big → Running",
+            "unload nomic-embed from helper",
+            "unload qwen3:8b from helper",
+            "record intent: coder → Stopped { manual: false }",
+            "stop coder",
+            "start big",
+            "wait for big readiness",
+            "verify big serves fake/big",
+        ]
+    );
+    // Rollback restores the evicted at_start set. Unloaded models are not
+    // reloaded: an on-demand service loads them again on its next request.
+    assert_eq!(
+        labels(&plan.rollback),
+        vec!["record intent: coder → Running", "start coder", "stop big"]
+    );
+
+    // A restart of the running target is the same swap.
+    let observations = [
+        obs("big", &[0, 1], true),
+        obs_loaded("helper", &[0, 1], &["qwen3:8b"]),
+    ];
+    let plan = plan_restart(&inv, &observations, &wn("big")).unwrap();
+    assert_eq!(
+        labels(&plan.steps)[..4],
+        [
+            "record intent: big → Running",
+            "unload qwen3:8b from helper",
+            "stop big",
+            "start big",
+        ]
+    );
+}
+
+#[test]
+fn swap_plan_unloads_only_what_it_can_name_and_needs() {
+    let unloads = |inv: &HostInventory, observations: &[Observation], target: &str| {
+        plan_run(inv, observations, &wn(target))
+            .unwrap()
+            .steps
+            .iter()
+            .filter(|s| matches!(s, PlanStep::UnloadModel { .. }))
+            .count()
+    };
+    let inv = inventory_with_on_demand_helper();
+
+    // Loaded list unknown or empty, or the service is down: nothing to name.
+    // (The daemon's occupancy guard still refuses when the card is held.)
+    assert_eq!(unloads(&inv, &[obs("helper", &[0, 1], true)], "big"), 0);
+    assert_eq!(unloads(&inv, &[obs_loaded("helper", &[0, 1], &[])], "big"), 0);
+    let mut down = obs_loaded("helper", &[], &["qwen3:8b"]);
+    down.process = ProcessState::Stopped;
+    assert_eq!(unloads(&inv, &[down], "big"), 0);
+    let mut unknown = obs_loaded("helper", &[0, 1], &["qwen3:8b"]);
+    unknown.process = ProcessState::Unknown;
+    assert_eq!(unloads(&inv, &[unknown], "big"), 0);
+
+    // No shared card: the service keeps its models.
+    let mut apart = inv.clone();
+    apart.workloads[1].gpus = vec![gpu(1)];
+    let loaded = [obs_loaded("helper", &[1], &["qwen3:8b"])];
+    assert_eq!(unloads(&apart, &loaded, "coder"), 0);
+    assert_eq!(unloads(&apart, &loaded, "big"), 1);
+
+    // An on-demand target claims nothing at start: it unloads nobody, and
+    // its own models are not unloaded by its own run.
+    let mut both = inv.clone();
+    both.workloads[0].gpu_claim = llmctl_core::GpuClaim::OnDemand;
+    let loaded = [obs_loaded("helper", &[0, 1], &["qwen3:8b"])];
+    assert_eq!(unloads(&both, &loaded, "coder"), 0);
+    assert_eq!(unloads(&inv, &loaded, "helper"), 0);
+
+    // No engine-level unload, or no lifecycle authority: never planned.
+    let mut no_unload = inv.clone();
+    no_unload.workloads[1].engine_kind = EngineKind::FakeEngine;
+    assert_eq!(unloads(&no_unload, &loaded, "big"), 0);
+    let mut observe_only = inv.clone();
+    observe_only.workloads[1].authority = ControlAuthority::ObserveOnly {
+        endpoint: "http://127.0.0.1:8101".into(),
+    };
+    assert_eq!(unloads(&observe_only, &loaded, "big"), 0);
+}
+
+#[test]
+fn observations_without_a_loaded_list_still_parse() {
+    // Journaled plans and older agents carry observations without the field.
+    let mut v = serde_json::to_value(obs("coder", &[0], true)).unwrap();
+    assert!(v.get("loaded_models").is_none(), "{v}");
+    v.as_object_mut().unwrap().remove("loaded_models");
+    let back: Observation = serde_json::from_value(v).unwrap();
+    assert_eq!(back.loaded_models, None);
 }

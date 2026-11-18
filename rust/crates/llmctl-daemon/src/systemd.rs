@@ -251,6 +251,7 @@ impl Engine for SystemdEngine {
                     process: probe.process,
                     readiness: probe.readiness,
                     served_model: probe.served_model,
+                    loaded_models: None,
                     observed_at: Utc::now(),
                 });
             }
@@ -425,6 +426,23 @@ impl Engine for SystemdEngine {
                 .into_iter()
                 .filter(|o| wanted.contains(&o.gpu))
                 .collect())
+        })
+    }
+
+    /// Device-aware loaded list of a vendor service (`probe_local`: LM
+    /// Studio models on an LM Link device are not this machine's).
+    fn loaded_models(
+        &self,
+        workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Option<Vec<String>>> {
+        let protocol = EngineProtocol::for_kind(&workload.engine_kind);
+        let port = workload.port;
+        let timeout = self.http_timeout;
+        Box::pin(async move {
+            if !protocol.supports_unload() {
+                return None;
+            }
+            engine_api::probe_local(protocol, port, timeout).await.loaded
         })
     }
 

@@ -55,8 +55,48 @@ pub fn gpu_conflicts<'a>(
         .collect()
 }
 
-/// Build a run plan: persist intent, stop GPU conflicts, start the target,
-/// await readiness, verify served-model identity. Workloads whose observed
+/// Models a run of `target` unloads first (M4c swap plans): everything an
+/// on-demand vendor service reports loaded, when that service is observed
+/// running and may use one of the target's cards. Only what can be named
+/// and done is planned — a service whose loaded list is unknown, whose
+/// engine has no unload, or that llmctl does not control yields nothing,
+/// and the daemon's occupancy guard still refuses if it holds the card.
+/// The service keeps running; models are in name order.
+pub fn on_demand_unloads<'a>(
+    inventory: &'a crate::inventory::HostInventory,
+    observations: &[Observation],
+    target: &WorkloadName,
+) -> Vec<(&'a crate::inventory::WorkloadDefinition, Vec<String>)> {
+    let Some(def) = inventory.workload(target) else {
+        return Vec::new();
+    };
+    if !def.gpu_claim.is_at_start() {
+        return Vec::new();
+    }
+    let mut out: Vec<(&crate::inventory::WorkloadDefinition, Vec<String>)> = inventory
+        .workloads
+        .iter()
+        .filter(|w| w.name != *target)
+        .filter(|w| !w.gpu_claim.is_at_start())
+        .filter(|w| w.engine_kind.has_engine_unload() && w.authority.supports_lifecycle())
+        .filter(|w| w.gpus.iter().any(|g| def.gpus.contains(g)))
+        .filter_map(|w| {
+            let o = observations
+                .iter()
+                .find(|o| o.workload == w.name && o.process == ProcessState::Running)?;
+            let mut models = o.loaded_models.clone()?;
+            models.sort();
+            models.dedup();
+            (!models.is_empty()).then_some((w, models))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+    out
+}
+
+/// Build a run plan: persist intent, unload on-demand models on the
+/// target's cards, stop GPU conflicts, start the target, await readiness,
+/// verify served-model identity. Workloads whose observed
 /// process is already running for the target are restarted only via an
 /// explicit `Restart`; a plain run of an already-confirmed-running target
 /// still re-plans (stop then start) so the end state is deterministic.
@@ -82,6 +122,20 @@ pub fn plan_run(
         workload: target.clone(),
         intent: DesiredIntent::Running,
     });
+
+    // On-demand neighbours give their cards back first: an engine-level
+    // unload is the cheapest step to fail, and nothing has been stopped
+    // yet. No rollback entry — the service stays up and loads the model
+    // again on its next request.
+    for (svc, models) in on_demand_unloads(inventory, observations, target) {
+        for model in models {
+            steps.push(PlanStep::UnloadModel {
+                workload: svc.name.clone(),
+                unit: svc.unit.clone(),
+                model,
+            });
+        }
+    }
 
     // Conflicts are stopped in stable (name) order; rollback restarts them
     // in reverse so the last evicted is restored first.

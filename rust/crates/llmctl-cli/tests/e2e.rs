@@ -1016,6 +1016,111 @@ async fn on_demand_claims_pass_the_guard_and_name_the_unload() {
     );
 }
 
+/// Set what a fake vendor service holds in memory (`world.json`).
+fn set_loaded(d: &DaemonGuard, name: &str, models: &[&str]) {
+    let path = d.data_dir().join("world.json");
+    let mut world: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    world["units"][&format!("user/llmctl-next-fake-{name}.service")]["loaded"] =
+        serde_json::json!(models);
+    std::fs::write(&path, world.to_string()).unwrap();
+}
+
+fn loaded_of(d: &DaemonGuard, name: &str) -> serde_json::Value {
+    let world: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(d.data_dir().join("world.json")).unwrap()).unwrap();
+    world["units"][&format!("user/llmctl-next-fake-{name}.service")]["loaded"].clone()
+}
+
+/// M4c swap plan: one run unloads the on-demand service's models, evicts
+/// the at_start conflict, starts the target; a failed start restores the
+/// evicted workload and never stops the service.
+#[tokio::test]
+async fn swap_plan_unloads_on_demand_models_then_evicts_and_rolls_back() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("control.sock");
+    let host = "workstation";
+    let wl = |name: &str, port: u16| {
+        serde_json::json!({
+            "name": name, "engine": "fake", "model": format!("fake/{name}"),
+            "gpus": [{"host": host, "index": 0}], "port": port,
+            "unit": {"scope": "user", "name": format!("llmctl-next-fake-{name}.service")},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": format!("llmctl-next-fake-{name}.service")},
+            "ownership": {"kind": "external"}
+        })
+    };
+    let mut svc = wl("svc", 8102);
+    svc["gpu_claim"] = "on_demand".into();
+    svc["engine_kind"] = "ollama".into();
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [wl("coder", 8100), wl("old", 8101), svc],
+        "revision": 1
+    }});
+    std::fs::write(dir.path().join("inventory.json"), inv.to_string()).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(&socket).arg("--data-dir").arg(dir.path()).arg("daemon")
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let client = d.client();
+    let running = |st: &llmctl_client::wire::StatusResponse, name: &str| {
+        let w = st.workloads.iter().find(|w| w.name == name).unwrap();
+        format!("{:?}", w.process).contains("Running")
+    };
+
+    // `old` serves on the card; the on-demand service has two models on it.
+    run_to_success(&d, "old", "swap-setup-1").await;
+    run_to_success(&d, "svc", "swap-setup-2").await;
+    set_loaded(&d, "svc", &["qwen3:8b", "nomic-embed"]);
+    write_gpus(&d, serde_json::json!([
+        {"gpu": 0, "pid": 4101, "unit": "user/llmctl-next-fake-old.service", "memory_mib": 20000},
+        {"gpu": 0, "pid": 4102, "unit": "user/llmctl-next-fake-svc.service", "memory_mib": 17000}
+    ]));
+
+    // The preview names the unloads, before the eviction; only `old` stops.
+    let plan = client
+        .plan(PlanRequest { kind: OpKind::Run, workload: "coder".into() })
+        .await
+        .expect("the swap plan passes the occupancy guard");
+    let labels: Vec<String> = plan.plan.steps.iter().map(|s| s.label()).collect();
+    assert_eq!(
+        labels[1..5],
+        [
+            "unload nomic-embed from svc",
+            "unload qwen3:8b from svc",
+            "record intent: old → Stopped { manual: false }",
+            "stop old",
+        ],
+        "{labels:?}"
+    );
+    assert_eq!(plan.stop_targets, vec!["old"]);
+
+    // The target's start fails: `old` is restored, the service was never
+    // stopped, and its models stay unloaded (they load again on demand).
+    d.write_faults(serde_json::json!({"fail_effects": [
+        {"unit": "user/llmctl-next-fake-coder.service", "kind": "start", "mode": "before"}
+    ]}));
+    let resp = client.admit(admit_req(OpKind::Run, "coder", "swap-fail")).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Failed, "{op:?}");
+    assert_eq!(op.recovery.expect("restoration recorded")["outcome"], "restored");
+    let st = client.status().await.unwrap();
+    assert!(running(&st, "old") && running(&st, "svc") && !running(&st, "coder"));
+    assert_eq!(loaded_of(&d, "svc"), serde_json::json!([]));
+
+    // Second try, one model loaded again: the swap goes through.
+    set_loaded(&d, "svc", &["qwen3:8b"]);
+    let resp = client.admit(admit_req(OpKind::Run, "coder", "swap-ok")).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Succeeded, "{op:?}");
+    assert!(op.phases.iter().any(|p| p.label == "unload qwen3:8b from svc"));
+    let st = client.status().await.unwrap();
+    assert!(running(&st, "coder") && running(&st, "svc") && !running(&st, "old"));
+    assert_eq!(loaded_of(&d, "svc"), serde_json::json!([]));
+}
+
 // ---- B: bounded recovery ----------------------------------------------------
 
 /// A daemon whose inventory gives `coder` a recovery budget and whose

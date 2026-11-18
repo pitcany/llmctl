@@ -56,6 +56,11 @@ pub struct Observation {
     pub readiness: Readiness,
     pub served_model: ServedModel,
     pub gpus: Vec<GpuId>,
+    /// Models the engine holds in memory on this machine right now (vendor
+    /// services: Ollama, LM Studio). `None` = not asked, not applicable, or
+    /// the engine could not say — never the same as "nothing loaded".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_models: Option<Vec<String>>,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -86,6 +91,7 @@ mod tests {
             readiness,
             served_model: ServedModel::Unknown,
             gpus: vec![GpuId::new(host, 0)],
+            loaded_models: None,
             observed_at: Utc::now(),
         }
     }

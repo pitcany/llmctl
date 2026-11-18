@@ -268,6 +268,37 @@ impl OpManager {
         }
     }
 
+    /// Fresh observations for planning `kind`. A run or restart also asks
+    /// each running on-demand vendor service what it holds in memory, so
+    /// the plan can name those unloads (M4c swap plans); an engine that
+    /// cannot say leaves the list unknown and the occupancy guard decides.
+    async fn observe_for(
+        &self,
+        inv: &HostInventory,
+        kind: OpKind,
+    ) -> Result<Vec<llmctl_core::Observation>, OpsError> {
+        let mut observations = self
+            .engine
+            .observe(inv)
+            .await
+            .map_err(|e| OpsError::Engine(e.to_string()))?;
+        if matches!(kind, OpKind::Run | OpKind::Restart) {
+            for o in observations.iter_mut() {
+                if o.process != ProcessState::Running {
+                    continue;
+                }
+                let Some(def) = inv.workload(&o.workload) else {
+                    continue;
+                };
+                if def.gpu_claim.is_at_start() || !def.engine_kind.has_engine_unload() {
+                    continue;
+                }
+                o.loaded_models = self.engine.loaded_models(def).await;
+            }
+        }
+        Ok(observations)
+    }
+
     /// Fresh observations + a plan for `kind`/`workload` (dry-run path).
     pub async fn build_plan(
         &self,
@@ -280,11 +311,7 @@ impl OpManager {
             return Err(OpsError::UnknownWorkload(workload.to_string()));
         };
         self.check_definition(kind, def).await?;
-        let observations = self
-            .engine
-            .observe(&inv)
-            .await
-            .map_err(|e| OpsError::Engine(e.to_string()))?;
+        let observations = self.observe_for(&inv, kind).await?;
         let plan = match kind {
             OpKind::Run => llmctl_core::plan_run(&inv, &observations, &name),
             OpKind::Stop => llmctl_core::plan_stop(&inv, &observations, &name),
@@ -320,8 +347,9 @@ impl OpManager {
 
     /// Foreign GPU occupancy guard: a plan that starts a unit asks the
     /// affected cards who is on them. Allowed on those cards: the target
-    /// itself and enrolled workloads this plan already stops (its
-    /// conflicts). Anything else — an unenrolled unit or an unmappable
+    /// itself, enrolled workloads this plan already stops (its conflicts)
+    /// and on-demand services whose loaded models this plan unloads first
+    /// (M4c swap plans). Anything else — an unenrolled unit or an unmappable
     /// process — refuses the operation before anything is journaled, and a
     /// probe that cannot answer refuses too: unknown is never "free".
     async fn guard_gpus(&self, inv: &HostInventory, plan: &Plan) -> Result<(), OpsError> {
@@ -344,9 +372,9 @@ impl OpManager {
             .steps
             .iter()
             .filter_map(|s| match s {
-                PlanStep::StartUnit { workload, .. } | PlanStep::StopUnit { workload, .. } => {
-                    Some(workload)
-                }
+                PlanStep::StartUnit { workload, .. }
+                | PlanStep::StopUnit { workload, .. }
+                | PlanStep::UnloadModel { workload, .. } => Some(workload),
                 _ => None,
             })
             .collect();
@@ -426,11 +454,7 @@ impl OpManager {
             return Err(OpsError::UnknownWorkload(params.workload));
         };
         self.check_definition(params.kind, def).await?;
-        let observations = self
-            .engine
-            .observe(&inv)
-            .await
-            .map_err(|e| OpsError::Engine(e.to_string()))?;
+        let observations = self.observe_for(&inv, params.kind).await?;
         let plan = match (&params.kind, params.plan_override) {
             (OpKind::Upgrade | OpKind::LaneWrite, Some(prebuilt)) => prebuilt,
             // Re-planned against the observations taken under the admission
@@ -1311,6 +1335,8 @@ pub struct ObservationLite {
     pub readiness: Readiness,
     pub served_model: ServedModel,
     pub gpus: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loaded_models: Option<Vec<String>>,
     pub observed_at: chrono::DateTime<Utc>,
 }
 
@@ -1322,6 +1348,7 @@ impl From<llmctl_core::Observation> for ObservationLite {
             readiness: o.readiness,
             served_model: o.served_model,
             gpus: o.gpus.iter().map(|g| g.to_string()).collect(),
+            loaded_models: o.loaded_models,
             observed_at: o.observed_at,
         }
     }

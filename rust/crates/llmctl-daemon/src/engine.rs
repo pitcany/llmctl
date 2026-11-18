@@ -186,6 +186,18 @@ pub trait Engine: Send + Sync {
         Box::pin(async { Ok(Vec::new()) })
     }
 
+    /// Models a vendor service holds in memory on this machine right now
+    /// (M4c swap plans name them as unload steps). `None` = this engine
+    /// cannot say for that workload; it is never read as "nothing loaded".
+    /// Asked only when a plan needs it: for LM Studio it runs the `lms`
+    /// CLI, too slow for every observation.
+    fn loaded_models(
+        &self,
+        _workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Option<Vec<String>>> {
+        Box::pin(async { None })
+    }
+
     /// What the manager says about a down unit (the recovery decision
     /// input). Engines without a retrying manager report `GaveUp` for a
     /// down unit; engines that cannot ask report `Unknown`.
@@ -236,6 +248,9 @@ struct UnitState {
     pid: Option<u32>,
     ready_at: Option<DateTime<Utc>>,
     model: Option<String>,
+    /// Models a fake vendor service holds in memory (tests write this).
+    #[serde(default)]
+    loaded: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -396,6 +411,7 @@ impl Engine for FakeEngine {
                         } else {
                             Vec::new()
                         },
+                        loaded_models: None,
                         observed_at: now,
                     }
                 })
@@ -408,11 +424,6 @@ impl Engine for FakeEngine {
             dir: self.dir.clone(),
         };
         Box::pin(async move {
-            if matches!(effect, Effect::UnloadModel { .. }) {
-                return Err(EngineError::Unsupported(
-                    "the fake engine has no engine-level unload".into(),
-                ));
-            }
             let faults = this.take_faults().await.unwrap_or_default();
             let fail_mode = Self::matching_rule(&faults, &effect)
                 .map(|idx| (idx, faults.fail_effects[idx].mode.clone()));
@@ -439,6 +450,7 @@ impl Engine for FakeEngine {
                     entry.pid = None;
                     entry.ready_at = None;
                     entry.model = None;
+                    entry.loaded.clear();
                     format!("stopped:{}:{}", effect.unit(), workload)
                 }
                 Effect::StartUnit {
@@ -454,7 +466,14 @@ impl Engine for FakeEngine {
                     entry.model = Some(model.clone());
                     format!("started:{}:{}:{}", effect.unit(), workload, world.next_pid)
                 }
-                Effect::UnloadModel { .. } => unreachable!("refused above"),
+                // Unloading a model that is not loaded is the asked-for end
+                // state, as with the real engines.
+                Effect::UnloadModel {
+                    workload, model, ..
+                } => {
+                    entry.loaded.retain(|m| m != model);
+                    format!("unloaded:{}:{}:{}", effect.unit(), workload, model)
+                }
             };
             this.write_world(&world).await?;
             // The effect is durable in the world now. If the fault wanted to
@@ -497,6 +516,27 @@ impl Engine for FakeEngine {
                 .into_iter()
                 .filter(|o| wanted.contains(&o.gpu))
                 .collect())
+        })
+    }
+
+    /// A fake vendor service (engine kind with an unload) reports the
+    /// `loaded` list of its unit in `world.json` while it runs.
+    fn loaded_models(
+        &self,
+        workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Option<Vec<String>>> {
+        let this = FakeEngine {
+            dir: self.dir.clone(),
+        };
+        let key = workload.unit.to_string();
+        let vendor = workload.engine_kind.has_engine_unload();
+        Box::pin(async move {
+            if !vendor {
+                return None;
+            }
+            let world = this.read_world().await.ok()?;
+            let state = world.units.get(&key)?;
+            state.active.then(|| state.loaded.clone())
         })
     }
 
@@ -647,6 +687,16 @@ impl Engine for RoutedEngine {
         match self.route(&workload.unit) {
             Ok(engine) => engine.logs(workload, lines, after),
             Err(e) => Box::pin(async move { Err(e) }),
+        }
+    }
+
+    fn loaded_models(
+        &self,
+        workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Option<Vec<String>>> {
+        match self.route(&workload.unit) {
+            Ok(engine) => engine.loaded_models(workload),
+            Err(_) => Box::pin(async { None }),
         }
     }
 
