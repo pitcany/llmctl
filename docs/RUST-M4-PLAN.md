@@ -7,8 +7,9 @@ recommended (end of this file). **M4a done 2026-11-17 — see
 first version: [progress](RUST-M4C-PROGRESS.md). Exit check 2026-11-17:
 1 row met, 4 partly, 1 not met. The other five rows closed on
 2026-11-18, the last two at 02:13 PST: **all six rows are met**, each
-with limits that are written down — see "Exit check" below. Whether that
-closes M4 is the owner's call.**
+with limits that are written down — see "Exit check" below. **M4 was
+closed by the owner on 2026-11-18 (02:56 PST)**; what carries over is
+listed at the end of the exit check.**
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table,
 M4 row; "Engine support and ownership"). Builds on M2 (one owned Linux
 workload, staged vLLM upgrade — [plan](RUST-M2-PLAN.md)) and M3 (Mac agent,
@@ -509,8 +510,28 @@ Limits, said plainly:
 - The mlx-serve swap back to 26.10.1 on m5 was not run.
 
 **To pass: nothing is left on the table.** All six rows are met as read
-here; the limits in the four updates are the honest remainder. Closing M4
-in the parent plan is the owner's call.
+here; the limits in the four updates are the honest remainder.
+
+### Closed 2026-11-18, 02:56 PST
+
+The owner closed M4 with those limits accepted. Carried over (to M5 or
+to be picked up on their own), by how much they matter in daily use:
+
+1. **No verb to attach a recipe or to remove a workload record.** Both
+   are inventory edits with the agent stopped.
+2. **Lanes:** no stop verb (eviction or ttl only), no log of their own,
+   and `deepseek41-1017-mxfp4-m5` was never loaded through llmctl-next.
+3. **Vendor apps on the Macs** (`lm-studio` on both, `ollama` on mbp2)
+   are observe-only: no start, stop or logs through llmctl-next.
+4. **A failed restart leaves the workload stopped** (the rollback of a
+   run is "stop the target"). The cause seen on m5 is fixed; the rule
+   itself is unchanged, and mac-heal does not restart a job that is not
+   loaded.
+5. **Release archives on launchd** and `release` after a promote.
+6. **M4c gaps:** the Mac unified-memory budget, removing weights, model
+   stores on the Macs, profiles combined with the VRAM fit, per-lane
+   in-flight counts.
+7. **From M3:** the sleep/wake drill (blocked by Acronis' sleep lock).
 
 ## Hazards found by the sweep (not M4 work, owner's call)
 

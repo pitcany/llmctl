@@ -43,8 +43,9 @@ All seven M4c items have a first working version. What is left, by weight:
    the VRAM fit, per-lane (not router-wide) in-flight counts for llama-swap.
 3. **M4 exit:** checked row by row on 2026-11-17 (`RUST-M4-PLAN.md`,
    "Exit check"). The other five rows closed on 2026-11-18: all six are
-   met, with the limits written in the plan's four updates. Closing M4 in
-   the parent plan is the owner's call.
+   met, with the limits written in the plan's four updates. **M4 closed by
+   the owner 2026-11-18**; what carries over is in the plan, "Closed
+   2026-11-18".
 
 ## Open points
 
