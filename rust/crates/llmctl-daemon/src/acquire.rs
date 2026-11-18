@@ -28,7 +28,37 @@ pub const LMS_BIN_ENV: &str = "LLMCTL_NEXT_LMS_BIN";
 const TIMEOUT_SECS: u64 = 12 * 3600;
 
 fn tool(env: &str, default: &str) -> String {
-    std::env::var(env).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
+    std::env::var(env)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| locate(default))
+}
+
+/// Where a helper program is. An agent started by launchd has a short
+/// `PATH` (on mbp2 `hf` in `~/.local/bin` was not on it, so every size
+/// came back unknown): after `PATH`, the usual install places are tried.
+/// A name that is found nowhere is returned as it is, and running it
+/// reports the missing tool.
+pub(crate) fn locate(name: &str) -> String {
+    if name.contains('/') {
+        return name.to_string();
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    if let Some(home) = &home {
+        dirs.push(home.join(".local/bin"));
+    }
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(std::path::PathBuf::from));
+    if name == "ollama" {
+        dirs.push("/Applications/Ollama.app/Contents/Resources".into());
+    }
+    dirs.iter()
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| name.to_string())
 }
 
 /// Free bytes on the filesystem that holds `path` (`df -Pk`, which GNU and
@@ -387,4 +417,14 @@ mod tests {
             assert!(tail.len() <= max && tail.chars().all(|c| c == '█'), "max {max}: {tail:?}");
         }
     }
+    #[test]
+    fn a_tool_is_found_on_path_first_and_a_missing_one_keeps_its_name() {
+        // `sh` is on every PATH this runs with; the full path comes back.
+        let sh = locate("sh");
+        assert!(sh.ends_with("/sh") && std::path::Path::new(&sh).is_file(), "{sh}");
+        // A path is taken as given; a name found nowhere stays a name.
+        assert_eq!(locate("/opt/x/bin/hf"), "/opt/x/bin/hf");
+        assert_eq!(locate("no-such-tool-llmctl-next"), "no-such-tool-llmctl-next");
+    }
+
 }

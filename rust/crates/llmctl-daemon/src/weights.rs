@@ -354,7 +354,7 @@ pub async fn remove(state: &AppState, req: &ModelRemoveRequest) -> Result<ModelR
             let ollama = std::env::var(crate::acquire::OLLAMA_BIN_ENV)
                 .ok()
                 .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| "ollama".into());
+                .unwrap_or_else(|| crate::acquire::locate("ollama"));
             let out = tokio::process::Command::new(&ollama)
                 .args(["rm", &tag])
                 .env("OLLAMA_HOST", format!("127.0.0.1:{}", def.port))
