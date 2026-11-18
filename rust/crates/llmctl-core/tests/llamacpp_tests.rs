@@ -382,3 +382,64 @@ fn the_router_is_an_on_demand_engine_with_model_unload() {
     assert!(!EngineKind::LlamaCpp.has_engine_unload());
     let _ = render(&llamacpp::RouterPreset::default());
 }
+
+/// Item 3, the other direction: a `vllm-engine` start on the router's cards
+/// plans the router's loaded models out first (the M4c on-demand swap),
+/// and never stops the router itself.
+#[test]
+fn a_vllm_start_unloads_router_models_on_its_cards_first() {
+    use llmctl_core::{plan_run, Observation, ProcessState, Readiness, ServedModel, WorkloadName};
+    let wl = |name: &str, kind: &str, claim: Option<&str>, model: &str, port: u16| {
+        let mut w = serde_json::json!({
+            "name": name, "engine": "fake", "engine_kind": kind, "model": model,
+            "gpus": [{"host": "workstation", "index": 0}, {"host": "workstation", "index": 1}],
+            "port": port,
+            "unit": {"scope": "user", "name": format!("{name}.service")},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": format!("{name}.service")},
+            "ownership": {"kind": "external"}
+        });
+        if let Some(c) = claim {
+            w["gpu_claim"] = serde_json::json!(c);
+        }
+        w
+    };
+    let inv: llmctl_core::HostInventory = serde_json::from_value(serde_json::json!({
+        "host": "workstation", "platform": "linux",
+        "gpus": [{"host": "workstation", "index": 0}, {"host": "workstation", "index": 1}],
+        "workloads": [
+            wl("vllm-engine", "vllm", None, "fake/vllm", 8003),
+            wl("llamacpp-router", "llama_cpp_router", Some("on_demand"), "llamacpp-router", 8010),
+        ],
+        "revision": 1
+    }))
+    .unwrap();
+    inv.validate().unwrap();
+    let obs = |name: &str, running: bool, loaded: Option<&[&str]>| Observation {
+        workload: WorkloadName::new(name).unwrap(),
+        unit: None,
+        process: if running { ProcessState::Running } else { ProcessState::Stopped },
+        readiness: if running { Readiness::Ready } else { Readiness::NotReady },
+        served_model: ServedModel::Unknown,
+        pid: None,
+        gpus: Vec::new(),
+        loaded_models: loaded.map(|m| m.iter().map(|s| s.to_string()).collect()),
+        observed_at: chrono::Utc::now(),
+    };
+    let plan = plan_run(
+        &inv,
+        &[obs("vllm-engine", false, None), obs("llamacpp-router", true, Some(&["qwen3.6-35b-a3b", "qwen3.5-0.8b"]))],
+        &WorkloadName::new("vllm-engine").unwrap(),
+    )
+    .unwrap();
+    let labels: Vec<String> = plan.steps.iter().map(|s| s.label()).collect();
+    assert_eq!(
+        labels[..3],
+        [
+            "record intent: vllm-engine → Running",
+            "unload qwen3.5-0.8b from llamacpp-router",
+            "unload qwen3.6-35b-a3b from llamacpp-router",
+        ],
+        "{labels:?}"
+    );
+    assert!(!labels.iter().any(|l| l == "stop llamacpp-router"), "{labels:?}");
+}

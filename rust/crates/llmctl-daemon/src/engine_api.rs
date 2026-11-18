@@ -14,6 +14,9 @@
 //! - [`EngineProtocol::LmStudio`]: `GET /api/v0/models` (servable, with a
 //!   per-model `state`); unload = `lms unload <id>` (the REST API has no
 //!   stable unload; the CLI is what LM Studio documents).
+//! - [`EngineProtocol::LlamaCppRouter`]: `llama-server` in router mode
+//!   (M5d) — `GET /models` lists every preset model with a `status`;
+//!   unload = `POST /models/unload` with `{"model": id}`.
 //!
 //! A vendor service hosts many models, so its workload may name the service
 //! itself as the model ([`EngineProtocol::service_identity`]: `ollama`,
@@ -33,6 +36,7 @@ pub enum EngineProtocol {
     OpenAi,
     Ollama,
     LmStudio,
+    LlamaCppRouter,
 }
 
 /// What the engine reports beyond the readiness probe.
@@ -51,6 +55,7 @@ impl EngineProtocol {
         match kind {
             EngineKind::Ollama => EngineProtocol::Ollama,
             EngineKind::LmStudio => EngineProtocol::LmStudio,
+            EngineKind::LlamaCppRouter => EngineProtocol::LlamaCppRouter,
             _ => EngineProtocol::OpenAi,
         }
     }
@@ -62,6 +67,7 @@ impl EngineProtocol {
             EngineProtocol::OpenAi => None,
             EngineProtocol::Ollama => Some("ollama"),
             EngineProtocol::LmStudio => Some("lmstudio"),
+            EngineProtocol::LlamaCppRouter => Some(llmctl_core::llamacpp::SERVICE_IDENTITY),
         }
     }
 
@@ -74,6 +80,7 @@ impl EngineProtocol {
             EngineProtocol::OpenAi => "openai",
             EngineProtocol::Ollama => "ollama",
             EngineProtocol::LmStudio => "lmstudio",
+            EngineProtocol::LlamaCppRouter => "llamacpp-router",
         }
     }
 }
@@ -87,6 +94,33 @@ pub async fn probe(protocol: EngineProtocol, port: u16, timeout: Duration) -> En
         },
         EngineProtocol::Ollama => probe_ollama(port, timeout).await,
         EngineProtocol::LmStudio => probe_lmstudio(port, timeout).await,
+        EngineProtocol::LlamaCppRouter => probe_llamacpp_router(port, timeout).await,
+    }
+}
+
+/// The router answers `GET /models`: it is ready. Servable = every model
+/// it lists; loaded = those that hold memory (loading and sleeping count).
+async fn probe_llamacpp_router(port: u16, timeout: Duration) -> EngineAnswer {
+    let v = match get_json(port, "/models", timeout).await {
+        Ok(v) => v,
+        Err(probe) => return EngineAnswer { probe, loaded: None },
+    };
+    let Some(rows) = llmctl_core::llamacpp::parse_models(&v) else {
+        return EngineAnswer {
+            probe: HttpProbe::Garbled,
+            loaded: None,
+        };
+    };
+    let mut ids = vec![llmctl_core::llamacpp::SERVICE_IDENTITY.to_string()];
+    ids.extend(rows.iter().map(|r| r.id.clone()));
+    EngineAnswer {
+        probe: HttpProbe::Models(ids),
+        loaded: Some(
+            rows.iter()
+                .filter(|r| r.state.holds_memory())
+                .map(|r| r.id.clone())
+                .collect(),
+        ),
     }
 }
 
@@ -230,6 +264,8 @@ pub async fn loaded_on_gpu(
             .ok()
             .map(|ps| ollama_vram_names(&ps)),
         EngineProtocol::LmStudio => probe_local(protocol, port, timeout).await.loaded,
+        // Every model the router holds runs on the router's cards.
+        EngineProtocol::LlamaCppRouter => probe(protocol, port, timeout).await.loaded,
     }
 }
 
@@ -391,6 +427,22 @@ pub async fn unload(
             }
         }
         EngineProtocol::LmStudio => lms_unload(model, timeout).await?,
+        EngineProtocol::LlamaCppRouter => {
+            let body = json!({"model": model});
+            match probe_http::request(port, Method::POST, "/models/unload", Some(&body), timeout).await {
+                Ok((status, _)) if (200..300).contains(&status) => {}
+                // Not loaded: the router may refuse the request; the end
+                // state is what was asked for, confirmed below.
+                Ok((_, _)) if outcome == Unloaded::NotLoaded => {}
+                Ok((status, body)) => {
+                    return Err(UnloadError::Failed(format!(
+                        "the router answered {status}: {}",
+                        String::from_utf8_lossy(&body).chars().take(200).collect::<String>()
+                    )))
+                }
+                Err(()) => return Err(UnloadError::Failed("the router is unreachable".into())),
+            }
+        }
         EngineProtocol::OpenAi => unreachable!("checked by supports_unload"),
     }
     let deadline = tokio::time::Instant::now() + confirm_within;
@@ -645,6 +697,72 @@ mod tests {
         assert_eq!(
             unload(EngineProtocol::OpenAi, 1, "m", T, T).await,
             Err(UnloadError::Unsupported("openai"))
+        );
+    }
+
+    /// A stand-in router: `GET /models` from a shared list, `POST
+    /// /models/unload` sets the named model unloaded.
+    async fn fake_router(models: Vec<(&'static str, &'static str)>) -> (u16, Arc<Mutex<Vec<(String, String)>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = Arc::new(Mutex::new(
+            models.into_iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>(),
+        ));
+        let s2 = state.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let text = if req.starts_with("POST /models/unload") {
+                    let model = req.split("\"model\":\"").nth(1).and_then(|r| r.split('"').next()).unwrap_or("").to_string();
+                    for (id, st) in s2.lock().unwrap().iter_mut() {
+                        if *id == model {
+                            *st = "unloaded".into();
+                        }
+                    }
+                    json!({"success": true}).to_string()
+                } else {
+                    let rows: Vec<Value> = s2
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|(id, st)| json!({"id": id, "status": {"value": st}}))
+                        .collect();
+                    json!({ "data": rows }).to_string()
+                };
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                    text.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(text.as_bytes()).await;
+            }
+        });
+        (port, state)
+    }
+
+    #[tokio::test]
+    async fn the_llamacpp_router_lists_loads_and_unloads_one_model() {
+        assert_eq!(EngineProtocol::for_kind(&EngineKind::LlamaCppRouter), EngineProtocol::LlamaCppRouter);
+        let p = EngineProtocol::LlamaCppRouter;
+        assert!(p.supports_unload());
+        let (port, state) = fake_router(vec![("small", "loaded"), ("big", "loading"), ("idle", "unloaded")]).await;
+        let ans = probe(p, port, T).await;
+        assert_eq!(
+            ans.probe,
+            HttpProbe::Models(vec!["llamacpp-router".into(), "small".into(), "big".into(), "idle".into()])
+        );
+        assert_eq!(ans.loaded, Some(vec!["small".to_string(), "big".to_string()]));
+        assert_eq!(loaded_on_gpu(p, port, T).await, Some(vec!["small".to_string(), "big".to_string()]));
+
+        assert_eq!(unload(p, port, "small", T, T).await, Ok(Unloaded::Freed));
+        assert!(state.lock().unwrap().iter().any(|(id, st)| id == "small" && st == "unloaded"));
+        assert_eq!(unload(p, port, "idle", T, T).await, Ok(Unloaded::NotLoaded));
+        assert_eq!(
+            unload(p, port, "llamacpp-router", T, T).await,
+            Err(UnloadError::ServiceIdentity("llamacpp-router".into()))
         );
     }
 }
