@@ -16,6 +16,7 @@ use llmctl_client::{ClientError, ControlClient};
 use llmctl_core::{OpKind, Plan};
 
 mod enroll;
+mod preset_cmds;
 
 #[derive(Parser)]
 #[command(
@@ -73,6 +74,24 @@ enum Command {
         /// The model the workload serves under --profile-env.
         #[arg(long, value_name = "NAME", requires = "profile_env")]
         model: Option<String>,
+        /// NAME is a preset (implied when NAME is not a workload): run the
+        /// preset's workload on the preset's router profile env.
+        #[arg(long, conflicts_with = "profile_env")]
+        preset: bool,
+        /// With a preset: write the preset's values into its profile env
+        /// first when they drifted (comments kept). Without it a drifted
+        /// profile is refused.
+        #[arg(long, conflicts_with = "profile_env")]
+        sync: bool,
+        /// With a preset: the vLLM workload to run it on (default: the
+        /// host's only one).
+        #[arg(long, conflicts_with = "profile_env")]
+        workload: Option<String>,
+    },
+    /// Presets (`~/.config/llmctl/presets/*.yaml`), edited in place.
+    Preset {
+        #[command(subcommand)]
+        cmd: preset_cmds::PresetCmd,
     },
     /// Stop a workload (records a manual-stop intent that recovery respects).
     Stop {
@@ -609,6 +628,11 @@ fn exit_code_for_client_error(e: &ClientError) -> u8 {
         ClientError::Unreachable { .. } => 3,
         ClientError::Api { code, .. } => match code.as_str() {
             codes::UNKNOWN_WORKLOAD | codes::UNKNOWN_OPERATION => 5,
+            llmctl_client::catalog::codes::UNKNOWN_PRESET
+            | llmctl_client::catalog::codes::UNKNOWN_MODEL => 5,
+            llmctl_client::catalog::codes::PRESET_REFUSED
+            | llmctl_client::catalog::codes::PRESET_DRIFT
+            | llmctl_client::catalog::codes::CATALOG_REFUSED => 4,
             codes::INVALID_REQUEST | codes::PROTOCOL_MISMATCH => 6,
             codes::STALE_PLAN
             | codes::OVERLAPPING_OPERATION
@@ -763,7 +787,19 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             force,
             profile_env,
             model,
+            preset,
+            sync,
+            workload,
         } => {
+            if profile_env.is_none() {
+                if let Some(code) = preset_cmds::run(
+                    cli, &name, preset, workload, sync, dry_run, wait, key.clone(), force,
+                )
+                .await?
+                {
+                    return Ok(code);
+                }
+            }
             let profile = profile_env.zip(model).map(|(env_source, model)| ProfileRequest {
                 // The agent resolves the path on its own host; a relative
                 // one would mean this shell's directory, so make it absolute.
@@ -798,6 +834,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Audit { since, all, json } => cmd_audit(cli, since.as_deref(), all, json).await,
         Command::Stores { cmd, json } => cmd_stores(cli, cmd, json).await,
         Command::Model { cmd } => cmd_model(cli, cmd).await,
+        Command::Preset { cmd } => preset_cmds::cmd_preset(cli, cmd).await,
         Command::Vram { measure, json } => cmd_vram(cli, measure.as_deref(), json).await,
         Command::Ops { json } => cmd_ops(cli, json).await,
         Command::Op { id, watch } => cmd_op(cli, &id, watch).await,

@@ -19,6 +19,7 @@
 pub mod acquire;
 pub mod adopt;
 pub mod api;
+pub mod api_m5c;
 pub mod audit;
 pub mod app;
 pub mod coord;
@@ -34,6 +35,7 @@ pub mod logfile;
 pub mod ops;
 pub mod own;
 pub mod pin;
+pub mod presets;
 pub mod plistdef;
 pub mod probe_http;
 pub mod profile;
