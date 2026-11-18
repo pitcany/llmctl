@@ -51,16 +51,18 @@ fn spans(lines: &[String]) -> std::collections::BTreeMap<String, (usize, usize)>
     for (n, (key, start)) in starts.iter().enumerate() {
         let limit = starts.get(n + 1).map(|(_, s)| *s).unwrap_or(lines.len());
         let mut end = start + 1;
-        for line in lines.iter().take(limit).skip(start + 1) {
+        // `end = j + 1` as in Python: an indented line after a blank or
+        // comment line pulls those interior lines into the span.
+        for (j, line) in lines.iter().enumerate().take(limit).skip(start + 1) {
             let body = line.trim_end_matches(['\n', '\r']);
             let first = body.as_bytes().first().copied().unwrap_or(b' ');
             if (first == b' ' || first == b'\t')
                 && !body.trim().is_empty()
                 && !body.trim_start().starts_with('#')
             {
-                end += 1;
-            } else if body == "-" || body.starts_with("- ") {
-                end += 1;
+                end = j + 1;
+            } else if body.trim_end() == "-" || body.starts_with("- ") {
+                end = j + 1;
             } else if body.trim().is_empty() || body.trim_start().starts_with('#') {
                 continue;
             } else {
@@ -161,6 +163,9 @@ pub fn edit_preset_text(text: &str, desired: &Value) -> Result<String, PresetErr
         }
         replacements.push((*start, *end, new_lines));
     }
+    // Apply bottom-up in line order (the map iterates keys alphabetically;
+    // a splice must never shift a range still to be applied).
+    replacements.sort_by_key(|(start, _, _)| *start);
     for (start, end, new) in replacements.into_iter().rev() {
         lines.splice(start..end, new);
     }

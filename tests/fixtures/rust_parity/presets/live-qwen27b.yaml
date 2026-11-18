@@ -1,0 +1,116 @@
+# Qwen3.8-27B (vendor block-FP8) — dense hybrid-Mamba, NATIVE VISION-LANGUAGE.
+#
+# Same qwen3_5 architecture family as the deployed qwen3.6-27b tutor generator
+# (48 Gated-DeltaNet linear_attn + 16 full-attention layers, 3:1 interleave), so
+# the parser/cache settings below are copied from that preset deliberately.
+# What changed in 3.8: image + video input is live (language_model_only=false,
+# vision tower + mrope_interleaved), and the checkpoint ships MTP weights.
+#
+# QUANT CHOICE — vendor FP8, not BF16 / NVFP4 / GGUF:
+#   - BF16 is ~55.6 GB of weights = 27.8 GB/card at TP=2. That leaves no room
+#     for the Gated-DeltaNet recurrent state (~75 MB/card PER SEQUENCE) plus KV
+#     plus activations inside 32 GB. Not servable here.
+#   - Vendor FP8 is block-scaled (weight_block_size [128,128], e4m3, dynamic
+#     activations) = ~31 GB total, ~15.5 GB/card. Block-scaled FP8 selects the
+#     DeepGemm block kernel and never enters the buggy cutlass scaled_mm path
+#     (see docs/RUNBOOK.md, "cutlass scaled_mm FP8 bug") — this is why it loads on vLLM >= 0.22.
+#   - NVFP4 (~16 GB, would fit ONE card) exists only as day-old third-party
+#     requants, and the 2026-06 NVFP4-vs-AWQ A/B on llama-3.3-70b came out
+#     against NVFP4. Not worth the quality risk for a 27B dense model.
+#   - GGUF is NOT an option: the vendored llama.cpp (build 10285, 2026-08-05)
+#     knows `qwen3next` but has no qwen3.5/qwen3_5 arch, and ollama 0.23.2 the
+#     same. Both predate this model by days.
+#
+# python_root = vllm-laguna, NOT the usual vllm-serve env. On 2026-08-13 04:03
+# something reinstalled vLLM into vllm-serve as a CPU wheel (vllm-0.26.0+cpu)
+# alongside torch 2.11.0+cu129, and that env can no longer even `import torch`
+# (libtorch_cuda.so: undefined symbol ncclWaitSignal — nccl_cu12 and nccl_cu13
+# 2.28.9 both installed). The live vllm-tp survives only because it started
+# 2026-08-08, before the change. vllm-laguna (0.25.1+cu129) is healthy, imports
+# fine, registers Qwen3_5ForConditionalGeneration (multimodal, IsHybrid) and
+# Qwen3_5MTP, and ships transformers 5.14.1. Point this preset back at
+# vllm-serve once that env is repaired.
+#
+#   - tool_parser qwen3_xml, NOT hermes/qwen3_coder: the 3.8 chat template
+#     mandates <tool_call><function=name><parameter=k> XML, same as 3.6.
+#   - reasoning_parser qwen3: the template emits the OPENING <think> in the
+#     prompt, so generation carries only the closing tag.
+#   - max_num_batched_tokens 8192: hybrid-Mamba cache block_size must be
+#     <= --max-num-batched-tokens, and chunked prefill would default it to 2048
+#     and assert during engine-core init.
+#   - max_model_len 262144 = native (raised from 131072 on 2026-09-18 to match
+#     the live vllm-tp.env / vllm-tp.env.qwen38, which had served 262144 for a
+#     while). KV math: only 16 of 64 layers hold KV (16 KB/token/card at fp8),
+#     so ~7 GB of KV pool is ~450K tokens. 1M context needs YaRN factor 4.0 via
+#     --hf-overrides; do not enable it for short-context work.
+#   - spec_config: MTP speculative decoding, MEASURED and ADOPTED 2026-08-17.
+#     mtp.safetensors ships in the repo (477 MB FP8, 1 layer vs the model's 64)
+#     and both vLLM envs register Qwen3_5MTP. A/B via scripts/bench-vllm.py at
+#     512-token completions, everything else held fixed:
+#         concurrency    off      k=2      k=3
+#           n=1         60.7     94.9    112.0   <- 1.84x, interactive tutor
+#           n=4        213.1    244.5    275.9   <- 1.29x, eval collect
+#           n=8        345.0    392.9    368.7   <- the only k=2 win
+#     k=3 acceptance by position 76.0/55.4/39.5% = 2.71 tokens per forward pass
+#     out of 4; on live tutor traffic it runs better still (~3.0/4, 302.8 tok/s
+#     aggregate at 4-way). k=2 wins only at n=8, where a saturated GPU spends
+#     real compute on rejected drafts — neither of our workloads runs there.
+#     Costs: KV pool 618,951 -> 514,829 tokens (still 3.93x concurrency at the
+#     full 131,072, against ~2.6% live usage) and boot ~225s instead of ~70s.
+#     Use "mtp"; 0.25.1 accepts "qwen3_5_mtp" but logs it deprecated.
+#     NOTE vLLM disables min_p and logit_bias under speculative decoding —
+#     verified neither appears in rag-webui-shim or rag before adopting.
+#
+# Thinking is ON by default; per-request control is reasoning_effort
+# (xhigh|medium|low, default xhigh) and preserve_thinking, both passed through
+# chat_template_kwargs.
+
+alias: qwen27b
+served_name: qwen3.8-27b
+model_id: /home/owner/models/hf2local/Qwen3.8-27B-FP8  # hf2local cuda from Qwen/Qwen3.8-27B@1d4bf0f2 (2026-10-21); was Qwen/Qwen3.8-27B-FP8 -- see docs/ADR-2026-10-21-hf2local-cuda-lane.md
+quantization: fp8
+vllm_quantization_flag: fp8
+tensor_parallel_size: 2
+max_model_len: 262144
+family: qwen
+param_count_b: 27.8
+architectures:
+- Qwen3_5ForConditionalGeneration
+max_num_seqs: 32
+gpu_memory_utilization: 0.80
+kv_cache_dtype: fp8
+dtype: null
+trust_remote_code: false  # the repo ships no custom modeling code (hf plan: ships_own_code=False); set 2026-10-20
+max_num_batched_tokens: 8192
+# 127.0.0.1, NOT 0.0.0.0: the llm-router (:4100) is the single entry point,
+# and :8003 must not be reachable over Tailscale. Mirrors qwen3.6-27b.
+host: 127.0.0.1
+tool_parser: qwen3_xml
+reasoning_parser: qwen3
+# --shutdown-timeout 30 (2026-10-22): vLLM 0.30 defaults to 0 = abort, which kills the engine
+# under an in-flight stream; uvicorn then waits forever for that connection and systemd
+# SIGKILLs the unit after TimeoutStopSec=60, leaving it `failed` (stop at 03:02). Drain mode
+# lets in-flight requests end (up to 30 s, inside the 60 s) so the stop returns cleanly.
+extra_args: --shutdown-timeout 30
+# 2026-09-28: python_root moved from vllm-laguna (vLLM 0.25.1) to vllm-muse
+# (vLLM 0.30.0, built for Muse Glimmer). Measured on the same prompts: 111 vs
+# 98 tok/s, MTP acceptance unchanged (57%), tools 18/18, vision 3/3, thinking
+# split intact; KV pool 413K vs 470K tokens (1.58x a full 262K request).
+# Rollback: python_root back to vllm-laguna, `llmctl router-profiles --write`,
+# `llmctl swap qwen3.8-27b`. Backup: _backups/qwen3.8-27b.yaml.bak-vllm0251-20260928.
+# The notes above and below describe the vllm-laguna era.
+#
+# NOTE: `vllm-laguna` is a MISNOMER as of 2026-08-19. The laguna-xs model was
+# decommissioned and its preset/weights deleted, but this env is retained because
+# it is the interpreter for the LIVE vllm-tp stack. Do NOT delete it. vllm-serve
+# is NOT a drop-in substitute: it is a cu13 build (torch.version.cuda == 13.0)
+# against this box's CUDA 12.x runtime. Rename to something role-accurate
+# (e.g. vllm-0251) only by updating vllm-engine.env{,.qwen38,.qwen38-unc,.previous}
+# and this preset together.
+python_root: /home/owner/miniconda3/envs/vllm-muse
+spec_config:
+  method: mtp
+  num_speculative_tokens: 3
+tq: false
+shortcuts: []
+schema_version: 1

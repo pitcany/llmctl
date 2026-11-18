@@ -1,0 +1,49 @@
+# Qwen3.8-27B with refusals suppressed, made LOCALLY with Heretic 2.1.0 (ARA) on 2026-11-13.
+#
+# SIBLING of qwen27b.yaml, not a replacement. The tutor generator stays `qwen27b`.
+# There is one vllm-engine unit for two-card models, so a request for this lane
+# stops the tutor until something asks for `qwen27b` again.
+#
+# Source: Qwen/Qwen3.8-27B@1d4bf0f2 (BF16, sha256 checked), the same revision as the tutor's pack.
+# Modification: `modify-model go ~/AI/modify-model/configs/qwen27b-heretic.toml` (~/AI/modify-model/README.md).
+# Weights: the FIRST search, trial 17 of 60, KL divergence 0.43 (owner decision 2026-11-14 09:30).
+# The second search (trial 2 of 100, KL 0.13) served this lane from 2026-11-14 05:08 to 09:30 and stays
+# on disk: ~/models/hf2local/Qwen3.8-27B-heretic-v2-FP8. Reason for the change back: with full answers
+# labelled by a judge, trial 17 does the request in 108 of 140 harmful requests, the second result in 69.
+# Pack: `hf2local cuda` block-FP8, MTP head copied from the original, vision tower kept.
+# Records: ~/AI/benchmarks/runs/other-modify-qwen3-8-27b-heretic-20261113-174012/
+# Evaluation (thinking off): harmful requests refused outright 37/40 -> 0/40, Heretic's 100 prompts 99 -> 2;
+# ordinary answers 12/12, reasoning 12/12, coding 8/8. Cost: modellab rag_hop2 79% against 92% for the
+# original (statistical support); math, code and agentic_hard are lower without statistical support.
+#
+# Every engine setting below is copied from qwen27b.yaml; that file gives the reason for each value.
+# Do NOT point the math shims (RAG_SHIM_GEN_MODEL) or routing.default_backend at this lane.
+
+alias: qwen27b-heretic
+served_name: qwen3.8-27b-heretic
+model_id: /home/owner/models/hf2local/Qwen3.8-27B-heretic-FP8
+quantization: fp8
+vllm_quantization_flag: fp8
+tensor_parallel_size: 2
+max_model_len: 262144
+family: qwen
+param_count_b: 27.8
+architectures:
+- Qwen3_5ForConditionalGeneration
+max_num_seqs: 32
+gpu_memory_utilization: 0.80
+kv_cache_dtype: fp8
+dtype: null
+trust_remote_code: false
+max_num_batched_tokens: 8192
+host: 127.0.0.1
+tool_parser: qwen3_xml
+reasoning_parser: qwen3
+extra_args: --shutdown-timeout 30
+python_root: /home/owner/miniconda3/envs/vllm-muse
+spec_config:
+  method: mtp
+  num_speculative_tokens: 3
+tq: false
+shortcuts: []
+schema_version: 1

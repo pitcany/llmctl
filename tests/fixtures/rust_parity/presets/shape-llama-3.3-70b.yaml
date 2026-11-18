@@ -1,0 +1,23 @@
+alias: llama-3.3-70b
+served_name: llama-3.3-70b
+model_id: casperhansen/llama-3.3-70b-instruct-awq
+quantization: awq
+vllm_quantization_flag: awq_marlin
+tensor_parallel_size: 2
+max_model_len: 65536
+family: llama
+param_count_b: 70.0
+architectures:
+- LlamaForCausalLM
+max_num_seqs: 64
+gpu_memory_utilization: 0.85
+kv_cache_dtype: fp8
+dtype: null
+trust_remote_code: false
+host: 0.0.0.0
+port: 8000
+tool_parser: llama3_json
+reasoning_parser: null
+tq: false
+shortcuts: []
+schema_version: 1

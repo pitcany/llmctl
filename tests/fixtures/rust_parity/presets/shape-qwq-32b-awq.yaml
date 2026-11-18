@@ -1,0 +1,23 @@
+alias: qwq-32b-awq
+served_name: qwq-32b-awq
+model_id: Qwen/QwQ-32B-AWQ
+quantization: awq
+vllm_quantization_flag: awq_marlin
+tensor_parallel_size: 2
+max_model_len: 40960
+family: qwen
+param_count_b: 32.0
+architectures:
+- Qwen2ForCausalLM
+max_num_seqs: 16
+gpu_memory_utilization: 0.85
+kv_cache_dtype: fp8
+dtype: null
+trust_remote_code: false
+host: 0.0.0.0
+port: 8000
+tool_parser: hermes
+reasoning_parser: qwen3
+tq: false
+shortcuts: []
+schema_version: 1

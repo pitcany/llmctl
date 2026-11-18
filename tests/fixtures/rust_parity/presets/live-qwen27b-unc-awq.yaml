@@ -1,0 +1,35 @@
+# Qwen3.8-27B ABLITERATED, 4-bit AWQ (twolven/Qwen3.8-27B-abliterated-AWQ-MTP) - one-card uncensored 27B.
+# Added 2026-10-21. Base JonathanColetti/Qwen3.8-27B-Uncensored; 18.2 GiB compressed-tensors W4A16,
+# MTP + vision kept. Same settings as qwen27b-awq (see that preset); only the weights differ.
+# Quality and KV pool UNMEASURED. Not a tutor model.
+
+alias: qwen27b-unc-awq
+served_name: qwen3.8-27b-unc-awq
+model_id: twolven/Qwen3.8-27B-abliterated-AWQ-MTP
+quantization: compressed-tensors
+vllm_quantization_flag: compressed-tensors
+tensor_parallel_size: 1
+max_model_len: 196608
+family: qwen
+param_count_b: 27.8
+architectures:
+- Qwen3_5ForConditionalGeneration
+max_num_seqs: 8
+gpu_memory_utilization: 0.93
+kv_cache_dtype: fp8
+dtype: null
+trust_remote_code: false
+max_num_batched_tokens: 4096
+host: 127.0.0.1
+tool_parser: qwen3_xml
+reasoning_parser: qwen3
+python_root: /home/owner/miniconda3/envs/vllm-muse
+spec_config:
+  method: mtp
+  num_speculative_tokens: 3
+tq: false
+shortcuts: []
+schema_version: 1
+# --shutdown-timeout 30 (2026-10-29): drain on stop, as in qwen27b.yaml. vLLM 0.30 defaults to
+# abort; a stop under an in-flight stream then hangs to the 60 s SIGKILL (10-28 21:27, unit failed).
+extra_args: --shutdown-timeout 30
