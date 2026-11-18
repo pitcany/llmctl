@@ -110,6 +110,30 @@ pub fn unit_from_cgroup(cgroup: &str) -> Option<String> {
         .map(|name| format!("{scope}/{name}"))
 }
 
+/// `nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits`
+/// rows: `0, 5123`. A row that does not parse makes the whole answer
+/// `None`: a card that could not be read is never reported as free.
+pub fn parse_free_mib(csv: &str) -> Option<BTreeMap<u32, u64>> {
+    let mut out = BTreeMap::new();
+    for line in csv.lines().filter(|l| !l.trim().is_empty()) {
+        let (idx, free) = line.split_once(',')?;
+        out.insert(idx.trim().parse().ok()?, free.trim().parse().ok()?);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Free MiB per card right now, or `None` when the cards cannot be read.
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+pub async fn free_mib_nvidia(timeout: std::time::Duration) -> Option<BTreeMap<u32, u64>> {
+    let csv = run_nvidia(
+        &["--query-gpu=index,memory.free", "--format=csv,noheader,nounits"],
+        timeout,
+    )
+    .await
+    .ok()?;
+    parse_free_mib(&csv)
+}
+
 /// Probe the cards through nvidia-smi and map pids to their units through
 /// `/proc/<pid>/cgroup` (Linux only). Any probe failure is an error:
 /// callers must refuse rather than treat an unobservable card as free.
@@ -170,6 +194,16 @@ use crate::engine::EngineError;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn free_mib_parses_or_says_unknown() {
+        assert_eq!(
+            super::parse_free_mib("0, 5123\n1, 31000\n"),
+            Some([(0u32, 5123u64), (1, 31000)].into_iter().collect())
+        );
+        assert_eq!(super::parse_free_mib("0, [N/A]\n1, 31000\n"), None);
+        assert_eq!(super::parse_free_mib(""), None);
+    }
+
     use super::*;
 
     #[test]

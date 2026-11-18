@@ -7,6 +7,7 @@
 //! use; unknown external state must stay representable.
 
 pub mod error;
+pub mod fit;
 pub mod identity;
 pub mod intent;
 pub mod inventory;
@@ -37,6 +38,8 @@ pub use recipe::{
 };
 pub use observation::{Observation, ProcessState, Readiness, ServedModel};
 pub use plan::{BinaryCheck, OpKind, Plan, PlanStep};
+pub use fit::{CardMib, FitDecision};
 pub use planner::{
-    plan_restart, plan_run, plan_run_profile, plan_stop, plan_unload, plan_upgrade, ProfileSwap,
+    plan_restart, plan_restart_with, plan_run, plan_run_profile, plan_run_with, plan_stop,
+    plan_unload, plan_upgrade, ProfileSwap,
 };

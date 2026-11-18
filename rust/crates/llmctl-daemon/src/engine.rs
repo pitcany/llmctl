@@ -186,6 +186,23 @@ pub trait Engine: Send + Sync {
         Box::pin(async { Ok(Vec::new()) })
     }
 
+    /// Free MiB per card right now (M4c VRAM fit). `None` = this engine
+    /// cannot read the cards; a fit is then never assumed.
+    fn gpu_free_mib(&self, _gpus: &[GpuId]) -> BoxFut<Option<std::collections::BTreeMap<u32, u64>>> {
+        Box::pin(async { None })
+    }
+
+    /// Units the service manager stops when this workload's unit starts
+    /// (systemd `Conflicts=`), in the display form occupancy uses
+    /// (`user/foo.service`). `None` = it could not be asked, which rules
+    /// out starting beside anything.
+    fn unit_conflicts(
+        &self,
+        _workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Option<Vec<String>>> {
+        Box::pin(async { None })
+    }
+
     /// Models of a vendor service that hold GPU memory on this machine
     /// right now (M4c swap plans name them as unload steps). `None` = this
     /// engine cannot say for that workload; never read as "nothing loaded".
@@ -522,6 +539,31 @@ impl Engine for FakeEngine {
         })
     }
 
+    /// Free VRAM is injected through `gpu_free.json` in the dev data dir
+    /// (`{"0": 20000, "1": 30000}`); absent = the cards cannot be read.
+    fn gpu_free_mib(&self, gpus: &[GpuId]) -> BoxFut<Option<std::collections::BTreeMap<u32, u64>>> {
+        let path = self.dir.join("gpu_free.json");
+        let wanted: std::collections::BTreeSet<u32> = gpus.iter().map(|g| g.index).collect();
+        Box::pin(async move {
+            let bytes = tokio::fs::read(&path).await.ok()?;
+            let all: std::collections::BTreeMap<String, u64> = serde_json::from_slice(&bytes).ok()?;
+            let out: std::collections::BTreeMap<u32, u64> = all
+                .into_iter()
+                .filter_map(|(k, v)| Some((k.parse().ok()?, v)))
+                .filter(|(k, _)| wanted.contains(k))
+                .collect();
+            (!out.is_empty()).then_some(out)
+        })
+    }
+
+    /// Fake units never conflict with each other.
+    fn unit_conflicts(
+        &self,
+        _workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Option<Vec<String>>> {
+        Box::pin(async { Some(Vec::new()) })
+    }
+
     /// A fake vendor service (engine kind with an unload) reports the
     /// `loaded` list of its unit in `world.json` while it runs.
     fn loaded_models(
@@ -701,6 +743,41 @@ impl Engine for RoutedEngine {
             Ok(engine) => engine.loaded_models(workload),
             Err(_) => Box::pin(async { None }),
         }
+    }
+
+    fn unit_conflicts(
+        &self,
+        workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Option<Vec<String>>> {
+        match self.route(&workload.unit) {
+            Ok(engine) => engine.unit_conflicts(workload),
+            Err(_) => Box::pin(async { None }),
+        }
+    }
+
+    /// The first engine with enrolled units that can read the cards.
+    fn gpu_free_mib(&self, gpus: &[GpuId]) -> BoxFut<Option<std::collections::BTreeMap<u32, u64>>> {
+        let enrolled: std::collections::BTreeSet<String> = self
+            .routes
+            .read()
+            .expect("routes lock")
+            .values()
+            .cloned()
+            .collect();
+        let futs: Vec<_> = self
+            .engines
+            .iter()
+            .filter(|(name, _)| enrolled.contains(*name))
+            .map(|(_, engine)| engine.gpu_free_mib(gpus))
+            .collect();
+        Box::pin(async move {
+            for fut in futs {
+                if let Some(free) = fut.await {
+                    return Some(free);
+                }
+            }
+            None
+        })
     }
 
     fn reload(&self, inventory: &HostInventory) {

@@ -130,6 +130,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Measured VRAM per workload and the cards' free memory: what the
+    /// fit decision ("start beside what runs, or make room") rests on.
+    /// --measure records what a serving workload holds right now.
+    Vram {
+        #[arg(long, value_name = "NAME")]
+        measure: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// List operations from the journal.
     Ops {
         #[arg(long)]
@@ -596,6 +605,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             force,
         } => cmd_mutate(cli, OpKind::Restart, &name, dry_run, wait, key, force, None).await,
         Command::Intent { name, json } => cmd_intent(cli, name.as_deref(), json).await,
+        Command::Vram { measure, json } => cmd_vram(cli, measure.as_deref(), json).await,
         Command::Ops { json } => cmd_ops(cli, json).await,
         Command::Op { id, watch } => cmd_op(cli, &id, watch).await,
         Command::Cancel { id } => cmd_cancel(cli, &id).await,
@@ -1053,6 +1063,9 @@ async fn cmd_mutate(
         .await?;
     if dry_run {
         print_plan(&plan_resp.plan, &plan_resp.stop_targets);
+        for note in &plan_resp.notes {
+            println!("note: {note}");
+        }
         return Ok(0);
     }
 
@@ -1385,6 +1398,44 @@ async fn cmd_upgrade(cli: &Cli, cmd: UpgradeCmd) -> Result<u8, CliError> {
             Ok(0)
         }
     }
+}
+
+async fn cmd_vram(cli: &Cli, measure: Option<&str>, json: bool) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    let resp = match measure {
+        Some(name) => client.vram_measure(name).await?,
+        None => client.vram().await?,
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+        return Ok(0);
+    }
+    let gib = |m: &std::collections::BTreeMap<u32, u64>| {
+        m.iter()
+            .map(|(c, v)| format!("{:.1} GiB on gpu {c}", *v as f64 / 1024.0))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if let Some(r) = &resp.measured {
+        println!("measured {} ({}): {}", r.workload, r.model, gib(&r.per_card_mib));
+    }
+    match &resp.free_mib {
+        Some(free) => println!("free now: {}", gib(free)),
+        None => println!("free now: unknown (the cards cannot be read)"),
+    }
+    if resp.records.is_empty() {
+        println!("no workload measured yet: every start makes room the old way");
+    }
+    for r in &resp.records {
+        println!(
+            "  {:<14} {:<34} {}  ({})",
+            r.workload,
+            r.model,
+            gib(&r.per_card_mib),
+            r.measured_at.format("%Y-%m-%d %H:%M")
+        );
+    }
+    Ok(0)
 }
 
 /// `intent [NAME]`: exit 0 with the record(s); exit 5 when NAME matches no

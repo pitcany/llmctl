@@ -36,6 +36,7 @@ pub mod recover;
 pub mod supervisor;
 pub mod upgrade;
 pub mod version;
+pub mod vram;
 
 // Platform managers (RUST-M3-PLAN A.2): systemd/journald exist only on
 // Linux, launchd only on macOS. The fake engine, journal DB, API, CLI,

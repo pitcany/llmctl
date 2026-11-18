@@ -172,6 +172,17 @@ impl OpsError {
     }
 }
 
+/// A lifecycle plan and what it rested on.
+#[derive(Default)]
+struct Planned {
+    plan: Option<Plan>,
+    /// Decisions the steps do not show (the VRAM fit and its reason).
+    notes: Vec<String>,
+    /// Units the plan leaves running on the target's cards because the
+    /// target fits beside them: the occupancy guard must accept them.
+    keep_units: std::collections::BTreeSet<String>,
+}
+
 pub enum AdmitOutcome {
     Admitted(OpRow),
     /// Same idempotency key, same request: the existing operation.
@@ -488,7 +499,7 @@ impl OpManager {
         def: &llmctl_core::WorkloadDefinition,
         kind: OpKind,
         profile: Option<&llmctl_client::wire::ProfileRequest>,
-    ) -> Result<Plan, OpsError> {
+    ) -> Result<Planned, OpsError> {
         let name = &def.name;
         let swap = match (kind, profile) {
             (_, None) => None,
@@ -501,18 +512,94 @@ impl OpManager {
                 )))
             }
         };
-        match (kind, &swap) {
-            (OpKind::Run, Some(swap)) => {
-                llmctl_core::plan_run_profile(inv, observations, name, swap)
+        // VRAM fit (M4c item 2): a plain run or restart that would evict
+        // or unload neighbours first asks whether the target fits beside
+        // them. A profile switch always evicts: the new profile's need is
+        // only known once it has served.
+        let mut planned = Planned::default();
+        let fit_applies = swap.is_none() && matches!(kind, OpKind::Run | OpKind::Restart);
+        let keep = if fit_applies {
+            let fit = self.fit_beside(inv, observations, def).await;
+            if let Some((decision, neighbours, units)) = fit {
+                let who = neighbours.join(", ");
+                if decision.keeps_neighbours() {
+                    planned.notes.push(format!("starts beside {who}: {}", decision.reason()));
+                    planned.keep_units = units.into_iter().collect();
+                    true
+                } else {
+                    planned.notes.push(format!("makes room ({who}): {}", decision.reason()));
+                    false
+                }
+            } else {
+                false
             }
-            (OpKind::Run, None) => llmctl_core::plan_run(inv, observations, name),
-            (OpKind::Stop, _) => llmctl_core::plan_stop(inv, observations, name),
-            (OpKind::Restart, _) => llmctl_core::plan_restart(inv, observations, name),
-            (other, _) => {
-                return Err(OpsError::Invalid(format!("{other} is not a lifecycle plan")))
+        } else {
+            false
+        };
+        planned.plan = Some(
+            match (kind, &swap) {
+                (OpKind::Run, Some(swap)) => {
+                    llmctl_core::plan_run_profile(inv, observations, name, swap)
+                }
+                (OpKind::Run, None) => llmctl_core::plan_run_with(inv, observations, name, keep),
+                (OpKind::Stop, _) => llmctl_core::plan_stop(inv, observations, name),
+                (OpKind::Restart, _) => {
+                    llmctl_core::plan_restart_with(inv, observations, name, keep)
+                }
+                (other, _) => {
+                    return Err(OpsError::Invalid(format!("{other} is not a lifecycle plan")))
+                }
             }
+            .map_err(plan_error)?,
+        );
+        Ok(planned)
+    }
+
+    /// The fit question for a start of `def`: `None` when the start has no
+    /// neighbours to evict or unload (nothing to decide). Otherwise the
+    /// decision, the neighbours' names and their unit identities.
+    async fn fit_beside(
+        &self,
+        inv: &HostInventory,
+        observations: &[llmctl_core::Observation],
+        def: &llmctl_core::WorkloadDefinition,
+    ) -> Option<(llmctl_core::FitDecision, Vec<String>, Vec<String>)> {
+        use llmctl_core::planner::{gpu_conflicts, on_demand_unloads};
+        let mut neighbours: Vec<&llmctl_core::WorkloadDefinition> = gpu_conflicts(inv, observations, &def.name)
+            .into_iter()
+            .map(|(w, _)| w)
+            .collect();
+        neighbours.extend(on_demand_unloads(inv, observations, &def.name).into_iter().map(|(w, _)| w));
+        if neighbours.is_empty() {
+            return None;
         }
-        .map_err(plan_error)
+        let names: Vec<String> = neighbours.iter().map(|w| w.name.to_string()).collect();
+        let units: Vec<String> = neighbours.iter().map(|w| w.unit.to_string()).collect();
+        let need = match &self.own_ctx {
+            Some(ctx) => crate::vram::load(&crate::vram::store_path(&ctx.paths.data_dir))
+                .await
+                .remove(&crate::vram::key(def))
+                .map(|r| r.per_card),
+            None => None,
+        };
+        let free = self.engine.gpu_free_mib(&def.gpus).await;
+        let running = observations
+            .iter()
+            .any(|o| o.workload == def.name && o.process == ProcessState::Running);
+        let own = if running {
+            crate::vram::measure(self.engine.as_ref(), def).await.unwrap_or_default()
+        } else {
+            Default::default()
+        };
+        let conflicts = self.engine.unit_conflicts(def).await;
+        let decision = llmctl_core::fit::decide(
+            need.as_ref(),
+            free.as_ref(),
+            &own,
+            conflicts.as_deref(),
+            &units,
+        );
+        Some((decision, names, units))
     }
 
     /// One `ApplyEnvFile` step, forward or restore (M4c profiles): the
@@ -552,7 +639,7 @@ impl OpManager {
         kind: OpKind,
         workload: &str,
         profile: Option<&llmctl_client::wire::ProfileRequest>,
-    ) -> Result<(Plan, Vec<ObservationLite>), OpsError> {
+    ) -> Result<(Plan, Vec<ObservationLite>, Vec<String>), OpsError> {
         let inv = self.inventory().await;
         let name = WorkloadName::new(workload).map_err(|e| OpsError::Invalid(e.to_string()))?;
         let Some(def) = inv.workload(&name) else {
@@ -560,7 +647,7 @@ impl OpManager {
         };
         self.check_definition(kind, def, profile.is_some()).await?;
         let observations = self.observe_for(&inv, kind, def).await?;
-        let plan = match kind {
+        let mut planned = match kind {
             OpKind::Run | OpKind::Stop | OpKind::Restart => {
                 self.plan_lifecycle(&inv, &observations, def, kind, profile)
                     .await?
@@ -588,13 +675,15 @@ impl OpManager {
                 ))
             }
         };
-        self.guard_gpus(&inv, &plan).await?;
+        let plan = planned.plan.take().expect("a lifecycle plan");
+        self.guard_gpus(&inv, &plan, &planned.keep_units).await?;
         Ok((
             plan,
             observations
                 .into_iter()
                 .map(ObservationLite::from)
                 .collect(),
+            planned.notes,
         ))
     }
 
@@ -605,7 +694,12 @@ impl OpManager {
     /// (M4c swap plans). Anything else — an unenrolled unit or an unmappable
     /// process — refuses the operation before anything is journaled, and a
     /// probe that cannot answer refuses too: unknown is never "free".
-    async fn guard_gpus(&self, inv: &HostInventory, plan: &Plan) -> Result<(), OpsError> {
+    async fn guard_gpus(
+        &self,
+        inv: &HostInventory,
+        plan: &Plan,
+        keep_units: &std::collections::BTreeSet<String>,
+    ) -> Result<(), OpsError> {
         let starts_units = plan
             .steps
             .iter()
@@ -633,9 +727,12 @@ impl OpManager {
             .collect();
         // Full unit identities (scope included): a user unit and a system
         // unit with the same name are different units.
+        // ... plus the enrolled neighbours the VRAM fit decided to keep: the
+        // target was measured to fit beside them (M4c).
         let allowed: std::collections::BTreeSet<String> = touched
             .iter()
             .filter_map(|w| inv.workload(w).map(|d| d.unit.to_string()))
+            .chain(keep_units.iter().cloned())
             .collect();
 
         let occupants = self
@@ -712,6 +809,7 @@ impl OpManager {
         // controller is changing. Any refusal below drops the hold.
         let hold = self.coordinate(&inv, def, params.kind).await?;
         let observations = self.observe_for(&inv, params.kind, def).await?;
+        let mut keep_units = std::collections::BTreeSet::new();
         let plan = match (&params.kind, params.plan_override) {
             (OpKind::Upgrade | OpKind::LaneWrite | OpKind::LaneSwap, Some(prebuilt)) => prebuilt,
             // Re-planned against the observations taken under the admission
@@ -731,11 +829,14 @@ impl OpManager {
                 )))
             }
             (kind, _) => {
-                self.plan_lifecycle(&inv, &observations, def, *kind, params.profile.as_ref())
-                    .await?
+                let mut planned = self
+                    .plan_lifecycle(&inv, &observations, def, *kind, params.profile.as_ref())
+                    .await?;
+                keep_units = std::mem::take(&mut planned.keep_units);
+                planned.plan.take().expect("a lifecycle plan")
             }
         };
-        self.guard_gpus(&inv, &plan).await?;
+        self.guard_gpus(&inv, &plan, &keep_units).await?;
 
         // Revalidation: refuse obsolete confirmations.
         if let Some(expected) = params.expected_revision {
@@ -946,6 +1047,15 @@ impl OpManager {
                     self.persist(&mut row).await?;
                     return self.run_recovery(&mut row, i, &applied_identities).await;
                 }
+            }
+        }
+
+        // The target serves: what it holds on its cards now is what a later
+        // start needs (M4c VRAM fit). Best effort; never fails the operation.
+        if matches!(row.kind, OpKind::Run | OpKind::Restart) {
+            let inv = self.inventory().await;
+            if let (Some(ctx), Some(def)) = (&self.own_ctx, inv.workload(&row.plan.target)) {
+                crate::vram::remember(self.engine.as_ref(), &ctx.paths.data_dir, def).await;
             }
         }
 

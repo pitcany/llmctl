@@ -30,6 +30,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/inventory", get(inventory))
         .route("/v1/intents", get(intents))
+        .route("/v1/vram", get(vram))
+        .route("/v1/vram/measure", post(vram_measure))
         .route("/v1/plans", post(create_plan))
         .route("/v1/operations", post(admit_operation))
         .route("/v1/operations", get(list_operations))
@@ -78,6 +80,56 @@ async fn under_lease_scope(
     crate::coord::UNDER_LEASE
         .scope(pid, crate::coord::LOCK_HOLDER.scope(lock_holder, next.run(req)))
         .await
+}
+
+fn vram_view(r: &crate::vram::VramRecord) -> llmctl_client::wire::VramRecordView {
+    llmctl_client::wire::VramRecordView {
+        workload: r.workload.clone(),
+        model: r.model.clone(),
+        per_card_mib: r.per_card.clone(),
+        measured_at: r.measured_at,
+    }
+}
+
+async fn vram_response(
+    state: &AppState,
+    measured: Option<llmctl_client::wire::VramRecordView>,
+) -> llmctl_client::wire::VramResponse {
+    let inv = state.ops.inventory().await;
+    let store = crate::vram::load(&crate::vram::store_path(&state.paths.data_dir)).await;
+    llmctl_client::wire::VramResponse {
+        free_mib: state.ops.engine().gpu_free_mib(&inv.gpus).await,
+        records: store.values().map(vram_view).collect(),
+        measured,
+    }
+}
+
+/// Measured VRAM per workload and the cards' free memory (M4c VRAM fit).
+async fn vram(State(state): State<Arc<AppState>>) -> Json<llmctl_client::wire::VramResponse> {
+    Json(vram_response(&state, None).await)
+}
+
+/// Measure a serving workload now and remember it: how an engine that was
+/// started before the fit existed gets its first measurement.
+async fn vram_measure(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::VramMeasureRequest>,
+) -> Result<Json<llmctl_client::wire::VramResponse>, ApiError> {
+    let name = llmctl_core::WorkloadName::new(&req.workload)
+        .map_err(|e| ApiError::from_ops(&OpsError::Invalid(e.to_string())))?;
+    let inv = state.ops.inventory().await;
+    let def = inv
+        .workload(&name)
+        .ok_or_else(|| ApiError::from_ops(&OpsError::UnknownWorkload(req.workload.clone())))?;
+    let record = crate::vram::remember(state.ops.engine().as_ref(), &state.paths.data_dir, def)
+        .await
+        .ok_or_else(|| {
+            ApiError::from_ops(&OpsError::InvalidState(format!(
+                "{} holds no VRAM on its cards right now (not running, on the CPU, or the cards cannot be read); nothing to record",
+                req.workload
+            )))
+        })?;
+    Ok(Json(vram_response(&state, Some(vram_view(&record))).await))
 }
 
 /// Recorded intents from the journal's intent store. Cheap on purpose: a
@@ -282,7 +334,7 @@ async fn create_plan(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PlanRequest>,
 ) -> Result<Json<PlanResponse>, ApiError> {
-    let (plan, _obs) = state
+    let (plan, _obs, notes) = state
         .ops
         .build_plan(req.kind, &req.workload, req.profile.as_ref())
         .await?;
@@ -299,6 +351,7 @@ async fn create_plan(
         revision,
         stop_targets,
         plan,
+        notes,
     }))
 }
 

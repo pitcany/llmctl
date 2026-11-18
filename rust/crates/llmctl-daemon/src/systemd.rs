@@ -437,6 +437,52 @@ impl Engine for SystemdEngine {
         })
     }
 
+    fn gpu_free_mib(
+        &self,
+        gpus: &[llmctl_core::GpuId],
+    ) -> BoxFut<Option<std::collections::BTreeMap<u32, u64>>> {
+        let wanted: std::collections::BTreeSet<u32> = gpus.iter().map(|g| g.index).collect();
+        let timeout = self.gpu_probe_timeout;
+        Box::pin(async move {
+            let all = crate::gpu::free_mib_nvidia(timeout).await?;
+            // Every asked card must have been read: a missing one is unknown.
+            wanted
+                .iter()
+                .map(|c| all.get(c).map(|m| (*c, *m)))
+                .collect::<Option<std::collections::BTreeMap<u32, u64>>>()
+                .filter(|m| !m.is_empty())
+        })
+    }
+
+    /// `Conflicts=` of the unit, as `scope/name` like the occupancy probe.
+    fn unit_conflicts(
+        &self,
+        workload: &llmctl_core::WorkloadDefinition,
+    ) -> BoxFut<Option<Vec<String>>> {
+        let unit = workload.unit.clone();
+        let timeout = self.show_timeout;
+        Box::pin(async move {
+            let out = systemctl(
+                unit.scope,
+                &["show", &unit.name, "--property=Conflicts", "--value"],
+                timeout,
+            )
+            .await
+            .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let prefix = unit.to_string();
+            let scope = prefix.split('/').next().unwrap_or("user").to_string();
+            Some(
+                String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .map(|name| format!("{scope}/{name}"))
+                    .collect(),
+            )
+        })
+    }
+
     /// Models of a vendor service that hold GPU memory on this machine
     /// (Ollama: `size_vram`; LM Studio: loaded on this device, not on an
     /// LM Link device).

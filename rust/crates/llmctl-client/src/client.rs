@@ -195,6 +195,20 @@ impl ControlClient {
         self.get_json("/v1/status").await
     }
 
+    /// Measured VRAM per workload and the cards' free memory.
+    pub async fn vram(&self) -> Result<crate::wire::VramResponse, ClientError> {
+        self.get_json("/v1/vram").await
+    }
+
+    /// Measure a serving workload's VRAM now and remember it.
+    pub async fn vram_measure(&self, workload: &str) -> Result<crate::wire::VramResponse, ClientError> {
+        self.post_json(
+            "/v1/vram/measure",
+            &crate::wire::VramMeasureRequest { workload: workload.to_string() },
+        )
+        .await
+    }
+
     /// Recorded intents per workload; no engine is probed.
     pub async fn intents(&self) -> Result<crate::wire::IntentsResponse, ClientError> {
         self.get_json("/v1/intents").await

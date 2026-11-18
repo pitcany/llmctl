@@ -105,6 +105,20 @@ pub fn plan_run(
     observations: &[Observation],
     target: &WorkloadName,
 ) -> CoreResult<Plan> {
+    plan_run_with(inventory, observations, target, false)
+}
+
+/// [`plan_run`] with the VRAM-fit decision made by the caller (M4c item
+/// 2): `keep_neighbours` = every card the target uses has room for it, so
+/// nothing is unloaded and no conflict is stopped — the target starts
+/// beside what runs. The decision itself needs measurements and the cards
+/// ([`crate::fit::decide`]); the planner only arranges steps.
+pub fn plan_run_with(
+    inventory: &crate::inventory::HostInventory,
+    observations: &[Observation],
+    target: &WorkloadName,
+    keep_neighbours: bool,
+) -> CoreResult<Plan> {
     let def = inventory
         .workload(target)
         .ok_or_else(|| CoreError::UnknownWorkload(target.to_string()))?;
@@ -114,7 +128,11 @@ pub fn plan_run(
             reason: "control authority is observe-only; lifecycle ownership not proven".into(),
         });
     }
-    let conflicts = gpu_conflicts(inventory, observations, target);
+    let conflicts = if keep_neighbours {
+        Vec::new()
+    } else {
+        gpu_conflicts(inventory, observations, target)
+    };
     let mut steps: Vec<PlanStep> = Vec::new();
     let mut rollback: Vec<PlanStep> = Vec::new();
 
@@ -127,7 +145,12 @@ pub fn plan_run(
     // unload is the cheapest step to fail, and nothing has been stopped
     // yet. No rollback entry — the service stays up and loads the model
     // again on its next request.
-    for (svc, models) in on_demand_unloads(inventory, observations, target) {
+    let unloads = if keep_neighbours {
+        Vec::new()
+    } else {
+        on_demand_unloads(inventory, observations, target)
+    };
+    for (svc, models) in unloads {
         for model in models {
             steps.push(PlanStep::UnloadModel {
                 workload: svc.name.clone(),
@@ -340,6 +363,17 @@ pub fn plan_restart(
     observations: &[Observation],
     target: &WorkloadName,
 ) -> CoreResult<Plan> {
+    plan_restart_with(inventory, observations, target, false)
+}
+
+/// [`plan_restart`] with the caller's VRAM-fit decision; see
+/// [`plan_run_with`].
+pub fn plan_restart_with(
+    inventory: &crate::inventory::HostInventory,
+    observations: &[Observation],
+    target: &WorkloadName,
+    keep_neighbours: bool,
+) -> CoreResult<Plan> {
     if inventory.workload(target).is_none() {
         return Err(CoreError::UnknownWorkload(target.to_string()));
     }
@@ -358,7 +392,7 @@ pub fn plan_restart(
             .into(),
         });
     }
-    let mut plan = plan_run(inventory, observations, target)?;
+    let mut plan = plan_run_with(inventory, observations, target, keep_neighbours)?;
     plan.kind = OpKind::Restart;
     Ok(plan)
 }

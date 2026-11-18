@@ -1629,6 +1629,88 @@ async fn a_manual_stop_is_reported_survives_eviction_and_is_not_restored() {
     assert_eq!(manual(&client.intents().await.unwrap(), "helper"), Some(false));
 }
 
+// ---- M4c: VRAM fit ---------------------------------------------------------------
+
+fn write_gpu_free(d: &DaemonGuard, free: serde_json::Value) {
+    std::fs::write(d.data_dir().join("gpu_free.json"), free.to_string()).expect("write gpu_free.json");
+}
+
+/// A start keeps its neighbours when the target was measured to fit beside
+/// them, and makes room the old way on every unknown.
+#[tokio::test]
+async fn a_start_that_fits_runs_beside_its_neighbours() {
+    let d = spawn_daemon();
+    let client = d.client();
+    let unit = |n: &str| format!("user/llmctl-next-fake-{n}.service");
+    let plan_big = || async {
+        client
+            .plan(PlanRequest { kind: OpKind::Run, workload: "big".into(), profile: None })
+            .await
+            .unwrap()
+    };
+    let running = |st: &llmctl_client::wire::StatusResponse, name: &str| {
+        let w = st.workloads.iter().find(|w| w.name == name).unwrap();
+        format!("{:?}", w.process).contains("Running")
+    };
+
+    // coder holds gpu 0. `big` (both cards) was never measured: it evicts.
+    run_to_success(&d, "coder", "fit-setup").await;
+    write_gpus(&d, serde_json::json!([{"gpu": 0, "pid": 4101, "unit": unit("coder"), "memory_mib": 8000}]));
+    write_gpu_free(&d, serde_json::json!({"0": 24000, "1": 32000}));
+    let plan = plan_big().await;
+    assert_eq!(plan.stop_targets, vec!["coder"]);
+    assert!(plan.notes[0].contains("makes room (coder): never measured"), "{:?}", plan.notes);
+
+    // It runs once (alone); what it holds then is remembered.
+    write_gpus(&d, serde_json::json!([
+        {"gpu": 0, "pid": 4201, "unit": unit("big"), "memory_mib": 6000},
+        {"gpu": 1, "pid": 4202, "unit": unit("big"), "memory_mib": 6000}
+    ]));
+    run_to_success(&d, "big", "fit-measure").await;
+    let vram = client.vram().await.unwrap();
+    let rec = vram.records.iter().find(|r| r.workload == "big").expect("big was measured");
+    assert_eq!(rec.per_card_mib, [(0u32, 6000u64), (1, 6000)].into_iter().collect());
+    assert_eq!(vram.free_mib, Some([(0u32, 24000u64), (1, 32000)].into_iter().collect()));
+
+    // Back to coder alone on gpu 0, with room for big on both cards.
+    let resp = client.admit(admit_req(OpKind::Stop, "big", "fit-stop")).await.unwrap();
+    assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
+    write_gpus(&d, serde_json::json!([]));
+    run_to_success(&d, "coder", "fit-coder").await;
+    write_gpus(&d, serde_json::json!([{"gpu": 0, "pid": 4101, "unit": unit("coder"), "memory_mib": 8000}]));
+    let plan = plan_big().await;
+    assert!(plan.stop_targets.is_empty(), "{:?}", plan.stop_targets);
+    assert!(plan.notes[0].starts_with("starts beside coder: fits: needs 5.9 GiB on gpu 0"), "{:?}", plan.notes);
+    run_to_success(&d, "big", "fit-beside").await;
+    let st = client.status().await.unwrap();
+    assert!(running(&st, "coder") && running(&st, "big"));
+
+    // One MiB short of the headroom on gpu 0: back to making room.
+    let resp = client.admit(admit_req(OpKind::Stop, "big", "fit-stop-2")).await.unwrap();
+    assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
+    write_gpu_free(&d, serde_json::json!({"0": 7023, "1": 32000}));
+    let plan = plan_big().await;
+    assert_eq!(plan.stop_targets, vec!["coder"]);
+    assert!(plan.notes[0].contains("does not fit"), "{:?}", plan.notes);
+
+    // Cards that cannot be read are never "free".
+    std::fs::remove_file(d.data_dir().join("gpu_free.json")).unwrap();
+    let plan = plan_big().await;
+    assert_eq!(plan.stop_targets, vec!["coder"]);
+    assert!(plan.notes[0].contains("free VRAM could not be read"), "{:?}", plan.notes);
+
+    // Measuring on request needs the workload on its cards.
+    match client.vram_measure("helper").await {
+        Err(ClientError::Api { code, message, .. }) => {
+            assert_eq!(code, codes::INVALID_STATE, "{message}");
+            assert!(message.contains("holds no VRAM"), "{message}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    let measured = client.vram_measure("coder").await.unwrap().measured.expect("coder measured");
+    assert_eq!(measured.per_card_mib, [(0u32, 8000u64)].into_iter().collect());
+}
+
 // ---- B: bounded recovery ----------------------------------------------------
 
 /// A daemon whose inventory gives `coder` a recovery budget and whose

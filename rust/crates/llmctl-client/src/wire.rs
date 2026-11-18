@@ -334,6 +334,34 @@ pub struct PlanResponse {
     /// destructive footprint a confirmation refers to.
     pub stop_targets: Vec<String>,
     pub plan: Plan,
+    /// What the plan rested on that its steps do not show: the VRAM-fit
+    /// decision and its reason (M4c).
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// Measured VRAM per workload and the cards' free memory (M4c VRAM fit).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VramResponse {
+    /// Free MiB per card now; `None` when the cards cannot be read.
+    pub free_mib: Option<std::collections::BTreeMap<u32, u64>>,
+    pub records: Vec<VramRecordView>,
+    /// Set by a measure request: what was just recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured: Option<VramRecordView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VramRecordView {
+    pub workload: String,
+    pub model: String,
+    pub per_card_mib: std::collections::BTreeMap<u32, u64>,
+    pub measured_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VramMeasureRequest {
+    pub workload: String,
 }
 
 // ---- operations -----------------------------------------------------------

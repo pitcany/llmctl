@@ -636,3 +636,38 @@ fn profile_run_needs_a_model_and_lifecycle_authority() {
     let err = llmctl_core::plan_run_profile(&inv, &[], &wn("coder"), &profile("m")).unwrap_err();
     assert!(matches!(err, CoreError::InvalidConfig { .. }), "{err:?}");
 }
+
+// ---- M4c: VRAM fit -------------------------------------------------------------
+
+#[test]
+fn a_run_that_fits_keeps_its_neighbours() {
+    let inv = inventory_with_on_demand_helper();
+    let observations = [
+        obs("coder", &[0], true),
+        obs_loaded("helper", &[0, 1], &["qwen3:8b"]),
+        obs("big", &[], false),
+    ];
+    // The caller decided there is room: nothing is unloaded or stopped, and
+    // a failed start only takes the target down again.
+    let plan = llmctl_core::plan_run_with(&inv, &observations, &wn("big"), true).unwrap();
+    assert_eq!(
+        labels(&plan.steps),
+        vec![
+            "record intent: big → Running",
+            "start big",
+            "wait for big readiness",
+            "verify big serves fake/big",
+        ]
+    );
+    assert_eq!(labels(&plan.rollback), vec!["stop big"]);
+
+    // No room: the plan evicts as before.
+    let plan = llmctl_core::plan_run_with(&inv, &observations, &wn("big"), false).unwrap();
+    assert!(plan.steps.iter().any(|s| matches!(s, PlanStep::StopUnit { .. })));
+    assert!(plan.steps.iter().any(|s| matches!(s, PlanStep::UnloadModel { .. })));
+
+    // A restart that fits still restarts the target itself, and only it.
+    let observations = [obs("coder", &[0], true), obs("big", &[0, 1], true)];
+    let plan = llmctl_core::plan_restart_with(&inv, &observations, &wn("big"), true).unwrap();
+    assert_eq!(labels(&plan.steps)[..3], ["record intent: big → Running", "stop big", "start big"]);
+}
