@@ -19,6 +19,7 @@ mod enroll;
 mod catalog_cmds;
 mod lanes_matrix;
 mod preset_cmds;
+mod records_cmds;
 
 #[derive(Parser)]
 #[command(
@@ -95,6 +96,14 @@ enum Command {
         #[command(subcommand)]
         cmd: catalog_cmds::CatalogCmd,
     },
+    /// Enroll a workload `adopt` cannot prove: an observe-only endpoint
+    /// (--observe URL) or a vendor app's own controls (--start/--stop).
+    /// A preview until --confirm.
+    Enroll(records_cmds::EnrollArgs),
+    /// Change a record's control authority (external records only; an
+    /// adopted workload keeps the unit adoption pinned). A preview until
+    /// --confirm.
+    Authority(records_cmds::AuthorityArgs),
     /// Presets (`~/.config/llmctl/presets/*.yaml`), edited in place.
     Preset {
         #[command(subcommand)]
@@ -853,6 +862,8 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Stores { cmd, json } => cmd_stores(cli, cmd, json).await,
         Command::Model { cmd } => cmd_model(cli, cmd).await,
         Command::Preset { cmd } => preset_cmds::cmd_preset(cli, cmd).await,
+        Command::Enroll(a) => records_cmds::cmd_enroll(cli, a).await,
+        Command::Authority(a) => records_cmds::cmd_authority(cli, a).await,
         Command::Catalog { cmd } => catalog_cmds::cmd_catalog(cli, cmd).await,
         Command::Vram { measure, json } => cmd_vram(cli, measure.as_deref(), json).await,
         Command::Ops { json } => cmd_ops(cli, json).await,

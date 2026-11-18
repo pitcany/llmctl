@@ -34,6 +34,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/catalog/models/edit", post(catalog_edit))
         .route("/v1/catalog/models/enable", post(catalog_enable))
         .route("/v1/catalog/scan", post(catalog_scan))
+        .route("/v1/records/enroll", post(records_enroll))
+        .route("/v1/records/authority", post(records_authority))
 }
 
 pub struct M5cError {
@@ -214,4 +216,32 @@ async fn catalog_scan(
 ) -> Result<Json<cat::ScanResponse>, M5cError> {
     check_protocol(req.protocol)?;
     Ok(Json(crate::catalog::scan(&state, &req).await?))
+}
+
+impl From<crate::ops::OpsError> for M5cError {
+    fn from(e: crate::ops::OpsError) -> Self {
+        let (code, status) = e.code_and_status();
+        M5cError {
+            status: StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            code,
+            message: e.to_string(),
+            details: e.details(),
+        }
+    }
+}
+
+async fn records_enroll(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<cat::EnrollRequest>,
+) -> Result<Json<cat::RecordResponse>, M5cError> {
+    check_protocol(req.protocol)?;
+    Ok(Json(crate::records::enroll(&state, &req).await?))
+}
+
+async fn records_authority(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<cat::AuthorityRequest>,
+) -> Result<Json<cat::RecordResponse>, M5cError> {
+    check_protocol(req.protocol)?;
+    Ok(Json(crate::records::set_authority(&state, &req).await?))
 }

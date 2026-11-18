@@ -395,3 +395,79 @@ impl ControlClient {
         self.post_json("/v1/catalog/scan", req).await
     }
 }
+
+// ---- records by verb (M5c item 5) ---------------------------------------------
+
+/// How a new record is controlled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EnrollAuthority {
+    /// Watched, never moved: `run`/`stop` are refused.
+    ObserveOnly { endpoint: String },
+    /// A Mac vendor app's own controls (absolute programs).
+    VendorCommand {
+        start: Vec<String>,
+        stop: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        log: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrollRequest {
+    pub protocol: u32,
+    pub name: String,
+    pub authority: EnrollAuthority,
+    /// What runs there (`ollama`, `lm_studio`, `vllm`, …).
+    pub engine_kind: String,
+    /// What its endpoint must serve.
+    pub model: String,
+    /// The port it answers on (observe-only: taken from the endpoint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// GPU indexes; default every GPU of the host.
+    #[serde(default)]
+    pub gpus: Vec<u32>,
+    /// Holds no VRAM until a request loads a model (vendor services).
+    #[serde(default)]
+    pub on_demand: bool,
+    /// The supervisor adapter (default: `systemd` on Linux, `launchd` on
+    /// a Mac; tests use `fake`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorityRequest {
+    pub protocol: u32,
+    pub name: String,
+    pub authority: llmctl_core::ControlAuthority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordResponse {
+    pub workload: String,
+    /// The record as it is (or with `confirm` was) written.
+    pub record: llmctl_core::WorkloadDefinition,
+    /// The authority before (`authority` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<llmctl_core::ControlAuthority>,
+    /// Pass back as `confirm` to write exactly this.
+    pub confirm: String,
+    pub applied: bool,
+    pub inventory_revision: u64,
+}
+
+impl ControlClient {
+    pub async fn enroll_record(&self, req: &EnrollRequest) -> Result<RecordResponse, ClientError> {
+        self.post_json("/v1/records/enroll", req).await
+    }
+
+    pub async fn set_authority(&self, req: &AuthorityRequest) -> Result<RecordResponse, ClientError> {
+        self.post_json("/v1/records/authority", req).await
+    }
+}
