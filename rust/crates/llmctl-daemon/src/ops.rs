@@ -314,6 +314,17 @@ impl OpManager {
         }
     }
 
+    /// True when the recorded intent of `workload` is a manual stop.
+    async fn manually_stopped(&self, workload: &WorkloadName) -> bool {
+        self.db
+            .get_intents()
+            .await
+            .ok()
+            .and_then(|all| all.into_iter().find(|(w, _)| w == workload.as_str()))
+            .and_then(|(_, j)| serde_json::from_str::<llmctl_core::DesiredIntent>(&j).ok())
+            .is_some_and(|i| matches!(i, llmctl_core::DesiredIntent::Stopped { manual: true }))
+    }
+
     /// Fresh observations for planning `kind` on `target`. A run or restart
     /// of an at_start workload also asks each running on-demand vendor
     /// service that really sits on one of the target's cards which models
@@ -952,6 +963,18 @@ impl OpManager {
     ) -> StepOutcome {
         match step {
             PlanStep::PersistIntent { workload, intent } => {
+                // An eviction (`Stopped { manual: false }`) of a workload the
+                // owner stopped by hand — and something else started again —
+                // must not turn the manual stop into an ordinary one: the
+                // healers and this operation's own rollback rely on it.
+                if matches!(intent, llmctl_core::DesiredIntent::Stopped { manual: false })
+                    && self.manually_stopped(workload).await
+                {
+                    set_phase(&mut row.phases, index, |p| {
+                        p.detail = Some("kept: manually stopped".into())
+                    });
+                    return StepOutcome::Done;
+                }
                 if let Err(e) = self
                     .db
                     .set_intent(
@@ -1278,6 +1301,30 @@ impl OpManager {
                     p.status = PhaseStatus::EffectPending
                 });
                 self.persist(row).await?;
+            }
+
+            // A swap's rollback never restarts a manual stop (plan item 6):
+            // the workload was running against the owner's recorded wish,
+            // and "restoring" it would repeat that.
+            let restores_other = matches!(
+                &step,
+                PlanStep::StartUnit { workload, .. }
+                | PlanStep::PersistIntent { workload, intent: llmctl_core::DesiredIntent::Running }
+                    if *workload != row.plan.target
+            );
+            if restores_other && self.manually_stopped(step.workload()).await {
+                recovery_steps.push(json!({
+                    "step": step.label(),
+                    "outcome": "skipped",
+                    "reason": "manually stopped; a rollback does not start it again",
+                }));
+                let last = row.phases.len() - 1;
+                set_phase(&mut row.phases, last, |p| {
+                    p.status = PhaseStatus::Done;
+                    p.detail = Some("skipped: manually stopped".into());
+                });
+                self.persist(row).await?;
+                continue;
             }
 
             let outcome: Result<Option<String>, String> = match &step {

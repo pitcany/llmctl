@@ -29,6 +29,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/status", get(status))
         .route("/v1/inventory", get(inventory))
+        .route("/v1/intents", get(intents))
         .route("/v1/plans", post(create_plan))
         .route("/v1/operations", post(admit_operation))
         .route("/v1/operations", get(list_operations))
@@ -76,6 +77,50 @@ async fn under_lease_scope(
     crate::coord::UNDER_LEASE
         .scope(pid, crate::coord::LOCK_HOLDER.scope(lock_holder, next.run(req)))
         .await
+}
+
+/// Recorded intents from the journal's intent store. Cheap on purpose: a
+/// healer calls this before every repair, so it must not probe engines.
+async fn intents(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<llmctl_client::wire::IntentsResponse>, ApiError> {
+    let inv = state.ops.inventory().await;
+    let stored: std::collections::HashMap<String, String> = state
+        .ops
+        .db()
+        .get_intents()
+        .await
+        .map_err(|e| ApiError::from_ops(&OpsError::Db(e)))?
+        .into_iter()
+        .collect();
+    let intents = inv
+        .workloads
+        .iter()
+        .map(|def| {
+            let intent = stored
+                .get(def.name.as_str())
+                .and_then(|j| serde_json::from_str::<llmctl_core::DesiredIntent>(j).ok());
+            llmctl_client::wire::IntentView {
+                workload: def.name.to_string(),
+                unit: def.unit.name.clone(),
+                intent: match intent {
+                    Some(llmctl_core::DesiredIntent::Running) => "running",
+                    Some(llmctl_core::DesiredIntent::Stopped { .. }) => "stopped",
+                    Some(llmctl_core::DesiredIntent::Unmanaged) => "unmanaged",
+                    None => "none",
+                }
+                .into(),
+                manual_stop: matches!(
+                    intent,
+                    Some(llmctl_core::DesiredIntent::Stopped { manual: true })
+                ),
+            }
+        })
+        .collect();
+    Ok(Json(llmctl_client::wire::IntentsResponse {
+        host: inv.host.to_string(),
+        intents,
+    }))
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {

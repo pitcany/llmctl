@@ -195,6 +195,11 @@ impl ControlClient {
         self.get_json("/v1/status").await
     }
 
+    /// Recorded intents per workload; no engine is probed.
+    pub async fn intents(&self) -> Result<crate::wire::IntentsResponse, ClientError> {
+        self.get_json("/v1/intents").await
+    }
+
     /// The raw inventory (read-only; adoption/ownership state included).
     pub async fn inventory(&self) -> Result<serde_json::Value, ClientError> {
         self.get_json("/v1/inventory").await

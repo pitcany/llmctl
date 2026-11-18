@@ -1549,6 +1549,86 @@ async fn a_profile_run_swaps_the_env_repins_and_rolls_back() {
     assert_eq!(std::fs::read_to_string(&env).unwrap(), "MODEL=fast\n");
 }
 
+// ---- M4c: manual stops ---------------------------------------------------------
+
+/// Something outside llmctl-next started the workload again (a start script,
+/// a healer): the fake world has it active while the intent is untouched.
+fn start_fake_unit_outside(d: &DaemonGuard, name: &str) {
+    let path = d.data_dir().join("world.json");
+    let mut world: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let unit = &mut world["units"][&format!("user/llmctl-next-fake-{name}.service")];
+    unit["active"] = true.into();
+    unit["pid"] = 9999.into();
+    unit["ready_at"] = "2026-01-01T00:00:00Z".into();
+    unit["model"] = format!("fake/{name}").into();
+    std::fs::write(&path, world.to_string()).unwrap();
+}
+
+/// A manual stop is the owner's decision. The healers ask for it (`intent`),
+/// an eviction does not turn it into an ordinary stop, and a rollback never
+/// starts the workload again.
+#[tokio::test]
+async fn a_manual_stop_is_reported_survives_eviction_and_is_not_restored() {
+    let d = spawn_daemon();
+    let client = d.client();
+    let manual = |intents: &llmctl_client::wire::IntentsResponse, name: &str| {
+        intents.intents.iter().find(|i| i.workload == name).map(|i| i.manual_stop)
+    };
+    let running = |st: &llmctl_client::wire::StatusResponse, name: &str| {
+        let w = st.workloads.iter().find(|w| w.name == name).unwrap();
+        format!("{:?}", w.process).contains("Running")
+    };
+
+    run_to_success(&d, "coder", "ms-setup").await;
+    let intents = client.intents().await.unwrap();
+    assert_eq!(manual(&intents, "coder"), Some(false));
+    let coder = intents.intents.iter().find(|i| i.workload == "coder").unwrap();
+    assert_eq!(coder.unit, "llmctl-next-fake-coder.service");
+
+    // The owner stops coder: reported as a manual stop.
+    let resp = client.admit(admit_req(OpKind::Stop, "coder", "ms-stop")).await.unwrap();
+    assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
+    assert_eq!(manual(&client.intents().await.unwrap(), "coder"), Some(true));
+
+    // Something else starts it anyway. `big` needs its card, so the plan
+    // evicts it; big's start fails; the rollback must not bring coder back.
+    start_fake_unit_outside(&d, "coder");
+    assert!(running(&client.status().await.unwrap(), "coder"));
+    d.write_faults(serde_json::json!({"fail_effects": [
+        {"unit": "user/llmctl-next-fake-big.service", "kind": "start", "mode": "before"}
+    ]}));
+    let resp = client.admit(admit_req(OpKind::Run, "big", "ms-fail")).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Failed, "{op:?}");
+    let recovery = op.recovery.expect("restoration recorded");
+    assert_eq!(recovery["outcome"], "restored", "{recovery}");
+    let skipped: Vec<&str> = recovery["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["outcome"] == "skipped")
+        .filter_map(|s| s["step"].as_str())
+        .collect();
+    assert_eq!(skipped, vec!["record intent: coder → Running", "start coder"], "{recovery}");
+    assert!(recovery.to_string().contains("manually stopped"), "{recovery}");
+    let st = client.status().await.unwrap();
+    assert!(!running(&st, "coder") && !running(&st, "big"));
+    assert_eq!(manual(&client.intents().await.unwrap(), "coder"), Some(true));
+
+    // The same eviction in a run that succeeds: still a manual stop after.
+    start_fake_unit_outside(&d, "coder");
+    run_to_success(&d, "big", "ms-ok").await;
+    assert_eq!(manual(&client.intents().await.unwrap(), "coder"), Some(true));
+
+    // An ordinary eviction is not a manual stop, and its rollback restores.
+    let resp = client.admit(admit_req(OpKind::Stop, "big", "ms-stop-big")).await.unwrap();
+    assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
+    run_to_success(&d, "helper", "ms-helper").await;
+    run_to_success(&d, "big", "ms-evict-helper").await;
+    assert_eq!(manual(&client.intents().await.unwrap(), "helper"), Some(false));
+}
+
 // ---- B: bounded recovery ----------------------------------------------------
 
 /// A daemon whose inventory gives `coder` a recovery budget and whose

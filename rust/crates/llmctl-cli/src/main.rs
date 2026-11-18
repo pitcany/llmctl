@@ -121,6 +121,15 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Recorded intent per workload, without probing anything. What a
+    /// healer asks before it restarts or loads something: a `manual_stop`
+    /// means the owner stopped it here, so leave it alone.
+    Intent {
+        /// Workload name, unit name or launchd label; omit for all.
+        name: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// List operations from the journal.
     Ops {
         #[arg(long)]
@@ -570,6 +579,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             key,
             force,
         } => cmd_mutate(cli, OpKind::Restart, &name, dry_run, wait, key, force, None).await,
+        Command::Intent { name, json } => cmd_intent(cli, name.as_deref(), json).await,
         Command::Ops { json } => cmd_ops(cli, json).await,
         Command::Op { id, watch } => cmd_op(cli, &id, watch).await,
         Command::Cancel { id } => cmd_cancel(cli, &id).await,
@@ -1359,6 +1369,44 @@ async fn cmd_upgrade(cli: &Cli, cmd: UpgradeCmd) -> Result<u8, CliError> {
             Ok(0)
         }
     }
+}
+
+/// `intent [NAME]`: exit 0 with the record(s); exit 5 when NAME matches no
+/// enrolled workload or unit. A healer treats any failure as "not held".
+async fn cmd_intent(cli: &Cli, name: Option<&str>, json: bool) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    let all = client.intents().await?;
+    let bare = |s: &str| s.trim_end_matches(".service").to_string();
+    let picked: Vec<_> = match name {
+        None => all.intents.iter().collect(),
+        Some(n) => all
+            .intents
+            .iter()
+            .filter(|i| i.workload == n || bare(&i.unit) == bare(n))
+            .collect(),
+    };
+    if let (Some(n), true) = (name, picked.is_empty()) {
+        eprintln!("error: no enrolled workload or unit named {n:?} on {}", all.host);
+        return Ok(5);
+    }
+    if json {
+        let out = match (name, picked.as_slice()) {
+            (Some(_), [one]) => serde_json::to_string_pretty(one),
+            _ => serde_json::to_string_pretty(&picked),
+        };
+        println!("{}", out.unwrap());
+        return Ok(0);
+    }
+    for i in picked {
+        println!(
+            "{:<14} {:<44} {}{}",
+            i.workload,
+            i.unit,
+            i.intent,
+            if i.manual_stop { "  (manual stop: leave it alone)" } else { "" }
+        );
+    }
+    Ok(0)
 }
 
 async fn cmd_ops(cli: &Cli, json: bool) -> Result<u8, CliError> {

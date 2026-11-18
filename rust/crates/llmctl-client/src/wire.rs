@@ -304,6 +304,26 @@ pub struct ProfileRequest {
     pub model: String,
 }
 
+/// Recorded intents, without probing anything (M4c): what the healers
+/// (llm-heal, mac-heal, llmctl-warm) ask before they restart or load a
+/// workload. `manual_stop` = the owner stopped it through llmctl-next;
+/// hands off.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntentsResponse {
+    pub host: String,
+    pub intents: Vec<IntentView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntentView {
+    pub workload: String,
+    /// Bare unit or launchd label name, as the service manager knows it.
+    pub unit: String,
+    /// `running`, `stopped`, `unmanaged`, or `none` (never set).
+    pub intent: String,
+    pub manual_stop: bool,
+}
+
 /// Dry-run response: the plan the daemon would execute now, against fresh
 /// observations. Offline plans are estimates; this one is revalidated again
 /// at admission.
