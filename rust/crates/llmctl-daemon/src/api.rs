@@ -32,6 +32,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/intents", get(intents))
         .route("/v1/stores", get(stores))
         .route("/v1/models/acquire", post(models_acquire))
+        .route("/v1/models/remove", post(models_remove))
+        .route("/v1/stores/add", post(stores_add))
+        .route("/v1/stores/remove", post(stores_remove))
         .route("/v1/vram", get(vram))
         .route("/v1/vram/measure", post(vram_measure))
         .route("/v1/plans", post(create_plan))
@@ -91,6 +94,46 @@ async fn under_lease_scope(
 
 async fn stores(State(state): State<Arc<AppState>>) -> Json<llmctl_client::wire::StoresResponse> {
     Json(crate::acquire::stores(&state).await)
+}
+
+async fn stores_add(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::StoreAddRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_protocol(req.protocol)?;
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    Ok(Json(
+        crate::weights::add_store(&state, &req)
+            .await
+            .map_err(|e| ApiError::from_ops(&e))?,
+    ))
+}
+
+async fn stores_remove(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::StoreRemoveRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_protocol(req.protocol)?;
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    Ok(Json(
+        crate::weights::remove_store(&state, &req.name)
+            .await
+            .map_err(|e| ApiError::from_ops(&e))?,
+    ))
+}
+
+/// Preview a removal of weights, or carry it out with the preview's token.
+async fn models_remove(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::ModelRemoveRequest>,
+) -> Result<Json<llmctl_client::wire::ModelRemoveResponse>, ApiError> {
+    check_protocol(req.protocol)?;
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    Ok(Json(
+        crate::weights::remove(&state, &req)
+            .await
+            .map_err(|e| ApiError::from_ops(&e))?,
+    ))
 }
 
 async fn models_acquire(

@@ -379,6 +379,55 @@ pub struct StoreView {
     pub free_bytes: Option<u64>,
 }
 
+/// Declare a model store (nothing is created on disk).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreAddRequest {
+    pub protocol: u32,
+    pub name: String,
+    /// `hf_cache`, `directory`, `ollama` or `lmstudio`.
+    pub kind: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserve_gib: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreRemoveRequest {
+    pub protocol: u32,
+    pub name: String,
+}
+
+/// Remove weights from a store. Without `confirm` it only previews: the
+/// path, the size, and whoever still references them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRemoveRequest {
+    pub protocol: u32,
+    /// `hf:org/name`, `ollama:tag`, or `path:<relative path in the store>`.
+    pub target: String,
+    pub store: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRemoveResponse {
+    pub target: String,
+    pub store: String,
+    /// The directory or file that goes (absent for an Ollama tag).
+    pub path: Option<String>,
+    pub bytes: Option<u64>,
+    /// Who still names these weights. Not empty = nothing is removed.
+    pub references: Vec<String>,
+    /// The token that confirms this preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
+    pub removed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freed_bytes: Option<u64>,
+}
+
 /// Download weights into a store. `dry_run` only checks and previews.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcquireRequest {

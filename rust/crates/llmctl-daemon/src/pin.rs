@@ -139,7 +139,7 @@ pub async fn repin(state: &AppState, name: &str) -> Result<Value, OpsError> {
 }
 
 /// Write a changed inventory: validated, file first, then the live copy.
-async fn commit_inventory(
+pub(crate) async fn commit_inventory(
     state: &AppState,
     mut next: llmctl_core::HostInventory,
     what: &str,

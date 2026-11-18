@@ -200,6 +200,28 @@ impl ControlClient {
         self.get_json("/v1/stores").await
     }
 
+    pub async fn store_add(
+        &self,
+        req: &crate::wire::StoreAddRequest,
+    ) -> Result<serde_json::Value, ClientError> {
+        self.post_json("/v1/stores/add", req).await
+    }
+
+    pub async fn store_remove(
+        &self,
+        req: &crate::wire::StoreRemoveRequest,
+    ) -> Result<serde_json::Value, ClientError> {
+        self.post_json("/v1/stores/remove", req).await
+    }
+
+    /// Preview, or with the preview's token carry out, a removal of weights.
+    pub async fn model_remove(
+        &self,
+        req: &crate::wire::ModelRemoveRequest,
+    ) -> Result<crate::wire::ModelRemoveResponse, ClientError> {
+        self.post_json("/v1/models/remove", req).await
+    }
+
     /// Check, preview and (unless `dry_run`) admit a download into a store.
     pub async fn acquire(
         &self,

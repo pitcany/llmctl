@@ -2768,3 +2768,100 @@ fn recipes_are_set_and_cleared_and_a_record_is_forgotten_by_verbs() {
     assert_eq!(code, Some(5), "an unknown workload: {text}");
     stop_daemon(child);
 }
+
+/// Stores are declared by verb, and weights leave a store only through a
+/// preview and its token, never while a workload still names them.
+#[test]
+fn stores_are_declared_and_weights_removed_only_when_nothing_names_them() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hub = dir.path().join("hub");
+    for repo in ["models--org--tiny", "models--org--used"] {
+        let blobs = hub.join(repo).join("blobs");
+        std::fs::create_dir_all(&blobs).unwrap();
+        std::fs::write(blobs.join("weights.bin"), vec![7u8; 4096]).unwrap();
+    }
+    let host = "workstation";
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [{
+            // This workload serves org/used: those weights are in use.
+            "name": "eng", "engine": "fake", "model": "org/used",
+            "gpus": [{"host": host, "index": 0}], "port": 8100,
+            "unit": {"scope": "user", "name": "llmctl-next-fake-eng.service"},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": "llmctl-next-fake-eng.service"},
+            "ownership": {"kind": "external"}
+        }],
+        "revision": 1
+    }});
+    std::fs::write(dir.path().join("inventory.json"), inv.to_string()).unwrap();
+    let child = start_daemon_in(dir.path(), &[]);
+    let socket = dir.path().join("control.sock");
+    let run = |args: &[&str]| {
+        let out = cli(&socket, args);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.code(), text)
+    };
+    let hub_s = hub.to_str().unwrap();
+
+    // Declaring: a bad kind, a service store without its service and a
+    // second store of the same name are refused.
+    let (code, text) = run(&["stores", "add", "hub", "--kind", "bucket", "--path", hub_s]);
+    assert_ne!(code, Some(0), "{text}");
+    assert!(text.contains("hf_cache, directory, ollama or lmstudio"), "{text}");
+    let (code, text) = run(&["stores", "add", "oll", "--kind", "ollama", "--path", hub_s]);
+    assert_ne!(code, Some(0), "{text}");
+    assert!(text.contains("must name the Ollama workload"), "{text}");
+    let (code, text) = run(&["stores", "add", "hub", "--kind", "hf_cache", "--path", hub_s, "--reserve-gib", "1"]);
+    assert_eq!(code, Some(0), "{text}");
+    let (code, text) = run(&["stores", "add", "hub", "--kind", "hf_cache", "--path", hub_s]);
+    assert_ne!(code, Some(0), "{text}");
+    assert!(text.contains("already declared"), "{text}");
+    let (_, text) = run(&["stores"]);
+    assert!(text.contains("hub") && text.contains("hf_cache"), "{text}");
+
+    // In use: named, listed, not removable even with a token.
+    let (code, text) = run(&["model", "rm", "hf:org/used", "--store", "hub"]);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(text.contains("still referenced") && text.contains("workload eng serves it"), "{text}");
+    let (code, text) = run(&["model", "rm", "hf:org/used", "--store", "hub", "--confirm", "0000000000000000"]);
+    assert_eq!(code, Some(4), "{text}");
+    assert!(hub.join("models--org--used").exists());
+
+    // Not in use: a preview with a token, and nothing is gone yet.
+    let (code, text) = run(&["model", "rm", "hf:org/tiny", "--store", "hub"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("nothing references it") && text.contains("--confirm "), "{text}");
+    assert!(hub.join("models--org--tiny").exists(), "a preview removes nothing");
+    let token = text.split("--confirm ").nth(1).unwrap().split_whitespace().next().unwrap().to_string();
+    let (code, text) = run(&["model", "rm", "hf:org/tiny", "--store", "hub", "--confirm", "ffffffffffffffff"]);
+    assert_ne!(code, Some(0), "{text}");
+    assert!(text.contains("stale confirmation"), "{text}");
+    assert!(hub.join("models--org--tiny").exists());
+    let (code, text) = run(&["model", "rm", "hf:org/tiny", "--store", "hub", "--confirm", &token]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("removed"), "{text}");
+    assert!(!hub.join("models--org--tiny").exists());
+    assert!(hub.join("models--org--used").exists(), "only the named weights went");
+    let (code, text) = run(&["model", "rm", "hf:org/tiny", "--store", "hub"]);
+    assert_ne!(code, Some(0), "{text}");
+    assert!(text.contains("is not in store hub"), "{text}");
+
+    // A path cannot leave the store.
+    let (code, text) = run(&["model", "rm", "path:../inventory.json", "--store", "hub"]);
+    assert_ne!(code, Some(0), "{text}");
+    assert!(text.contains("not a plain relative path"), "{text}");
+    assert!(dir.path().join("inventory.json").exists());
+
+    // Forgetting the store leaves its weights.
+    let (code, text) = run(&["stores", "remove", "hub"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(hub.join("models--org--used").exists());
+    let (_, text) = run(&["stores"]);
+    assert!(text.contains("no store declared"), "{text}");
+    stop_daemon(child);
+}

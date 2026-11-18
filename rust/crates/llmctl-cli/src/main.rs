@@ -131,7 +131,11 @@ enum Command {
         json: bool,
     },
     /// Declared model stores (where weights live) with their free space.
+    /// `stores add` / `stores remove` declare or forget one; neither
+    /// creates or deletes anything on disk.
     Stores {
+        #[command(subcommand)]
+        cmd: Option<StoresCmd>,
         #[arg(long)]
         json: bool,
     },
@@ -354,6 +358,43 @@ enum ModelCmd {
         #[arg(long)]
         key: Option<String>,
     },
+    /// Remove weights from a store: `hf:org/name`, `ollama:tag`, or
+    /// `path:<relative path in the store>`. Without --confirm it shows
+    /// the path, the size and who still references them; weights a
+    /// workload, a profile or a lane names are never removed.
+    Rm {
+        target: String,
+        #[arg(long)]
+        store: String,
+        /// The token the preview printed.
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum StoresCmd {
+    /// Declare a store.
+    Add {
+        name: String,
+        /// hf_cache, directory, ollama or lmstudio.
+        #[arg(long)]
+        kind: String,
+        /// Absolute path of the store's root.
+        #[arg(long)]
+        path: String,
+        /// Free space a download must leave (default 20).
+        #[arg(long)]
+        reserve_gib: Option<u64>,
+        /// The workload its downloads are journaled under; required for
+        /// ollama and lmstudio stores (the service that downloads).
+        #[arg(long)]
+        workload: Option<String>,
+    },
+    /// Forget a store. The weights in it stay.
+    Remove { name: String },
 }
 
 #[derive(Subcommand, Clone)]
@@ -722,7 +763,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             force,
         } => cmd_mutate(cli, OpKind::Restart, &name, dry_run, wait, key, force, None).await,
         Command::Intent { name, json } => cmd_intent(cli, name.as_deref(), json).await,
-        Command::Stores { json } => cmd_stores(cli, json).await,
+        Command::Stores { cmd, json } => cmd_stores(cli, cmd, json).await,
         Command::Model { cmd } => cmd_model(cli, cmd).await,
         Command::Vram { measure, json } => cmd_vram(cli, measure.as_deref(), json).await,
         Command::Ops { json } => cmd_ops(cli, json).await,
@@ -1646,8 +1687,46 @@ async fn cmd_upgrade(cli: &Cli, cmd: UpgradeCmd) -> Result<u8, CliError> {
     }
 }
 
-async fn cmd_stores(cli: &Cli, json: bool) -> Result<u8, CliError> {
+async fn cmd_stores(cli: &Cli, cmd: Option<StoresCmd>, json: bool) -> Result<u8, CliError> {
     let client = connect(cli)?;
+    match cmd {
+        Some(StoresCmd::Add {
+            name,
+            kind,
+            path,
+            reserve_gib,
+            workload,
+        }) => {
+            ensure_protocol(&client).await?;
+            let r = client
+                .store_add(&llmctl_client::wire::StoreAddRequest {
+                    protocol: PROTOCOL_VERSION,
+                    name: name.clone(),
+                    kind,
+                    path,
+                    reserve_gib,
+                    workload,
+                })
+                .await?;
+            println!("store {name} declared; inventory revision {}", r["inventory_revision"]);
+            return Ok(0);
+        }
+        Some(StoresCmd::Remove { name }) => {
+            ensure_protocol(&client).await?;
+            let r = client
+                .store_remove(&llmctl_client::wire::StoreRemoveRequest {
+                    protocol: PROTOCOL_VERSION,
+                    name: name.clone(),
+                })
+                .await?;
+            println!(
+                "store {name} forgotten (its weights stay); inventory revision {}",
+                r["inventory_revision"]
+            );
+            return Ok(0);
+        }
+        None => {}
+    }
     let resp = client.stores().await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&resp).unwrap());
@@ -1676,15 +1755,61 @@ async fn cmd_stores(cli: &Cli, json: bool) -> Result<u8, CliError> {
 async fn cmd_model(cli: &Cli, cmd: ModelCmd) -> Result<u8, CliError> {
     let client = connect(cli)?;
     ensure_protocol(&client).await?;
-    let ModelCmd::Get {
-        source,
-        store,
-        for_workload,
-        size_gib,
-        dry_run,
-        wait,
-        key,
-    } = cmd;
+    let (source, store, for_workload, size_gib, dry_run, wait, key) = match cmd {
+        ModelCmd::Get {
+            source,
+            store,
+            for_workload,
+            size_gib,
+            dry_run,
+            wait,
+            key,
+        } => (source, store, for_workload, size_gib, dry_run, wait, key),
+        ModelCmd::Rm {
+            target,
+            store,
+            confirm,
+            json,
+        } => {
+            let r = client
+                .model_remove(&llmctl_client::wire::ModelRemoveRequest {
+                    protocol: PROTOCOL_VERSION,
+                    target,
+                    store,
+                    confirm,
+                })
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
+                return Ok(if r.references.is_empty() { 0 } else { 4 });
+            }
+            let size = r
+                .bytes
+                .map(|b| format!("{:.1} GiB", b as f64 / 1073741824.0))
+                .unwrap_or_else(|| "size unknown".into());
+            let what = r.path.clone().unwrap_or_else(|| r.target.clone());
+            if r.removed {
+                println!("removed {what} from store {} ({size})", r.store);
+                return Ok(0);
+            }
+            println!("{} in store {}: {what} ({size})", r.target, r.store);
+            if !r.references.is_empty() {
+                println!("  not removed: it is still referenced");
+                for line in &r.references {
+                    println!("    {line}");
+                }
+                return Ok(4);
+            }
+            println!("  nothing references it");
+            if let Some(token) = &r.confirm {
+                println!(
+                    "to remove it for good:\n  llmctl-next model rm {} --store {} --confirm {token}",
+                    r.target, r.store
+                );
+            }
+            return Ok(0);
+        }
+    };
     let resp = client
         .acquire(&llmctl_client::wire::AcquireRequest {
             protocol: PROTOCOL_VERSION,
