@@ -1,6 +1,6 @@
 # Rust successor for llmctl
 
-Status: proposed implementation plan, November 15, 2026. Progress: M2 done 2026-11-16 (pilot on `vllm-engine2`; [M2 plan](RUST-M2-PLAN.md)); M3 A–G done on mbp2 (G pilot on llama-swap 2026-11-17, [report](RUST-M3-PILOT-2026-11-17.md)); only the sleep/wake drill is open, blocked by Acronis' sleep lock ([M3 plan](RUST-M3-PLAN.md), [progress](RUST-M3-PROGRESS-2026-11-16.md)); M4 done 2026-11-18 (all six exit rows met, closed by the owner; the limits and what carries over are in the [M4 plan](RUST-M4-PLAN.md), "Exit check"); M5 started 2026-11-18: [plan](RUST-M5-PLAN.md), all seven owner decisions taken as recommended.
+Status: proposed implementation plan, November 15, 2026. Progress: M2 done 2026-11-16 (pilot on `vllm-engine2`; [M2 plan](RUST-M2-PLAN.md)); M3 A–G done on mbp2 (G pilot on llama-swap 2026-11-17, [report](RUST-M3-PILOT-2026-11-17.md)); the sleep/wake drill passed 2026-11-18 ([report](RUST-M3-SLEEP-DRILL-2026-11-18.md)), so M3 is done ([M3 plan](RUST-M3-PLAN.md), [progress](RUST-M3-PROGRESS-2026-11-16.md)); M4 done 2026-11-18 (all six exit rows met, closed by the owner; the limits and what carries over are in the [M4 plan](RUST-M4-PLAN.md), "Exit check"); M5 started 2026-11-18: [plan](RUST-M5-PLAN.md), all seven owner decisions taken as recommended.
 
 User priority: **daily use first, broader distribution later**. Rust is the
 working language choice following the C++/Rust discussion. This document plans

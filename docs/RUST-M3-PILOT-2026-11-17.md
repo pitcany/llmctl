@@ -9,6 +9,8 @@ Window 08:17–08:40 PST; healers paused 08:18, resumed 08:39.
 **Result: G passed except the sleep/wake drill, which could not run:**
 Acronis holds a system-wide sleep lock on mbp2 (below). M3 exit checklist:
 4 of 5 rows pass on the real unit; sleep/reconnect stays open.
+**Update 2026-11-18:** the sleep/wake drill passed as its own run:
+[RUST-M3-SLEEP-DRILL-2026-11-18.md](RUST-M3-SLEEP-DRILL-2026-11-18.md).
 
 ## Sequence and evidence
 

@@ -3,7 +3,8 @@
 Status 2026-11-17: A–G done on mbp2. The llama-swap pilot passed adopt,
 own, apply, logs, stop/run, release (byte-identical) and the drills on the
 real unit ([pilot report](RUST-M3-PILOT-2026-11-17.md)); the sleep/wake
-drill could not run (Acronis blocks sleep on mbp2) and stays open. A–F
+drill could not run then (Acronis blocked sleep on mbp2); **it passed on
+2026-11-18** ([drill report](RUST-M3-SLEEP-DRILL-2026-11-18.md)), so M3 is complete. A–F
 evidence: [progress note](RUST-M3-PROGRESS-2026-11-16.md). Owner answers
 below.
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md)
@@ -205,8 +206,9 @@ workstation:
   from the workstation — disposable and pilot
 - [x] Disconnect / lost ACK: no duplicate effect, no false success —
   disposable and pilot (both branches on the real unit)
-- [ ] Sleep / reconnect: stale while asleep, resolved by key after wake — pilot
-  (open: Acronis holds PreventSystemSleep on mbp2; see the pilot report)
+- [x] Sleep / reconnect: stale while asleep, resolved by key after wake — pilot
+  (done 2026-11-18 on mbp2 after a fix to `status --all`, `7c06963`;
+  [drill report](RUST-M3-SLEEP-DRILL-2026-11-18.md))
 - [x] Host / agent restart: agent SIGKILL reconciles honestly (disposable and
   pilot); login start simulated by bootout + bootstrap of the agent (pilot).
   A real reboot is not exercised (owner decision 3).

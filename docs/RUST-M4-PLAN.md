@@ -526,7 +526,8 @@ night (next section). What still carries over:
 3. **`deepseek41-1017-mxfp4-m5`** was never loaded through llmctl-next.
 4. **Release archives on launchd**, and `release` after a promote.
 5. **Profiles combined with the VRAM fit; per-lane in-flight counts.**
-6. **From M3:** the sleep/wake drill (blocked by Acronis' sleep lock).
+6. ~~**From M3:** the sleep/wake drill (blocked by Acronis' sleep lock).~~
+   Done 2026-11-18: [drill report](RUST-M3-SLEEP-DRILL-2026-11-18.md).
 
 ### After the close: five carried-over items (2026-11-18, 03:26 PST)
 
