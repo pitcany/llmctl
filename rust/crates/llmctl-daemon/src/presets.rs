@@ -337,6 +337,12 @@ fn drift_of(current: &str, rendered: &str) -> Vec<EnvDrift> {
         .collect()
 }
 
+/// Whether the workload's env file holds exactly the render's assignments,
+/// in any order (the same test as drift: a hand-ordered file is not drift).
+fn env_matches(active: &str, rendered: &str) -> bool {
+    pl::diff_env(active, rendered).is_empty()
+}
+
 /// The render of `p` for `def` (port = the workload's port).
 pub fn render_for(p: &Preset, def: &WorkloadDefinition) -> Result<String, PresetsError> {
     let defaults = vllm_defaults()?;
@@ -365,7 +371,7 @@ fn link(p: &Preset, def: &WorkloadDefinition) -> Result<Linked, PresetsError> {
         drift_of("", &rendered)
     };
     let active_text = std::fs::read_to_string(env_path(def)).unwrap_or_default();
-    let active = def.model == p.served_name && pl::parse_env(&active_text) == pl::parse_env(&rendered);
+    let active = def.model == p.served_name && env_matches(&active_text, &rendered);
     Ok(Linked {
         link: PresetLink {
             workload: def.name.to_string(),
@@ -810,6 +816,19 @@ mod tests {
         let (fresh, none) = write_keeping(&dir.path().join("new"), b"x", 0o640).unwrap();
         assert!(none.is_none());
         assert_eq!(mode(&fresh), 0o640);
+    }
+
+    #[test]
+    fn the_active_env_matches_its_render_in_any_key_order() {
+        // The live vllm-engine.env (2026-11-18) holds the render's keys and
+        // values with VLLM_TRUST_REMOTE and VLLM_EXTRA elsewhere: still the
+        // preset being served.
+        let rendered = "VLLM_MODEL=/m\nVLLM_TRUST_REMOTE=0\nVLLM_TP=2\nVLLM_EXTRA=\n";
+        let file = "# header\nVLLM_MODEL=/m\nVLLM_TP=2\nVLLM_EXTRA=\nVLLM_TRUST_REMOTE=0\n";
+        assert!(env_matches(file, rendered));
+        assert!(!env_matches("VLLM_MODEL=/m\nVLLM_TP=1\nVLLM_EXTRA=\nVLLM_TRUST_REMOTE=0\n", rendered));
+        assert!(!env_matches("VLLM_MODEL=/m\nVLLM_TP=2\nVLLM_EXTRA=\n", rendered), "a missing key");
+        assert!(!env_matches(&format!("{rendered}VLLM_QUANT=fp8\n"), rendered), "an extra key");
     }
 
     #[test]
