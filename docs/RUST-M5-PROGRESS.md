@@ -49,14 +49,19 @@ llmctl_next:
 | 2026-11-18 | **Python guard** (`8f30377`, `llmctl/integrations/llmctl_next.py` + `SystemctlRunner.run`): write verbs on a delegated unit go to `llmctl-next run/stop/restart <workload> --wait`; rc 3/4/5/6 → honest failure naming the reversal setting, never a systemctl fallback; read verbs never delegate; CLI, TUI and `:8088` inherit it (one chokepoint). Unit lookups normalize bare and `.service` forms (security review 2026-11-18: a near-miss key must never defeat the gate). `LLMCTL_NEXT_CMD`/`LLMCTL_NEXT_DISABLED` for tests | `tests/test_llmctl_next_guard.py` 7/7 with a stand-in binary (delegated argv, refusal on rc 3 with no fallback, rc 7 ≠ refused, unowned → systemctl, both unit-name forms, disabled/absent settings, env override); full Python suite 1815 passed |
 | 2026-11-18 | **take-gpus guard** (llmctl-stack `26e52b8d`): `stop_blockers` delegates owned units to `llmctl-next stop`; ImportError (old llmctl pin) falls back to the old path for everything | stack tests: owned → agent argv only; rc 3 → failed stop, no systemctl; unowned → `systemctl --user stop`. 16 pre-existing take_gpus tests unchanged-green |
 | 2026-11-18 | **Mac llmctl guard** (local-llm `5dd7415`, m5 + mbp2): `next_enabled: 1` routes `start/stop` of an owned lane through `llamctl-next lanes swap/stop --wait`; `--dry-run` untouched (exits in start_guard); agent unreachable → refusal with the lever | live on m5: T1 bin missing → die; T3 agent up, owned lane → delegated ("not running: nothing to stop", exit 0); T4 agent down (rc 3) → "refusing to touch llama-swap directly… next_enabled: 0". mbp2 merged, default off (its llama-swap workload is not agent-owned yet) |
+| 2026-11-19 | **M5b enabled** (owner go-ahead, 11:11 PST, after the baseline day ended 10:32 PST). Baseline count accepted: workstation 0, mbp2 0, m5 4, all llama-swap's own lane swaps (request loads, one TTL unload, one from the M5d pilot), none by a legacy writer. Workstation: the `llmctl_next:` section above appended to `~/.config/llmctl/settings.yaml` (not committed to llmctl-config: the file holds a token; backup in the session scratchpad). m5: `next_enabled: 1` in `~/.config/llmctl/config.yaml` (backup `config.yaml.pre-m5b` next to it). mbp2 stays off (its llama-swap is not agent-owned). `llamacpp-router.service` is not in `units:` (no Python writer touches it) | Python `load_delegation()` reads the section; with `LLMCTL_NEXT_CMD=echo`: restart `vllm-engine.service` → `restart vllm-engine --wait`, stop `gpt-oss-120b` → `stop gpt-oss-120b --wait`, start `ollama-gpu1.service` → `run ollama-gpu1 --wait`; `llamacpp-router` and read verbs keep the systemctl path; the guard's real `cmd` answers `status`; `llmctl status` rc 0; `:8088` answers; m5 `llmctl config` shows `next_enabled 1 file` and the agent lists 13 owned lanes. No real write was sent through either guard |
 | 2026-11-18 | **Router item 4 — not done, owner-accepted gap**: `qwen3coder30b` maps to owned `ollama-gpu1`, but `run ollama-gpu1` does not preload `qwen3-coder:30b`; the router's Ollama readiness reads `/api/ps`, so a handover breaks the lane. Stayed on the script; its take-gpus stops now delegate (item 2), its final `systemctl start ollama-gpu1.service` remains a foreign write when that lane is used | reasoning in B4 of the workflow matrix; revisit with M5c catalog work |
 
 ### Left to do in M5b
 
-1. Enable the workstation `llmctl_next:` section (snippet above) after
-   the baseline day; enable `next_enabled: 1` on m5 at the same time.
+1. ~~Enable the workstation `llmctl_next:` section and m5 `next_enabled: 1`~~
+   **done 2026-11-19 11:11 PST** (row above).
 2. One day of normal use with `audit` on: the foreign-write count for
    owned workloads should fall to zero.
+   Window: 2026-11-19 11:11 PST → 2026-11-20 11:11 PST. Count legacy
+   writers only: llama-swap's own request loads and TTL unloads on m5 stay
+   foreign by design, and the router's `qwen3coder30b` start of
+   `ollama-gpu1` stays one (item 4 gap).
 
 Done the same evening: `~/AI/.venv` reinstalled from the guard commit
 (`uv pip --no-deps git+file:///home/yannik/Projects/llmctl@8f30377`),
