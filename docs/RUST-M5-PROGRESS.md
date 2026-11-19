@@ -80,6 +80,7 @@ re-run `uv lock` in `~/AI`, so fresh installs resolve the same build.
 | 2026-11-18 | **Merged and deployed** (M5c, M5d, M5e merged into main `75dfd5c`, `cd6db43`, `2dbddfd`, pushed): workstation agent binary swapped (release build of `2dbddfd`, sha256 `2ea13335…`; old binary kept as `llmctl-next.bin.pre-m5cde` in the m4a data dir; `llmctl-next.service` restarted 20:56 PST); mbp2 `host upgrade --source` (built on mbp2, sha256 `bacba625…`, agent restarted 20:58); m5 `host upgrade --binary` with mbp2's build (same sha256, restarted 21:15). Not yet run: `preset settle --write`, `catalog import`, any M5d load | `status` on the workstation unchanged line for line; `status --all` all three hosts seen 0 s ago; `preset list` answers (5 presets `ready`); `model list` answers on both Macs (0 models, nothing imported); `audit --all`: workstation 0, mbp2 0, m5 1 (the 2026-11-19 00:07 UTC lane load of `qwen35b-m5`, before the deploy) |
 | 2026-11-18 | **`preset settle --write` run on the workstation** (21:33 PST): three comment lines — `vllm-engine.env.qwen38` and `.previous` line 9 now name the real preset `qwen27b.yaml` (not the missing `qwen3.8-27b.yaml`); `router.yaml` line 103 says the `qwen27b` backend runs from vllm-muse, not vllm-laguna. Committed `~/AI` `9d69f81f`, llm-router `0340362`; previous bytes in `*.llmctl-previous` (untracked). **Found:** `preset list` shows `qwen27b` as `ready`, not `serving`, while vllm-engine serves it — the active env has the same keys/values as the profile and the inventory's model and env path match, so the `active` test in `llmctl-daemon/src/presets.rs:368` is suspect (not investigated further) | re-run dry run: "every comment already says so (7 files read)"; each file differs from its backup by one line; vllm-engine Running/Ready, llm-router `/health` ok on qwen27b, `audit` 0 |
 | 2026-11-18 | **Fixed: served preset shown as `ready`** (`129da67`): `preset list` compared the active env with the render as ordered lists (`parse_env` keeps file order); the live `vllm-engine.env` has `VLLM_TRUST_REMOTE` and `VLLM_EXTRA` elsewhere. Now `env_matches` = `diff_env(...).is_empty()`, the same test drift uses. Workstation agent redeployed with it (sha256 `274d4c82…`, 21:52 PST); the Macs keep `bacba625…` (they hold no presets) | new unit test failed on the old comparison, passes now; daemon 97 + core suites + `presets_e2e` green; live `preset list`: `qwen27b serving`, other four `ready`; `audit` 0 |
+| 2026-11-19 | **`catalog import` dry run on all three agents** (bundle from `llmctl export-registry`: 74 models, 2 profiles; nothing imported): workstation `--as yannik-desktop` new 53, no_store 1, unmapped 20, 2 new profiles; m5 `--as Yanniks-MacBook-Pro.local` (exact hostname match) new 13, no_store 1, unmapped 60; mbp2 `--as macbookpro.lan` (by elimination: its hostname is `Freddie`) new 7, no_store 1, unmapped 66. The no_store row is the same on every host: `gpt-oss-120b-mxfp4`, whose GGUF is in no declared store | dry-run reports read per host; `model list` still 0 on the Macs after the runs (dry run wrote nothing) |
 
 ### Left to do in M5c
 
@@ -90,7 +91,9 @@ re-run `uv lock` in `~/AI`, so fresh installs resolve the same build.
 2. Import the real registry on each agent: workstation
    `catalog import <bundle> --as yannik-desktop`, the Macs with
    `--host m5|mbp2 … --as Yanniks-MacBook-Pro.local|macbookpro.lan`
-   (which name is which Mac: check before importing). Optionally declare
+   (dry run done 2026-11-19 on all three, row above; m5 = the
+   `Yanniks-MacBook-Pro.local` entry, mbp2 = `macbookpro.lan`). Apply with
+   `--confirm` (owner). Optionally declare
    a store for `~/models/gpt-oss-120b` (the one no-store row).
 3. Owner decision 7: install `hf` on m5 (not done here: no host changes
    in this session).
@@ -128,7 +131,7 @@ installs reuse it; take each release's sha256 from the release page or
   "strip_components": 1,
   "binary": "llama-server",
   "version_arg": "--version",
-  "version_pattern": "version: {build}"
+  "version_pattern": "build {build},"
 }
 ```
 
@@ -139,7 +142,7 @@ release flagged "latest" is `v1.0.0` (2026-11-13) and has no macOS asset;
 the `b<build>` tags do. Confidence: high (listed with `gh api`, archive
 listed with `tar -tzf`).
 
-### Pilot (not run; needs the owner's go-ahead)
+### Pilot (run 2026-11-18/19, results below)
 
 1. Merge the branch, redeploy the three agents from main (`host upgrade`).
 2. Workstation: a `llamacpp-router` user unit from
@@ -158,6 +161,18 @@ listed with `tar -tzf`).
    `llamacpp lane` on a Qwen GGUF under `~/Models/huggingface/Qwen`, one
    request. mbp2: the same with an embedding GGUF from
    `~/Models/gguf/embeddings` and `--arg embedding`, one embedding request.
+
+#### Pilot results (2026-11-19)
+
+| Step | Result | Evidence |
+|---|---|---|
+| 2. Router unit | `llamacpp-router.service` (user unit, started, not enabled) on :8012, `--models-max 2 --no-models-autoload`; adopted as a managed workload (inventory revision 44); `llamacpp import` round trip equivalent; both Qwen models added by admitted operations (preset revision 3) | adopt checks all passed incl. served_identity; `/models` lists both `unloaded`; a request for an unloaded model returned HTTP 400 "model is not loaded" and nothing loaded it |
+| 3a. Qwen3.5-0.8B beside vllm-engine (`longjob m5d-pilot-a`, 22:05 PST) | fit check said yes (1.5 GiB per card needed, 4.2/5.1 GiB free); loaded in 21 s; measured 1.5 GiB gpu 0, 1.4 GiB gpu 1; answer `pong` (200 completion tokens: thinking on); unloaded | `nvidia-smi` before/after: llama-server 1506/1406 MiB while loaded, gone after; vllm-engine untouched |
+| 3b. Qwen3.6-35B-A3B with `--evict` (`longjob m5d-pilot-b`, 03:01 PST) | dry run without `--evict` refused (21 GiB declared, 4–5 GiB free); `load --evict` stopped vllm-engine and loaded in 182 s (37.8 GB GGUF read cold); measured 20.2 GiB gpu 0, 18.0 GiB gpu 1; answer `pong` (thinking off), 119 tok/s; `run vllm-engine --dry-run` with the 35B loaded planned `unload qwen3.6-35b-a3b from llamacpp-router` before `start vllm-engine`; unload, then `run vllm-engine` ready in 95 s | vllm-engine down 03:01:01–03:05:53; afterwards vllm `:8003/health` 200, llm-router `:4100/health` 200, VLLM workers 26.0 GB per card |
+| 4. m5 | **Bug found and fixed:** every stage on macOS failed `io: df failed` (GNU-only `df -B1 --output=avail`); fixed in `80312df` (`df -Pk`), Macs redeployed (mbp2 build, sha256 `041e1d59…`). **Recipe fixed:** b12527 prints `version: 1.0.0-dev (build 12527, …)`, so the pattern is now `build {build},` (the stager refused the old pattern and promoted nothing). Then b12527 staged into `~/local-llm/engines/llama.cpp/llama-swap.llamacpp-b12527-9389c37c`, macro `llamacpp` set, lane `qwen3-embed-llamacpp-m5` (Qwen3-Embedding-0.6B Q8, `--embedding`, ttl 300) answered a 1024-dim embedding in 6 s cold. Lane removed afterwards | **Found:** the lane was in no matrix set, so its first request evicted the preloaded `mimo9b-m5` and `qwen35b-m5` (about 50 s out at 02:51 PST; the reload on removal preloaded them again, both `ready` 02:52). `llamacpp lane` on a matrix config should say so in the plan (follow-up) |
+| 4. mbp2 | same release staged, macro set, lane `nomic-code-embed-llamacpp-mbp2` (nomic-embed-code Q8, 7.5 GB, `--embedding`) answered a 3584-dim embedding in 11.5 s cold; lane removed afterwards (nothing else was running) | `/running` empty before and after; each write confirmed `configuration reloaded` and committed to the config repo |
+
+The `llamacpp` macro and the staged b12527 stay on both Macs for real lanes.
 
 ### Step 7 runbook — `gpt-oss-120b` moves into the router (prepared 2026-11-18, not run)
 
