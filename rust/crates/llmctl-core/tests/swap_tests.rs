@@ -361,3 +361,22 @@ models:
     assert!(r.lines.iter().any(|l| l.starts_with("WARN matrix set pair") && l.contains("no peak figure for coder")), "{r:?}");
 }
 
+
+#[test]
+fn lanes_outside_every_matrix_set_are_named() {
+    // Every lane of the synthetic config is in the `pair` set.
+    let mut cfg = swap::import(COMMENTED).unwrap();
+    assert_eq!(swap::lanes_outside_sets(&cfg), Some(BTreeSet::new()));
+    // A new lane with no var and no set: llama-swap runs it alone.
+    let mut c = cfg.lanes[1].clone();
+    c.id = "lane-c".into();
+    cfg.lanes.push(c);
+    assert_eq!(swap::lanes_outside_sets(&cfg), Some(BTreeSet::from(["lane-c".to_string()])));
+    // A var alone does not put a lane in a set.
+    cfg.matrix.as_mut().unwrap().vars.push(("c".into(), "lane-c".into()));
+    assert_eq!(swap::lanes_outside_sets(&cfg), Some(BTreeSet::from(["lane-c".to_string()])));
+    cfg.matrix.as_mut().unwrap().sets.push(("solo".into(), "c".into()));
+    assert_eq!(swap::lanes_outside_sets(&cfg), Some(BTreeSet::new()));
+    // No matrix (groups or nothing): the question does not apply.
+    assert_eq!(swap::lanes_outside_sets(&swap::import(MBP2).unwrap()), None);
+}

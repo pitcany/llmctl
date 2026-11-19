@@ -1187,6 +1187,16 @@ fn dependency_order(sets: &[(String, String)]) -> Result<Vec<String>, String> {
     Ok(order)
 }
 
+/// Lanes that no matrix set holds. llama-swap runs such a lane alone: its
+/// first request stops every lane running then (seen on m5, 2026-11-19).
+/// `None` when the config has no matrix or the matrix does not expand.
+pub fn lanes_outside_sets(cfg: &SwapConfig) -> Option<BTreeSet<String>> {
+    let ids: BTreeSet<&str> = cfg.lanes.iter().map(|l| l.id.as_str()).collect();
+    let sets = expand_matrix(cfg.matrix.as_ref()?, &ids).ok()?;
+    let held: BTreeSet<&str> = sets.iter().flat_map(|s| s.lanes.iter().map(String::as_str)).collect();
+    Some(ids.difference(&held).map(|s| (*s).to_owned()).collect())
+}
+
 /// Validate a matrix like llama-swap does and return its expanded sets in
 /// solver order (`+ref` targets first, otherwise definition order).
 pub fn expand_matrix(m: &Matrix, lanes: &BTreeSet<&str>) -> Result<Vec<ExpandedSet>, String> {

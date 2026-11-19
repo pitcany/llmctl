@@ -259,3 +259,45 @@ fn a_release_archive_is_staged_and_a_llama_cpp_lane_runs_from_it() {
     assert!(ok, "{text}");
     assert!(!std::fs::read_to_string(&config).unwrap().contains("emb:"));
 }
+
+const MATRIX_CONFIG: &str = "healthCheckTimeout: 300\nmacros:\n  mlx: \"/opt/mlx/bin/serve\"\n\nmatrix:\n  vars:\n    a: chat\n    b: chat2\n  sets:\n    pair: \"a & b\"\n\nmodels:\n  chat:\n    cmd: ${mlx} --port ${PORT}\n    proxy: http://127.0.0.1:${PORT}\n  chat2:\n    cmd: ${mlx} --port ${PORT}\n    proxy: http://127.0.0.1:${PORT}\n";
+
+/// A lane outside every matrix set runs alone in llama-swap: its first
+/// request stops the running lanes (m5, 2026-11-19). The plan says so and
+/// names them; it is a warning, so the write still goes through.
+#[test]
+fn a_new_lane_outside_every_matrix_set_is_warned_about() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.yaml");
+    std::fs::write(&config, MATRIX_CONFIG).unwrap();
+    let (port, running) = fake_swap(config.clone());
+    running.lock().unwrap().extend(["chat".to_string(), "chat2".to_string()]);
+    let d = spawn(&dir.path().join("agent"), port);
+    let cfg_s = config.to_str().unwrap();
+    let (_, text) = cli(&d.socket, &["lanes", "import", "llama-swap", "--config", cfg_s]);
+    let digest = token_after(&text, "--confirm ");
+    let (ok, text) = cli(&d.socket, &["lanes", "import", "llama-swap", "--config", cfg_s, "--confirm", &digest]);
+    assert!(ok && text.contains("records saved"), "{text}");
+
+    // An edit that strands no lane: no warning.
+    let (ok, text) = cli(&d.socket, &["lanes", "set", "llama-swap", "chat", "ttl", "60"]);
+    assert!(ok && !text.contains("WARNING"), "{text}");
+
+    let gguf = dir.path().join("emb.Q8_0.gguf");
+    std::fs::write(&gguf, b"GGUF").unwrap();
+    let lane = ["llamacpp", "lane", "llama-swap", "emb", "--model", gguf.to_str().unwrap(), "--macro", "mlx", "--arg", "embedding"];
+    let (ok, text) = cli(&d.socket, &lane);
+    assert!(ok, "{text}");
+    let warning = text.lines().find(|l| l.contains("WARNING")).unwrap_or_default();
+    assert!(warning.contains("emb is in no matrix set"), "{text}");
+    assert!(warning.contains("chat, chat2"), "the running lanes are named: {text}");
+    assert!(warning.contains("lanes matrix llama-swap"), "the way out is named: {text}");
+
+    // A warning, not a refusal: the write goes through.
+    let plan = token_after(&text, "--confirm ");
+    let mut args = lane.to_vec();
+    args.extend(["--confirm", &plan, "--wait"]);
+    let (ok, text) = cli(&d.socket, &args);
+    assert!(ok, "{text}");
+    assert!(std::fs::read_to_string(&config).unwrap().contains("emb:"));
+}

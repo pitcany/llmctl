@@ -802,6 +802,10 @@ pub struct LanePlanResponse {
     /// reload starts loading them.
     #[serde(default)]
     pub reload_preloads: Vec<String>,
+    /// Consequences worth reading that do not block the write (a lane
+    /// outside every matrix set, which runs alone).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub plan_digest: String,
     /// False when the render equals the live file (nothing to write).
     pub bytes_changed: bool,

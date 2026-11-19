@@ -602,6 +602,9 @@ async fn lane_write(
         if !plan.reload_restarts.is_empty() {
             println!("  reload restarts running lanes: {}", plan.reload_restarts.join(", "));
         }
+        for w in &plan.warnings {
+            println!("  WARNING: {w}");
+        }
         for v in &plan.validation {
             println!("  INVALID: {v}");
         }

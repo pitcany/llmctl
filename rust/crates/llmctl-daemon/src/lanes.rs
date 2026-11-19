@@ -436,6 +436,7 @@ async fn plan_inner(
     let rendered = swap::check_render(&next).map_err(|e| refuse(e.to_string()))?;
     let changes = swap::value_diffs(&swap::to_value(&store.records), &swap::to_value(&next), "");
     let running = running_lanes(state, workload).await;
+    let warnings = stranded_lane_warnings(&store.records, &next, &running, workload);
     let plan_digest = bytes_digest(
         format!("{}|{}|{}", next.digest(), store.file_digest, bytes_digest(rendered.as_bytes())).as_bytes(),
     );
@@ -454,6 +455,7 @@ async fn plan_inner(
             .and_then(serde_yaml::Value::as_sequence)
             .map(|s| s.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
             .unwrap_or_default(),
+        warnings,
         plan_digest,
         bytes_changed: rendered.as_bytes() != current_bytes.as_slice(),
     };
@@ -470,6 +472,31 @@ async fn plan_inner(
 /// edit needs a recorded budget, and every set it adds or changes (not
 /// `risky*`) must have a peak figure for each of its lanes, so the sum
 /// the budget check makes is a real one and not a lower bound.
+/// Lanes this change leaves outside every matrix set (a new lane, or one
+/// whose last set or var went). llama-swap runs such a lane alone, so its
+/// first request stops the lanes running then. A warning, not a refusal:
+/// a lone lane can be what the owner wants.
+fn stranded_lane_warnings(before: &SwapConfig, next: &SwapConfig, running: &[String], workload: &str) -> Vec<String> {
+    let Some(after) = swap::lanes_outside_sets(next) else {
+        return Vec::new();
+    };
+    let was = swap::lanes_outside_sets(before).unwrap_or_default();
+    let stopped = match running {
+        [] => "nothing runs now".to_string(),
+        r => format!("running now: {}", r.join(", ")),
+    };
+    after
+        .difference(&was)
+        .map(|lane| {
+            format!(
+                "{lane} is in no matrix set: llama-swap runs it alone, so its first request stops \
+                 every running lane ({stopped}); to run it beside others, add it to a set \
+                 (`lanes matrix {workload} var …` and `set …`)"
+            )
+        })
+        .collect()
+}
+
 fn matrix_guard(store: &LaneStore, next: &SwapConfig, edits: &[LaneEdit], workload: &str) -> Vec<String> {
     if !edits.iter().any(|e| matches!(e, LaneEdit::Matrix { .. })) {
         return Vec::new();
