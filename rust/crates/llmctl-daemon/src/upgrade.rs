@@ -157,21 +157,30 @@ async fn run_logged_with(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Free bytes on the filesystem that holds `path`. `df -Pk` is the form GNU
+/// and macOS both speak (`-B1 --output=avail` is GNU only, and failed every
+/// stage on the Macs).
 fn free_bytes(path: &Path) -> Result<u64, UpgradeError> {
     let out = std::process::Command::new("df")
-        .arg("-B1")
-        .arg("--output=avail")
+        .arg("-Pk")
         .arg(path)
         .output()
         .map_err(|e| UpgradeError::Io(format!("spawning df: {e}")))?;
     if !out.status.success() {
-        return Err(UpgradeError::Io("df failed".into()));
+        return Err(UpgradeError::Io(format!(
+            "df -Pk {} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.lines()
-        .nth(1)
-        .and_then(|l| l.trim().parse::<u64>().ok())
+    parse_df_pk(&String::from_utf8_lossy(&out.stdout))
         .ok_or_else(|| UpgradeError::Io("df output not understood".into()))
+}
+
+/// The Available column (KiB) of `df -Pk`'s data line, in bytes.
+fn parse_df_pk(text: &str) -> Option<u64> {
+    let kib: u64 = text.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()?;
+    Some(kib * 1024)
 }
 
 async fn managed_parts(
@@ -1497,5 +1506,20 @@ mod tests {
         // Versions with dashes still round-trip.
         let dashed = env_id("engine", "1.0-rc1");
         assert_eq!(owned_env_id("engine", &dashed), Some(dashed.clone()));
+    }
+
+    #[test]
+    fn free_bytes_reads_posix_df_on_linux_and_macos() {
+        // `df -Pk` as GNU coreutils and macOS print it.
+        let gnu = "Filesystem     1024-blocks      Used Available Capacity Mounted on\n\
+                   /dev/nvme0n1p2  1921724676 812345678 1011234567      45% /\n";
+        let mac = "Filesystem     1024-blocks      Used Available Capacity  Mounted on\n\
+                   /dev/disk3s5    971350180 512345678 412345678    56%    /System/Volumes/Data\n";
+        assert_eq!(parse_df_pk(gnu), Some(1011234567 * 1024));
+        assert_eq!(parse_df_pk(mac), Some(412345678 * 1024));
+        assert_eq!(parse_df_pk("Filesystem\n"), None);
+        // And the real df on this host answers for a directory that exists.
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(free_bytes(dir.path()).expect("df answers") > 0);
     }
 }
