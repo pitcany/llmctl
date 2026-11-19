@@ -22,6 +22,9 @@ use crate::error::{CoreError, CoreResult};
 pub enum EngineKind {
     Vllm,
     LlamaCpp,
+    /// `llama-server` in router mode: one server, many models loaded and
+    /// unloaded through its own API (M5d).
+    LlamaCppRouter,
     Ollama,
     LmStudio,
     Mtplx,
@@ -38,7 +41,7 @@ impl EngineKind {
     /// Vendor services that host many models and can unload one without
     /// stopping (M4b): the planner refuses `unload` for every other kind.
     pub fn has_engine_unload(&self) -> bool {
-        matches!(self, EngineKind::Ollama | EngineKind::LmStudio)
+        matches!(self, EngineKind::Ollama | EngineKind::LmStudio | EngineKind::LlamaCppRouter)
     }
 
     /// The placeholder stored when an inventory predates `engine_kind`.
@@ -58,6 +61,7 @@ impl EngineKind {
         match k.as_str() {
             "vllm" => EngineKind::Vllm,
             "llamacpp" | "llamaserver" | "llamacppserver" => EngineKind::LlamaCpp,
+            "llamacpprouter" | "llamaserverrouter" => EngineKind::LlamaCppRouter,
             "ollama" => EngineKind::Ollama,
             "lmstudio" | "lms" | "llmster" => EngineKind::LmStudio,
             "mtplx" => EngineKind::Mtplx,
@@ -76,6 +80,7 @@ impl std::fmt::Display for EngineKind {
         match self {
             EngineKind::Vllm => write!(f, "vllm"),
             EngineKind::LlamaCpp => write!(f, "llama_cpp"),
+            EngineKind::LlamaCppRouter => write!(f, "llama_cpp_router"),
             EngineKind::Ollama => write!(f, "ollama"),
             EngineKind::LmStudio => write!(f, "lm_studio"),
             EngineKind::Mtplx => write!(f, "mtplx"),

@@ -252,7 +252,7 @@ pub async fn stage(
     match &recipe {
         InstallRecipe::PythonEnv(py) => stage_python_env(state, name, &wl, py, version).await,
         InstallRecipe::ReleaseArchive(r) => {
-            stage_release_archive(state, name, &wl, &recipe, r, version).await
+            stage_release_archive(state, name, &RestageGuard::Workload(wl.clone()), &recipe, r, version).await
         }
         InstallRecipe::SourceBuild(r) => {
             stage_source_build(state, name, &wl, &recipe, r, version).await
@@ -397,13 +397,21 @@ async fn stage_python_env(
     Ok(StageOutcome { row, validation })
 }
 
+/// What a restage must not delete: the dirs a workload runs from and
+/// would roll back to, or (a llama-swap lane engine, M5d) the paths its
+/// lanes' macro names now.
+pub enum RestageGuard {
+    Workload(WorkloadName),
+    LivePaths(Vec<String>),
+}
+
 /// Stage a release archive: fetch (or copy), verify the checksum when one
 /// is declared, unpack into a staging dir, check the binary, then promote
 /// = rename into `<root>/<id>/` with the manifest written last.
-async fn stage_release_archive(
+pub async fn stage_release_archive(
     state: &AppState,
     name: &str,
-    wl: &WorkloadName,
+    guard: &RestageGuard,
     recipe: &InstallRecipe,
     r: &ReleaseArchiveRecipe,
     version: &str,
@@ -426,7 +434,19 @@ async fn stage_release_archive(
             MIN_FREE_DIR_BYTES / (1 << 30)
         )));
     }
-    refuse_restage_of_live_or_rollback_dir(state, name, wl, recipe, &dir).await?;
+    match guard {
+        RestageGuard::Workload(wl) => {
+            refuse_restage_of_live_or_rollback_dir(state, name, wl, recipe, &dir).await?
+        }
+        RestageGuard::LivePaths(paths) => {
+            if let Some(p) = paths.iter().find(|p| Path::new(p).starts_with(&dir)) {
+                return Err(refuse(format!(
+                    "{p} runs from {}; restaging would delete the live install",
+                    dir.display()
+                )));
+            }
+        }
+    }
     // A remote archive is unpacked and its binary run here: no digest
     // declared for this version means nothing is fetched at all.
     let expected_digest = r.checksum_for(version);

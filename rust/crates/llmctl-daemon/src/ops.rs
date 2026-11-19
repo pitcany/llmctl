@@ -461,8 +461,9 @@ impl OpManager {
         use crate::inflight;
         let mut stopping: Vec<(String, u16)> = Vec::new();
         for step in &plan.steps {
-            let (PlanStep::StopUnit { workload, .. } | PlanStep::UnloadModel { workload, .. }) =
-                step
+            let (PlanStep::StopUnit { workload, .. }
+            | PlanStep::UnloadModel { workload, .. }
+            | PlanStep::UnloadRouterModel { workload, .. }) = step
             else {
                 continue;
             };
@@ -815,6 +816,11 @@ impl OpManager {
                     "downloads are planned by `model get`".into(),
                 ))
             }
+            OpKind::RouterModel | OpKind::RouterWrite => {
+                return Err(OpsError::Unsupported(
+                    "router models are planned by `llamacpp load/unload/set`".into(),
+                ))
+            }
         };
         let plan = planned.plan.take().expect("a lifecycle plan");
         self.guard_gpus(&inv, &plan, &planned.keep_units).await?;
@@ -953,7 +959,12 @@ impl OpManager {
         let mut keep_units = std::collections::BTreeSet::new();
         let plan = match (&params.kind, params.plan_override) {
             (
-                OpKind::Upgrade | OpKind::LaneWrite | OpKind::LaneSwap | OpKind::Acquire,
+                OpKind::Upgrade
+                | OpKind::LaneWrite
+                | OpKind::LaneSwap
+                | OpKind::Acquire
+                | OpKind::RouterModel
+                | OpKind::RouterWrite,
                 Some(prebuilt),
             ) => prebuilt,
             // Re-planned against the observations taken under the admission
@@ -971,7 +982,9 @@ impl OpManager {
                 | OpKind::Unload
                 | OpKind::LaneWrite
                 | OpKind::LaneSwap
-                | OpKind::Acquire,
+                | OpKind::Acquire
+                | OpKind::RouterModel
+                | OpKind::RouterWrite,
                 None,
             ) => {
                 return Err(OpsError::Invalid(format!(
@@ -1299,6 +1312,97 @@ impl OpManager {
                     applied,
                 )
                 .await
+            }
+            PlanStep::LoadRouterModel {
+                workload,
+                port,
+                model,
+                timeout_secs,
+                measure_gpus,
+                store_path,
+                reason,
+            } => {
+                set_phase(&mut row.phases, index, |p| {
+                    p.status = PhaseStatus::EffectPending
+                });
+                if self.persist(row).await.is_err() {
+                    return StepOutcome::Failed("journaling effect boundary failed".into());
+                }
+                // Free VRAM before and after: the drop is the model's
+                // measured need (M4c fit rule: measured, never guessed).
+                let gpus: Vec<llmctl_core::GpuId> = self
+                    .inventory()
+                    .await
+                    .workload(workload)
+                    .map(|d| d.gpus.iter().filter(|g| measure_gpus.contains(&g.index)).cloned().collect())
+                    .unwrap_or_default();
+                let before = if gpus.is_empty() { None } else { self.engine.gpu_free_mib(&gpus).await };
+                match crate::llamacpp::load_and_confirm(
+                    *port,
+                    model,
+                    std::time::Duration::from_secs(*timeout_secs),
+                )
+                .await
+                {
+                    Ok(mut report) => {
+                        if let (Some(before), Some(sp)) = (before.as_ref(), store_path) {
+                            let after = self.engine.gpu_free_mib(&gpus).await;
+                            report.push_str(
+                                &crate::llamacpp::record_measured(sp, model, before, after.as_ref()).await,
+                            );
+                        }
+                        if !reason.is_empty() {
+                            report = format!("{report} (allowed: {reason})");
+                        }
+                        applied.push(format!("router-load:{workload}:{model}"));
+                        set_phase(&mut row.phases, index, |p| p.detail = Some(report.clone()));
+                        StepOutcome::Done
+                    }
+                    Err(e) => StepOutcome::Failed(e),
+                }
+            }
+            PlanStep::UnloadRouterModel {
+                workload,
+                port,
+                model,
+                timeout_secs,
+            } => {
+                set_phase(&mut row.phases, index, |p| {
+                    p.status = PhaseStatus::EffectPending
+                });
+                if self.persist(row).await.is_err() {
+                    return StepOutcome::Failed("journaling effect boundary failed".into());
+                }
+                match crate::llamacpp::unload_and_confirm(
+                    *port,
+                    model,
+                    std::time::Duration::from_secs(*timeout_secs),
+                )
+                .await
+                {
+                    Ok(report) => {
+                        applied.push(format!("router-unload:{workload}:{model}"));
+                        set_phase(&mut row.phases, index, |p| p.detail = Some(report.clone()));
+                        StepOutcome::Done
+                    }
+                    Err(e) => StepOutcome::Failed(e),
+                }
+            }
+            PlanStep::WriteRouterPreset { .. } => {
+                set_phase(&mut row.phases, index, |p| {
+                    p.status = PhaseStatus::EffectPending
+                });
+                if self.persist(row).await.is_err() {
+                    return StepOutcome::Failed("journaling effect boundary failed".into());
+                }
+                match run_router_write(step).await {
+                    Ok(report) => {
+                        applied.push(format!("router-write:{}", step.workload()));
+                        set_phase(&mut row.phases, index, |p| p.detail = Some(report.clone()));
+                        StepOutcome::Done
+                    }
+                    Err(e) => StepOutcome::Failed(e),
+                }
             }
             PlanStep::WriteSwapConfig { .. } => {
                 // Effect boundary first: a crash mid-write is resolved by
@@ -1807,6 +1911,24 @@ impl OpManager {
                 PlanStep::LoadLane { .. } => Err("a lane load is not a restoration step".to_string()),
                 PlanStep::UnloadLane { .. } => Err("a lane unload is not a restoration step".to_string()),
                 PlanStep::WriteSwapConfig { .. } => run_swap_write(&step).await.map(Some),
+                // A failed load is undone by unloading what may have come
+                // up; a failed preset write by writing the previous bytes.
+                PlanStep::UnloadRouterModel {
+                    port,
+                    model,
+                    timeout_secs,
+                    ..
+                } => crate::llamacpp::unload_and_confirm(
+                    *port,
+                    model,
+                    std::time::Duration::from_secs(*timeout_secs),
+                )
+                .await
+                .map(Some),
+                PlanStep::WriteRouterPreset { .. } => run_router_write(&step).await.map(Some),
+                PlanStep::LoadRouterModel { .. } => {
+                    Err("a router model load is not a restoration step".to_string())
+                }
             };
             match outcome {
                 Ok(identity) => recovery_steps.push(json!({
@@ -1958,6 +2080,9 @@ impl OpManager {
                             | PlanStep::ApplyEnvFile { .. }
                             | PlanStep::RunHook { .. }
                             | PlanStep::WriteSwapConfig { .. }
+                            | PlanStep::LoadRouterModel { .. }
+                            | PlanStep::UnloadRouterModel { .. }
+                            | PlanStep::WriteRouterPreset { .. }
                     )
             });
 
@@ -2079,6 +2204,35 @@ fn plan_error(e: llmctl_core::CoreError) -> OpsError {
 }
 
 /// Run one `WriteSwapConfig` step (forward or rollback).
+async fn run_router_write(step: &PlanStep) -> Result<String, String> {
+    let PlanStep::WriteRouterPreset {
+        workload,
+        path,
+        content,
+        expect_digest,
+        port,
+        models,
+        timeout_secs,
+        store_path,
+        summary,
+    } = step
+    else {
+        return Err("not a router preset write".into());
+    };
+    crate::llamacpp::write_and_confirm(
+        workload.as_str(),
+        path,
+        content,
+        expect_digest,
+        *port,
+        models,
+        std::time::Duration::from_secs(*timeout_secs),
+        store_path,
+        summary,
+    )
+    .await
+}
+
 async fn run_swap_write(step: &PlanStep) -> Result<String, String> {
     let PlanStep::WriteSwapConfig {
         workload,

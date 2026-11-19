@@ -20,6 +20,7 @@ mod catalog_cmds;
 mod lanes_matrix;
 mod preset_cmds;
 mod records_cmds;
+mod llamacpp_cmd;
 
 #[derive(Parser)]
 #[command(
@@ -290,6 +291,12 @@ enum Command {
     Lanes {
         #[command(subcommand)]
         cmd: LanesCmd,
+    },
+    /// llama.cpp (M5d): router models loaded and unloaded by verb after
+    /// the fit/budget check, preset edits, and Mac llama.cpp lanes.
+    Llamacpp {
+        #[command(subcommand)]
+        cmd: llamacpp_cmd::LlamacppCmd,
     },
     /// Installs per recipe kind (M4a): stage fetches/builds a new
     /// versioned dir; plan prints the vendor-app plan (owner-run steps,
@@ -880,6 +887,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Release { name } => cmd_release(cli, &name).await,
         Command::Upgrade { cmd } => cmd_upgrade(cli, cmd).await,
         Command::Lanes { cmd } => cmd_lanes(cli, cmd).await,
+        Command::Llamacpp { cmd } => llamacpp_cmd::cmd_llamacpp(cli, cmd).await,
         Command::Install { cmd } => cmd_install(cli, cmd).await,
         Command::Version { name, repin } => cmd_version(cli, &name, repin).await,
         Command::Recipe { cmd } => cmd_recipe(cli, cmd).await,
