@@ -1,0 +1,30 @@
+ llmctl-next  d Hosts  w Run  o Operations  l Logs  g GPUs/memory  m Catalog  a Audit
+┌ GPUs / memory ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│workstation                                                                                                                       │
+│  gpu 0   free 3.0 GiB   enrolled vllm-engine              foreign -                                                              │
+│  gpu 1   free 10.0 GiB  enrolled vllm-engine              foreign pid 4242 (comfyui.service, 2.0 GiB)                            │
+│  measured vllm-engine      qwen3.8-27b                    27.3 GiB on gpu 0, 27.3 GiB on gpu 1                                   │
+│  llama-router (llama_cpp): 2 loaded — gpt-oss-120b, qwen3-coder                                                                  │
+│m5                                                                                                                                │
+│  llama-swap (llama-swap): budget 96 GiB, loaded peaks 38.5 GiB                                                                   │
+│    loaded lanes: qwen3-30b                                                                                                       │
+│mbp2         STALE — not asked until it answers the status call again                                                             │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+r refresh · ? help · q quit

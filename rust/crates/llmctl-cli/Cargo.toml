@@ -17,6 +17,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(llmctl_macos)'] }
 llmctl-core = { workspace = true }
 llmctl-client = { workspace = true }
 llmctl-daemon = { workspace = true }
+llmctl-tui = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

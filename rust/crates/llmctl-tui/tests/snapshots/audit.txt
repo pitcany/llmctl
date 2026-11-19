@@ -1,0 +1,30 @@
+ llmctl-next  d Hosts  w Run  o Operations  l Logs  g GPUs/memory  m Catalog  a Audit
+┌ Audit: foreign writes (1) · mbp2 STALE, skipped ─────────────────────────────────────────────────────────────────────────────────┐
+│workstation  no foreign writes                                                                                                    │
+│m5           1 foreign write(s)                                                                                                   │
+│  2026-11-18 16:00:00  llama-swap       lanes      running pid=812 lanes=[qwen3-30b] -> running pid=812 lanes=[]  actor=llama-swap│
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+r refresh · ? help · q quit

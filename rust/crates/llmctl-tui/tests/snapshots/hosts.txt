@@ -1,0 +1,30 @@
+ llmctl-next  d Hosts  w Run  o Operations  l Logs  g GPUs/memory  m Catalog  a Audit
+┌ Hosts ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│workstation  agent 0.1.0  linux  seen 2 s ago  revision 42  3 workload(s)                                                         │
+│  vllm-engine          Running  Ready     intent running          qwen3.8-27b ✓                  managed  4 s ago                 │
+│  llama-router         Running  Ready     intent running          router ✓                       managed  4 s ago                 │
+│      └ loaded gpt-oss-120b                                                                                                       │
+│      └ loaded qwen3-coder                                                                                                        │
+│  ollama-gpu1          Stopped  NotReady  intent stopped (manual) -                              managed  4 s ago                 │
+│m5           agent 0.1.0  macos  seen 3 s ago  revision 7  1 workload(s)                                                          │
+│  llama-swap           Running  Ready     intent running          -                              managed  4 s ago                 │
+│      └ loaded qwen3-30b                                                                                                          │
+│mbp2         STALE  last seen 42 min ago · last observations shown                                                                │
+│  (no answer within 10 s: asleep or unreachable (LLMCTL_NEXT_STATUS_TIMEOUT_S sets the limit))                                    │
+│  llama-swap           Running  Ready     intent running          -                              managed  4 s ago [stale]         │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+↑↓ select · enter logs · r refresh · ? help · q quit

@@ -1,0 +1,30 @@
+ llmctl-next  d Hosts  w Run  o Operations  l Logs  g GPUs/memory  m Catalog  a Audit
+┌ Pick ────────────────────────────────┐┌ workstation · vllm-engine · following ───────────────────────────────────────────────────┐
+│workstation  vllm-engine              ││-- run abcdef12 --                                                                        │
+│workstation  llama-router             ││Nov 18 18:00:01 INFO Started server process                                               │
+│workstation  ollama-gpu1              ││Nov 18 18:00:05 INFO Application startup complete.                                        │
+│m5           llama-swap               ││Nov 18 18:00:09 manager: vllm-engine.service: Consumed 1min CPU time.                     │
+│    lane qwen3-30b                    ││                                                                                          │
+│    lane gemma-27b                    ││                                                                                          │
+│mbp2         llama-swap               ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+│                                      ││                                                                                          │
+└──────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+↑↓ pick · enter open · f follow · PgUp/PgDn scroll · End newest · q quit

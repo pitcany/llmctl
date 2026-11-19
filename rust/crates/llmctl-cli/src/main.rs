@@ -21,6 +21,7 @@ mod lanes_matrix;
 mod preset_cmds;
 mod records_cmds;
 mod llamacpp_cmd;
+mod tui_cmd;
 
 #[derive(Parser)]
 #[command(
@@ -346,6 +347,17 @@ enum Command {
     Host {
         #[command(subcommand)]
         cmd: HostCmd,
+    },
+    /// The multi-host TUI (M5e): Hosts, Run, Operations, Logs, GPUs,
+    /// Audit. Reads every agent; writes only after a preview or a y/n.
+    Tui {
+        /// Refuse every write (run/stop/restart, cancel, acknowledge).
+        #[arg(long)]
+        read_only: bool,
+        /// Measure instead of drawing: N headless rounds through the
+        /// screens against the live agents (read-only), then p50/p95.
+        #[arg(long, value_name = "ROUNDS")]
+        bench: Option<usize>,
     },
 }
 
@@ -926,6 +938,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         }
         Command::Bridge => cmd_bridge(cli).await,
         Command::Host { cmd } => cmd_host(cli, cmd).await,
+        Command::Tui { read_only, bench } => tui_cmd::cmd_tui(cli, read_only, bench).await.map_err(CliError::Daemon),
     }
 }
 

@@ -1,0 +1,30 @@
+ llmctl-next  d Hosts  w Run  o Operations  l Logs  g GPUs/memory  m Catalog  a Audit
+Presets: pending — they land when M5c (presets and catalog) merges.
+Until then this runs workloads: enter shows the plan, y admits it, progress follows.
+┌ Run: workloads ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│workstation  agent 0.1.0  linux  seen 2 s ago  revision 42  3 workload(s)                                                         │
+│  vllm-engine    ┌ run vllm-engine on workstation: preview ─────────────────────────────────────────────────────┐                 │
+│  llama-router   │REFUSED: the plan changed since the preview — nothing ran.                                    │                 │
+│  ollama-gpu1    │  agent: inventory revision moved 42 -> 43: the stop targets changed                          │                 │
+│m5           agen│Review the fresh plan below and confirm again.                                                │                 │
+│  llama-swap     │                                                                                              │                 │
+│mbp2         STAL│plan: run vllm-engine on workstation @ inventory revision 43                                  │                 │
+│  (no answer with│expected model: qwen3.8-27b  gpus: workstation/gpu/0                                          │                 │
+│  llama-swap     │STOP TARGETS: ollama-gpu1, llama-router                                                       │ [stale]         │
+│                 │steps:                                                                                        │                 │
+│                 │   1. stop ollama-gpu1                                                                        │                 │
+│                 │   2. stop llama-router                                                                       │                 │
+│                 │   3. start vllm-engine                                                                       │                 │
+│                 │   4. wait for vllm-engine readiness                                                          │                 │
+│                 │rollback (on failure):                                                                        │                 │
+│                 │   1. stop vllm-engine                                                                        │                 │
+│                 │note: fits: 2 cards free                                                                      │                 │
+│                 │                                                                                              │                 │
+│                 │y admit this plan · n / esc cancel                                                            │                 │
+│                 └──────────────────────────────────────────────────────────────────────────────────────────────┘                 │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+↑↓ select · enter run (preview) · S stop · T restart · r refresh · q quit
