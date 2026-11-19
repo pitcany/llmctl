@@ -4,6 +4,7 @@
 //! the daemon) never form a dependency cycle.
 
 pub mod bridge;
+pub mod catalog;
 pub mod client;
 pub mod lease;
 pub mod oplock;

@@ -1,0 +1,109 @@
+# Qwen3.8-27B Uncensored (orcarouter abliterated requant of the vendor block-FP8).
+#
+# SIBLING of qwen3.8-27b.yaml, NOT a replacement. The deployed tutor generator
+# stays `qwen3.8-27b`; this preset exists so an uncensored variant can be swapped
+# in on demand. Because there is ONE vllm-tp unit, activating this EVICTS the
+# tutor generator until you swap back — that is the whole cost of using it.
+#
+# Provenance: orcarouter/Qwen3.8-27B-Uncensored-FP8, an "abliterated" (refusal-
+# direction ablated) derivative of Qwen/Qwen3.8-27B, requantized to block-FP8.
+# Same qwen3_5 hybrid architecture (48 Gated-DeltaNet linear_attn + 16 full-
+# attention layers) and same vision tower, so every engine setting below is
+# copied verbatim from the vendor preset. 7 shards, ~30.9 GB (~15.5 GB/card).
+#
+# MTP speculative decoding: ENABLED, k=3. This preset previously carried a "NO
+# spec_config" note claiming THIS repo ships no MTP weights, and that the vendor
+# head is trained against un-ablated hidden states so borrowing it is unsound.
+# BOTH halves were wrong, and no graft is needed. Corrected 2026-09-09 to match
+# services/vllm-tp.env.qwen38-unc, which adopted MTP on 2026-08-26; the preset
+# had stayed stale, and llmctl regenerating vllm-tp.env from it silently dropped
+# VLLM_SPEC_CONFIG from the live env.
+#
+# The repo ships no FILE named mtp.safetensors, but it ships the HEAD: all 22
+# mtp.* tensors are physically present in model-00007-of-00007.safetensors and
+# listed in model.safetensors.index.json, at the same shapes and dtypes as the
+# vendor's standalone mtp.safetensors. Transferability never came into it —
+# the abliteration carried its own head.
+#
+# Measured on 2x5090, 1000-token completion, same prompt as the vendor A/B:
+#                        tok/s   acceptance   per-position          per pass
+#   unc, no spec config   61.4   --           --                    1 of 1
+#   unc, mtp k=3          86.0   0.584        78.5 / 56.7 / 39.9%   2.75 of 4
+#   vendor qwen38, k=3   100.4   0.535        76.8 / 51.6 / 32.0%   2.60 of 4
+#
+# +40%, and acceptance is HIGHER than the un-ablated vendor model's. Costs match
+# the vendor profile: boot ~225s (not ~70s) and a smaller KV pool at GPU_MEM 0.80.
+# NOTE vLLM disables min_p and logit_bias under speculative decoding.
+# AUDITED 2026-09-09: no consumer of :8003 sets either. Checked (a) code under
+# ~/AI, ~/.hermes, ~/Projects, ~/.claude/skills across py/js/ts/json/yaml/toml/sh
+# -- zero hits outside the vendored llama.cpp tree, which is a different backend;
+# (b) the gateways -- llm-router/litellm/config.yaml, llm-router/config/router.yaml
+# and the whole ~/AI/llm-router tree; (c) ~/.hermes/config.yaml; (d) the Open WebUI
+# sqlite DB (harbor.webui, read-only, every table) -- only the `file` table matched,
+# i.e. the strings sit inside uploaded RAG document text, NOT in sampling config;
+# the model/config/user tables that hold per-model and per-user sampling params are
+# clean. This re-confirms the vendor preset's rag-webui-shim / rag check.
+# RESIDUAL GAP: an Open WebUI user can still type min_p into per-chat advanced
+# params at request time. That is a live ad-hoc override, not a persisted config,
+# so it would not show in the DB. Re-run the audit before assuming it still holds.
+#
+# Re-confirmed live 2026-09-09, after the preset/env drift noted above was
+# fixed and vllm-tp restarted with the flag actually present:
+#   99.1 tok/s, acceptance 0.611, per-position 78.8 / 61.2 / 43.3%, 2.83 of 4.
+# (Acceptance read from the /metrics spec_decode counters: 353 drafts, 1059
+# draft tokens, 647 accepted.) NOT a like-for-like row in the table above --
+# different prompt, temperature 0, reasoning_effort low -- so it is recorded
+# separately rather than replacing the 86.0 figure.
+# Boot was 105s, not ~225s, because the torch.compile cache was already warm;
+# expect ~225s on a cold cache. Engine confirms MTP at boot with
+# "Detected MTP model. Sharing target model embedding weights with the draft
+# model." on both TP ranks; KV pool 435,104 tokens, 3.32x concurrency at
+# 131,072 -- matching the vendor MTP profile (433,753 / 3.31x).
+#
+# gpu_memory_utilization 0.80, same as the vendor preset: ollama sits resident
+# and ASYMMETRIC (~3.5 GB on GPU1 vs ~0.5 GB on GPU0), and 0.85 OOM-crashed the
+# vendor config on real retrieval-length prompts on 2026-08-18. With MTP now on,
+# headroom matches the vendor profile — do not raise it without re-validating
+# against real long prompts and watching free VRAM on GPU 1.
+#
+# Quality is UNMEASURED. Abliteration is known to cost general capability, and
+# nothing in this stack has evaluated this checkpoint. Do NOT point the math
+# shims (RAG_SHIM_GEN_MODEL) or routing.default_backend at it.
+
+alias: qwen27b-uncensored
+served_name: qwen3.8-27b-uncensored
+model_id: orcarouter/Qwen3.8-27B-Uncensored-FP8
+quantization: fp8
+vllm_quantization_flag: fp8
+tensor_parallel_size: 2
+max_model_len: 131072
+family: qwen
+param_count_b: 27.8
+architectures:
+- Qwen3_5ForConditionalGeneration
+max_num_seqs: 32
+gpu_memory_utilization: 0.80
+kv_cache_dtype: fp8
+dtype: null
+trust_remote_code: false  # the repo ships no custom modeling code (hf plan: ships_own_code=False); set 2026-10-20
+max_num_batched_tokens: 8192
+# 127.0.0.1, NOT 0.0.0.0: the llm-router (:4100) is the single entry point and
+# :8003 must not be reachable over Tailscale. Mirrors qwen3.8-27b.
+host: 127.0.0.1
+tool_parser: qwen3_xml
+reasoning_parser: qwen3
+# 2026-09-28: moved from vllm-laguna (vLLM 0.25.1) to vllm-muse (0.30.0), with
+# the vendor preset. Measured: ~114 tok/s (107-117; 99.1 before), MTP acceptance
+# 58%, tools 18/18, vision 3/3, KV pool 381K tokens. Rollback: python_root back
+# to vllm-laguna + `llmctl router-profiles --write`.
+# Backup: _backups/qwen3.8-27b-uncensored.yaml.bak-vllm0251-20260928.
+python_root: /home/owner/miniconda3/envs/vllm-muse
+spec_config:
+  method: mtp
+  num_speculative_tokens: 3
+tq: false
+shortcuts: []
+schema_version: 1
+# --shutdown-timeout 30 (2026-10-29): drain on stop, as in qwen27b.yaml. vLLM 0.30 defaults to
+# abort; a stop under an in-flight stream then hangs to the 60 s SIGKILL (10-28 21:27, unit failed).
+extra_args: --shutdown-timeout 30

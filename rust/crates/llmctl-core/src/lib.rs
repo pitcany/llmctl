@@ -7,15 +7,18 @@
 //! use; unknown external state must stay representable.
 
 pub mod acquire;
+pub mod catalog;
 pub mod error;
 pub mod fit;
 pub mod identity;
 pub mod intent;
 pub mod inventory;
 pub mod launch;
+pub mod matrix_edit;
 pub mod observation;
 pub mod plan;
 pub mod planner;
+pub mod preset_launch;
 pub mod presets;
 pub mod recipe;
 pub mod swap;

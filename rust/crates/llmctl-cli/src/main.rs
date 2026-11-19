@@ -16,6 +16,10 @@ use llmctl_client::{ClientError, ControlClient};
 use llmctl_core::{OpKind, Plan};
 
 mod enroll;
+mod catalog_cmds;
+mod lanes_matrix;
+mod preset_cmds;
+mod records_cmds;
 
 #[derive(Parser)]
 #[command(
@@ -73,6 +77,37 @@ enum Command {
         /// The model the workload serves under --profile-env.
         #[arg(long, value_name = "NAME", requires = "profile_env")]
         model: Option<String>,
+        /// NAME is a preset (implied when NAME is not a workload): run the
+        /// preset's workload on the preset's router profile env.
+        #[arg(long, conflicts_with = "profile_env")]
+        preset: bool,
+        /// With a preset: write the preset's values into its profile env
+        /// first when they drifted (comments kept). Without it a drifted
+        /// profile is refused.
+        #[arg(long, conflicts_with = "profile_env")]
+        sync: bool,
+        /// With a preset: the vLLM workload to run it on (default: the
+        /// host's only one).
+        #[arg(long, conflicts_with = "profile_env")]
+        workload: Option<String>,
+    },
+    /// The model catalog: import a Python registry bundle, export one back.
+    Catalog {
+        #[command(subcommand)]
+        cmd: catalog_cmds::CatalogCmd,
+    },
+    /// Enroll a workload `adopt` cannot prove: an observe-only endpoint
+    /// (--observe URL) or a vendor app's own controls (--start/--stop).
+    /// A preview until --confirm.
+    Enroll(records_cmds::EnrollArgs),
+    /// Change a record's control authority (external records only; an
+    /// adopted workload keeps the unit adoption pinned). A preview until
+    /// --confirm.
+    Authority(records_cmds::AuthorityArgs),
+    /// Presets (`~/.config/llmctl/presets/*.yaml`), edited in place.
+    Preset {
+        #[command(subcommand)]
+        cmd: preset_cmds::PresetCmd,
     },
     /// Stop a workload (records a manual-stop intent that recovery respects).
     Stop {
@@ -386,6 +421,8 @@ enum ModelCmd {
         #[arg(long)]
         json: bool,
     },
+    #[command(flatten)]
+    Catalog(catalog_cmds::ModelCatalogCmd),
 }
 
 #[derive(Subcommand, Clone)]
@@ -556,6 +593,15 @@ enum LanesCmd {
         #[arg(long)]
         wait: bool,
     },
+    /// The llama-swap matrix: with no op it shows the vars, sets and the
+    /// memory budget against them; an op plans a change (--confirm writes
+    /// it). The budget guards the write: refused without one, and for a
+    /// new set over it or holding a lane with no peak figure.
+    Matrix {
+        workload: String,
+        #[command(subcommand)]
+        op: Option<lanes_matrix::MatrixOp>,
+    },
     /// Write the records as they are (normalises the file to the render).
     Rewrite {
         workload: String,
@@ -609,6 +655,11 @@ fn exit_code_for_client_error(e: &ClientError) -> u8 {
         ClientError::Unreachable { .. } => 3,
         ClientError::Api { code, .. } => match code.as_str() {
             codes::UNKNOWN_WORKLOAD | codes::UNKNOWN_OPERATION => 5,
+            llmctl_client::catalog::codes::UNKNOWN_PRESET
+            | llmctl_client::catalog::codes::UNKNOWN_MODEL => 5,
+            llmctl_client::catalog::codes::PRESET_REFUSED
+            | llmctl_client::catalog::codes::PRESET_DRIFT
+            | llmctl_client::catalog::codes::CATALOG_REFUSED => 4,
             codes::INVALID_REQUEST | codes::PROTOCOL_MISMATCH => 6,
             codes::STALE_PLAN
             | codes::OVERLAPPING_OPERATION
@@ -763,7 +814,19 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             force,
             profile_env,
             model,
+            preset,
+            sync,
+            workload,
         } => {
+            if profile_env.is_none() {
+                if let Some(code) = preset_cmds::run(
+                    cli, &name, preset, workload, sync, dry_run, wait, key.clone(), force,
+                )
+                .await?
+                {
+                    return Ok(code);
+                }
+            }
             let profile = profile_env.zip(model).map(|(env_source, model)| ProfileRequest {
                 // The agent resolves the path on its own host; a relative
                 // one would mean this shell's directory, so make it absolute.
@@ -798,6 +861,10 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Audit { since, all, json } => cmd_audit(cli, since.as_deref(), all, json).await,
         Command::Stores { cmd, json } => cmd_stores(cli, cmd, json).await,
         Command::Model { cmd } => cmd_model(cli, cmd).await,
+        Command::Preset { cmd } => preset_cmds::cmd_preset(cli, cmd).await,
+        Command::Enroll(a) => records_cmds::cmd_enroll(cli, a).await,
+        Command::Authority(a) => records_cmds::cmd_authority(cli, a).await,
+        Command::Catalog { cmd } => catalog_cmds::cmd_catalog(cli, cmd).await,
         Command::Vram { measure, json } => cmd_vram(cli, measure.as_deref(), json).await,
         Command::Ops { json } => cmd_ops(cli, json).await,
         Command::Op { id, watch } => cmd_op(cli, &id, watch).await,
@@ -1813,6 +1880,9 @@ async fn cmd_stores(cli: &Cli, cmd: Option<StoresCmd>, json: bool) -> Result<u8,
 }
 
 async fn cmd_model(cli: &Cli, cmd: ModelCmd) -> Result<u8, CliError> {
+    if let ModelCmd::Catalog(c) = cmd {
+        return catalog_cmds::cmd_model_catalog(cli, c).await;
+    }
     let client = connect(cli)?;
     ensure_protocol(&client).await?;
     let (source, store, for_workload, size_gib, dry_run, wait, key) = match cmd {
@@ -1825,6 +1895,7 @@ async fn cmd_model(cli: &Cli, cmd: ModelCmd) -> Result<u8, CliError> {
             wait,
             key,
         } => (source, store, for_workload, size_gib, dry_run, wait, key),
+        ModelCmd::Catalog(_) => unreachable!("handled above"),
         ModelCmd::Rm {
             target,
             store,
@@ -2462,6 +2533,11 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
             confirm,
             wait,
         } => (workload, Vec::new(), confirm, wait),
+        LanesCmd::Matrix { workload, op: None } => return lanes_matrix::show(cli, &workload).await,
+        LanesCmd::Matrix { workload, op: Some(op) } => {
+            let (edits, confirm, wait) = lanes_matrix::edit(op)?;
+            (workload, edits, confirm, wait)
+        }
     };
     let mut req = LaneEditRequest {
         protocol: PROTOCOL_VERSION,

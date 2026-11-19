@@ -1,0 +1,23 @@
+alias: deepseek-r1-70b
+served_name: deepseek-r1-70b
+model_id: casperhansen/deepseek-r1-distill-llama-70b-awq
+quantization: awq
+vllm_quantization_flag: awq_marlin
+tensor_parallel_size: 2
+max_model_len: 65536
+family: llama
+param_count_b: 70.0
+architectures:
+- LlamaForCausalLM
+max_num_seqs: 64
+gpu_memory_utilization: 0.85
+kv_cache_dtype: fp8
+dtype: null
+trust_remote_code: false
+host: 0.0.0.0
+port: 8000
+tool_parser: llama3_json
+reasoning_parser: deepseek_r1
+tq: false
+shortcuts: []
+schema_version: 1

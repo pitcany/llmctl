@@ -1,0 +1,23 @@
+alias: qwen3-coder-next-80b
+served_name: qwen3-coder-next-80b
+model_id: cyankiwi/Qwen3-Coder-Next-AWQ-4bit
+quantization: compressed-tensors
+vllm_quantization_flag: compressed-tensors
+tensor_parallel_size: 2
+max_model_len: 32768
+family: qwen
+param_count_b: 80.0
+architectures:
+- Qwen3NextForCausalLM
+max_num_seqs: 64
+gpu_memory_utilization: 0.85
+kv_cache_dtype: fp8
+dtype: null
+trust_remote_code: false
+host: 0.0.0.0
+port: 8000
+tool_parser: hermes
+reasoning_parser: null
+tq: false
+shortcuts: []
+schema_version: 1

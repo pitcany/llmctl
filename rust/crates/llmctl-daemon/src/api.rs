@@ -69,6 +69,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/lanes/memory", post(lanes_memory))
         .route("/v1/lanes/{workload}", get(lanes_status))
         .route("/v1/logs", post(logs))
+        .merge(crate::api_m5c::routes())
         .layer(axum::middleware::from_fn(under_lease_scope))
         .with_state(state)
 }

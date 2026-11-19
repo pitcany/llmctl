@@ -1,0 +1,54 @@
+# Qwen3.8-27B, 4-bit AWQ W4A16 g32, BUILT LOCALLY by `hf2local quant4` (2026-10-22)
+# from the BF16 Qwen/Qwen3.8-27B@1d4bf0f2 -- the ONE-CARD 27B.
+# Replaced the third-party cyankiwi/Qwen3.8-27B-AWQ-INT4 on 2026-10-22
+# (backup: _backups/qwen27b-awq.yaml.bak-pre-g32-20261022). The cyankiwi weights were
+# DELETED from /mnt/storage/hf-cache on 2026-10-30 (owner's cleanup); a future hf2local
+# 4-bit gate that wants that MTP-acceptance baseline re-downloads the public repo (20 GB).
+#
+# Added 2026-10-21 for one-card vLLM (llmctl PR #22): tensor_parallel_size 1, so
+# `llmctl run qwen27b-awq` takes one 5090 and leaves the other serving (Strata
+# `flash`, an Ollama lane, or a second vLLM preset on vllm-engine2 :8010).
+#
+# Same model and settings as `qwen27b` (see that preset for the parser, MTP and
+# hybrid-cache notes); only the weights and the one-card sizing differ.
+#   - Pack: ~/models/hf2local/Qwen3.8-27B-AWQ-W4A16-g32 (NVMe copy of
+#     /mnt/storage/converted/Qwen3.8-27B-AWQ-W4A16-g32-calibB), 19.56 GiB,
+#     compressed-tensors pack-quantized, group 32, vision tower and MTP kept.
+#   - Gates (docs/ADR-2026-10-21-hf2local-calibrated-4bit.md): KL vs the hf2local
+#     FP8 pack 0.0266 / 0.0295 (cyankiwi 0.0252 / 0.0290), MTP acceptance PASS,
+#     157 vs 140 tok/s on one card.
+#   - KV at TP=1 is ~32 KB/token at fp8 (16 of 64 layers hold KV); the cyankiwi
+#     pack measured a 139,179-token pool at util 0.90 (2026-10-21).
+#   - QUALITY UNMEASURED vs the evaluated FP8 tutor (no rigor ruler or tutor smoke):
+#     a second model, not a tutor replacement, until it passes the gate.
+
+alias: qwen27b-awq
+served_name: qwen3.8-27b-awq
+model_id: /home/owner/models/hf2local/Qwen3.8-27B-AWQ-W4A16-g32
+quantization: compressed-tensors
+vllm_quantization_flag: compressed-tensors
+tensor_parallel_size: 1
+max_model_len: 131072
+family: qwen
+param_count_b: 27.8
+architectures:
+- Qwen3_5ForConditionalGeneration
+max_num_seqs: 8
+gpu_memory_utilization: 0.90
+kv_cache_dtype: fp8
+dtype: null
+trust_remote_code: false
+max_num_batched_tokens: 8192
+host: 127.0.0.1
+tool_parser: qwen3_xml
+reasoning_parser: qwen3
+python_root: /home/owner/miniconda3/envs/vllm-muse
+spec_config:
+  method: mtp
+  num_speculative_tokens: 3
+tq: false
+shortcuts: []
+schema_version: 1
+# --shutdown-timeout 30 (2026-10-29): drain on stop, as in qwen27b.yaml. vLLM 0.30 defaults to
+# abort; a stop under an in-flight stream then hangs to the 60 s SIGKILL (10-28 21:27, unit failed).
+extra_args: --shutdown-timeout 30

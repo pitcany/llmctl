@@ -648,6 +648,9 @@ pub struct LaneStatusResponse {
     /// no budget is set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memory: Vec<String>,
+    /// The `matrix:` records (M5c item 4); `None` without a matrix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matrix: Option<llmctl_core::swap::Matrix>,
 }
 
 /// The memory budget of a llama-swap host and its lanes' peak figures.
@@ -696,6 +699,12 @@ pub enum LaneEdit {
     SetMacro {
         name: String,
         value: String,
+    },
+    /// A change to the `matrix:` (M5c item 4). Guarded by the memory
+    /// budget: refused without one, and for a set that would go over it or
+    /// holds a lane with no peak figure.
+    Matrix {
+        edit: llmctl_core::matrix_edit::MatrixEdit,
     },
 }
 
