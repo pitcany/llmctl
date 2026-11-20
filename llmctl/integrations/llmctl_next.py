@@ -140,3 +140,38 @@ def delegate(
         detail = (err.strip() or out.strip()).splitlines()[-1:] or [""]
         return rc, out, refusal_message(verb, unit, workload, rc, detail[0])
     return rc, out, err
+
+
+def run_preset(
+    preset: str,
+    workload: str,
+    delegation: NextDelegation,
+    runner=None,
+) -> tuple[int, str, str]:
+    """``llmctl-next run <preset> --preset --workload <w> --wait`` (M5b).
+
+    The agent switches the engine to the preset's profile env, starts it,
+    verifies the served model and rolls back on failure; llmctl writes no
+    env of its own (the agent would refuse that file as drift). Returns
+    ``(rc, stdout, stderr)``; on failure stderr carries the honest refusal.
+    ``runner`` (tests) takes the argv and returns that triple.
+    """
+    argv = [*delegation.cmd, "run", preset, "--preset", "--workload", workload, "--wait"]
+    try:
+        if runner is not None:
+            rc, out, err = runner(argv)
+        else:
+            proc = subprocess.run(  # noqa: S603 - argv from settings, no shell
+                argv, capture_output=True, text=True, check=False, timeout=_TIMEOUT_S
+            )
+            rc, out, err = proc.returncode, proc.stdout or "", proc.stderr or ""
+    except subprocess.TimeoutExpired as exc:
+        rc, out, err = 124, "", str(exc) or f"timed out after {_TIMEOUT_S:.0f}s"
+    except OSError as exc:
+        rc, out, err = 3, "", f"could not run {argv[0]}: {exc}"
+    if rc != 0:
+        detail = (err.strip() or out.strip()).splitlines()[-1:] or [""]
+        verb = f"run (preset {preset}) via"
+        return rc, out, refusal_message(verb, workload, workload, rc, detail[0])
+    return rc, out, err
+

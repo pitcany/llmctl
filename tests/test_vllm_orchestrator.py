@@ -690,3 +690,92 @@ def test_second_engine_preflight_keeps_the_main_engine(tmp_path: Path) -> None:
 
     fleet = log["preflight_calls"][0]["fleet"]
     assert "vllm-engine" not in units_to_stop(FleetRole.TP, fleet)
+
+
+# ---- Rust M5b: a delegated engine runs the preset through llmctl-next --------
+# With llmctl_next on, the agent pins the env file's digest: writing our own
+# render and restarting makes it refuse the start (definition_drift). The
+# direct path therefore hands the whole start to `llmctl-next run <preset>
+# --preset`, which switches the profile, starts, verifies and rolls back.
+
+from llmctl.integrations.llmctl_next import NextDelegation  # noqa: E402
+
+_NEXT = ("llmctl-next", "--data-dir", "/state")
+
+
+def _delegated(deps: Dependencies, outcome=(0, "ok\n", "")) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def runner(argv):
+        calls.append(list(argv))
+        return outcome
+
+    deps.next_delegation = lambda: NextDelegation(
+        enabled=True, cmd=_NEXT, units={"vllm-tp.service": "vllm-engine"}
+    )
+    deps.next_runner = runner
+    return calls
+
+
+def test_a_delegated_engine_runs_the_preset_through_llmctl_next(tmp_path: Path) -> None:
+    _write_preset(tmp_path)
+    deps, log = _build_deps(config_dir=tmp_path)
+    calls = _delegated(deps)
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        deps=deps,
+    )
+    assert result.ok is True
+    assert calls == [
+        [*_NEXT, "run", "llama-3.3-70b", "--preset", "--workload", "vllm-engine", "--wait"]
+    ]
+    assert log["adapters_built"] == []  # no env written, no systemctl restart
+    assert log["check_calls"] == [{"port": 8003}]
+
+
+def test_a_delegated_refusal_fails_the_run_without_writing_the_env(tmp_path: Path) -> None:
+    _write_preset(tmp_path)
+    deps, log = _build_deps(config_dir=tmp_path)
+    calls = _delegated(deps, outcome=(4, "", "error: api error (409) gpu_occupied: pid 9"))
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        deps=deps,
+    )
+    assert result.ok is False
+    assert result.restart is not None and result.restart.error is not None
+    assert "refused before anything changed" in result.restart.error
+    assert "gpu_occupied" in result.restart.error
+    assert len(calls) == 1 and log["adapters_built"] == []
+    assert result.rollback is not None
+
+
+def test_one_off_overrides_are_refused_for_a_delegated_engine(tmp_path: Path) -> None:
+    _write_preset(tmp_path)
+    deps, log = _build_deps(config_dir=tmp_path)
+    calls = _delegated(deps)
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        options=OrchestratorOptions(gpus="1"),
+        deps=deps,
+    )
+    assert result.ok is False
+    assert calls == [] and log["adapters_built"] == []
+    assert result.restart is not None and "one-off" in (result.restart.error or "")
+
+
+def test_an_engine_the_agent_does_not_own_keeps_the_adapter_path(tmp_path: Path) -> None:
+    _write_preset(tmp_path)
+    deps, log = _build_deps(config_dir=tmp_path)
+    calls = _delegated(deps)
+    deps.next_delegation = lambda: NextDelegation(
+        enabled=True, cmd=_NEXT, units={"other.service": "x"}
+    )
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        deps=deps,
+    )
+    assert result.ok is True and calls == [] and len(log["adapters_built"]) == 1

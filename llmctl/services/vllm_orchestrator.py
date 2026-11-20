@@ -211,6 +211,10 @@ class Dependencies:
     post_start_checks: Sequence[PostStartCheck] | None = None
     fleet_preflight: Callable[..., Any] = preflight_stop
     logger: Callable[[str], None] = print
+    #: Rust M5b: who owns the engine (None = read settings.yaml) and how the
+    #: agent CLI is run (None = a subprocess). Tests pass fakes.
+    next_delegation: Callable[[], Any] | None = None
+    next_runner: Callable[[list[str]], tuple[int, str, str]] | None = None
 
 
 def start_vllm_tp(
@@ -270,6 +274,7 @@ def start_vllm_tp(
         options=options,
         deps=deps,
         renderer=render_vllm_env,
+        preset_name=preset_name,
     )
 
 
@@ -370,6 +375,7 @@ def _run_lifecycle(
     options: OrchestratorOptions,
     deps: Dependencies,
     renderer: Callable[[VLLMLaunchSpec], str],
+    preset_name: str | None = None,
 ) -> OrchestratorResult:
     """Start lifecycle for the TP unit."""
     result = OrchestratorResult(spec=spec, dry_run=options.dry_run)
@@ -431,6 +437,95 @@ def _run_lifecycle(
             elif outcome is False:
                 result.companions_stop_failed.append(companion.name)
 
+    workload = _delegated_workload(managed_unit, deps) if preset_name else None
+    if workload is not None:
+        result.restart = _run_preset_via_next(preset_name, workload, managed_unit, options, deps)
+        if options.rollback_on_failure and not result.ok:
+            # The agent rolled its own change back; put back what we stopped.
+            result.rollback = _rollback(
+                result, managed_unit, systemctl, deps, by_name, env_written=False
+            )
+            return result
+    else:
+        _restart_with_adapter(
+            result, spec, managed_unit, systemctl, unit_systemctl, options, deps, by_name, renderer
+        )
+        if result.rollback is not None:
+            return result
+
+    if options.restore_companions:
+        _restore_companions(
+            result, {managed_unit.unit_name, fleet.tp}, systemctl, deps, by_name
+        )
+
+    if options.enable_post_start_checks and (
+        result.restart is not None and result.restart.ready
+    ):
+        for check in checks:
+            try:
+                result.checks[check.name] = check.run(spec, logger=deps.logger)
+            except Exception as exc:  # noqa: BLE001 - checks are advisory
+                deps.logger(f"  {check.name}: check raised {exc}")
+                result.checks[check.name] = f"error: {exc}"
+
+    return result
+
+
+def _delegated_workload(managed_unit: ManagedUnitConfig, deps: Dependencies) -> str | None:
+    """The llmctl-next workload that owns this engine unit, if delegated."""
+    from llmctl.integrations.llmctl_next import load_delegation
+
+    delegation = (deps.next_delegation or load_delegation)()
+    return delegation.workload_for(managed_unit.unit_name)
+
+
+def _run_preset_via_next(
+    preset_name: str,
+    workload: str,
+    managed_unit: ManagedUnitConfig,
+    options: OrchestratorOptions,
+    deps: Dependencies,
+) -> ManagedRestartResult:
+    """Hand the start to the agent (M5b); llmctl writes no env file."""
+    from llmctl.integrations.llmctl_next import load_delegation, run_preset
+
+    env_path = managed_unit.resolve_env_file()
+    if options.preset_overrides or options.tq_override is not None or options.gpus is not None:
+        return ManagedRestartResult(
+            env_path=env_path,
+            env_body="",
+            ready=False,
+            error=(
+                f"{managed_unit.unit_name} is owned by llmctl-next, which runs presets as "
+                "written; one-off overrides (--tp/--max-len/--gpu-mem/--gpus/--tq) cannot be "
+                "handed over. Change the preset (llmctl-next preset edit), or set "
+                "llmctl_next.enabled: false in settings.yaml."
+            ),
+        )
+    deps.logger(
+        f"  {managed_unit.unit_name} is owned by llmctl-next: "
+        f"llmctl-next run {preset_name} --preset"
+    )
+    delegation = (deps.next_delegation or load_delegation)()
+    rc, _out, err = run_preset(preset_name, workload, delegation, runner=deps.next_runner)
+    if rc != 0:
+        return ManagedRestartResult(env_path=env_path, env_body="", ready=False, error=err.strip())
+    return ManagedRestartResult(env_path=env_path, env_body="", ready=True)
+
+
+def _restart_with_adapter(
+    result: OrchestratorResult,
+    spec: VLLMLaunchSpec,
+    managed_unit: ManagedUnitConfig,
+    systemctl: SystemctlRunner,
+    unit_systemctl: SystemctlRunner,
+    options: OrchestratorOptions,
+    deps: Dependencies,
+    by_name: dict[str, Companion],
+    renderer: Callable[[VLLMLaunchSpec], str],
+) -> None:
+    """Write the rendered env and restart the unit (the non-delegated path).
+    Sets ``result.rollback`` when a failed launch was rolled back."""
     adapter = deps.adapter_factory(
         managed_unit,
         systemctl=unit_systemctl,
@@ -478,24 +573,6 @@ def _run_lifecycle(
             prior_env=prior_env,
             unit_systemctl=unit_systemctl,
         )
-        return result
-
-    if options.restore_companions:
-        _restore_companions(
-            result, {managed_unit.unit_name, fleet.tp}, systemctl, deps, by_name
-        )
-
-    if options.enable_post_start_checks and (
-        result.restart is not None and result.restart.ready
-    ):
-        for check in checks:
-            try:
-                result.checks[check.name] = check.run(spec, logger=deps.logger)
-            except Exception as exc:  # noqa: BLE001 - checks are advisory
-                deps.logger(f"  {check.name}: check raised {exc}")
-                result.checks[check.name] = f"error: {exc}"
-
-    return result
 
 
 def _start_companion(
