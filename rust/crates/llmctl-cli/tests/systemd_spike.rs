@@ -190,6 +190,7 @@ fn write_inventory(dir: &Path, unit: &str, port: u16, model: &str) {
             observed_version: None,
         }],
         stores: Vec::new(),
+        gpu_tolerated: Vec::new(),
         revision: 1,
     };
     std::fs::write(

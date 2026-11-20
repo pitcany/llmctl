@@ -428,6 +428,32 @@ pub struct StoreRemoveRequest {
     pub name: String,
 }
 
+/// `tolerate add`: let one known process stay on the cards (M5b). Exactly
+/// one of `unit` (full identity) or `cmdline` (substring) is set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TolerateAddRequest {
+    pub protocol: u32,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmdline: Option<String>,
+    pub max_mib: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TolerateRemoveRequest {
+    pub protocol: u32,
+    pub name: String,
+}
+
+/// The processes the GPU guard tolerates on this host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToleratedResponse {
+    pub host: String,
+    pub tolerated: Vec<llmctl_core::GpuTolerance>,
+}
+
 /// Remove weights from a store. Without `confirm` it only previews: the
 /// path, the size, and whoever still references them.
 #[derive(Debug, Clone, Serialize, Deserialize)]

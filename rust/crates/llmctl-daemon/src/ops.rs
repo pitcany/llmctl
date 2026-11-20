@@ -892,6 +892,22 @@ impl OpManager {
             if allowed_here {
                 continue;
             }
+            // A tolerated process (M5b): left alone while it stays under
+            // its cap; above the cap it is foreign again, and says so.
+            let tolerance = inv.tolerance_for(occ.unit.as_deref(), occ.cmdline.as_deref());
+            if let Some(t) = tolerance {
+                if occ.memory_mib <= t.max_mib {
+                    continue;
+                }
+                return Err(OpsError::GpuOccupied {
+                    workload: plan.target.to_string(),
+                    gpu: occ.gpu,
+                    desc: format!(
+                        "pid {} (tolerated as {}) holds {} MiB, over its tolerated {} MiB",
+                        occ.pid, t.name, occ.memory_mib, t.max_mib
+                    ),
+                });
+            }
             // An enrolled on-demand service with a model loaded: real VRAM,
             // never stopped by this plan — name the unload instead.
             let on_demand = occ.unit.as_ref().and_then(|u| {

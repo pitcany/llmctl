@@ -124,6 +124,7 @@ pub fn sample_inventory(host: &HostId) -> HostInventory {
             mk("big", &[0, 1], 8102),
         ],
         stores: Vec::new(),
+        gpu_tolerated: Vec::new(),
         revision: 1,
     };
     // Platform is detected per host rather than hardcoded once Macs enroll.

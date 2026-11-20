@@ -18,6 +18,10 @@ pub struct GpuOccupant {
     /// unit with the same name are different units.
     pub unit: Option<String>,
     pub memory_mib: u64,
+    /// `/proc/<pid>/cmdline` with NULs as spaces (at most 512 bytes), for
+    /// tolerances that match a process with no unit. `None` when unread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmdline: Option<String>,
 }
 
 /// `nvidia-smi --query-gpu=index,uuid --format=csv,noheader` rows:
@@ -76,6 +80,7 @@ pub fn parse_compute_apps(
             pid,
             unit: None,
             memory_mib: mem,
+            cmdline: None,
         });
     }
     Ok(out)
@@ -156,6 +161,7 @@ pub async fn probe_nvidia(timeout: std::time::Duration) -> Result<Vec<GpuOccupan
     let mut occupants = parse_compute_apps(&apps, &uuid_index).map_err(EngineError::Io)?;
     for occ in &mut occupants {
         occ.unit = cgroup_unit_of(occ.pid).await;
+        occ.cmdline = cmdline_of(occ.pid).await;
     }
     Ok(occupants)
 }
@@ -179,6 +185,23 @@ async fn run_nvidia(args: &[&str], timeout: std::time::Duration) -> Result<Strin
 }
 
 #[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
+async fn cmdline_of(pid: u32) -> Option<String> {
+    let bytes = tokio::fs::read(format!("/proc/{pid}/cmdline")).await.ok()?;
+    Some(cmdline_text(&bytes))
+}
+
+/// `/proc/<pid>/cmdline` bytes as one line: NULs become spaces, at most
+/// 512 bytes (cut at a char boundary), trailing space trimmed.
+pub fn cmdline_text(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes).replace('\0', " ");
+    let mut end = text.len().min(512);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].trim_end().to_string()
+}
+
+#[cfg(all(unix, target_os = "linux", not(llmctl_macos)))]
 async fn cgroup_unit_of(pid: u32) -> Option<String> {
     let text = tokio::fs::read_to_string(format!("/proc/{pid}/cgroup"))
         .await
@@ -194,6 +217,17 @@ use crate::engine::EngineError;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cmdline_text_joins_args_and_caps_the_length() {
+        assert_eq!(
+            super::cmdline_text(b"/usr/bin/python\0uvicorn\0speaches.main:create_app\0"),
+            "/usr/bin/python uvicorn speaches.main:create_app"
+        );
+        let long = "\u{e9}".repeat(400); // 800 bytes, 2 per char
+        let cut = super::cmdline_text(long.as_bytes());
+        assert!(cut.len() <= 512 && cut.chars().all(|c| c == '\u{e9}'));
+    }
+
     #[test]
     fn free_mib_parses_or_says_unknown() {
         assert_eq!(

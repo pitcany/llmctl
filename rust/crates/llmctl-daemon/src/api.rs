@@ -36,6 +36,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/models/remove", post(models_remove))
         .route("/v1/stores/add", post(stores_add))
         .route("/v1/stores/remove", post(stores_remove))
+        .route("/v1/gpu/tolerated", get(tolerated))
+        .route("/v1/gpu/tolerated/add", post(tolerate_add))
+        .route("/v1/gpu/tolerated/remove", post(tolerate_remove))
         .route("/v1/vram", get(vram))
         .route("/v1/vram/measure", post(vram_measure))
         .route("/v1/plans", post(create_plan))
@@ -121,6 +124,40 @@ async fn stores_remove(
     let _one_at_a_time = state.adopt_lock.lock().await;
     Ok(Json(
         crate::weights::remove_store(&state, &req.name)
+            .await
+            .map_err(|e| ApiError::from_ops(&e))?,
+    ))
+}
+
+async fn tolerated(State(state): State<Arc<AppState>>) -> Json<llmctl_client::wire::ToleratedResponse> {
+    let inv = state.ops.inventory().await;
+    Json(llmctl_client::wire::ToleratedResponse {
+        host: inv.host.to_string(),
+        tolerated: inv.gpu_tolerated.clone(),
+    })
+}
+
+async fn tolerate_add(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::TolerateAddRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_protocol(req.protocol)?;
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    Ok(Json(
+        crate::weights::add_tolerance(&state, &req)
+            .await
+            .map_err(|e| ApiError::from_ops(&e))?,
+    ))
+}
+
+async fn tolerate_remove(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::TolerateRemoveRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_protocol(req.protocol)?;
+    let _one_at_a_time = state.adopt_lock.lock().await;
+    Ok(Json(
+        crate::weights::remove_tolerance(&state, &req.name)
             .await
             .map_err(|e| ApiError::from_ops(&e))?,
     ))

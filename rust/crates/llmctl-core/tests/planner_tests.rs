@@ -57,6 +57,7 @@ fn inventory() -> HostInventory {
             workload("big", &[0, 1], 8102),
         ],
         stores: Vec::new(),
+        gpu_tolerated: Vec::new(),
         revision: 12,
     };
     i.validate().unwrap();

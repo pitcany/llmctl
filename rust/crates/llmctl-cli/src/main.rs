@@ -190,6 +190,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Processes the GPU guard tolerates on a card (M5b): a display encoder,
+    /// a small speech server. Above its --max-mib a process is foreign again.
+    /// `tolerate add` / `tolerate remove` change the list; nothing is stopped.
+    Tolerate {
+        #[command(subcommand)]
+        cmd: Option<TolerateCmd>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Model weights.
     Model {
         #[command(subcommand)]
@@ -464,6 +473,26 @@ enum StoresCmd {
         workload: Option<String>,
     },
     /// Forget a store. The weights in it stay.
+    Remove { name: String },
+}
+
+#[derive(Subcommand, Clone)]
+enum TolerateCmd {
+    /// Tolerate one process. Give exactly one of --unit or --cmdline.
+    Add {
+        name: String,
+        /// Full unit identity, e.g. system/rustdesk.service.
+        #[arg(long)]
+        unit: Option<String>,
+        /// A substring of the command line, for a process with no unit
+        /// (a Docker container), e.g. speaches.main.
+        #[arg(long)]
+        cmdline: Option<String>,
+        /// The most VRAM it may hold on one card; above it, it is foreign.
+        #[arg(long)]
+        max_mib: u64,
+    },
+    /// Stop tolerating a process: it counts as foreign again.
     Remove { name: String },
 }
 
@@ -879,6 +908,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Intent { name, json } => cmd_intent(cli, name.as_deref(), json).await,
         Command::Audit { since, all, json } => cmd_audit(cli, since.as_deref(), all, json).await,
         Command::Stores { cmd, json } => cmd_stores(cli, cmd, json).await,
+        Command::Tolerate { cmd, json } => cmd_tolerate(cli, cmd, json).await,
         Command::Model { cmd } => cmd_model(cli, cmd).await,
         Command::Preset { cmd } => preset_cmds::cmd_preset(cli, cmd).await,
         Command::Enroll(a) => records_cmds::cmd_enroll(cli, a).await,
@@ -1833,6 +1863,60 @@ async fn cmd_upgrade(cli: &Cli, cmd: UpgradeCmd) -> Result<u8, CliError> {
             Ok(0)
         }
     }
+}
+
+async fn cmd_tolerate(cli: &Cli, cmd: Option<TolerateCmd>, json: bool) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    match cmd {
+        Some(TolerateCmd::Add { name, unit, cmdline, max_mib }) => {
+            ensure_protocol(&client).await?;
+            let r = client
+                .tolerate_add(&llmctl_client::wire::TolerateAddRequest {
+                    protocol: PROTOCOL_VERSION,
+                    name: name.clone(),
+                    unit,
+                    cmdline,
+                    max_mib,
+                })
+                .await?;
+            println!(
+                "{name} tolerated on the cards up to {max_mib} MiB; inventory revision {}",
+                r["inventory_revision"]
+            );
+            return Ok(0);
+        }
+        Some(TolerateCmd::Remove { name }) => {
+            ensure_protocol(&client).await?;
+            let r = client
+                .tolerate_remove(&llmctl_client::wire::TolerateRemoveRequest {
+                    protocol: PROTOCOL_VERSION,
+                    name: name.clone(),
+                })
+                .await?;
+            println!("{name} no longer tolerated; inventory revision {}", r["inventory_revision"]);
+            return Ok(0);
+        }
+        None => {}
+    }
+    let resp = client.tolerated().await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+        return Ok(0);
+    }
+    if resp.tolerated.is_empty() {
+        println!("no GPU process tolerated on {} (tolerate add NAME --unit|--cmdline … --max-mib N)", resp.host);
+        return Ok(0);
+    }
+    println!("{:<16} {:<8} {:<44} {:>8}", "NAME", "MATCH", "VALUE", "MAX MIB");
+    for t in &resp.tolerated {
+        let (how, what) = match (&t.unit, &t.cmdline) {
+            (Some(u), _) => ("unit", u.as_str()),
+            (None, Some(c)) => ("cmdline", c.as_str()),
+            (None, None) => ("-", "-"),
+        };
+        println!("{:<16} {:<8} {:<44} {:>8}", t.name, how, what, t.max_mib);
+    }
+    Ok(0)
 }
 
 async fn cmd_stores(cli: &Cli, cmd: Option<StoresCmd>, json: bool) -> Result<u8, CliError> {

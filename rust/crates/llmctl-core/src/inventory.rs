@@ -302,13 +302,70 @@ pub struct HostInventory {
     /// Places model weights live (M4c item 1). Absent in older files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stores: Vec<crate::acquire::ModelStore>,
+    /// Processes the GPU guard lets stay on a card (M5b): a display
+    /// encoder, a small speech server. Absent in older files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gpu_tolerated: Vec<GpuTolerance>,
     /// Bumped on every change. Plans carry the revision they were built
     /// against; admission revalidates and refuses stale plans instead of
     /// executing an obsolete confirmation.
     pub revision: u64,
 }
 
+/// One tolerated GPU process. It matches by full unit identity
+/// (`system/rustdesk.service`) or, for a process with no unit (a Docker
+/// container), by a substring of its command line; exactly one of the two
+/// is set. Above `max_mib` on a card the process counts as foreign again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuTolerance {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmdline: Option<String>,
+    pub max_mib: u64,
+}
+
+impl GpuTolerance {
+    /// Whether this entry names the process (its size is checked apart).
+    pub fn names(&self, unit: Option<&str>, cmdline: Option<&str>) -> bool {
+        match (&self.unit, &self.cmdline) {
+            (Some(u), _) => unit == Some(u.as_str()),
+            (None, Some(c)) => !c.is_empty() && cmdline.is_some_and(|l| l.contains(c.as_str())),
+            (None, None) => false,
+        }
+    }
+
+    /// A request's shape: a name, exactly one matcher, a cap above zero.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("a tolerance needs a name".into());
+        }
+        match (&self.unit, &self.cmdline) {
+            (Some(_), Some(_)) | (None, None) => {
+                return Err("give exactly one of --unit or --cmdline".into())
+            }
+            (Some(u), None) if !u.contains('/') || !u.ends_with(".service") => {
+                return Err(format!("unit {u:?}: use the full identity, e.g. system/rustdesk.service"))
+            }
+            (None, Some(c)) if c.trim().len() < 4 => {
+                return Err(format!("command-line match {c:?} is too short to name one process"))
+            }
+            _ => {}
+        }
+        if self.max_mib == 0 {
+            return Err("--max-mib must be above 0".into());
+        }
+        Ok(())
+    }
+}
+
 impl HostInventory {
+    /// The tolerance that names this process, if any (size not checked).
+    pub fn tolerance_for(&self, unit: Option<&str>, cmdline: Option<&str>) -> Option<&GpuTolerance> {
+        self.gpu_tolerated.iter().find(|t| t.names(unit, cmdline))
+    }
+
     pub fn workload(&self, name: &WorkloadName) -> Option<&WorkloadDefinition> {
         self.workloads.iter().find(|w| &w.name == name)
     }
@@ -521,6 +578,28 @@ mod tests {
     use super::*;
     use crate::identity::UnitScopeMarker;
 
+    #[test]
+    fn gpu_tolerance_matches_by_unit_or_cmdline_and_validates_its_shape() {
+        let by_unit = GpuTolerance { name: "rustdesk".into(), unit: Some("system/rustdesk.service".into()), cmdline: None, max_mib: 1024 };
+        let by_cmd = GpuTolerance { name: "speaches".into(), unit: None, cmdline: Some("speaches.main".into()), max_mib: 2048 };
+        assert!(by_unit.names(Some("system/rustdesk.service"), None));
+        assert!(!by_unit.names(Some("user/rustdesk.service"), None), "scope is part of the identity");
+        assert!(by_cmd.names(None, Some("python uvicorn speaches.main:create_app")));
+        assert!(!by_cmd.names(None, None) && !by_cmd.names(None, Some("python other")));
+        assert!(by_unit.validate().is_ok() && by_cmd.validate().is_ok());
+        let mut bad = by_unit.clone();
+        bad.cmdline = Some("x-long-enough".into());
+        assert!(bad.validate().is_err(), "both matchers");
+        bad = GpuTolerance { unit: None, cmdline: None, ..by_unit.clone() };
+        assert!(bad.validate().is_err(), "no matcher");
+        bad = GpuTolerance { unit: Some("rustdesk".into()), ..by_unit.clone() };
+        assert!(bad.validate().is_err(), "bare unit name");
+        bad = GpuTolerance { cmdline: Some("py".into()), ..by_cmd.clone() };
+        assert!(bad.validate().is_err(), "too short a substring");
+        bad = GpuTolerance { max_mib: 0, ..by_cmd.clone() };
+        assert!(bad.validate().is_err(), "zero cap");
+    }
+
     fn inv() -> HostInventory {
         let host = HostId::new("workstation").unwrap();
         HostInventory {
@@ -550,6 +629,7 @@ mod tests {
                 observed_version: None,
             }],
             stores: Vec::new(),
+            gpu_tolerated: Vec::new(),
             revision: 7,
         }
     }

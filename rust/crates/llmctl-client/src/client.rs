@@ -214,6 +214,24 @@ impl ControlClient {
         self.post_json("/v1/stores/remove", req).await
     }
 
+    pub async fn tolerated(&self) -> Result<crate::wire::ToleratedResponse, ClientError> {
+        self.get_json("/v1/gpu/tolerated").await
+    }
+
+    pub async fn tolerate_add(
+        &self,
+        req: &crate::wire::TolerateAddRequest,
+    ) -> Result<serde_json::Value, ClientError> {
+        self.post_json("/v1/gpu/tolerated/add", req).await
+    }
+
+    pub async fn tolerate_remove(
+        &self,
+        req: &crate::wire::TolerateRemoveRequest,
+    ) -> Result<serde_json::Value, ClientError> {
+        self.post_json("/v1/gpu/tolerated/remove", req).await
+    }
+
     /// Preview, or with the preview's token carry out, a removal of weights.
     pub async fn model_remove(
         &self,

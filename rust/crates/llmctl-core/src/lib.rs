@@ -30,7 +30,7 @@ pub use identity::{
 };
 pub use intent::DesiredIntent;
 pub use inventory::{
-    ControlAuthority, GpuClaim, Hook, HookWhen, HostInventory, Platform, RecoveryPolicy,
+    ControlAuthority, GpuClaim, GpuTolerance, Hook, HookWhen, HostInventory, Platform, RecoveryPolicy,
     UnitScope, WorkloadDefinition,
 };
 pub use launch::{

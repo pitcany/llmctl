@@ -63,6 +63,48 @@ pub async fn remove_store(state: &AppState, name: &str) -> Result<serde_json::Va
     Ok(serde_json::json!({ "store": name, "removed": true, "inventory_revision": revision }))
 }
 
+/// `tolerate add`: let one known process stay on the cards (M5b). The
+/// GPU guard skips it while it holds at most `max_mib` on a card.
+pub async fn add_tolerance(
+    state: &AppState,
+    req: &llmctl_client::wire::TolerateAddRequest,
+) -> Result<serde_json::Value, OpsError> {
+    let entry = llmctl_core::GpuTolerance {
+        name: req.name.clone(),
+        unit: req.unit.clone(),
+        cmdline: req.cmdline.clone(),
+        max_mib: req.max_mib,
+    };
+    entry.validate().map_err(invalid)?;
+    let _quiet = state.ops.quiesce().await?;
+    let inv = state.ops.inventory().await;
+    if inv.gpu_tolerated.iter().any(|t| t.name == entry.name) {
+        return Err(OpsError::InvalidState(format!(
+            "a tolerance named {} already exists (tolerate remove it first)",
+            entry.name
+        )));
+    }
+    let mut next = (*inv).clone();
+    next.gpu_tolerated.push(entry);
+    let revision = crate::pin::commit_inventory(state, next, "gpu-tolerance").await?;
+    tracing::info!(tolerance = %req.name, max_mib = req.max_mib, revision, "gpu tolerance added");
+    Ok(serde_json::json!({ "tolerance": req.name, "added": true, "inventory_revision": revision }))
+}
+
+/// `tolerate remove`: the process counts as foreign again.
+pub async fn remove_tolerance(state: &AppState, name: &str) -> Result<serde_json::Value, OpsError> {
+    let _quiet = state.ops.quiesce().await?;
+    let inv = state.ops.inventory().await;
+    if !inv.gpu_tolerated.iter().any(|t| t.name == name) {
+        return Err(invalid(format!("no tolerance named {name}")));
+    }
+    let mut next = (*inv).clone();
+    next.gpu_tolerated.retain(|t| t.name != name);
+    let revision = crate::pin::commit_inventory(state, next, "gpu-tolerance").await?;
+    tracing::info!(tolerance = %name, revision, "gpu tolerance removed");
+    Ok(serde_json::json!({ "tolerance": name, "removed": true, "inventory_revision": revision }))
+}
+
 // ---- what a target names ---------------------------------------------------------
 
 /// What `model rm` was asked to remove.

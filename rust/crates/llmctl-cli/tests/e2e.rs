@@ -3057,3 +3057,75 @@ async fn agent_restart_keeps_findings_without_duplicating() {
     child2.kill().unwrap();
     child2.wait().unwrap();
 }
+
+// ---- M5b: tolerated GPU occupants ---------------------------------------------
+
+/// A small known process (a display encoder, a speech server) can be
+/// tolerated on a card: by unit identity, or by a command-line substring
+/// when it has no unit (Docker). Its VRAM cap is the limit: above it the
+/// process counts as foreign again. The list lives in the inventory and
+/// changes through `tolerate add/remove`.
+#[tokio::test]
+async fn tolerated_gpu_occupants_let_a_run_through_until_one_outgrows_its_cap() {
+    let d = spawn_daemon();
+    let occupants = |speaches_mib: u64| {
+        serde_json::json!([
+            {"gpu": 0, "pid": 501, "unit": null, "memory_mib": speaches_mib,
+             "cmdline": "/home/ubuntu/speaches/.venv/bin/python uvicorn --factory speaches.main:create_app"},
+            {"gpu": 0, "pid": 502, "unit": "system/rustdesk.service", "memory_mib": 614}
+        ])
+    };
+    write_gpus(&d, occupants(784));
+    let client = d.client();
+    match client.admit(admit_req(OpKind::Run, "coder", "tol-1")).await {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, codes::GPU_OCCUPIED),
+        other => panic!("expected gpu_occupied before any tolerance, got {other:?}"),
+    }
+
+    // Bad requests: neither or both matchers, a zero cap.
+    for bad in [
+        vec!["tolerate", "add", "x", "--max-mib", "100"],
+        vec!["tolerate", "add", "x", "--unit", "system/a.service", "--cmdline", "a", "--max-mib", "100"],
+        vec!["tolerate", "add", "x", "--cmdline", "a", "--max-mib", "0"],
+    ] {
+        let out = cli(&d.socket, &bad);
+        assert!(!out.status.success(), "{bad:?} should be refused");
+    }
+
+    let out = cli(&d.socket, &["tolerate", "add", "speaches", "--cmdline", "speaches.main", "--max-mib", "2048"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = cli(&d.socket, &["tolerate", "add", "rustdesk", "--unit", "system/rustdesk.service", "--max-mib", "1024"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = cli(&d.socket, &["tolerate", "add", "rustdesk", "--unit", "system/other.service", "--max-mib", "1"]);
+    assert!(!out.status.success(), "a duplicate name is refused");
+
+    let listed = String::from_utf8(cli(&d.socket, &["tolerate"]).stdout).unwrap();
+    assert!(listed.contains("speaches") && listed.contains("speaches.main"), "{listed}");
+    assert!(listed.contains("rustdesk") && listed.contains("system/rustdesk.service"), "{listed}");
+
+    // Both occupants tolerated → the run goes through.
+    run_to_success(&d, "coder", "tol-2").await;
+
+    // speaches grows past its cap → foreign again, and the refusal says why.
+    let resp = client.admit(admit_req(OpKind::Stop, "coder", "tol-3")).await.unwrap();
+    assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
+    write_gpus(&d, occupants(4096));
+    match client.admit(admit_req(OpKind::Run, "coder", "tol-4")).await {
+        Err(ClientError::Api { code, message, .. }) => {
+            assert_eq!(code, codes::GPU_OCCUPIED, "{message}");
+            assert!(message.contains("501") && message.contains("2048"), "{message}");
+        }
+        other => panic!("expected gpu_occupied over the cap, got {other:?}"),
+    }
+
+    // Removing a tolerance makes its process foreign again.
+    write_gpus(&d, occupants(784));
+    let out = cli(&d.socket, &["tolerate", "remove", "speaches"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    match client.admit(admit_req(OpKind::Run, "coder", "tol-5")).await {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, codes::GPU_OCCUPIED),
+        other => panic!("expected gpu_occupied after the removal, got {other:?}"),
+    }
+    let listed = String::from_utf8(cli(&d.socket, &["tolerate"]).stdout).unwrap();
+    assert!(!listed.contains("speaches.main") && listed.contains("rustdesk"), "{listed}");
+}
