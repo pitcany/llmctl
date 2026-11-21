@@ -697,6 +697,202 @@ async fn cancellation_between_phases_is_recorded() {
         .any(|p| p.status == llmctl_client::wire::PhaseStatus::Skipped));
 }
 
+/// Spawn a daemon on an existing data dir (the restart tests reuse one).
+fn spawn_daemon_in(dir: &Path, socket: &Path) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket")
+        .arg(socket)
+        .arg("--data-dir")
+        .arg(dir)
+        .arg("daemon")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn daemon")
+}
+
+/// Poll an operation until one of its phases matches `pred`.
+async fn wait_phase(
+    client: &ControlClient,
+    id: &str,
+    what: &str,
+    pred: impl Fn(&llmctl_client::wire::PhaseView) -> bool,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let op = client.operation(id).await.expect("operation readable");
+        if op.phases.iter().any(&pred) {
+            return;
+        }
+        assert!(
+            !op.status.is_terminal() && tokio::time::Instant::now() < deadline,
+            "never reached {what}: {op:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn effect_pending(label_prefix: &'static str) -> impl Fn(&llmctl_client::wire::PhaseView) -> bool {
+    move |p| {
+        p.label.starts_with(label_prefix)
+            && p.status == llmctl_client::wire::PhaseStatus::EffectPending
+    }
+}
+
+/// A daemon killed while it restores the world after a failed step must
+/// not auto-resolve on restart: the neighbours it was restarting may still
+/// be down. needs_attention, unacknowledged, blocking.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_during_rollback_needs_attention() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("control.sock");
+    let mut child = ChildGuard(Some(spawn_daemon_in(dir.path(), &socket)));
+    wait_socket(&socket).await;
+    let client = ControlClient::connect(&socket).unwrap();
+    let setup = client
+        .admit(admit_req(OpKind::Run, "helper", "k-rb-setup"))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !client.operation(&setup.operation.id).await.unwrap().status.is_terminal() {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // "start big" applies but reports failure; every effect is slow, so
+    // the rollback's restart of helper sits in its effect window.
+    std::fs::write(
+        dir.path().join("faults.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "effect_delay_ms": 1500,
+            "fail_effects": [
+                {"unit": "user/llmctl-next-fake-big.service", "kind": "start", "mode": "after"}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let admitted = client
+        .admit(admit_req(OpKind::Run, "big", "k-rb"))
+        .await
+        .unwrap();
+    let id = admitted.operation.id.clone();
+    wait_phase(&client, &id, "a rollback effect", effect_pending("rollback:")).await;
+    child.kill_now();
+    std::fs::remove_file(&socket).unwrap_or(());
+
+    std::fs::write(dir.path().join("faults.json"), b"{}").unwrap();
+    let guard = DaemonGuard {
+        child: spawn_daemon_in(dir.path(), &socket),
+        dir,
+        socket: socket.clone(),
+    };
+    wait_socket(&socket).await;
+    let client2 = guard.client();
+    let op = client2.operation(&id).await.unwrap();
+    assert_eq!(op.status, OpStatus::NeedsAttention, "{op:?}");
+    assert!(!op.acknowledged, "an incomplete restoration is never auto-resolved");
+    match client2
+        .admit(admit_req(OpKind::Run, "coder", "k-rb-2"))
+        .await
+    {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, codes::BLOCKED_NEEDS_ATTENTION),
+        other => panic!("expected block, got {other:?}"),
+    }
+}
+
+/// A daemon killed inside a start effect (outcome unknown) must not report
+/// "external effects complete" and auto-resolve.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_inside_start_effect_needs_attention() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("control.sock");
+    std::fs::write(
+        dir.path().join("faults.json"),
+        serde_json::to_vec(&serde_json::json!({"effect_delay_ms": 3000})).unwrap(),
+    )
+    .unwrap();
+    let mut child = ChildGuard(Some(spawn_daemon_in(dir.path(), &socket)));
+    wait_socket(&socket).await;
+    let client = ControlClient::connect(&socket).unwrap();
+    let admitted = client
+        .admit(admit_req(OpKind::Run, "coder", "k-mid-start"))
+        .await
+        .unwrap();
+    let id = admitted.operation.id.clone();
+    wait_phase(&client, &id, "the start effect", effect_pending("start")).await;
+    child.kill_now();
+    std::fs::remove_file(&socket).unwrap_or(());
+
+    std::fs::write(dir.path().join("faults.json"), b"{}").unwrap();
+    let guard = DaemonGuard {
+        child: spawn_daemon_in(dir.path(), &socket),
+        dir,
+        socket: socket.clone(),
+    };
+    wait_socket(&socket).await;
+    let op = guard.client().operation(&id).await.unwrap();
+    assert_eq!(op.status, OpStatus::NeedsAttention, "{op:?}");
+    assert!(!op.acknowledged);
+}
+
+/// A cancel that lands after a neighbour was evicted restores it: the
+/// world returns to where the operation started.
+#[tokio::test]
+async fn cancel_after_eviction_restores_the_neighbour() {
+    let d = spawn_daemon();
+    run_to_success(&d, "helper", "k-cx-setup").await;
+    d.write_faults(serde_json::json!({"effect_delay_ms": 1000}));
+    let client = d.client();
+    let resp = client
+        .admit(admit_req(OpKind::Run, "big", "k-cx"))
+        .await
+        .unwrap();
+    let id = resp.operation.id.clone();
+    wait_phase(&client, &id, "stopping helper", effect_pending("stop")).await;
+    client.cancel(&id, Some("test".into())).await.unwrap();
+    let op = d.wait_terminal(&id).await;
+    assert_eq!(op.status, OpStatus::Canceled, "{op:?}");
+    let recovery = op.recovery.expect("restoration recorded");
+    assert_eq!(recovery["outcome"], "restored", "{recovery}");
+
+    let status = d.client().status().await.unwrap();
+    let process = |name: &str| {
+        status
+            .workloads
+            .iter()
+            .find(|w| w.name == name)
+            .unwrap()
+            .process
+            .clone()
+    };
+    assert_eq!(process("helper"), "Running", "evicted neighbour restored");
+    assert_ne!(process("big"), "Running", "canceled target not left up");
+}
+
+/// A canceled restart restores the target, and the restoration's own
+/// readiness wait is not cut short by the cancel that triggered it.
+#[tokio::test]
+async fn cancel_during_restart_restores_the_target() {
+    let d = spawn_daemon();
+    run_to_success(&d, "coder", "k-cr-setup").await;
+    d.write_faults(serde_json::json!({"effect_delay_ms": 1000}));
+    let client = d.client();
+    let resp = client
+        .admit(admit_req(OpKind::Restart, "coder", "k-cr"))
+        .await
+        .unwrap();
+    let id = resp.operation.id.clone();
+    wait_phase(&client, &id, "stopping coder", effect_pending("stop")).await;
+    client.cancel(&id, Some("test".into())).await.unwrap();
+    let op = d.wait_terminal(&id).await;
+    assert_eq!(op.status, OpStatus::Canceled, "{op:?}");
+    assert_eq!(op.recovery.as_ref().unwrap()["outcome"], "restored", "{op:?}");
+    let status = d.client().status().await.unwrap();
+    let coder = status.workloads.iter().find(|w| w.name == "coder").unwrap();
+    assert_eq!(coder.process, "Running");
+}
+
 #[tokio::test]
 async fn stop_records_manual_intent_and_status_shows_it() {
     let d = spawn_daemon();

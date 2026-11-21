@@ -1216,8 +1216,13 @@ impl OpManager {
             let fresh = self.db.get_op(id.as_str()).await?;
             if let Some(fresh) = fresh {
                 if fresh.status == OpStatus::CancelRequested {
-                    self.finish_canceled(&mut row, i, "cancel observed between phases")
-                        .await?;
+                    self.finish_canceled(
+                        &mut row,
+                        i,
+                        "cancel observed between phases",
+                        &applied_identities,
+                    )
+                    .await?;
                     return Ok(());
                 }
             }
@@ -1235,7 +1240,8 @@ impl OpManager {
                     self.persist(&mut row).await?;
                 }
                 StepOutcome::Canceled(why) => {
-                    self.finish_canceled(&mut row, i, &why).await?;
+                    self.finish_canceled(&mut row, i, &why, &applied_identities)
+                        .await?;
                     return Ok(());
                 }
                 StepOutcome::Failed(why) => {
@@ -1244,7 +1250,9 @@ impl OpManager {
                         p.detail = Some(why.clone());
                     });
                     self.persist(&mut row).await?;
-                    return self.run_recovery(&mut row, i, &applied_identities).await;
+                    return self
+                        .run_recovery(&mut row, RecoveryCause::Failed { at: i }, &applied_identities)
+                        .await;
                 }
             }
         }
@@ -1464,7 +1472,7 @@ impl OpManager {
                 workload: _,
                 unit,
                 timeout_secs,
-            } => self.await_readiness(row, index, unit, *timeout_secs).await,
+            } => self.await_readiness(row, index, unit, *timeout_secs, true).await,
             PlanStep::VerifyServedModel { unit, model, .. } => {
                 self.verify_served_model(unit, model).await
             }
@@ -1706,18 +1714,23 @@ impl OpManager {
         }
     }
 
+    /// `honor_cancel` is false for a restoration that a cancel itself
+    /// started: the flag is already set and must not cut that wait short.
     async fn await_readiness(
         &self,
         row: &OpRow,
         _index: usize,
         unit: &UnitName,
         timeout_secs: u64,
+        honor_cancel: bool,
     ) -> StepOutcome {
         let budget = timeout_secs.min(MAX_POLL_TIMEOUT_SECS);
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(budget);
         loop {
-            if let Some(canceled) = self.check_cancel(row).await {
-                return StepOutcome::Canceled(canceled);
+            if honor_cancel {
+                if let Some(canceled) = self.check_cancel(row).await {
+                    return StepOutcome::Canceled(canceled);
+                }
             }
             match self.engine.probe(unit).await {
                 Ok(UnitProbe {
@@ -1763,20 +1776,19 @@ impl OpManager {
     async fn run_recovery(
         &self,
         row: &mut OpRow,
-        failed_at: usize,
+        cause: RecoveryCause<'_>,
         applied: &[String],
     ) -> Result<(), OpsError> {
         let rollback = row.plan.rollback.clone();
         let rollback_steps = rollback.clone();
         if rollback.is_empty() {
-            row.status = OpStatus::Failed;
-            row.result = Some(json!({
-                "outcome": "failed",
-                "failed_phase": failed_at,
-                "error": row.phases.get(failed_at).and_then(|p| p.detail.clone()),
-                "rollback": "none",
-                "effects": applied,
-            }));
+            row.status = match cause {
+                RecoveryCause::Failed { .. } => OpStatus::Failed,
+                RecoveryCause::Canceled { .. } => OpStatus::Canceled,
+            };
+            let mut result = self.recovery_result(row, cause, applied);
+            result["rollback"] = json!("none");
+            row.result = Some(result);
             crate::audit::record_effects(self, row).await;
             self.persist(row).await?;
             return Ok(());
@@ -1897,7 +1909,13 @@ impl OpManager {
                 PlanStep::AwaitReadiness {
                     unit, timeout_secs, ..
                 } => match self
-                    .await_readiness(row, start_index + offset, unit, *timeout_secs)
+                    .await_readiness(
+                        row,
+                        start_index + offset,
+                        unit,
+                        *timeout_secs,
+                        matches!(cause, RecoveryCause::Failed { .. }),
+                    )
                     .await
                 {
                     StepOutcome::Done => Ok(None),
@@ -2004,33 +2022,78 @@ impl OpManager {
                 "note": "the world differs from where the operation started; a human decides",
             }));
         } else {
-            row.status = OpStatus::Failed;
+            row.status = match cause {
+                RecoveryCause::Failed { .. } => OpStatus::Failed,
+                RecoveryCause::Canceled { .. } => OpStatus::Canceled,
+            };
             row.recovery = Some(json!({
                 "outcome": "restored",
                 "steps": recovery_steps,
             }));
         }
-        row.result = Some(json!({
-            "outcome": "failed",
-            "failed_phase": failed_at,
-            "error": row.phases.get(failed_at).and_then(|p| p.detail.clone()),
-            "effects": applied,
-        }));
+        row.result = Some(self.recovery_result(row, cause, applied));
         crate::audit::record_effects(self, row).await;
         self.persist(row).await?;
         Ok(())
     }
 
+    /// The operation's own outcome, recorded apart from its restoration.
+    fn recovery_result(
+        &self,
+        row: &OpRow,
+        cause: RecoveryCause<'_>,
+        applied: &[String],
+    ) -> serde_json::Value {
+        match cause {
+            RecoveryCause::Failed { at } => json!({
+                "outcome": "failed",
+                "failed_phase": at,
+                "error": row.phases.get(at).and_then(|p| p.detail.clone()),
+                "effects": applied,
+            }),
+            RecoveryCause::Canceled { at, why } => json!({
+                "outcome": "canceled",
+                "why": why,
+                "at_phase": at,
+                "canceled_at": Utc::now().to_rfc3339(),
+                "effects": applied,
+            }),
+        }
+    }
+
+    /// Record an accepted cancellation. Once an external effect has begun,
+    /// the world is restored first (the plan's rollback, as for a failed
+    /// step): a cancel after evictions must not leave neighbours down. A
+    /// failed restoration is needs_attention, as for any rollback.
     async fn finish_canceled(
         &self,
         row: &mut OpRow,
         from_phase: usize,
         why: &str,
+        applied: &[String],
     ) -> Result<(), OpsError> {
+        let effects_began = row.phases.iter().any(|p| {
+            p.index < row.plan.steps.len()
+                && matches!(p.status, PhaseStatus::Done | PhaseStatus::EffectPending)
+                && row.plan.steps[p.index].is_external()
+        });
         for p in row.phases.iter_mut() {
             if p.status == PhaseStatus::Pending || p.status == PhaseStatus::Running {
                 p.status = PhaseStatus::Skipped;
             }
+        }
+        if effects_began && !row.plan.rollback.is_empty() {
+            self.persist(row).await?;
+            return self
+                .run_recovery(
+                    row,
+                    RecoveryCause::Canceled {
+                        at: from_phase,
+                        why,
+                    },
+                    applied,
+                )
+                .await;
         }
         row.status = OpStatus::Canceled;
         row.result = Some(json!({
@@ -2099,27 +2162,7 @@ impl OpManager {
             if row.status.is_terminal() {
                 continue;
             }
-            let external_started = row.phases.iter().any(|p| {
-                (p.status == PhaseStatus::EffectPending || p.status == PhaseStatus::Done)
-                    && p.index < row.plan.steps.len()
-                    && row.plan.steps[p.index].is_external()
-            });
-            let remaining_destructive = row.phases.iter().any(|p| {
-                p.status == PhaseStatus::Pending
-                    && p.index < row.plan.steps.len()
-                    && row.plan.steps[p.index].is_external()
-                    && matches!(
-                        row.plan.steps[p.index],
-                        PlanStep::StopUnit { .. }
-                            | PlanStep::StartUnit { .. }
-                            | PlanStep::ApplyEnvFile { .. }
-                            | PlanStep::RunHook { .. }
-                            | PlanStep::WriteSwapConfig { .. }
-                            | PlanStep::LoadRouterModel { .. }
-                            | PlanStep::UnloadRouterModel { .. }
-                            | PlanStep::WriteRouterPreset { .. }
-                    )
-            });
+            let verdict = classify_interrupted(&row.plan, &row.phases);
 
             let affected_units: Vec<UnitName> = row
                 .plan
@@ -2150,31 +2193,36 @@ impl OpManager {
                 );
             }
 
-            if !external_started {
-                row.status = OpStatus::Interrupted;
-                row.result = Some(json!({
-                    "outcome": "interrupted",
-                    "reconciled": "no external effects had begun; nothing observable happened",
-                    "observed": observed,
-                }));
-                row.acknowledged = true; // provably safe
-            } else if !remaining_destructive {
-                row.status = OpStatus::Interrupted;
-                row.result = Some(json!({
-                    "outcome": "interrupted",
-                    "reconciled": "external effects complete; only observation steps remained",
-                    "observed": observed,
-                }));
-                row.acknowledged = true;
-            } else {
-                row.status = OpStatus::NeedsAttention;
-                row.result = Some(json!({
-                    "outcome": "needs_attention",
-                    "reconciled": "interrupted with destructive steps pending; observed state attached",
-                    "observed": observed,
-                }));
-                row.acknowledged = false;
-            }
+            let (status, outcome, reconciled, acknowledged) = match verdict {
+                Reconciled::NothingBegan => (
+                    OpStatus::Interrupted,
+                    "interrupted",
+                    "no external effects had begun; nothing observable happened",
+                    true, // provably safe
+                ),
+                Reconciled::ObservationOnly => (
+                    OpStatus::Interrupted,
+                    "interrupted",
+                    "external effects complete; only observation steps remained",
+                    true,
+                ),
+                Reconciled::Restored => (
+                    OpStatus::Interrupted,
+                    "interrupted",
+                    "the restoration had completed before the daemon stopped",
+                    true,
+                ),
+                Reconciled::NeedsAttention(why) => {
+                    (OpStatus::NeedsAttention, "needs_attention", why, false)
+                }
+            };
+            row.status = status;
+            row.result = Some(json!({
+                "outcome": outcome,
+                "reconciled": reconciled,
+                "observed": observed,
+            }));
+            row.acknowledged = acknowledged;
             row.updated_at = Utc::now();
             self.persist(&mut row).await?;
             resolved.push(row.id.to_string());
@@ -2187,6 +2235,98 @@ enum StepOutcome {
     Done,
     Canceled(String),
     Failed(String),
+}
+
+/// Why `run_recovery` restores the world: a failed step, or an accepted
+/// cancellation after external effects had begun.
+#[derive(Clone, Copy)]
+enum RecoveryCause<'a> {
+    Failed { at: usize },
+    Canceled { at: usize, why: &'a str },
+}
+
+/// What startup reconciliation concludes for one nonterminal operation.
+#[derive(Debug, PartialEq, Eq)]
+enum Reconciled {
+    /// No external effect had begun.
+    NothingBegan,
+    /// Destructive work was complete; only observation remained.
+    ObservationOnly,
+    /// A restoration ran to completion before the daemon stopped.
+    Restored,
+    /// The world may differ from both the start and the target.
+    NeedsAttention(&'static str),
+}
+
+/// Steps that change the world (as opposed to observing it).
+fn is_destructive(step: &PlanStep) -> bool {
+    matches!(
+        step,
+        PlanStep::StopUnit { .. }
+            | PlanStep::StartUnit { .. }
+            | PlanStep::ApplyEnvFile { .. }
+            | PlanStep::RunHook { .. }
+            | PlanStep::WriteSwapConfig { .. }
+            | PlanStep::LoadRouterModel { .. }
+            | PlanStep::UnloadRouterModel { .. }
+            | PlanStep::WriteRouterPreset { .. }
+    )
+}
+
+/// Pure verdict for an operation a crash left nonterminal. Rollback phases
+/// are appended after the forward ones (`index >= plan.steps.len()`); a
+/// forward failure or any rollback phase means a restoration was owed.
+fn classify_interrupted(plan: &Plan, phases: &[PhaseRecord]) -> Reconciled {
+    let n = plan.steps.len();
+    let forward = |p: &&PhaseRecord| p.index < n;
+    let rollback_phases: Vec<&PhaseRecord> = phases.iter().filter(|p| p.index >= n).collect();
+    let forward_failed = phases
+        .iter()
+        .filter(forward)
+        .any(|p| p.status == PhaseStatus::Failed);
+
+    if (forward_failed || !rollback_phases.is_empty()) && !plan.rollback.is_empty() {
+        let complete = rollback_phases.len() == plan.rollback.len()
+            && rollback_phases.iter().all(|p| p.status == PhaseStatus::Done);
+        return if complete {
+            Reconciled::Restored
+        } else if rollback_phases.is_empty() {
+            Reconciled::NeedsAttention(
+                "a step failed and the restoration never began; observed state attached",
+            )
+        } else {
+            Reconciled::NeedsAttention(
+                "interrupted during the restoration; it did not complete; observed state attached",
+            )
+        };
+    }
+
+    let external_started = phases.iter().filter(forward).any(|p| {
+        matches!(p.status, PhaseStatus::EffectPending | PhaseStatus::Done)
+            && plan.steps[p.index].is_external()
+    });
+    if !external_started {
+        return Reconciled::NothingBegan;
+    }
+    let effect_unknown = phases.iter().filter(forward).any(|p| {
+        p.status == PhaseStatus::EffectPending && is_destructive(&plan.steps[p.index])
+    });
+    if effect_unknown {
+        return Reconciled::NeedsAttention(
+            "interrupted inside a destructive effect whose outcome is unknown; observed state attached",
+        );
+    }
+    // `Running` without the effect marker: the step was about to act.
+    let remaining_destructive = phases.iter().filter(forward).any(|p| {
+        matches!(p.status, PhaseStatus::Pending | PhaseStatus::Running)
+            && is_destructive(&plan.steps[p.index])
+    });
+    if remaining_destructive {
+        return Reconciled::NeedsAttention(
+            "interrupted with destructive steps pending; observed state attached",
+        );
+    }
+    Reconciled::ObservationOnly
 }
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -2297,6 +2437,120 @@ async fn run_swap_write(step: &PlanStep) -> Result<String, String> {
         summary,
     )
     .await
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+    use llmctl_core::UnitScopeMarker;
+
+    fn w(name: &str) -> WorkloadName {
+        WorkloadName::new(name).unwrap()
+    }
+    fn u(name: &str) -> UnitName {
+        UnitName::systemd(UnitScopeMarker::User, format!("{name}.service")).unwrap()
+    }
+
+    /// run big, evicting helper: intent, stop helper, start big, await, verify;
+    /// rollback: restart helper, stop big.
+    fn plan() -> Plan {
+        Plan {
+            id: OperationId::generate(),
+            kind: OpKind::Run,
+            target: w("big"),
+            revision: 1,
+            expected_model: "m".into(),
+            affected_gpus: vec![],
+            steps: vec![
+                PlanStep::PersistIntent {
+                    workload: w("big"),
+                    intent: llmctl_core::DesiredIntent::Running,
+                },
+                PlanStep::StopUnit { workload: w("helper"), unit: u("helper") },
+                PlanStep::StartUnit { workload: w("big"), unit: u("big") },
+                PlanStep::AwaitReadiness { workload: w("big"), unit: u("big"), timeout_secs: 5 },
+                PlanStep::VerifyServedModel { workload: w("big"), unit: u("big"), model: "m".into() },
+            ],
+            rollback: vec![
+                PlanStep::StartUnit { workload: w("helper"), unit: u("helper") },
+                PlanStep::StopUnit { workload: w("big"), unit: u("big") },
+            ],
+        }
+    }
+
+    fn phases(statuses: &[PhaseStatus]) -> Vec<PhaseRecord> {
+        statuses
+            .iter()
+            .enumerate()
+            .map(|(index, status)| PhaseRecord {
+                index,
+                label: format!("phase {index}"),
+                status: *status,
+                detail: None,
+            })
+            .collect()
+    }
+
+    use PhaseStatus::{Done, EffectPending, Failed, Pending, Running};
+
+    #[test]
+    fn nothing_external_began_auto_resolves() {
+        let p = phases(&[Done, Pending, Pending, Pending, Pending]);
+        assert_eq!(classify_interrupted(&plan(), &p), Reconciled::NothingBegan);
+    }
+
+    #[test]
+    fn only_observation_left_auto_resolves() {
+        let p = phases(&[Done, Done, Done, Running, Pending]);
+        assert_eq!(classify_interrupted(&plan(), &p), Reconciled::ObservationOnly);
+    }
+
+    #[test]
+    fn destructive_effect_in_flight_needs_attention() {
+        let p = phases(&[Done, Done, EffectPending, Pending, Pending]);
+        assert!(matches!(classify_interrupted(&plan(), &p), Reconciled::NeedsAttention(_)));
+    }
+
+    #[test]
+    fn destructive_step_about_to_act_needs_attention() {
+        let p = phases(&[Done, Done, Running, Pending, Pending]);
+        assert!(matches!(classify_interrupted(&plan(), &p), Reconciled::NeedsAttention(_)));
+    }
+
+    #[test]
+    fn failure_with_restoration_never_begun_needs_attention() {
+        // readiness failed; the daemon died before the first rollback phase.
+        let p = phases(&[Done, Done, Done, Failed, Pending]);
+        assert!(matches!(classify_interrupted(&plan(), &p), Reconciled::NeedsAttention(_)));
+    }
+
+    #[test]
+    fn restoration_mid_way_needs_attention() {
+        let p = phases(&[Done, Done, Done, Failed, Pending, EffectPending]);
+        assert!(matches!(classify_interrupted(&plan(), &p), Reconciled::NeedsAttention(_)));
+        let p = phases(&[Done, Done, Done, Failed, Pending, Done]);
+        assert!(matches!(classify_interrupted(&plan(), &p), Reconciled::NeedsAttention(_)));
+    }
+
+    #[test]
+    fn completed_restoration_auto_resolves() {
+        let p = phases(&[Done, Done, Done, Failed, Pending, Done, Done]);
+        assert_eq!(classify_interrupted(&plan(), &p), Reconciled::Restored);
+    }
+
+    #[test]
+    fn canceled_restoration_mid_way_needs_attention() {
+        // a cancel marks the forward remainder skipped, then restores.
+        let p = phases(&[
+            Done,
+            Done,
+            PhaseStatus::Skipped,
+            PhaseStatus::Skipped,
+            PhaseStatus::Skipped,
+            EffectPending,
+        ]);
+        assert!(matches!(classify_interrupted(&plan(), &p), Reconciled::NeedsAttention(_)));
+    }
 }
 
 #[cfg(test)]

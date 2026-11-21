@@ -99,3 +99,40 @@ assessment. This does not reopen the accepted M4 milestone or claim M6 readiness
 Published artifact follow-up: check Driving llmctl against this lock handoff and
 legacy-key behavior when updating its Rust delegation guidance. The artifact
 index was checked; no published page was changed.
+
+## Follow-up: reconciliation and cancellation (evening, November 20)
+
+Two executor defects found in a later code study. Both are fixed in
+`rust/crates/llmctl-daemon/src/ops.rs`. Not deployed.
+
+**Startup reconciliation.** It read only the forward phases. A daemon killed
+during a rollback was auto-acknowledged as `interrupted`, with neighbours
+possibly still stopped. A crash inside a start or stop effect was reported as
+"external effects complete". The pure function `classify_interrupted` now
+decides. The result is `needs_attention` (unacknowledged, blocking) when:
+
+- a forward step failed and the restoration did not complete;
+- any rollback phase exists and the restoration did not complete;
+- a destructive forward step is `effect_pending` (outcome unknown);
+- a destructive forward step is pending or about to act.
+
+A restoration that completed before the crash is `interrupted`,
+auto-acknowledged.
+
+**Cancellation.** A cancel marked the operation `canceled` and did nothing
+else. A cancel after evictions left the evicted workloads stopped. Now, when an
+external effect has begun, a cancel runs the plan's rollback, as a failed step
+does. The result is `canceled` with `recovery.outcome = "restored"`, or
+`needs_attention` when the restoration fails. The restoration's readiness wait
+ignores the cancel flag that started it. A cancel during a failure's rollback
+still stops that rollback (unchanged).
+
+Behavior change: a daemon restart while a start or stop effect is in flight
+now blocks mutations until `llmctl-next ack <id>`.
+
+Tests: 4 new e2e tests (`restart_during_rollback_needs_attention`,
+`restart_inside_start_effect_needs_attention`,
+`cancel_after_eviction_restores_the_neighbour`,
+`cancel_during_restart_restores_the_target`) failed before the fix and pass
+after it. 8 new unit tests cover `classify_interrupted`. Workspace suite:
+0 failed. Real-systemd and launchd spike suites were not run.
