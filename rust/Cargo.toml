@@ -12,7 +12,8 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.89"
+publish = false
 
 [workspace.dependencies]
 llmctl-core = { path = "crates/llmctl-core" }

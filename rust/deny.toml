@@ -1,0 +1,50 @@
+# cargo-deny policy for the llmctl-next workspace (M7d, docs/RUST-M7-PLAN.md).
+# Run: cargo deny --manifest-path rust/Cargo.toml check   (or scripts/check.sh)
+
+[graph]
+# Check the dependency graph for both supported targets, so macOS-only
+# crates are covered from the Linux workstation.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+  "aarch64-apple-darwin",
+]
+
+[licenses]
+# Permissive licenses only. A crate with any other license fails the gate
+# and is named in the output.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two major versions of one crate: a warning, not a failure.
+multiple-versions = "warn"
+wildcards = "warn"
+allow-wildcard-paths = true
+
+[sources]
+# crates.io only. No git or other registries.
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[advisories]
+# RustSec advisories. Each ignored advisory has a reason.
+ignore = [
+  # Bundled SQLite < 3.54 (libsqlite3-sys 0.30.1 via rusqlite 0.32) can
+  # return stale page-cache memory for a crafted db + -wal pair. The agent
+  # opens only databases in its own data dir, which only its user can
+  # write. Fix: rusqlite 0.41 (libsqlite3-sys 0.39), an API upgrade tracked
+  # as an owner follow-up (docs/RUST-M7-PROGRESS.md). Added 2026-11-21.
+  { id = "RUSTSEC-2026-0459", reason = "local-only, own data dir; rusqlite 0.41 upgrade pending owner go-ahead" },
+  # chrono is unmaintained; no vulnerability and no safe upgrade. Moving
+  # to jiff or time is a workspace-wide change, not part of M7. Added
+  # 2026-11-21.
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained only; replacement is a separate change" },
+]
