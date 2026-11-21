@@ -41,22 +41,6 @@ pub fn under_lease() -> Option<u32> {
     UNDER_LEASE.try_with(|v| *v).ok().flatten()
 }
 
-tokio::task_local! {
-    /// The pid the current API request says holds the operation lock for
-    /// it (set by the API layer from `llmctl-lock-holder`).
-    pub static LOCK_HOLDER: Option<u32>;
-}
-
-/// True when the caller of this API request claims to hold the lock at
-/// `path` and the kernel agrees (`/proc/locks`). The operation then runs
-/// under the caller's hold: taking the lock again would only refuse the
-/// caller's own request. A claim that cannot be verified counts for
-/// nothing.
-pub fn caller_holds(path: &Path) -> bool {
-    let claimed = LOCK_HOLDER.try_with(|v| *v).ok().flatten();
-    claimed.is_some() && claimed == flock_owner_pid(path, Path::new("/proc/locks"))
-}
-
 /// Operations that change what holds the cards: every operation kind on a
 /// workload that has cards. That includes the two lane operations — a
 /// lane swap makes llama-swap evict and load models, and a lane write
@@ -111,12 +95,23 @@ pub fn op_lock_wait() -> Duration {
         .unwrap_or(Duration::from_secs(5))
 }
 
-/// A held operation lock. Dropping it closes the descriptor, which
-/// releases the flock; the holder record stays in the file and the next
+/// A held operation lock. Dropping it explicitly unlocks, then closes
+/// the descriptor; the holder record stays in the file and the next
 /// holder overwrites it, as the other controllers do.
 #[derive(Debug)]
 pub struct OpLock {
     _file: File,
+}
+
+impl Drop for OpLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // Explicit unlock also releases copies briefly inherited across fork.
+        // No other process is allowed to borrow this executor's ownership.
+        unsafe {
+            libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
 }
 
 /// Why the lock could not be taken.

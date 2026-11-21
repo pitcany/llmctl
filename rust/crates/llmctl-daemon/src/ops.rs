@@ -35,7 +35,7 @@ pub enum OpsError {
     UnknownWorkload(String),
     #[error("unsupported protocol {got}, daemon supports {supported:?}")]
     ProtocolMismatch { got: u32, supported: Vec<u32> },
-    #[error("idempotency key {key} already used by operation {existing} ({existing_kind} {existing_workload})")]
+    #[error("idempotency key {key} already used by operation {existing} ({existing_kind} {existing_workload}); request differs or its original identity is unavailable")]
     IdempotencyConflict {
         key: String,
         existing: String,
@@ -215,6 +215,26 @@ pub struct AdmitParams {
     /// against fresh observations under the admission lock); required for
     /// `OpKind::Upgrade`, ignored otherwise.
     pub plan_override: Option<Plan>,
+    /// Stable caller inputs for specialized operations, never a derived plan.
+    pub request_payload: Option<serde_json::Value>,
+}
+
+impl AdmitParams {
+    fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let canonical = json!({
+            "version": 1,
+            "kind": self.kind,
+            "workload": self.workload,
+            "force": self.force,
+            "profile": self.profile,
+            "payload": self.request_payload,
+        });
+        format!(
+            "sha256:{:x}",
+            Sha256::digest(canonical.to_string().as_bytes())
+        )
+    }
 }
 
 pub struct OpManager {
@@ -432,11 +452,8 @@ impl OpManager {
         let Some(path) = coord::op_lock_path(&inv.platform, def) else {
             return Ok(None);
         };
-        // The caller already holds it for this operation (llm-router's
-        // handoff): run under that hold.
-        if coord::caller_holds(&path) {
-            return Ok(None);
-        }
+        // The executor must own its lock through completion, even when the
+        // admitting client exits. A caller PID is not a transferable hold.
         let wait = coord::op_lock_wait();
         match coord::acquire(&path, &format!("{kind} {}", def.name), wait).await {
             Ok(lock) => Ok(Some(lock)),
@@ -944,11 +961,12 @@ impl OpManager {
         let name =
             WorkloadName::new(&params.workload).map_err(|e| OpsError::Invalid(e.to_string()))?;
 
+        let fingerprint = params.fingerprint();
         let _guard = self.admit_lock.lock().await;
 
         // Idempotency: same key + same request returns the same operation.
         if let Some(existing) = self.db.find_by_key(key.as_str()).await? {
-            if existing.kind == params.kind && existing.workload == name {
+            if existing.request_fingerprint.as_deref() == Some(fingerprint.as_str()) {
                 return Ok(AdmitOutcome::Replayed(existing));
             }
             return Err(OpsError::IdempotencyConflict {
@@ -1059,6 +1077,7 @@ impl OpManager {
         let row = OpRow {
             id: OperationId::generate(),
             idempotency_key: key,
+            request_fingerprint: Some(fingerprint),
             kind: params.kind,
             workload: name,
             status: OpStatus::Admitted,
@@ -1245,6 +1264,7 @@ impl OpManager {
             "effects": applied_identities,
             "completed_at": Utc::now().to_rfc3339(),
         }));
+        crate::audit::record_effects(self, &mut row).await;
         self.persist(&mut row).await?;
         Ok(())
     }
@@ -1757,6 +1777,7 @@ impl OpManager {
                 "rollback": "none",
                 "effects": applied,
             }));
+            crate::audit::record_effects(self, row).await;
             self.persist(row).await?;
             return Ok(());
         }
@@ -1995,6 +2016,7 @@ impl OpManager {
             "error": row.phases.get(failed_at).and_then(|p| p.detail.clone()),
             "effects": applied,
         }));
+        crate::audit::record_effects(self, row).await;
         self.persist(row).await?;
         Ok(())
     }
@@ -2017,19 +2039,16 @@ impl OpManager {
             "at_phase": from_phase,
             "canceled_at": Utc::now().to_rfc3339(),
         }));
+        crate::audit::record_effects(self, row).await;
         self.persist(row).await?;
         Ok(())
     }
 
     /// Persist executor progress. The executor owns phases/result, but a
     /// concurrent `CancelRequested` from the API wins over the executor's
-    /// stale `Executing` — never let a progress write erase a cancellation.
+    /// stale `Executing`. The database enforces this in the update itself;
+    /// a separate read/check/write would race with an accepted cancellation.
     async fn persist(&self, row: &mut OpRow) -> Result<(), OpsError> {
-        if let Ok(Some(fresh)) = self.db.get_op(row.id.as_str()).await {
-            if fresh.status == OpStatus::CancelRequested && row.status == OpStatus::Executing {
-                row.status = OpStatus::CancelRequested;
-            }
-        }
         self.db
             .mutate_op(
                 row.id.as_str(),
@@ -2278,4 +2297,42 @@ async fn run_swap_write(step: &PlanStep) -> Result<String, String> {
         summary,
     )
     .await
+}
+
+#[cfg(test)]
+mod request_identity_tests {
+    use super::*;
+
+    #[test]
+    fn specialized_request_identity_uses_inputs_not_generated_plan_metadata() {
+        for kind in [
+            OpKind::Unload,
+            OpKind::LaneWrite,
+            OpKind::LaneSwap,
+            OpKind::Acquire,
+            OpKind::RouterModel,
+            OpKind::RouterWrite,
+            OpKind::Upgrade,
+        ] {
+            let mut params = AdmitParams {
+                protocol: PROTOCOL_VERSION,
+                idempotency_key: "retry".into(),
+                kind,
+                workload: "engine".into(),
+                expected_revision: None,
+                expected_stop_targets: None,
+                force: false,
+                profile: None,
+                plan_override: None,
+                request_payload: Some(json!({"model": "first", "version": 1})),
+            };
+            let original = params.fingerprint();
+            params.request_payload = Some(json!({"version": 1, "model": "first"}));
+            params.expected_revision = Some(42);
+            params.expected_stop_targets = Some(vec!["old-eviction".into()]);
+            assert_eq!(original, params.fingerprint(), "{kind}: retry metadata");
+            params.request_payload = Some(json!({"model": "second", "version": 1}));
+            assert_ne!(original, params.fingerprint(), "{kind}: material payload");
+        }
+    }
 }

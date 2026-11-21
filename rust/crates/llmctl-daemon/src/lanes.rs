@@ -658,6 +658,7 @@ pub async fn apply(
             expected_stop_targets: None,
             force: false,
             profile: None,
+            request_payload: Some(serde_json::json!({"edits": edits, "confirm": confirm})),
             plan_override: Some(plan),
         })
         .await?)
@@ -797,6 +798,7 @@ pub async fn swap(
             expected_stop_targets: None,
             force: false,
             profile: None,
+            request_payload: Some(serde_json::json!(req)),
             plan_override: Some(plan),
         })
         .await?;

@@ -1203,15 +1203,12 @@ async fn gpu_operations_take_the_host_lock_and_honour_the_lane_lease() {
     );
     assert!(msg.contains("llm-router") && msg.contains("switch qwen27b"), "{msg}");
 
-    //    The holder itself may drive llmctl-next (llm-router's handoff):
-    //    a caller that really holds the lock is let through under its own
-    //    hold, and the record stays the holder's. A false claim is not.
-    let wrong = d.client().holding_lock(1);
-    refused(wrong.admit(admit_req(OpKind::Run, "helper", "lock-pass-0")).await, codes::HOST_LOCK_BUSY);
-    let holder = d.client().holding_lock(std::process::id());
-    let resp = holder.admit(admit_req(OpKind::Run, "helper", "lock-pass-1")).await.unwrap();
-    assert_eq!(d.wait_terminal(&resp.operation.id).await.status, OpStatus::Succeeded);
-    assert!(std::fs::read_to_string(&lock_path).unwrap().contains("switch qwen27b"));
+    // PID claims never replace the executor's own lock, including a true
+    // claim. Cooperating callers release their hold before delegation.
+    for pid in [1, std::process::id()] {
+        let holder = d.client().holding_lock(pid);
+        refused(holder.admit(admit_req(OpKind::Run, "helper", "lock-pass")).await, codes::HOST_LOCK_BUSY);
+    }
     drop(held);
 
     // 2. Free: the run goes through under our own hold, recorded in the
@@ -2867,6 +2864,274 @@ fn stores_are_declared_and_weights_removed_only_when_nothing_names_them() {
 }
 
 // ---- M5a: the foreign-write record ------------------------------------------
+
+#[tokio::test]
+async fn idempotency_refuses_a_changed_profile_or_force_flag() {
+    let d = spawn_daemon();
+    let request = admit_req(OpKind::Run, "coder", "payload-identity");
+    let first = d.client().admit(request.clone()).await.unwrap();
+    assert_eq!(
+        d.wait_terminal(&first.operation.id).await.status,
+        OpStatus::Succeeded
+    );
+    let replay = d.client().admit(request.clone()).await.unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.operation.id, first.operation.id);
+
+    let mut changed = request.clone();
+    changed.profile = Some(llmctl_client::wire::ProfileRequest {
+        env_source: "/tmp/different-profile".into(),
+        model: "different-model".into(),
+    });
+    let mut forced = request;
+    forced.force = true;
+    for request in [changed, forced] {
+        match d.client().admit(request).await {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, codes::IDEMPOTENCY_CONFLICT),
+            other => panic!("a changed payload must conflict, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_claimed_caller_lock_never_substitutes_for_an_executor_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("control.sock");
+    let lock_path = dir.path().join("operations.lock");
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("daemon")
+        .env("LLMCTL_NEXT_OP_LOCK", &lock_path)
+        .env("LLMCTL_NEXT_LANE_LEASE", "off")
+        .env("LLMCTL_NEXT_OP_LOCK_WAIT_MS", "100")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let holder = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    assert!(try_flock(&holder));
+    let request = admit_req(OpKind::Run, "coder", "caller-lock");
+    match d
+        .client()
+        .holding_lock(std::process::id())
+        .admit(request.clone())
+        .await
+    {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, codes::HOST_LOCK_BUSY),
+        other => panic!("a borrowed lock must not authorize execution: {other:?}"),
+    }
+    drop(holder);
+    d.write_faults(serde_json::json!({"effect_delay_ms": 1500}));
+    let mut caller = ChildGuard(Some(
+        Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+            .arg("--socket")
+            .arg(&d.socket)
+            .args(["run", "coder", "--key", "caller-lock", "--wait"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    ));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let operation = loop {
+        if let Ok(op) = d.client().operation_by_key("caller-lock").await {
+            break op;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "caller never admitted"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(!operation.status.is_terminal());
+    caller.kill_now();
+    let other = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    assert!(
+        !try_flock(&other),
+        "caller death must not release the executor's lock"
+    );
+    assert_eq!(
+        d.wait_terminal(&operation.id).await.status,
+        OpStatus::Succeeded
+    );
+}
+
+#[tokio::test]
+async fn request_identity_survives_daemon_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("control.sock");
+    let mut daemon = ChildGuard(Some(start_daemon_in(dir.path(), &[])));
+    let request = admit_req(OpKind::Run, "coder", "durable-identity");
+    let client = ControlClient::connect(&socket).unwrap();
+    let admitted = client.admit(request.clone()).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if client
+            .operation(&admitted.operation.id)
+            .await
+            .unwrap()
+            .status
+            .is_terminal()
+        {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    daemon.kill_now();
+    let _daemon = ChildGuard(Some(start_daemon_in(dir.path(), &[])));
+    let client = ControlClient::connect(&socket).unwrap();
+    let replay = client.admit(request.clone()).await.unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.operation.id, admitted.operation.id);
+    let mut changed = request;
+    changed.force = true;
+    match client.admit(changed).await {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, codes::IDEMPOTENCY_CONFLICT),
+        other => panic!("changed payload after restart: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_completed_start_does_not_explain_a_foreign_stop_before_the_next_sample() {
+    let d = spawn_managed().await;
+    let client = d.client();
+    client.status().await.unwrap();
+    run_to_success(&d, "coder", "audit-first-start").await;
+    client.status().await.unwrap();
+    let restarted = client
+        .admit(admit_req(OpKind::Restart, "coder", "audit-restart"))
+        .await
+        .unwrap();
+    assert_eq!(
+        d.wait_terminal(&restarted.operation.id).await.status,
+        OpStatus::Succeeded
+    );
+    foreign_flip(
+        &d,
+        "coder",
+        serde_json::json!({
+            "active": false, "pid": null, "ready_at": null, "model": null
+        }),
+    );
+    client.status().await.unwrap();
+    assert_eq!(client.audit(None).await.unwrap().findings.len(), 1);
+}
+
+#[tokio::test]
+async fn acknowledging_an_old_effect_does_not_explain_a_new_foreign_transition() {
+    let d = spawn_managed().await;
+    let client = d.client();
+    client.status().await.unwrap();
+    run_to_success(&d, "coder", "audit-ack-start").await;
+    client.status().await.unwrap();
+    let fault = serde_json::json!({
+        "unit": "user/llmctl-next-fake-coder.service", "kind": "start", "mode": "before"
+    });
+    d.write_faults(serde_json::json!({"fail_effects": [fault.clone(), fault]}));
+    let failed = client
+        .admit(admit_req(OpKind::Restart, "coder", "audit-ack-failure"))
+        .await
+        .unwrap();
+    assert_eq!(
+        d.wait_terminal(&failed.operation.id).await.status,
+        OpStatus::NeedsAttention
+    );
+    client.status().await.unwrap();
+    assert!(client.audit(None).await.unwrap().findings.is_empty());
+    foreign_flip(
+        &d,
+        "coder",
+        serde_json::json!({
+            "active": true, "pid": 49999, "ready_at": "2020-01-01T00:00:00Z", "model": "fake/coder"
+        }),
+    );
+    client.status().await.unwrap();
+    assert_eq!(client.audit(None).await.unwrap().findings.len(), 1);
+    client
+        .acknowledge(&failed.operation.id, None)
+        .await
+        .unwrap();
+    foreign_flip(
+        &d,
+        "coder",
+        serde_json::json!({
+            "active": false, "pid": null, "ready_at": null, "model": null
+        }),
+    );
+    client.status().await.unwrap();
+    assert_eq!(
+        client.audit(None).await.unwrap().findings.len(),
+        2,
+        "acknowledgement must not renew old effect evidence"
+    );
+}
+
+#[tokio::test]
+async fn audit_preserves_its_baseline_until_a_restart_finishes() {
+    let d = spawn_managed().await;
+    let client = d.client();
+    client.status().await.unwrap();
+    run_to_success(&d, "coder", "audit-overlap-start").await;
+    client.status().await.unwrap();
+    d.write_faults(serde_json::json!({"effect_delay_ms": 300}));
+    let restarted = client
+        .admit(admit_req(OpKind::Restart, "coder", "audit-overlap"))
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !client
+        .operation(&restarted.operation.id)
+        .await
+        .unwrap()
+        .status
+        .is_terminal()
+    {
+        assert!(tokio::time::Instant::now() < deadline);
+        client.status().await.unwrap();
+        assert!(client.audit(None).await.unwrap().findings.is_empty());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    client.status().await.unwrap();
+    assert!(client.audit(None).await.unwrap().findings.is_empty());
+}
+
+#[tokio::test]
+async fn a_noop_run_does_not_explain_a_foreign_stop() {
+    let d = spawn_managed().await;
+    let client = d.client();
+    client.status().await.unwrap();
+    run_to_success(&d, "coder", "audit-start").await;
+    client.status().await.unwrap();
+    assert!(client.audit(None).await.unwrap().findings.is_empty());
+    run_to_success(&d, "coder", "audit-noop").await;
+    foreign_flip(
+        &d,
+        "coder",
+        serde_json::json!({
+            "active": false, "pid": null, "ready_at": null, "model": null
+        }),
+    );
+    client.status().await.unwrap();
+    let findings = client.audit(None).await.unwrap().findings;
+    assert_eq!(findings.len(), 1, "a no-op run cannot explain a stop");
+    assert_eq!(findings[0].workload, "coder");
+}
 
 /// One fake workload, adopted (managed) + one external sibling — the
 /// audit compares managed workloads only.

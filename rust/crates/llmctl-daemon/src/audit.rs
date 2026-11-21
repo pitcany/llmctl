@@ -6,11 +6,10 @@
 //! `foreign_transition` finding in the journal DB: the evidence behind
 //! "no legacy lifecycle writes" and the pilot day's second condition.
 //!
-//! What counts as explained: an operation whose `workload` is the changed
-//! one, or whose plan has any step naming it (an eviction's `stop` step
-//! explains the target's disappearance). Healer and recovery repairs that
-//! went through llmctl-next are such operations; a repair that bypassed
-//! the agent is a finding, exactly as intended.
+//! A transition is explained only by a matching post-effect observation
+//! recorded by an executor in this baseline window. Merely admitting or
+//! acknowledging an operation is not evidence that it changed anything.
+//! Active operations defer comparison until their effects are settled.
 //!
 //! Honest limits, on purpose:
 //!
@@ -32,6 +31,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use llmctl_client::wire::PhaseStatus;
 
 use llmctl_core::{Observation, Ownership, PlanStep};
 
@@ -65,7 +66,7 @@ fn model_of(o: &Observation) -> Option<String> {
 
 /// A unit observation as a comparable state. `None` when the observation
 /// cannot support a conclusion (process unknown).
-fn unit_state(o: &Observation) -> Option<SeenState> {
+pub(crate) fn unit_state(o: &Observation) -> Option<SeenState> {
     if o.process == llmctl_core::ProcessState::Unknown {
         return None;
     }
@@ -81,10 +82,119 @@ fn unit_state(o: &Observation) -> Option<SeenState> {
 /// workload, or any plan step names it (an eviction stops another target).
 fn op_touches(op: &crate::db::OpRow, workload: &str) -> bool {
     op.workload.as_str() == workload
-        || op.plan.steps.iter().any(|s| match s {
+        || op.plan.steps.iter().chain(&op.plan.rollback).any(|s| match s {
             PlanStep::PersistIntent { .. } => false,
             _ => s.workload().as_str() == workload,
         })
+}
+
+/// Evidence captured by an executor after actual state-changing phases.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EffectObservation {
+    pub workload: String,
+    pub state: SeenState,
+    pub at: DateTime<Utc>,
+}
+
+fn effects(op: &crate::db::OpRow) -> Vec<EffectObservation> {
+    op.result
+        .as_ref()
+        .and_then(|r| r.get("audit_observations"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+fn explains(effect: &EffectObservation, current: &SeenState, baseline_at: DateTime<Utc>) -> bool {
+    effect.at >= baseline_at
+        && effect.state.process == current.process
+        && current.pid.is_none_or(|pid| effect.state.pid == Some(pid))
+        && current
+            .model
+            .as_ref()
+            .is_none_or(|model| effect.state.model.as_ref() == Some(model))
+        && current.lanes.as_ref().is_none_or(|lanes| {
+            let mut expected = effect.state.lanes.clone().unwrap_or_default();
+            let mut actual = lanes.clone();
+            expected.sort();
+            actual.sort();
+            effect.state.lanes.is_some() && expected == actual
+        })
+}
+
+/// Capture the result of completed effects while this executor still
+/// holds the host lock. No-op plans and later acknowledgements get no
+/// new evidence. Unknown observations cannot explain a transition.
+pub(crate) async fn record_effects(manager: &crate::ops::OpManager, row: &mut crate::db::OpRow) {
+    use std::collections::BTreeSet;
+    let changed: BTreeSet<_> = row
+        .plan
+        .steps
+        .iter()
+        .chain(&row.plan.rollback)
+        .zip(&row.phases)
+        .filter(|(step, phase)| {
+            phase.status == PhaseStatus::Done
+                && !phase
+                    .detail
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("skipped:"))
+                && matches!(
+                    step,
+                    PlanStep::StartUnit { .. }
+                        | PlanStep::StopUnit { .. }
+                        | PlanStep::UnloadModel { .. }
+                        | PlanStep::LoadLane { .. }
+                        | PlanStep::UnloadLane { .. }
+                        | PlanStep::WriteSwapConfig { .. }
+                        | PlanStep::LoadRouterModel { .. }
+                        | PlanStep::UnloadRouterModel { .. }
+                        | PlanStep::WriteRouterPreset { .. }
+                )
+        })
+        .map(|(step, _)| step.workload().to_string())
+        .collect();
+    if changed.is_empty() {
+        return;
+    }
+    let inv = manager.inventory().await;
+    let mut affected = (*inv).clone();
+    affected
+        .workloads
+        .retain(|def| changed.contains(def.name.as_str()));
+    let observations = match manager.engine().observe(&affected).await {
+        Ok(observations) => observations,
+        Err(error) => {
+            tracing::warn!(%error, "could not capture audit effect evidence");
+            return;
+        }
+    };
+    let mut evidence = Vec::new();
+    for obs in observations
+        .iter()
+        .filter(|o| changed.contains(o.workload.as_str()))
+    {
+        let Some(mut state) = crate::audit::unit_state(obs) else {
+            continue;
+        };
+        if let (Some(ctx), Some(def)) = (&manager.own_ctx, inv.workload(&obs.workload)) {
+            let path = ctx
+                .paths
+                .data_dir
+                .join("lanes")
+                .join(format!("{}.json", obs.workload));
+            if matches!(crate::lanes::read_store(&path).await, Ok(Some(_))) {
+                state.lanes = crate::lanes::running_on_checked(def.port).await;
+            }
+        }
+        evidence.push(crate::audit::EffectObservation {
+            workload: obs.workload.to_string(),
+            state,
+            at: obs.observed_at,
+        });
+    }
+    if let Some(result) = row.result.as_mut().and_then(|r| r.as_object_mut()) {
+        result.insert("audit_observations".into(), json!(evidence));
+    }
 }
 
 /// One comparison pass. Records findings for unexplained transitions and
@@ -149,11 +259,20 @@ pub async fn compare(state: &Arc<AppState>, observations: &[Observation]) -> Vec
             }
         }
 
+        // A status probe can overlap an executor. Preserve the old baseline
+        // until completion; never credit its intent or a half-observed effect.
+        if ops.iter().any(|op| {
+            op_touches(op, name)
+                && (!op.status.is_terminal()
+                    || effects(op).iter().any(|e| e.workload == name && e.at > obs.observed_at))
+        }) {
+            continue;
+        }
         let (baseline, baseline_at) = match baselines.get(name) {
             Some((seen, at)) => (seen.clone(), *at),
             None => {
                 // First sight of this workload: record, never conclude.
-                let _ = db.set_seen(name, &encode(&current), now).await;
+                let _ = db.set_seen(name, &encode(&current), obs.observed_at).await;
                 continue;
             }
         };
@@ -162,7 +281,9 @@ pub async fn compare(state: &Arc<AppState>, observations: &[Observation]) -> Vec
         if changed {
             let explained = ops
                 .iter()
-                .any(|op| op_touches(op, name) && op.updated_at >= baseline_at);
+                .filter(|op| op.status.is_terminal())
+                .flat_map(effects)
+                .any(|e| e.workload == name && explains(&e, &current, baseline_at));
             if !explained {
                 let actor = match (&baseline.lanes, &current.lanes) {
                     (Some(before), Some(after)) => {
@@ -187,7 +308,7 @@ pub async fn compare(state: &Arc<AppState>, observations: &[Observation]) -> Vec
                 });
             }
         }
-        let _ = db.set_seen(name, &encode(&current), now).await;
+        let _ = db.set_seen(name, &encode(&current), obs.observed_at).await;
     }
 
     for f in &findings {
@@ -286,6 +407,34 @@ mod tests {
             model: model.map(str::to_owned),
             lanes: None,
         }
+    }
+
+    #[test]
+    fn effect_evidence_expires_and_must_match_the_observed_identity() {
+        let at = Utc::now();
+        let effect = EffectObservation {
+            workload: "coder".into(),
+            at,
+            state: seen("running", Some(100), Some("qwen")),
+        };
+        assert!(explains(&effect, &effect.state, at));
+        // Updating/acknowledging the operation does not renew this timestamp.
+        assert!(!explains(
+            &effect,
+            &effect.state,
+            at + chrono::Duration::seconds(1)
+        ));
+        assert!(!explains(&effect, &seen("stopped", None, None), at));
+        assert!(!explains(
+            &effect,
+            &seen("running", Some(101), Some("qwen")),
+            at
+        ));
+        assert!(!explains(
+            &effect,
+            &seen("running", Some(100), Some("different")),
+            at
+        ));
     }
 
     #[test]

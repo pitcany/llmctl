@@ -764,12 +764,7 @@ fn connect(cli: &Cli) -> Result<ControlClient, ClientError> {
         Some(pid) => client.under_lease(pid),
         None => client,
     };
-    // Called by whoever holds the host operation lock (llm-router during a
-    // switch): work under that hold instead of being refused by it.
-    Ok(match llmctl_client::oplock::holder_ancestor() {
-        Some(pid) => client.holding_lock(pid),
-        None => client,
-    })
+    Ok(client)
 }
 
 /// Mutations require a protocol match; reads (status, logs, ops) still

@@ -78,8 +78,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// Carry the caller's `llmctl-under-lease` and `llmctl-lock-holder` claims
-/// (pids) to admission without threading them through every handler (M4c).
+/// Carry the caller's lane lease claim to admission. Legacy lock-holder
+/// headers are ignored: the executor always acquires its own flock.
 async fn under_lease_scope(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -89,14 +89,7 @@ async fn under_lease_scope(
         .get(llmctl_client::lease::UNDER_LEASE_HEADER)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
-    let lock_holder = req
-        .headers()
-        .get(llmctl_client::oplock::LOCK_HOLDER_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u32>().ok());
-    crate::coord::UNDER_LEASE
-        .scope(pid, crate::coord::LOCK_HOLDER.scope(lock_holder, next.run(req)))
-        .await
+    crate::coord::UNDER_LEASE.scope(pid, next.run(req)).await
 }
 
 async fn stores(State(state): State<Arc<AppState>>) -> Json<llmctl_client::wire::StoresResponse> {
@@ -567,6 +560,7 @@ async fn admit_operation(
             force: req.force,
             profile: req.profile,
             plan_override: None,
+            request_payload: None,
         })
         .await?;
     let (row, replayed, status) = match outcome {
@@ -617,6 +611,7 @@ async fn admit_unload(
             expected_stop_targets: None,
             force: false,
             profile: None,
+            request_payload: Some(serde_json::json!({"model": req.model})),
             plan_override: Some(provisional),
         })
         .await?;

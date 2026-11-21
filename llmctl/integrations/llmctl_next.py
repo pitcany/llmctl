@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from llmctl.config import _read_yaml, settings_file_path  # noqa: SLF001 - same package
+from llmctl.services.op_lock import handed_off
 
 #: Exit codes that mean "refused before anything changed" (see module doc).
 REFUSED_BEFORE_CHANGE = frozenset({3, 4, 5, 6})
@@ -115,7 +116,7 @@ def delegate(
     ``verb`` is the systemctl word (``start``/``stop``/``restart``). Returns
     ``(rc, stdout, stderr)`` with the refusal message folded into stderr on
     failure, or ``None`` when this unit is not delegated — the caller then
-    keeps its own path. Never raises.
+    keeps its own path. Lock reacquisition failures propagate.
     """
     delegation = delegation or load_delegation()
     workload = delegation.workload_for(unit)
@@ -125,17 +126,7 @@ def delegate(
     if next_verb is None:
         return None
     argv = [*delegation.cmd, next_verb, workload, "--wait"]
-    try:
-        proc = subprocess.run(  # noqa: S603 - argv from settings, no shell
-            argv, capture_output=True, text=True, check=False, timeout=_TIMEOUT_S
-        )
-        rc, out, err = proc.returncode, proc.stdout or "", proc.stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        detail = str(exc) or f"timed out after {_TIMEOUT_S:.0f}s"
-        return 124, "", refusal_message(verb, unit, workload, 124, detail)
-    except OSError as exc:
-        # Binary gone ≈ agent down: the same honest refusal, rc 3.
-        return 3, "", refusal_message(verb, unit, workload, 3, f"could not run {argv[0]}: {exc}")
+    rc, out, err = _invoke(argv)
     if rc != 0:
         detail = (err.strip() or out.strip()).splitlines()[-1:] or [""]
         return rc, out, refusal_message(verb, unit, workload, rc, detail[0])
@@ -157,21 +148,31 @@ def run_preset(
     ``runner`` (tests) takes the argv and returns that triple.
     """
     argv = [*delegation.cmd, "run", preset, "--preset", "--workload", workload, "--wait"]
-    try:
-        if runner is not None:
-            rc, out, err = runner(argv)
-        else:
-            proc = subprocess.run(  # noqa: S603 - argv from settings, no shell
-                argv, capture_output=True, text=True, check=False, timeout=_TIMEOUT_S
-            )
-            rc, out, err = proc.returncode, proc.stdout or "", proc.stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        rc, out, err = 124, "", str(exc) or f"timed out after {_TIMEOUT_S:.0f}s"
-    except OSError as exc:
-        rc, out, err = 3, "", f"could not run {argv[0]}: {exc}"
+    rc, out, err = _invoke(argv, runner)
     if rc != 0:
         detail = (err.strip() or out.strip()).splitlines()[-1:] or [""]
         verb = f"run (preset {preset}) via"
         return rc, out, refusal_message(verb, workload, workload, rc, detail[0])
     return rc, out, err
 
+
+def _invoke(argv: list[str], runner=None) -> tuple[int, str, str]:
+    """Delegate under the agent's lock, then restore the caller's ownership.
+
+    Lock reacquisition failures propagate: callers must abort remaining
+    mutations when they no longer hold the host lock.
+    """
+    with handed_off(timeout=_TIMEOUT_S):
+        try:
+            if runner is not None:
+                rc, out, err = runner(argv)
+            else:
+                proc = subprocess.run(  # noqa: S603 - argv from settings, no shell
+                    argv, capture_output=True, text=True, check=False, timeout=_TIMEOUT_S
+                )
+                rc, out, err = proc.returncode, proc.stdout or "", proc.stderr or ""
+        except subprocess.TimeoutExpired as exc:
+            rc, out, err = 124, "", str(exc) or f"timed out after {_TIMEOUT_S:.0f}s"
+        except OSError as exc:
+            rc, out, err = 3, "", f"could not run {argv[0]}: {exc}"
+        return rc, out, err

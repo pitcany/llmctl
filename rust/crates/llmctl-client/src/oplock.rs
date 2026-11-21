@@ -1,9 +1,6 @@
-//! The host-wide GPU operation lock, as far as both sides need it (M4c):
-//! where the file lives, who really holds its flock, and whether this
-//! process runs inside that holder. The daemon takes the lock
-//! (`llmctl-daemon::coord`); the CLI only tells the daemon "my caller
-//! already holds it" — llm-router does, around a switch, when it hands the
-//! unit work to llmctl-next.
+//! Host lock location and kernel ownership inspection. The daemon owns
+//! its flock throughout execution; cooperating callers release their hold
+//! before delegation and reacquire it before continuing.
 
 use std::path::{Path, PathBuf};
 
@@ -13,8 +10,7 @@ use crate::lease::{env_override, is_ancestor, Override};
 pub const OP_LOCK_ENV: &str = "LLMCTL_NEXT_OP_LOCK";
 /// The override Python llmctl itself honours for the legacy file.
 pub const LEGACY_OP_LOCK_ENV: &str = "LLMCTL_OP_LOCK";
-/// Request header: the caller holds the operation lock with this pid and
-/// keeps it until the operation it admits is terminal.
+/// Legacy request header, ignored by current agents.
 pub const LOCK_HOLDER_HEADER: &str = "llmctl-lock-holder";
 
 /// Where Python llmctl and llm-router keep the lock: `LLMCTL_OP_LOCK`, else
@@ -51,9 +47,8 @@ pub fn flock_owner_pid(path: &Path, proc_locks: &Path) -> Option<u32> {
     })
 }
 
-/// The pid that holds the operation lock when this process runs inside it
-/// (llm-router calling `llmctl-next` during a switch). The CLI sends it so
-/// the agent works under the caller's hold instead of refusing it.
+/// The lock owner when this process runs inside its ancestry. Diagnostic
+/// only: a PID does not transfer lock ownership to an executor.
 pub fn holder_ancestor() -> Option<u32> {
     let path = match env_override(OP_LOCK_ENV) {
         Override::Off => return None,

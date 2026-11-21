@@ -159,6 +159,7 @@ async fn maybe_recover(
                 force: false,
                 profile: None,
                 plan_override: None,
+                request_payload: None,
             })
             .await
         {
@@ -190,6 +191,7 @@ async fn maybe_recover(
     }
     let now = Utc::now();
     let row = crate::db::OpRow {
+        request_fingerprint: None,
         id: OperationId::generate(),
         idempotency_key: llmctl_core::IdempotencyKey::new(&key)
             .map_err(|e| crate::ops::OpsError::Engine(format!("stall marker key: {e}")))?,

@@ -111,9 +111,9 @@ impl ControlClient {
         self
     }
 
-    /// Tell the agent the caller `pid` holds the host operation lock and
-    /// keeps it until the admitted operation is terminal (llm-router's
-    /// handoff). The agent checks the claim against the real holder.
+    /// Send the legacy lock-holder header for compatibility testing.
+    /// Current agents ignore this claim and acquire their own flock.
+    /// Callers must release their lock before delegating an operation.
     pub fn holding_lock(mut self, pid: u32) -> Self {
         self.holding_lock = Some(pid);
         self

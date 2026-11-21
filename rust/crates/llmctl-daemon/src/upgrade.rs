@@ -1029,6 +1029,7 @@ pub async fn promote(
             expected_stop_targets: None,
             force: false,
             profile: None,
+            request_payload: Some(serde_json::json!({"promote": version})),
             plan_override: Some(plan),
         })
         .await;
@@ -1296,6 +1297,7 @@ async fn rollback_admit(
             expected_stop_targets: None,
             force: false,
             profile: None,
+            request_payload: Some(serde_json::json!({"rollback": row_id})),
             plan_override: Some(plan),
         })
         .await;

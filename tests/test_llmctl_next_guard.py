@@ -175,3 +175,55 @@ def test_both_unit_name_forms_hit_the_map(tmp_path, standin):
         assert runner.stop("vllm-engine").ok, delegation.units
         assert runner.stop("vllm-engine.service").ok, delegation.units
         assert seen == [], "both forms must delegate regardless of the key form"
+
+@pytest.mark.parametrize("preset", [False, True])
+@pytest.mark.parametrize("rc", [0, 4])
+def test_delegation_hands_off_and_reacquires_host_lock(tmp_path, monkeypatch, preset, rc):
+    import fcntl
+    from llmctl.integrations import llmctl_next
+    from llmctl.services.op_lock import gpu_operation_lock, held_by_us
+
+    path = tmp_path / "operations.lock"
+    monkeypatch.setenv("LLMCTL_OP_LOCK", str(path))
+    config = NextDelegation(enabled=True, units={"engine": "engine"})
+
+    def runner(argv, **kwargs):
+        assert not held_by_us()
+        with path.open("r+") as probe:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return subprocess.CompletedProcess(argv, rc, "", "refused" if rc else "")
+
+    monkeypatch.setattr(llmctl_next.subprocess, "run", runner)
+    with gpu_operation_lock(purpose="test delegation", interface="pytest"):
+        if preset:
+            result = llmctl_next.run_preset("profile", "engine", config)
+        else:
+            result = llmctl_next.delegate("start", "engine", config)
+        assert result[0] == rc
+        assert held_by_us()
+        with path.open("r+") as probe:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_delegation_aborts_when_caller_cannot_reacquire_lock(tmp_path, monkeypatch):
+    import fcntl
+    from llmctl.integrations import llmctl_next
+    from llmctl.services import op_lock
+
+    path = tmp_path / "operations.lock"
+    monkeypatch.setenv("LLMCTL_OP_LOCK", str(path))
+    original_handoff = op_lock.handed_off
+    monkeypatch.setattr(llmctl_next, "handed_off", lambda **_: original_handoff(timeout=0))
+    config = NextDelegation(enabled=True, units={"engine": "engine"})
+    path.touch()
+    with path.open("r+") as contender:
+        def runner(argv, **kwargs):
+            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return subprocess.CompletedProcess(argv, 3, "", "agent disconnected")
+
+        monkeypatch.setattr(llmctl_next.subprocess, "run", runner)
+        with op_lock.gpu_operation_lock(purpose="test", interface="pytest"):
+            with pytest.raises(op_lock.LockBusy):
+                llmctl_next.delegate("start", "engine", config)
+            assert not op_lock.held_by_us()

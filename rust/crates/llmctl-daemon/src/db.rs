@@ -45,6 +45,8 @@ pub struct PhaseRecord {
 pub struct OpRow {
     pub id: OperationId,
     pub idempotency_key: IdempotencyKey,
+    #[serde(default)]
+    pub request_fingerprint: Option<String>,
     pub kind: OpKind,
     pub workload: WorkloadName,
     pub status: OpStatus,
@@ -108,8 +110,8 @@ enum DbMsg {
         usize,
         oneshot::Sender<Result<Vec<FindingRow>, DbError>>,
     ),
-    /// Operations updated at or after `since`, oldest first (M5a: which
-    /// transitions an admitted operation already explains).
+    /// Operations updated at or after `since`, plus all active operations.
+    /// Audit needs active operations even when the baseline is newer.
     OpsUpdatedSince(
         DateTime<Utc>,
         oneshot::Sender<Result<Vec<OpRow>, DbError>>,
@@ -180,6 +182,20 @@ impl Db {
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
+        // Older journals have no request identity. Keep those rows readable,
+        // but never guess that a newly supplied request is identical.
+        let has_fingerprint = conn
+            .prepare("PRAGMA table_info(operations)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|name| name == "request_fingerprint");
+        if !has_fingerprint {
+            conn.execute(
+                "ALTER TABLE operations ADD COLUMN request_fingerprint TEXT",
+                [],
+            )?;
+        }
         let (tx, rx) = sync_channel(QUEUE_DEPTH);
         thread::Builder::new()
             .name("llmctl-db".into())
@@ -397,6 +413,7 @@ CREATE TABLE IF NOT EXISTS meta(
 CREATE TABLE IF NOT EXISTS operations(
   id TEXT PRIMARY KEY,
   idempotency_key TEXT NOT NULL UNIQUE,
+  request_fingerprint TEXT,
   kind TEXT NOT NULL,
   workload TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -484,8 +501,8 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
                     "INSERT INTO operations(
                        id, idempotency_key, kind, workload, status,
                        plan, phases, result, recovery, acknowledged,
-                       created_at, updated_at)
-                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                       created_at, updated_at, request_fingerprint)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
                     params![
                         row.id.as_str(),
                         row.idempotency_key.as_str(),
@@ -503,6 +520,7 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
                         row.acknowledged as i64,
                         row.created_at.to_rfc3339(),
                         row.updated_at.to_rfc3339(),
+                        row.request_fingerprint,
                     ],
                 )
                 .map(|_| ())
@@ -514,7 +532,7 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
                 .query_row(
                     "SELECT id, idempotency_key, kind, workload, status,
                             plan, phases, result, recovery, acknowledged,
-                            created_at, updated_at
+                            created_at, updated_at, request_fingerprint
                      FROM operations WHERE id = ?1",
                     params![id],
                     op_row_from,
@@ -528,7 +546,7 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
                 .query_row(
                     "SELECT id, idempotency_key, kind, workload, status,
                             plan, phases, result, recovery, acknowledged,
-                            created_at, updated_at
+                            created_at, updated_at, request_fingerprint
                      FROM operations WHERE idempotency_key = ?1",
                     params![key],
                     op_row_from,
@@ -541,7 +559,7 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
             let mut stmt = conn.prepare(
                 "SELECT id, idempotency_key, kind, workload, status,
                         plan, phases, result, recovery, acknowledged,
-                        created_at, updated_at
+                        created_at, updated_at, request_fingerprint
                  FROM operations ORDER BY created_at DESC LIMIT ?1",
             )?;
             let out = stmt
@@ -554,7 +572,9 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
         DbMsg::MutateOp(id, m, tx) => {
             let out = conn
                 .execute(
-                    "UPDATE operations SET status=?2, phases=?3, result=?4,
+                    "UPDATE operations SET status=CASE
+                         WHEN status='\"cancel_requested\"' AND ?2='\"executing\"'
+                         THEN status ELSE ?2 END, phases=?3, result=?4,
                                             recovery=?5, acknowledged=?6, updated_at=?7
                      WHERE id = ?1",
                     params![
@@ -763,8 +783,10 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
             let mut stmt = conn.prepare(
                 "SELECT id, idempotency_key, kind, workload, status,
                         plan, phases, result, recovery, acknowledged,
-                        created_at, updated_at
-                 FROM operations WHERE updated_at >= ?1 ORDER BY updated_at",
+                        created_at, updated_at, request_fingerprint
+                 FROM operations WHERE updated_at >= ?1
+                    OR status IN ('\"admitted\"', '\"executing\"', '\"cancel_requested\"')
+                 ORDER BY updated_at",
             )?;
             let out = stmt
                 .query_map(params![since.to_rfc3339()], op_row_from)
@@ -889,6 +911,7 @@ fn op_row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<OpRow> {
             "idempotency key",
             IdempotencyKey::try_from,
         )?,
+        request_fingerprint: r.get("request_fingerprint")?,
         kind: parse(r.get::<_, String>("kind")?, "kind")?,
         workload: typed(
             r.get::<_, String>("workload")?,
@@ -916,4 +939,100 @@ fn parse_rfc3339(v: String) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(&v)
         .map(|t| t.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn old_journals_keep_rows_without_inventing_request_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&SCHEMA.replace("  request_fingerprint TEXT,\n", ""))
+            .unwrap();
+        let id = OperationId::generate();
+        let plan = Plan {
+            id: id.clone(),
+            kind: OpKind::Run,
+            target: WorkloadName::new("coder").unwrap(),
+            revision: 1,
+            expected_model: "fake/coder".into(),
+            affected_gpus: vec![],
+            steps: vec![],
+            rollback: vec![],
+        };
+        conn.execute(
+            "INSERT INTO operations(id, idempotency_key, kind, workload, status,
+            plan, phases, created_at, updated_at) VALUES(?1, 'legacy', '\"run\"', 'coder',
+            '\"succeeded\"', ?2, '[]', ?3, ?3)",
+            params![
+                id.as_str(),
+                serde_json::to_string(&plan).unwrap(),
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+        let db = Db::open(&path).unwrap();
+        let row = db.find_by_key("legacy").await.unwrap().unwrap();
+        assert_eq!(row.id, id);
+        assert_eq!(row.request_fingerprint, None);
+        // Reopening an already migrated journal is safe too.
+        let reopened = Db::open(&path).unwrap();
+        assert!(reopened.get_op(id.as_str()).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_progress_cannot_overwrite_a_persisted_cancel_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("journal.sqlite")).unwrap();
+        let id = OperationId::generate();
+        let now = Utc::now();
+        let name = WorkloadName::new("coder").unwrap();
+        db.insert_op(OpRow {
+            id: id.clone(),
+            idempotency_key: IdempotencyKey::new("cancel-race").unwrap(),
+            request_fingerprint: None,
+            kind: OpKind::Run,
+            workload: name.clone(),
+            status: OpStatus::CancelRequested,
+            plan: Plan {
+                id: id.clone(),
+                kind: OpKind::Run,
+                target: name,
+                revision: 1,
+                expected_model: "fake/coder".into(),
+                affected_gpus: vec![],
+                steps: vec![],
+                rollback: vec![],
+            },
+            phases: vec![],
+            result: None,
+            recovery: None,
+            acknowledged: false,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+        // The executor prepared this write before the cancellation committed.
+        db.mutate_op(
+            id.as_str(),
+            OpMutation {
+                status: OpStatus::Executing,
+                phases: vec![],
+                result: None,
+                recovery: None,
+                acknowledged: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.get_op(id.as_str()).await.unwrap().unwrap().status,
+            OpStatus::CancelRequested
+        );
+    }
 }

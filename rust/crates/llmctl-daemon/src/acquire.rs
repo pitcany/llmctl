@@ -293,6 +293,7 @@ pub async fn acquire(
             expected_stop_targets: None,
             force: false,
             profile: None,
+            request_payload: Some(serde_json::json!(req)),
             plan_override: Some(plan),
         })
         .await?;
