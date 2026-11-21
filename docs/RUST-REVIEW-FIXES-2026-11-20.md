@@ -136,3 +136,28 @@ Tests: 4 new e2e tests (`restart_during_rollback_needs_attention`,
 `cancel_during_restart_restores_the_target`) failed before the fix and pass
 after it. 8 new unit tests cover `classify_interrupted`. Workspace suite:
 0 failed. Real-systemd and launchd spike suites were not run.
+
+## Follow-up: promote refusal, plist secrets, TUI start (evening, November 20)
+
+Three more defects from the same study. Not deployed.
+
+- **Refused promote** (`e3de96b`, `upgrade.rs`). `promote` wrote `promoting`
+  before admission. A refusal left the row in `promoting` with no operation,
+  so it was never settled, never promotable and never collected. The status
+  and the rollback stash are now written only after admission succeeds.
+  Test: the spike test `staged_upgrade_promotes_verifies_and_rolls_back` holds
+  the host lock, expects exit 4 and a row that is still `validated`. It failed
+  before the fix.
+- **Plist secrets** (`c868424`, `plistdef.rs`). A credential-like
+  `EnvironmentVariables` name was reported, but its value stayed in the
+  definition that the macOS adoption preview returns. The value is now dropped,
+  as `unitdef` does for systemd. Test: `import_refuses_secret_env_and_missing_parts`.
+- **TUI unit start** (`84f4c96`, Python). Units `a` now asks first when
+  `scheduler.require_confirmation_for_start` is on, as `llmctl start-unit`
+  does. The help modal no longer lists `r refresh` on a screen that rebinds `r`.
+
+Verification: Rust workspace 326 passed, 0 failed. Real-systemd spike suite
+22 of 22 passed. Python suite 1,833 passed, 1 failed: `test_ruff_linting`, from
+lint findings that `bd38024` left in `tests/test_llmctl_next_guard.py` and
+`rust/crates/llmctl-tui/bench/bench_py_tui.py`; these commits do not touch
+those files.
