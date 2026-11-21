@@ -15,6 +15,7 @@ use llmctl_client::wire::{
 use llmctl_client::{ClientError, ControlClient};
 use llmctl_core::{OpKind, Plan};
 
+mod agent_install;
 mod enroll;
 mod catalog_cmds;
 mod lanes_matrix;
@@ -351,6 +352,14 @@ enum Command {
     /// the SSH bridge (M3-E.1). The workstation runs `ssh <alias>
     /// llmctl-next bridge`; the same HTTP/1.1 API flows through the pipe.
     Bridge,
+    /// Install this binary as the agent on this host (user systemd unit or
+    /// LaunchAgent), take it off again, or show what is installed (M7b).
+    /// Never replaces an agent it did not install; uninstall stops only the
+    /// agent, never an engine.
+    Agent {
+        #[command(subcommand)]
+        cmd: AgentCmd,
+    },
     /// Enrolled-host management (M3-D): install/upgrade/remove the agent
     /// on a Mac over ssh and record the enrollment on this workstation.
     Host {
@@ -367,6 +376,50 @@ enum Command {
         /// screens against the live agents (read-only), then p50/p95.
         #[arg(long, value_name = "ROUNDS")]
         bench: Option<usize>,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum AgentCmd {
+    /// Copy this binary to <prefix>/bin/llmctl-next, write the user
+    /// service, start it, and record every file in the data dir's
+    /// install-manifest.json. Run again to upgrade. The data dir is the
+    /// global --data-dir, else ~/.local/state/llmctl-next.
+    Install {
+        /// Install prefix (binary at <prefix>/bin/llmctl-next).
+        #[arg(long)]
+        prefix: Option<PathBuf>,
+        /// Host id the agent answers to (default: the short hostname).
+        #[arg(long)]
+        host_id: Option<String>,
+        /// Record an existing standard-layout install that has no manifest
+        /// (made before M7); changes nothing else, starts nothing.
+        #[arg(long)]
+        adopt: bool,
+        /// Service name (systemd unit stem / launchd label); for tests.
+        #[arg(long, hide = true)]
+        service_name: Option<String>,
+    },
+    /// Stop the agent and remove exactly the files the install recorded.
+    /// Refuses without a manifest or when a recorded file was edited.
+    Uninstall {
+        #[arg(long)]
+        prefix: Option<PathBuf>,
+        /// Also remove the data dir (journal, inventory) and the logs.
+        #[arg(long)]
+        purge: bool,
+        #[arg(long, hide = true)]
+        service_name: Option<String>,
+    },
+    /// What is installed: manifest, binary sha256, edits, service state,
+    /// whether the agent answers.
+    Status {
+        #[arg(long)]
+        prefix: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, hide = true)]
+        service_name: Option<String>,
     },
 }
 
@@ -969,6 +1022,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             Ok(0)
         }
         Command::Bridge => cmd_bridge(cli).await,
+        Command::Agent { cmd } => cmd_agent(cli, cmd).await,
         Command::Host { cmd } => cmd_host(cli, cmd).await,
         Command::Tui { read_only, bench } => tui_cmd::cmd_tui(cli, read_only, bench).await.map_err(CliError::Daemon),
     }
@@ -1008,6 +1062,118 @@ async fn cmd_bridge(cli: &Cli) -> Result<u8, CliError> {
     }
     let _ = stdout.flush().await;
     Ok(0)
+}
+
+async fn cmd_agent(cli: &Cli, cmd: AgentCmd) -> Result<u8, CliError> {
+    use agent_install as ai;
+    let err = CliError::Daemon;
+    if cli.host.is_some() {
+        return Err(err(
+            "`agent` verbs act on this machine only; for an enrolled host use `host add` / `host upgrade`".into(),
+        ));
+    }
+    // Host id only matters for install; uninstall/status read the manifest.
+    let layout = |prefix: Option<PathBuf>, svc: Option<String>, host: Option<String>, need_host: bool| {
+        let host = if need_host { host } else { Some(host.unwrap_or_else(|| "unused".into())) };
+        ai::Layout::resolve(prefix, cli.data_dir.clone(), svc, host)
+    };
+    let sm = ai::native_manager();
+    match cmd {
+        AgentCmd::Install { prefix, host_id, adopt, service_name } => {
+            let l = layout(prefix, service_name, host_id.clone(), true).map_err(err)?;
+            let exe = std::env::current_exe().map_err(|e| err(format!("locating this binary: {e}")))?;
+            let host_explicit = host_id.is_some();
+            let r = ai::install(&l, &exe, sm.as_ref(), adopt, host_explicit, std::time::Duration::from_secs(30))
+                .map_err(err)?;
+            let what = match r.mode {
+                ai::InstallMode::Fresh => "installed",
+                ai::InstallMode::Upgrade => "upgraded",
+                ai::InstallMode::Adopted => "adopted (manifest written; nothing else changed)",
+            };
+            println!("agent {what}: {} as {} (host id {})", r.manifest.binary.display(), r.manifest.service, r.manifest.host_id);
+            println!("service file: {}", r.manifest.service_file.display());
+            println!("manifest: {}", l.manifest_path().display());
+            for n in &r.notes {
+                println!("note: {n}");
+            }
+            Ok(0)
+        }
+        AgentCmd::Uninstall { prefix, purge, service_name } => {
+            let l = layout(prefix, service_name, None, false).map_err(err)?;
+            // Name what the agent owned, before it stops (best effort).
+            let owned: Vec<String> = match ControlClient::connect(l.socket()) {
+                Ok(c) => c
+                    .status()
+                    .await
+                    .map(|s| s.workloads.iter().map(|w| format!("{} ({})", w.name, w.process)).collect())
+                    .unwrap_or_default(),
+                Err(_) => Vec::new(),
+            };
+            let r = ai::uninstall(&l, sm.as_ref(), purge).map_err(err)?;
+            for f in &r.removed_files {
+                println!("removed {}", f.display());
+            }
+            for d in r.removed_dirs.iter().chain(&r.purged) {
+                println!("removed {}/", d.display());
+            }
+            for d in &r.kept_dirs {
+                println!("kept {}/ (not empty)", d.display());
+            }
+            for f in &r.missing {
+                println!("already gone: {}", f.display());
+            }
+            if !owned.is_empty() {
+                println!("now unmanaged (still in their last state; no engine was stopped): {}", owned.join(", "));
+            }
+            Ok(0)
+        }
+        AgentCmd::Status { prefix, json, service_name } => {
+            let l = layout(prefix, service_name, None, false).map_err(err)?;
+            let s = ai::status(&l, sm.as_ref()).map_err(err)?;
+            let version = if s.socket_answers {
+                match ControlClient::connect(l.socket()) {
+                    Ok(c) => c.health().await.ok().map(|h| h.daemon_version),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+            if json {
+                let mut v = serde_json::to_value(&s).unwrap();
+                v["version"] = serde_json::json!(version);
+                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                return Ok(0);
+            }
+            let installed = match (s.installed, s.adopted) {
+                (false, _) => "not installed by `agent install` (no manifest)",
+                (true, true) => "installed (adopted)",
+                (true, false) => "installed",
+            };
+            println!("agent: {installed}");
+            println!(
+                "binary: {} {}",
+                s.binary.display(),
+                s.binary_sha256.as_deref().map(|h| format!("sha256 {}", &h[..12])).unwrap_or_else(|| "(absent)".into())
+            );
+            println!("service file: {}", s.service_file.display());
+            println!("service: {}", s.service_state);
+            println!(
+                "socket: {}",
+                match (s.socket_answers, &version) {
+                    (true, Some(v)) => format!("answers (agent {v})"),
+                    (true, None) => "answers".into(),
+                    (false, _) => "no answer".into(),
+                }
+            );
+            for f in &s.edited {
+                println!("edited since install: {}", f.display());
+            }
+            for f in &s.missing {
+                println!("missing: {}", f.display());
+            }
+            Ok(if s.installed && s.edited.is_empty() && s.missing.is_empty() { 0 } else { 1 })
+        }
+    }
 }
 
 async fn cmd_host(cli: &Cli, cmd: HostCmd) -> Result<u8, CliError> {

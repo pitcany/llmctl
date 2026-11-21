@@ -167,22 +167,15 @@ pub const REMOTE_DATA_DIR: &str = "~/.local/state/llmctl-next";
 /// `host_name` is the enrollment name: the agent answers to it as its host
 /// id (before, every agent stayed `workstation`).
 pub fn agent_plist(home: &str, host_name: &str) -> Result<String, String> {
-    let dict = serde_json::json!({
-        "Label": AGENT_LABEL,
-        "ProgramArguments": [
-            format!("{home}/.local/bin/llmctl-next"),
-            "--data-dir",
-            format!("{home}/.local/state/llmctl-next"),
-            "daemon",
-            "--host-id",
-            host_name
-        ],
-        "RunAtLoad": true,
-        "KeepAlive": true,
-        "StandardOutPath": format!("{home}/Library/Logs/llmctl-next/agent.out.log"),
-        "StandardErrorPath": format!("{home}/Library/Logs/llmctl-next/agent.err.log"),
-    });
-    llmctl_daemon::plistdef::render_xml_plist(&dict)
+    // Same renderer as `agent install` (M7b), so an adopted Mac install
+    // matches what that command would write.
+    crate::agent_install::launchd_plist(
+        Path::new(&format!("{home}/.local/bin/llmctl-next")),
+        Path::new(&format!("{home}/.local/state/llmctl-next")),
+        Path::new(&format!("{home}/Library/Logs/llmctl-next")),
+        host_name,
+        AGENT_LABEL,
+    )
 }
 
 /// Read the arch and IOPlatformUUID facts from the host over ssh.
