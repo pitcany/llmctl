@@ -101,3 +101,44 @@ records the durable results. The targeted script was
 Published artifact follow-up: the Driving llmctl guide still needs its Rust
 handoff and old-key replay guidance reconciled. Its index was checked. No
 published page was edited.
+
+## Follow-up deployment: `55c83de` (same day, 23:36 PST)
+
+The owner asked for the five study defect fixes on all three hosts. Commits:
+`05e93d7` (rollback crash reconcile, cancel restores), `e3de96b` (a refused
+promote leaves the stage validated), `c868424` (plist import never carries
+secret env values), `84f4c96` (TUI start confirmation, honest `r` in help).
+No repository was pushed.
+
+Preflight: no non-terminal operation and no unacknowledged attention row on
+any agent; no running longjob, no lane lease, host flock free.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Workstation `~/.local/state/llmctl-next-m4a/llmctl-next.bin` (= running `/proc/<pid>/exe`) | `10d15ca9a1697ca3aabc2add19bcea71ac1bacc326e816b3fbcc56053b5044ab` |
+| m5 and mbp2 `~/.local/bin/llmctl-next`, built on mbp2 | `273f2847742447b262ac862a5c4a0f38bc18dee25edafb46341d67955fce1edf` |
+| `~/AI/.venv` package | wheel built from `55c83de`, `uv pip install --no-deps --reinstall`; changed TUI modules byte-identical to the checkout |
+
+Sequence: backups of each old binary and a SQLite `.backup` journal snapshot in
+`<agent-data-dir>/deploy-backups/2026-11-20-55c83de/` (the workstation one also
+holds a tarball of the old `~/AI/.venv` package). The workstation binary was
+swapped and `llmctl-next.service` restarted under the host flock. The Macs went
+through `host upgrade <host> --binary`; the Mac binary is kept in
+`mac-binaries/llmctl-next-macos-55c83de`. llmctl-api and the router were not
+restarted: no Python module they import changed. No inference service was
+restarted.
+
+| Check | Result |
+| --- | --- |
+| Rust workspace (source) | 326 passed |
+| Real systemd suite | 22 passed |
+| Real launchd suite on mbp2, disposable labels | 7 passed; no labels left |
+| Journals after restart | 56 / 19 / 21 operations, unchanged; no new attention rows |
+| Audit since 07:30 UTC on all three agents | zero foreign writes |
+| vLLM workers | PIDs 1701353 / 1707347 unchanged; a small request returned `OK` |
+| Router `/health` | ok, qwen3.8-27b active |
+
+Behavior change for operators: an agent restart while a start or stop effect
+is in flight now leaves the operation `needs_attention`, which blocks new
+operations until `llmctl-next ack`. A restart during an incomplete rollback
+does the same.
