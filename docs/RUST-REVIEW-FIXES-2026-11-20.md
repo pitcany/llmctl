@@ -4,6 +4,10 @@ The three reproduced findings in [the assessment](RUST-REVIEW-2026-11-20.md)
 are fixed in the working trees. Base llmctl commit: `9b60d08`. No application
 commit, deployment, service restart, or live inference mutation was performed.
 
+Follow-up: the owner subsequently authorized commits and deployment. See
+[deployment and real-host acceptance](RUST-REVIEW-DEPLOYMENT-2026-11-20.md)
+for the installed commits, corrected Python packaging, and verification results.
+
 ## Executor lock ownership
 
 The daemon always acquires its own host flock before admission and retains it
