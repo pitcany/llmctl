@@ -180,6 +180,7 @@ def test_both_unit_name_forms_hit_the_map(tmp_path, standin):
 @pytest.mark.parametrize("rc", [0, 4])
 def test_delegation_hands_off_and_reacquires_host_lock(tmp_path, monkeypatch, preset, rc):
     import fcntl
+
     from llmctl.integrations import llmctl_next
     from llmctl.services.op_lock import gpu_operation_lock, held_by_us
 
@@ -208,6 +209,7 @@ def test_delegation_hands_off_and_reacquires_host_lock(tmp_path, monkeypatch, pr
 
 def test_delegation_aborts_when_caller_cannot_reacquire_lock(tmp_path, monkeypatch):
     import fcntl
+
     from llmctl.integrations import llmctl_next
     from llmctl.services import op_lock
 

@@ -18,7 +18,10 @@ KEYS = ["d", "g", "l", "s", "u"]  # Dashboard, GPUs, Events, Sessions, Units
 
 def pct(xs):
     xs = sorted(xs)
-    rank = lambda p: xs[max(1, math.ceil(p * len(xs))) - 1]
+
+    def rank(p):
+        return xs[max(1, math.ceil(p * len(xs))) - 1]
+
     return rank(0.50), rank(0.95), xs[-1]
 
 
@@ -55,8 +58,14 @@ async def main():
             refresh_ms.append((time.perf_counter() - t) * 1000)
     k50, k95, kmax = pct(key_ms)
     r50, r95, rmax = pct(refresh_ms)
-    print(f"key to frame   n={len(key_ms):<4} p50 {k50:.2f} ms  p95 {k95:.2f} ms  max {kmax:.2f} ms")
-    print(f"dash refresh   n={len(refresh_ms):<4} p50 {r50:.2f} ms  p95 {r95:.2f} ms  max {rmax:.2f} ms")
+    print(
+        f"key to frame   n={len(key_ms):<4} "
+        f"p50 {k50:.2f} ms  p95 {k95:.2f} ms  max {kmax:.2f} ms"
+    )
+    print(
+        f"dash refresh   n={len(refresh_ms):<4} "
+        f"p50 {r50:.2f} ms  p95 {r95:.2f} ms  max {rmax:.2f} ms"
+    )
 
 
 asyncio.run(main())
