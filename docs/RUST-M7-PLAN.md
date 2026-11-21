@@ -202,10 +202,8 @@ license gate.
    for `/home/`, `/Users/`, `AI/`, `local-llm`, `workstation`,
    `pitcany`; fail on a hit not in an allowlist with a reason per
    entry. The label `com.pitcany.llmctl-next` is allowlisted as a vendor
-   id. The `"workstation"` host-id default becomes the machine's
-   hostname (short form), with `--host-id` still winning; the workstation
-   keeps its id because its unit passes none today and the M6 deploy
-   adds `--host-id workstation`.
+   id. The daemon's `"workstation"` host-id default stays and is
+   allowlisted (decision 8, as amended).
 
 Check: workspace suite green; a temp agent with an empty `HOME` starts,
 answers `status`, lists zero presets and reports both integrations off;
@@ -216,7 +214,7 @@ a planted path and passes after.
 
 | Verb | Linux | macOS |
 |---|---|---|
-| `agent install [--prefix ~/.local] [--data-dir …] [--host-id …]` | copy self to `<prefix>/bin/llmctl-next` (atomic rename); write `~/.config/systemd/user/llmctl-next.service` (generated; `PATH` = `<prefix>/bin` + system dirs, so a bare `uv` resolves); `daemon-reload`, `enable --now`; print the `loginctl enable-linger` line if lingering is off | copy self; write the LaunchAgent plist (`enroll::agent_plist`, moved to a shared module, `--host-id` passed through); `env -i launchctl bootstrap` |
+| `agent install [--prefix ~/.local] [--data-dir …] [--host-id …]` (`--host-id` defaults to the short hostname, normalized to `[a-z0-9-]`, decision 8) | copy self to `<prefix>/bin/llmctl-next` (atomic rename); write `~/.config/systemd/user/llmctl-next.service` (generated; `PATH` = `<prefix>/bin` + system dirs, so a bare `uv` resolves); `daemon-reload`, `enable --now`; print the `loginctl enable-linger` line if lingering is off | copy self; write the LaunchAgent plist (`enroll::agent_plist`, moved to a shared module, `--host-id` passed through); `env -i launchctl bootstrap` |
 | `agent uninstall [--purge]` | `disable --now`, remove unit, the `default.target.wants/` link and binary; `--purge` removes the data dir | `bootout`, remove plist and binary; `--purge` removes data dir and `~/Library/Logs/llmctl-next` |
 | `agent status` | installed?, binary path and sha256, service state, socket answers, version | same |
 
@@ -345,7 +343,8 @@ Not in the pilot window (rules 2 and 4). After the M5 exit and M6
 
 1. Format commit on `main` (M7d step 3), then rebase the M7 branch.
 2. Merge M7. Write the workstation `agent.toml` keys (M7a step 3) before
-   the new binary starts; add `--host-id workstation` to its unit.
+   the new binary starts. (No host-id step: the id is bound in its
+   journal.)
 3. `agent install --adopt` on mbp2 and m5 (writes manifests only).
 4. Rewire `host add` / `host upgrade` onto `agent install` (M7b), tested
    against one Mac first.
@@ -410,12 +409,13 @@ launchd needs a GUI session.
    release (public repo) and generating `THIRD-PARTY-LICENSES.md` is a
    separate owner go-ahead after M6 (recommended), or publish a
    pre-release at the end of M7.
-8. **Host-id default** (added after the review; not reviewed): the
-   `"workstation"` default becomes the short hostname, and the M6 deploy
-   adds `--host-id workstation` to the workstation unit (recommended:
-   a clean host gets a true id), or keep `"workstation"` and allowlist
-   it in the gate (no deploy step, but every new host is "workstation"
-   until `--host-id` is set). Risk of the recommendation: if the deploy
-   step is missed, the workstation agent answers to a new id and its
-   records no longer match; M7a adds a startup refusal when the data
-   dir's recorded host id differs from the resolved one.
+8. **Host id for new installs** — *amended by the owner 2026-11-21
+   during M7a:* `agent install` writes `--host-id <short hostname>`
+   into the unit or plist it generates; the daemon's `"workstation"`
+   default stays (allowlisted in the gate). Found in M7a: the host id is
+   bound once in the journal (`meta host_id`) and a bound id beats the
+   default, so live agents never change id, and the deploy needs no
+   host-id step or start-up refusal. Changing the daemon default instead
+   would have touched 27 daemon-spawn sites in the tests. (Original
+   recommendation: the default becomes the hostname, M6 adds
+   `--host-id workstation`.)
