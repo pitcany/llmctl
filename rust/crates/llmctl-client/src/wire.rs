@@ -281,6 +281,10 @@ pub struct StatusResponse {
     /// Per card: enrolled workloads (observed running) vs everyone else.
     #[serde(default)]
     pub gpus: Vec<GpuView>,
+    /// Host integrations from `agent.toml` (router config, lane lease),
+    /// one line each: the path, or why it is off. Empty from older agents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub integrations: Vec<String>,
 }
 
 /// One foreign compute process on a card.

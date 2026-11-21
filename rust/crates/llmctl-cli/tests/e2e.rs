@@ -3590,3 +3590,103 @@ async fn tolerated_gpu_occupants_let_a_run_through_until_one_outgrows_its_cap() 
     let listed = String::from_utf8(cli(&d.socket, &["tolerate"]).stdout).unwrap();
     assert!(!listed.contains("speaches.main") && listed.contains("rustdesk"), "{listed}");
 }
+
+// ---- M7a: host integrations come from agent.toml --------------------------
+
+/// Spawn a daemon with `home` as `$HOME` and no llmctl overrides set: the
+/// view a clean host has.
+fn spawn_clean_home_daemon(data: &Path, home: &Path, log: std::fs::File) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(data.join("control.sock")).arg("--data-dir").arg(data).arg("daemon")
+        .env("HOME", home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("LLMCTL_ROUTER_CONFIG")
+        .env_remove("LLMCTL_NEXT_LANE_LEASE")
+        .env_remove("LLMCTL_NEXT_PRESET_DIRS")
+        .env_remove("LLMCTL_NEXT_SETTINGS")
+        .env_remove("RUST_LOG")
+        // The agent's tracing output goes to stdout (journald on hosts).
+        .stdout(log)
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn daemon")
+}
+
+/// A clean host (empty `$HOME`, no `agent.toml`) starts with both
+/// integrations off and no presets. With the pre-M7 files present but no
+/// keys, the agent says at start that it ignores them; with the keys set,
+/// `status` names the files.
+#[tokio::test]
+async fn host_integrations_are_off_without_agent_toml_and_named_with_it() {
+    let data = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let socket = data.path().join("control.sock");
+    let log = data.path().join("daemon.log");
+    let status_text = |socket: &Path| {
+        let out = cli(socket, &["status"]);
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    // 1. Empty home: off, no presets, no warning.
+    let mut d = spawn_clean_home_daemon(data.path(), home.path(), std::fs::File::create(&log).unwrap());
+    wait_socket(&socket).await;
+    let text = status_text(&socket);
+    assert!(
+        text.contains("integrations: router config: off (not set in agent.toml) · lane lease: off (not set in agent.toml)"),
+        "{text}"
+    );
+    let presets: serde_json::Value =
+        serde_json::from_slice(&cli(&socket, &["preset", "list", "--json"]).stdout).unwrap();
+    assert_eq!(presets["presets"].as_array().map(Vec::len), Some(0), "{presets}");
+    let _ = d.kill();
+    let _ = d.wait();
+    assert!(!std::fs::read_to_string(&log).unwrap().contains("is ignored"));
+
+    // 2. The pre-M7 files exist, no keys: still off, and the start says so.
+    let ai = home.path().join("AI");
+    std::fs::create_dir_all(ai.join("llm-router/config")).unwrap();
+    std::fs::create_dir_all(ai.join("logs")).unwrap();
+    std::fs::write(ai.join("llm-router/config/router.yaml"), "backends: {}\n").unwrap();
+    std::fs::write(ai.join("logs/lane-lease.json"), "{}").unwrap();
+    let mut d = spawn_clean_home_daemon(data.path(), home.path(), std::fs::File::create(&log).unwrap());
+    wait_socket(&socket).await;
+    assert!(status_text(&socket).contains("router config: off"));
+    let _ = d.kill();
+    let _ = d.wait();
+    let err = std::fs::read_to_string(&log).unwrap();
+    assert!(err.contains("router_config not set") && err.contains("is ignored"), "{err}");
+    assert!(err.contains("lane_lease not set"), "{err}");
+
+    // 3. Keys set (with ~/ expansion): status names both files.
+    std::fs::write(
+        data.path().join("agent.toml"),
+        "router_config = \"~/AI/llm-router/config/router.yaml\"\nlane_lease = \"~/AI/logs/lane-lease.json\"\n",
+    )
+    .unwrap();
+    let mut d = spawn_clean_home_daemon(data.path(), home.path(), std::fs::File::create(&log).unwrap());
+    wait_socket(&socket).await;
+    let text = status_text(&socket);
+    let router = ai.join("llm-router/config/router.yaml");
+    assert!(text.contains(&format!("router config: {}", router.display())), "{text}");
+    assert!(text.contains(&format!("lane lease: {}", ai.join("logs/lane-lease.json").display())), "{text}");
+    let _ = d.kill();
+    let _ = d.wait();
+    assert!(!std::fs::read_to_string(&log).unwrap().contains("is ignored"));
+}
+
+/// A typo in agent.toml stops the start instead of silently turning an
+/// integration off.
+#[test]
+fn an_invalid_agent_toml_stops_the_start() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(data.path().join("agent.toml"), "lane_leese = \"/x\"\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(data.path().join("control.sock")).arg("--data-dir").arg(data.path())
+        .arg("daemon")
+        .output()
+        .expect("run daemon");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("agent.toml") && err.contains("lane_leese"), "{err}");
+}

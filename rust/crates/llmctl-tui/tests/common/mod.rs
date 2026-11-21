@@ -71,6 +71,7 @@ pub fn workstation_status() -> StatusResponse {
                 error: None,
             },
         ],
+        integrations: vec![],
     }
 }
 
@@ -82,6 +83,7 @@ pub fn mac_status(host: &str) -> StatusResponse {
         generated_at: t0() - chrono::Duration::seconds(3),
         workloads: vec![workload("llama-swap", "Running", "Ready", "running", None)],
         gpus: vec![],
+        integrations: vec![],
     }
 }
 

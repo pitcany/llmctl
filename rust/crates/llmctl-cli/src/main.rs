@@ -736,11 +736,18 @@ fn socket_path(cli: &Cli) -> PathBuf {
     if let Some(s) = &cli.socket {
         return s.clone();
     }
-    let dir = match &cli.data_dir {
-        Some(d) => d.clone(),
-        None => llmctl_daemon::app::default_data_dir(),
-    };
-    dir.join("control.sock")
+    data_dir(cli).join("control.sock")
+}
+
+/// The local agent's data dir: `--data-dir`, else the parent of an
+/// explicit `--socket` (the socket lives in the data dir by default),
+/// else the default.
+fn data_dir(cli: &Cli) -> PathBuf {
+    match (&cli.data_dir, &cli.socket) {
+        (Some(d), _) => d.clone(),
+        (None, Some(s)) => s.parent().map(PathBuf::from).unwrap_or_default(),
+        (None, None) => llmctl_daemon::app::default_data_dir(),
+    }
 }
 
 fn connect(cli: &Cli) -> Result<ControlClient, ClientError> {
@@ -760,7 +767,7 @@ fn connect(cli: &Cli) -> Result<ControlClient, ClientError> {
     let client = ControlClient::connect(socket_path(cli))?;
     // Inside a lane-lease holder (a longjob job that drives llmctl-next):
     // say so, or the agent would refuse the job's own commands (M4c).
-    let client = match llmctl_client::lease::holder_ancestor() {
+    let client = match llmctl_client::lease::holder_ancestor(&data_dir(cli)) {
         Some(pid) => client.under_lease(pid),
         None => client,
     };
@@ -1147,6 +1154,9 @@ async fn cmd_status(cli: &Cli, json: bool) -> Result<u8, CliError> {
             "gpu {:<6} enrolled={:<12} foreign={}",
             g.index, enrolled, foreign
         );
+    }
+    if !status.integrations.is_empty() {
+        println!("integrations: {}", status.integrations.join(" · "));
     }
     Ok(0)
 }

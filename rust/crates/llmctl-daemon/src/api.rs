@@ -473,6 +473,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
         generated_at: chrono::Utc::now(),
         workloads,
         gpus,
+        integrations: llmctl_client::agent_config::integration_lines(
+            &llmctl_client::agent_config::current(),
+        ),
     }))
 }
 

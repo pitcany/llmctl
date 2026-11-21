@@ -15,7 +15,8 @@
 //! default `$XDG_CONFIG_HOME/llmctl/presets` then `…/llm-models`, as the
 //! Python loader), `LLMCTL_NEXT_SETTINGS` (default
 //! `$XDG_CONFIG_HOME/llmctl/settings.yaml`), `LLMCTL_ROUTER_CONFIG`
-//! (default `~/AI/llm-router/config/router.yaml`, as llmctl-stack).
+//! (else `router_config` in the agent's `agent.toml`; unset = no router
+//! profiles, see `llmctl_client::agent_config`).
 
 use std::path::{Path, PathBuf};
 
@@ -79,17 +80,10 @@ pub fn settings_path() -> PathBuf {
     }
 }
 
-pub fn router_config_path() -> PathBuf {
-    match std::env::var_os("LLMCTL_ROUTER_CONFIG") {
-        Some(v) if !v.is_empty() => {
-            let s = v.to_string_lossy().into_owned();
-            match s.strip_prefix("~/") {
-                Some(rest) => home().join(rest),
-                None => PathBuf::from(s),
-            }
-        }
-        _ => home().join("AI/llm-router/config/router.yaml"),
-    }
+/// llm-router's config, or `None` when this agent has no router
+/// (`LLMCTL_ROUTER_CONFIG`, else `router_config` in `agent.toml`).
+pub fn router_config_path() -> Option<PathBuf> {
+    llmctl_client::agent_config::router_config(&llmctl_client::agent_config::current())
 }
 
 /// `vllm.defaults` from settings.yaml; a missing file is the defaults.
@@ -256,7 +250,7 @@ fn env_path(def: &WorkloadDefinition) -> PathBuf {
 /// router.yaml backends: `(served_model, profile file)` where a backend
 /// names a `profile_env` under `switch.services_dir`.
 fn router_profiles() -> Vec<(String, PathBuf)> {
-    let path = router_config_path();
+    let Some(path) = router_config_path() else { return Vec::new() };
     let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
     let Ok(raw) = serde_yaml::from_str::<Value>(&text) else { return Vec::new() };
     let services = raw
@@ -756,7 +750,9 @@ pub async fn settle(state: &AppState, req: &PresetSettleRequest) -> Result<Prese
             .map(|r| tilde(&r.path));
         files.push((f, source));
     }
-    files.push((router_config_path(), None));
+    if let Some(router) = router_config_path() {
+        files.push((router, None));
+    }
 
     let mut out = PresetSettleResponse {
         workload: def.name.to_string(),

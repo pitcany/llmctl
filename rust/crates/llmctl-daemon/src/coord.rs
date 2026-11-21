@@ -76,13 +76,15 @@ pub fn op_lock_path(platform: &Platform, def: &WorkloadDefinition) -> Option<Pat
     }
 }
 
-/// The lane-lease file for this workload, if one applies.
+/// The lane-lease file for this workload, if one applies: an explicit
+/// `LLMCTL_NEXT_LANE_LEASE` path always; the `lane_lease` key of
+/// `agent.toml` for real engines on Linux; otherwise none.
 pub fn lease_path(platform: &Platform, def: &WorkloadDefinition) -> Option<PathBuf> {
     match lease::env_override(lease::LEASE_ENV) {
         Override::Off => None,
         Override::Path(p) => Some(p),
         Override::Unset => real_engine_on_linux(platform, def)
-            .then(lease::default_path)
+            .then(|| llmctl_client::agent_config::current().lane_lease)
             .flatten(),
     }
 }
@@ -252,6 +254,33 @@ fn hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M7a: with no env override the lease file comes from `agent.toml`
+    /// (`lane_lease`), for real engines on Linux only; unset = off.
+    #[test]
+    fn the_lane_lease_comes_from_agent_toml_for_real_engines_on_linux() {
+        use llmctl_client::agent_config::{install, AgentConfig};
+        if std::env::var_os(lease::LEASE_ENV).is_some() {
+            return; // an explicit override wins by design
+        }
+        let host = llmctl_core::HostId::new("t").unwrap();
+        let inv = crate::app::sample_inventory(&host);
+        let mut real = inv.workloads[0].clone();
+        real.engine = "systemd".into();
+        let mut fake = real.clone();
+        fake.engine = "fake".into();
+
+        install(AgentConfig {
+            lane_lease: Some(PathBuf::from("/x/lane-lease.json")),
+            ..AgentConfig::default()
+        });
+        assert_eq!(lease_path(&Platform::Linux, &real), Some(PathBuf::from("/x/lane-lease.json")));
+        assert_eq!(lease_path(&Platform::Linux, &fake), None);
+        assert_eq!(lease_path(&Platform::Macos, &real), None);
+
+        install(AgentConfig::default());
+        assert_eq!(lease_path(&Platform::Linux, &real), None, "unset key = no lease");
+    }
 
     #[test]
     fn the_lock_excludes_a_second_holder_and_names_the_first() {

@@ -112,12 +112,6 @@ pub fn pid_alive(pid: u32) -> bool {
     }
 }
 
-/// Where the lease lives unless [`LEASE_ENV`] says otherwise: the file
-/// longjob, hf2local and llm-router use on the workstation.
-pub fn default_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("AI/logs/lane-lease.json"))
-}
-
 /// An environment override shared by the lease and the operation lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Override {
@@ -138,13 +132,12 @@ pub fn env_override(var: &str) -> Override {
 
 /// The pid of the active lease holder when this process runs inside it
 /// (a longjob job driving `llmctl-next`): the CLI sends it so the daemon
-/// lets the holder's own commands through.
-pub fn holder_ancestor() -> Option<u32> {
-    let path = match env_override(LEASE_ENV) {
-        Override::Off => return None,
-        Override::Path(p) => p,
-        Override::Unset => default_path()?,
-    };
+/// lets the holder's own commands through. The lease file comes from the
+/// same resolution the daemon uses ([`crate::agent_config::lane_lease`]):
+/// `LLMCTL_NEXT_LANE_LEASE`, else `lane_lease` in `<data_dir>/agent.toml`.
+pub fn holder_ancestor(data_dir: &Path) -> Option<u32> {
+    let cfg = crate::agent_config::AgentConfig::load(data_dir).unwrap_or_default();
+    let path = crate::agent_config::lane_lease(&cfg)?;
     let lease = read_active(&path, MAX_AGE_S)?;
     is_ancestor(lease.pid, std::process::id(), parent_of).then_some(lease.pid)
 }
@@ -175,6 +168,35 @@ pub fn parent_of(pid: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M7a: the CLI finds the lease through `<data_dir>/agent.toml`, the
+    /// same key the daemon reads, so a longjob job's own call is let
+    /// through. This test process is its own lease holder.
+    #[test]
+    fn holder_ancestor_reads_the_lane_lease_key_from_agent_toml() {
+        if std::env::var_os(LEASE_ENV).is_some() {
+            return; // an explicit override wins by design
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(holder_ancestor(dir.path()), None, "no agent.toml = no lease");
+        let lease = dir.path().join("lane-lease.json");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        std::fs::write(
+            &lease,
+            serde_json::json!({"holder": "longjob", "pid": std::process::id(), "updated": now})
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(crate::agent_config::FILE),
+            format!("lane_lease = {:?}\n", lease.display().to_string()),
+        )
+        .unwrap();
+        assert_eq!(holder_ancestor(dir.path()), Some(std::process::id()));
+    }
 
     #[test]
     fn parses_the_three_lease_shapes_and_rejects_non_leases() {

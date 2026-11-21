@@ -18,7 +18,7 @@ fn targets(cli: &Cli, local_name: Option<String>) -> Vec<HostTarget> {
     let local: Arc<dyn AgentApi> = match ControlClient::connect(crate::socket_path(cli)) {
         // Same headers as the CLI's own writes (lease holder, op lock).
         Ok(c) => {
-            let c = match llmctl_client::lease::holder_ancestor() {
+            let c = match llmctl_client::lease::holder_ancestor(&crate::data_dir(cli)) {
                 Some(pid) => c.under_lease(pid),
                 None => c,
             };

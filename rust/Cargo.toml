@@ -48,6 +48,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 sha2 = "0.10"
+toml = { version = "1.2", default-features = false, features = ["parse", "serde"] }
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 
 [profile.release]

@@ -162,6 +162,14 @@ impl AppState {
             .await
             .map_err(|e| format!("creating data dir {}: {e}", paths.data_dir.display()))?;
 
+        // Host-specific integrations (llm-router, the lane lease) come from
+        // <data-dir>/agent.toml; an invalid file stops the start.
+        let agent_cfg = llmctl_client::agent_config::AgentConfig::load(&paths.data_dir)?;
+        for line in llmctl_client::agent_config::ignored_legacy_files(&agent_cfg) {
+            tracing::warn!("{line}");
+        }
+        llmctl_client::agent_config::install(agent_cfg);
+
         let db = Db::open(&paths.db).map_err(|e| format!("opening journal: {e}"))?;
 
         // Stable host identity: bound once, renamed only when enrollment
