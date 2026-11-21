@@ -191,10 +191,14 @@ pub fn definition_from_plist(
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
+            // A credential-like name is reported, its value never carried
+            // (as `unitdef` does): the definition is returned by the
+            // adoption preview and rendered into the owned plist.
             if looks_secret(k) {
                 secret_env_names.push(k.clone());
+            } else {
+                environment.push((k.clone(), val));
             }
-            environment.push((k.clone(), val));
         }
         environment.sort();
     }
@@ -801,9 +805,14 @@ mod tests {
     #[test]
     fn import_refuses_secret_env_and_missing_parts() {
         let mut bad = llama_swap_plist();
-        bad["EnvironmentVariables"]["HF_TOKEN"] = Value::String("x".into());
-        let (_, secrets) = definition_from_plist(&bad, "/x").expect("import");
+        bad["EnvironmentVariables"]["HF_TOKEN"] = Value::String("hf_secret_value".into());
+        let (def, secrets) = definition_from_plist(&bad, "/x").expect("import");
         assert_eq!(secrets, vec!["HF_TOKEN"]);
+        // Named, never carried: the value must not reach the definition an
+        // adoption preview returns (or its render), as on systemd.
+        assert!(def.environment.iter().all(|(k, _)| k != "HF_TOKEN"));
+        let json = serde_json::to_string(&def).unwrap();
+        assert!(!json.contains("hf_secret_value"), "{json}");
 
         let mut no_args = llama_swap_plist();
         no_args.as_object_mut().unwrap().remove("ProgramArguments");
