@@ -99,10 +99,13 @@ def help_text(screen: object, extra: Iterable[ScreenRow] = ()) -> str:
     lines = ["[b]Screens[/b]"]
     for _name, title, what, key in (*SCREENS, *extra):
         lines.append(f"  [b]{esc(key)}[/b]  {esc(f'{title:<11}')} {esc(what)}")
-    lines.append("\n[b]Everywhere[/b]")
-    lines.append("  [b]r[/b]  refresh   [b]?[/b] / [b]F1[/b]  this help   "
-                 "[b]ctrl+\\[/b]  command palette   [b]q[/b]  quit")
     own = _binding_rows(getattr(type(screen), "BINDINGS", []))
+    # A screen binding wins over the global one (Benchmarks: `r` re-runs a
+    # live workload), so "r refresh" is listed only where it holds.
+    refresh = "" if any(key == "r" for key, _ in own) else "[b]r[/b]  refresh   "
+    lines.append("\n[b]Everywhere[/b]")
+    lines.append(f"  {refresh}[b]?[/b] / [b]F1[/b]  this help   "
+                 "[b]ctrl+\\[/b]  command palette   [b]q[/b]  quit")
     if own:
         lines.append(f"\n[b]This screen ({esc(type(screen).__name__)})[/b]")
         for key, desc in own:

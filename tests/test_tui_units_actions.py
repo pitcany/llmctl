@@ -78,7 +78,13 @@ async def _goto_units(app, pilot) -> None:
 
 
 def _drive(
-    monkeypatch, units_settings, *, key: str, active: set[str], row: int = 1
+    monkeypatch,
+    units_settings,
+    *,
+    key: str,
+    active: set[str],
+    row: int = 1,
+    confirm: bool = False,
 ) -> dict:
     """Boot the app, open Units, move to ``row``, press ``key``.
 
@@ -113,19 +119,46 @@ def _drive(
             await pilot.press(key)
             for _ in range(40):
                 await pilot.pause(0.02)
+            seen["screen"] = app.screen.__class__.__name__
+            if seen["screen"] == "DeleteModal":
+                seen["title"] = str(app.screen.query_one("#delete-title").content)
+            if confirm:
+                assert seen["screen"] == "DeleteModal", seen["screen"]
+                await pilot.click("#delete-confirm")
+                for _ in range(40):
+                    await pilot.pause(0.02)
             assert app.is_running, f"app died on '{key}'"
             seen["notes"] = [str(n.message) for n in app._notifications]
-            seen["screen"] = app.screen.__class__.__name__
 
     asyncio.run(_run())
     return seen
 
 
 def test_pressing_s_starts_the_selected_unit(monkeypatch, units_settings) -> None:
-    """`s` on an inactive unit reaches start_managed_unit with *that* unit."""
-    seen = _drive(monkeypatch, units_settings, key="a", active=set())
+    """`a` on an inactive unit, confirmed, reaches start_managed_unit with *that* unit."""
+    seen = _drive(monkeypatch, units_settings, key="a", active=set(), confirm=True)
     assert "gpt-oss-120b" in seen["started"], seen["notes"]
     assert seen["stopped"] == []
+
+
+def test_pressing_a_asks_first_when_start_confirmation_is_required(
+    monkeypatch, units_settings
+) -> None:
+    """`scheduler.require_confirmation_for_start` (default on) gates the TUI
+    start as it gates `llmctl start-unit`: a unit start can take GPUs."""
+    assert units_settings.scheduler.require_confirmation_for_start
+    seen = _drive(monkeypatch, units_settings, key="a", active=set())
+    assert seen["started"] == [], "start fired without confirmation"
+    assert seen["screen"] == "DeleteModal", seen["screen"]
+    assert "Start" in seen["title"] and "Delete" not in seen["title"], seen["title"]
+
+
+def test_pressing_a_starts_at_once_when_start_confirmation_is_off(
+    monkeypatch, units_settings
+) -> None:
+    units_settings.scheduler.require_confirmation_for_start = False
+    seen = _drive(monkeypatch, units_settings, key="a", active=set())
+    assert seen["started"] == ["gpt-oss-120b"], seen["notes"]
 
 
 def test_pressing_s_on_an_active_unit_refuses(monkeypatch, units_settings) -> None:
@@ -152,10 +185,12 @@ def test_the_action_follows_the_cursor_not_the_first_row(
     monkeypatch, units_settings
 ) -> None:
     """Row 0 is vllm-tp; row 1 is gpt-oss. The key must act on the cursor."""
-    top = _drive(monkeypatch, units_settings, key="a", active=set(), row=0)
+    top = _drive(monkeypatch, units_settings, key="a", active=set(), row=0, confirm=True)
     assert top["started"] == ["vllm-engine"], top["notes"]
 
-    second = _drive(monkeypatch, units_settings, key="a", active=set(), row=1)
+    second = _drive(
+        monkeypatch, units_settings, key="a", active=set(), row=1, confirm=True
+    )
     assert second["started"] == ["gpt-oss-120b"], second["notes"]
 
 

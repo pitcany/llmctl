@@ -304,6 +304,11 @@ class PresetValidationError(ValueError):
     """Raised when the TUI submits a preset payload that fails the schema."""
 
 
+def start_requires_confirmation() -> bool:
+    """`scheduler.require_confirmation_for_start`, as `llmctl start-unit` honours it."""
+    return bool(load_settings().scheduler.require_confirmation_for_start)
+
+
 def start_managed_unit(unit_name: str) -> tuple[str, bool]:
     """Start a managed systemd unit. Returns ``(scope, was_already_active)``."""
     with db_session() as db:

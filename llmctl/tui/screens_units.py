@@ -182,7 +182,10 @@ class UnitsScreen(DataScreen):
         return rows[idx]
 
     def action_start_unit(self) -> None:
-        """Start the unit under the cursor."""
+        """Start the unit under the cursor, after a confirmation when
+        `scheduler.require_confirmation_for_start` is on (as for
+        `llmctl start-unit`): a started unit can take GPUs.
+        """
         row = self._selected_row()
         if row is None:
             self.app.notify("No unit selected.", severity="warning")
@@ -208,8 +211,34 @@ class UnitsScreen(DataScreen):
                 )
             self.refresh_data()
 
-        self.run_action_worker(
-            lambda: _data.start_managed_unit(row.unit_name), _after
+        def _start() -> None:
+            self.run_action_worker(
+                lambda: _data.start_managed_unit(row.unit_name), _after
+            )
+
+        needs_confirm = self.query_data(
+            _data.start_requires_confirmation, what="Reading settings"
+        )
+        if needs_confirm is None:
+            return  # the error is already a toast
+        if not needs_confirm:
+            _start()
+            return
+
+        def _on_close(payload: ConfirmDelete | None) -> None:
+            if payload is not None:
+                _start()
+
+        self.app.push_screen(
+            DeleteModal(
+                f"unit '{row.unit_name}'",
+                "It starts with its current env file and may take GPUs that "
+                "other servers use. Large models take minutes to answer. "
+                "Ask before starting: scheduler.require_confirmation_for_start.",
+                allow_file_delete=False,
+                verb="Start",
+            ),
+            _on_close,
         )
 
     def action_stop_unit(self) -> None:
