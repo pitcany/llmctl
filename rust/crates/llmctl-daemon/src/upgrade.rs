@@ -980,22 +980,17 @@ pub async fn promote(
         }
         _ => None,
     };
-    state
-        .ops
-        .db()
-        .update_upgrade_status(
-            &row.id,
-            "promoting",
-            Some(json!({
-                "old_definition": old_def,
-                "old_executable": old_executable,
-                "old_interpreter": old_executable,
-                "from_version": from_version,
-                "old_version_output": old_version_output,
-            })),
-            None,
-        )
-        .await?;
+    // Recorded on the row only once admission succeeds (below): every
+    // refusal or error before that leaves the stage validated, its detail
+    // untouched. The caller holds `adopt_lock`, so stage/gc/rollback cannot
+    // read the row between admission and that write.
+    let stash = json!({
+        "old_definition": old_def,
+        "old_executable": old_executable,
+        "old_interpreter": old_executable,
+        "from_version": from_version,
+        "old_version_output": old_version_output,
+    });
 
     // The plan is built against fresh observations; admission re-checks
     // blockers, drift and GPU occupancy under its lock before journaling.
@@ -1036,11 +1031,16 @@ pub async fn promote(
     match admitted {
         Ok(AdmitOutcome::Admitted(row_op)) | Ok(AdmitOutcome::Replayed(row_op)) => {
             // The outcome is settled from this operation on the next read.
-            // Detail stays: it holds the N stash for rollback.
+            // Detail holds the N stash for rollback.
             state
                 .ops
                 .db()
-                .update_upgrade_status(&row.id, "promoting", None, Some(row_op.id.to_string()))
+                .update_upgrade_status(
+                    &row.id,
+                    "promoting",
+                    Some(stash),
+                    Some(row_op.id.to_string()),
+                )
                 .await?;
             Ok(crate::api::operation_view(&row_op))
         }

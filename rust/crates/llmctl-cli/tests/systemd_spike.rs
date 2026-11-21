@@ -1423,6 +1423,38 @@ fn staged_upgrade_promotes_verifies_and_rolls_back() {
     assert!(ok, "{text}");
     assert!(text.contains("validated"), "{text}");
 
+    // A refused admission changes nothing: with another tool holding the
+    // host lock the promote is refused, and the stage stays validated and
+    // promotable (it used to be stranded in `promoting` with no operation).
+    drop(d);
+    let lock_path = dir.path().join("operations.lock");
+    let lock_path_s = lock_path.to_string_lossy().to_string();
+    let d = spawn_daemon_env(
+        dir.path(),
+        &[
+            ("LLMCTL_NEXT_OP_LOCK", lock_path_s.as_str()),
+            ("LLMCTL_NEXT_OP_LOCK_WAIT_MS", "200"),
+        ],
+    );
+    {
+        use std::os::fd::AsRawFd;
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let (code, text) = cli_code(&d.socket, &["upgrade", "promote", "adopted", "2.0"]);
+        assert_eq!(code, Some(4), "refused while the host lock is held: {text}");
+        let rows = cli(&d.socket, &["upgrade", "list", "adopted"]).1;
+        assert_eq!(upgrade_rows(&rows, "validated", "2.0"), 1, "{rows}");
+        assert_eq!(upgrade_rows(&rows, "promoting", "2.0"), 0, "{rows}");
+    } // lock released
+
     // Promote: stop, apply definition, start, verify served identity and
     // the version itself. The unit must now serve 2.0.
     let (ok, text) = cli(
