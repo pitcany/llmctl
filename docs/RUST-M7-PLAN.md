@@ -1,6 +1,7 @@
 # Rust successor — M7 plan, first half (distribution)
 
-Status 2026-11-21: **draft, owner decisions open** (end of this file).
+Status 2026-11-21: **plan agreed — all eight owner decisions taken, each
+as recommended** (end of this file).
 Reviewed the same day by an independent read-only review (Claude Fable
 5.2 subagent); its findings are folded in below (one blocker, ten
 should-fix). Nothing of M7 is built.
@@ -370,10 +371,14 @@ own reversal.
 | Docs | `INSTALL.md` matches the passing clean-host runs |
 | Pilot untouched | M5 `audit --all` unchanged by M7 work; no agent redeploy and **no service-manager call** on the three hosts before the M5 exit |
 
-## Owner decisions (open — recommendation first)
+## Owner decisions (2026-11-21, all as recommended)
 
-The review agreed with all seven recommendations, with the amendments
-noted.
+The owner took all eight as recommended. The review agreed with the first
+seven, with the amendments noted; decision 8 was added after it.
+
+**Owner action needed before M7e (macOS):** create the throwaway user on
+mbp2 (`sudo`), and log it in once by fast user switching if M7e confirms
+launchd needs a GUI session.
 
 1. **Split into M7d, M7a, M7b, M7c, M7e, M7f** in that order, a check at
    the end of each, about **6.5–7.5 working days** (raised from 5.5–6.5
