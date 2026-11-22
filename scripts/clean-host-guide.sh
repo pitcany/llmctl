@@ -45,6 +45,7 @@ bin="$HOME/.local/bin/llmctl-next"
 data="$HOME/.local/state/llmctl-next"
 failed=0
 work=$(mktemp -d /tmp/llmctl-guide.XXXXXX)
+trap 'rm -rf "$work"' EXIT
 log="$work/log"
 
 if [ "$os" = linux ]; then
@@ -192,7 +193,7 @@ if [ "$os" = macos ]; then
     check "install without a GUI domain fails" no "$pkg/llmctl-next" agent install
     [ -x "$bin" ] && check "the failed install can be uninstalled" "$bin" agent uninstall --purge
     check "no agent files left by the failed install" no_product_files
-    echo "== STOPPED: log llmctltest in by fast user switching, then run again"
+    echo "== STOPPED: log llmctltest in, switch back by fast user switching (no logout), then run again"
     exit 3
   fi
   pass "gui/$uid exists"
@@ -205,6 +206,7 @@ cleanup() {
     launchctl bootout "gui/$uid/com.example.sleeper" >/dev/null 2>&1
     rm -f "$sleeper"
   fi
+  rm -rf "$work"
 }
 trap cleanup EXIT
 

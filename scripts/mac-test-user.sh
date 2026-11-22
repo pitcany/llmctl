@@ -42,7 +42,7 @@ case "${1:-}" in
     install -d -m 700 -o "$user" -g staff "/Users/$user/.ssh"
     install -m 600 -o "$user" -g staff "$key" "/Users/$user/.ssh/authorized_keys"
     echo "created $user (uid $(id -u "$user"), not an admin)"
-    echo "next: log in as \"$full\" once by fast user switching, then switch back without logging it out"
+    echo "next: switch to \"$full\" by fast user switching, wait for its desktop, then switch back from the same menu. Do not choose Log Out."
     ;;
   delete)
     id "$user" >/dev/null 2>&1 || die "no user $user"
