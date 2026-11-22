@@ -103,26 +103,33 @@ snapshot() {
     find "$HOME" /private/etc -xdev 2>/dev/null | LC_ALL=C sort
   fi
 }
-# same_tree BEFORE: the tree equals BEFORE. On macOS the system writes into
-# the caches of a logged-in user: those paths are printed and allowed. A
-# path that names llmctl is never allowed.
+# same_tree BEFORE: the tree equals BEFORE. macOS writes into a logged-in
+# account all the time: controls with no llmctl running saw 10 changes in
+# 25 s and 186 in 40 s (2026-11-22). Only the roots below are allowed, each
+# seen in those controls or a system store of the same kind. Anything else,
+# and any path that names llmctl or the test service, fails. LaunchAgents,
+# Preferences, Application Support, Logs and all outside ~/Library stay
+# strict.
 same_tree() {
-  local changed path bad=0
+  local changed path bad=0 allowed=0
   snapshot >"$work/after"
   changed=$(diff "$1" "$work/after" | sed -n 's/^[<>] //p')
   [ -n "$changed" ] || return 0
   while IFS= read -r path; do
-    case "$path" in
-      *llmctl-next*) echo "left: $path"; bad=1; continue ;;
+    # Match names below the home: the home itself is /Users/llmctltest.
+    case "${path#"$HOME"/}" in
+      *llmctl*|*com.example.sleeper*) echo "left: $path"; bad=1; continue ;;
     esac
     if [ "$os" = macos ]; then
       case "${path#"$HOME"/Library/}" in
+        Containers/*|"Daemon Containers"/*|"Application Scripts"/*|Trial/*|IdentityServices/delete*|\
         Caches/*|Metadata/*|Biome/*|HTTPStorages/*|DuetExpertCenter/*|Logs/DiagnosticReports/*)
-          echo "allowed (macOS): $path"; continue ;;
+          allowed=$((allowed + 1)); continue ;;
       esac
     fi
     echo "changed: $path"; bad=1
   done <<<"$changed"
+  echo "allowed: $allowed paths in macOS system stores"
   return "$bad"
 }
 no_product_files() {
@@ -276,6 +283,7 @@ check "guide: uninstall --purge" guide purge "$HOME"
 check "agent gone from the service manager" agent_gone
 check "enrolled service still runs" sleeper_runs
 check "files after --purge equal the list before" same_tree "$work/before"
+grep '^allowed:' "$log" | sed 's/^/NOTE  /'
 
 # ---- path B: uninstall with the data kept -----------------------------------------
 check "install again" guide install "$pkg"
