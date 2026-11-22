@@ -3,14 +3,19 @@
 # docs/RUST-M7-PLAN.md). Owner-approved local stand-in for hosted CI.
 #
 # Usage: scripts/clean-host-test.sh linux <archive.tar.gz> [--keep]
+#        scripts/clean-host-test.sh macos <archive.tar.gz>
 #   linux   Debian 12 container with systemd as PID 1 and a lingering user
 #           (`tester`), started without --privileged: private cgroup
 #           namespace, writable cgroups (Docker >= 25), no host D-Bus.
 #           The image has no Python, no Rust and no curl.
 #   --keep  leave the container running for inspection.
-#   (macos: to be added; needs the throwaway mbp2 user.)
+#   macos   the throwaway user `llmctltest` on $LLMCTL_CLEAN_MAC (default
+#           mbp2), over ssh. The user name is fixed on purpose. Exit 3: the
+#           user has no desktop session (log in once by fast user switching).
 #
-# Every real service-manager call runs inside the container (plan rule 4).
+# Both modes also run every command block of the archive's INSTALL.md
+# (clean-host-guide.sh). Every real service-manager call runs inside the
+# container or as the throwaway user (plan rule 4).
 # One PASS/FAIL line per check; exit 1 when any check failed. The full
 # transcript goes to the log file named at the end.
 set -uo pipefail
@@ -19,7 +24,7 @@ mode=${1:-}
 archive=${2:-}
 keep=0
 [ "${3:-}" = "--keep" ] && keep=1
-[ "$mode" = linux ] || { sed -n '2,15p' "$0"; exit 2; }
+case "$mode" in linux|macos) ;; *) sed -n '2,21p' "$0"; exit 2 ;; esac
 [ -f "$archive" ] || { echo "no archive: $archive" >&2; exit 2; }
 archive=$(cd "$(dirname "$archive")" && pwd)/$(basename "$archive")
 name=$(basename "$archive" .tar.gz)
@@ -27,6 +32,8 @@ image=llmctl-clean-debian12
 ctr=llmctl-clean-$$
 log=$(mktemp "${TMPDIR:-/tmp}/llmctl-clean-host.XXXXXX.log")
 failed=0
+guide_script="$(cd "$(dirname "$0")" && pwd)/clean-host-guide.sh"
+sums="$(dirname "$archive")/SHA256SUMS"
 
 say() { printf '%s\n' "$*" | tee -a "$log"; }
 # check NAME CMD...: PASS when CMD exits 0.
@@ -43,6 +50,38 @@ ux() {
 }
 # out CMD...: run as tester, echo the output into the log, print it.
 out() { ux "$@" 2>&1 | tee -a "$log"; return "${PIPESTATUS[0]}"; }
+# ---- macOS: everything runs as the throwaway user ---------------------------
+run_macos() {
+  local host=${LLMCTL_CLEAN_MAC:-mbp2} user=llmctltest rd rc
+  [ -f "$sums" ] || { say "FAIL  no SHA256SUMS next to the archive"; return 1; }
+  # No shared connection: an open socket could belong to another user.
+  local s=(ssh -o BatchMode=yes -o ConnectTimeout=10 -o ControlMaster=no -o ControlPath=none -l "$user" "$host")
+  say "== clean-host test: $name on $host as $user ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+  if [ "$("${s[@]}" id -un 2>>"$log")" != "$user" ]; then
+    say "FAIL  cannot log in as $user on $host (create the user and allow ssh first)"
+    return 1
+  fi
+  say "system: $("${s[@]}" 'echo "macOS $(sw_vers -productVersion) $(uname -m)"' 2>>"$log")"
+  rd=$("${s[@]}" 'mktemp -d /tmp/llmctl-clean.XXXXXX') || return 1
+  case "$rd" in /tmp/llmctl-clean.*) ;; *) say "FAIL  bad remote temp dir"; return 1 ;; esac
+  if ! { tar -C "$(dirname "$archive")" -cf - "$name.tar.gz" SHA256SUMS \
+        | "${s[@]}" "tar -C $rd -xf -" \
+      && "${s[@]}" "cat > $rd/guide.sh" <"$guide_script"; } >>"$log" 2>&1; then
+    say "FAIL  copy to $host"
+    return 1
+  fi
+  "${s[@]}" "/bin/bash $rd/guide.sh macos $rd" 2>&1 | tee -a "$log"
+  rc=${PIPESTATUS[0]}
+  "${s[@]}" "rm -rf $rd" >>"$log" 2>&1
+  return "$rc"
+}
+if [ "$mode" = macos ]; then
+  run_macos; rc=$?
+  if [ "$rc" = 0 ]; then say "== ALL PASS"; else say "== NOT PASSED (exit $rc)"; fi
+  say "log: $log"
+  exit "$rc"
+fi
+
 snapshot() {
   docker exec "$ctr" sh -c 'find /home/tester /etc -xdev 2>/dev/null | sort'
 }
@@ -57,7 +96,7 @@ say "== clean-host test: $name ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
 dockerfile=$(cat <<'EOF'
 FROM debian:12
 RUN apt-get update \
- && apt-get install -y --no-install-recommends systemd systemd-sysv dbus dbus-user-session libpam-systemd procps \
+ && apt-get install -y --no-install-recommends systemd systemd-sysv dbus dbus-user-session libpam-systemd polkitd procps \
  && rm -rf /var/lib/apt/lists/* \
  && useradd -m -u 1000 -s /bin/bash tester \
  && mkdir -p /var/lib/systemd/linger && touch /var/lib/systemd/linger/tester
@@ -103,7 +142,6 @@ before=$(snapshot)
 # ---- download and check -------------------------------------------------------
 docker exec "$ctr" mkdir -p /tmp/dl
 docker cp "$archive" "$ctr:/tmp/dl/" >>"$log" 2>&1
-sums="$(dirname "$archive")/SHA256SUMS"
 if [ -f "$sums" ]; then
   docker cp "$sums" "$ctr:/tmp/dl/SHA256SUMS" >>"$log" 2>&1
   check "SHA256SUMS verifies the archive" \
@@ -161,6 +199,16 @@ check "install refuses a hand-written unit" bash -c "$(declare -f ux); ctr=$ctr;
 sum_after=$(ux sha256sum /home/tester/.config/systemd/user/llmctl-next.service)
 check "hand-written unit unchanged" test "$sum_before" = "$sum_after"
 check "no binary installed by the refused install" bash -c "$(declare -f ux); ctr=$ctr; ! ux test -e $inst"
+
+# ---- INSTALL.md, each command block as written (M7f) -------------------------
+ux rm -f /home/tester/.config/systemd/user/llmctl-next.service
+ux systemctl --user daemon-reload
+docker exec "$ctr" mkdir -p /tmp/guide
+docker cp "$archive" "$ctr:/tmp/guide/" >>"$log" 2>&1
+docker cp "$sums" "$ctr:/tmp/guide/SHA256SUMS" >>"$log" 2>&1
+docker cp "$guide_script" "$ctr:/tmp/guide.sh" >>"$log" 2>&1
+docker exec "$ctr" chown -R tester /tmp/guide
+out bash /tmp/guide.sh linux /tmp/guide || failed=1
 
 # ---- bare alpine: the static binary without any service manager -------------
 abin_dir=$(mktemp -d)
