@@ -108,6 +108,8 @@ pub async fn preview(state: &AppState, req: &AdoptRequest) -> Result<AdoptionPre
         check("enrollment", CheckStatus::Fail, problems.join("; "))
     });
 
+    checks.push(readiness_check(req));
+
     let imported = match state.supervisor.import(&parsed.unit).await {
         Ok(i) => i,
         Err(e) => {
@@ -355,7 +357,7 @@ pub async fn transfer(state: &AppState, req: AdoptRequest) -> Result<AdoptRespon
         // on in the inventory (owner decision, 2026-11-16).
         recovery: None,
         recipe: None,
-        readiness_timeout_secs: None,
+        readiness_timeout_secs: req.readiness_timeout_secs,
         gpu_claim: requested_claim(&req),
         hooks: Vec::new(),
         pin_files: Vec::new(),
@@ -382,6 +384,39 @@ pub async fn transfer(state: &AppState, req: AdoptRequest) -> Result<AdoptRespon
         preview,
         inventory_revision: revision,
     })
+}
+
+/// How long a start will wait. A workload that loads at start and keeps
+/// the default is called out: a Strata lane needs 11-20 minutes, and a run
+/// that times out has already evicted what it replaced.
+fn readiness_check(req: &AdoptRequest) -> AdoptionCheck {
+    const NAME: &str = "readiness_timeout";
+    let max = crate::ops::MAX_POLL_TIMEOUT_SECS;
+    match req.readiness_timeout_secs {
+        Some(secs) if (1..=max).contains(&secs) => {
+            check(NAME, CheckStatus::Pass, format!("a start waits up to {secs} s"))
+        }
+        Some(secs) => check(
+            NAME,
+            CheckStatus::Fail,
+            format!("{secs} s is outside 1..={max}"),
+        ),
+        None => {
+            let default = llmctl_core::planner::DEFAULT_READINESS_TIMEOUT_SECS;
+            let status = if requested_claim(req).is_at_start() {
+                CheckStatus::Warn
+            } else {
+                CheckStatus::Pass
+            };
+            check(
+                NAME,
+                status,
+                format!(
+                    "a start waits {default} s (the default); pass --readiness-timeout for a model that loads longer"
+                ),
+            )
+        }
+    }
 }
 
 /// The GPU claim the request names, else the kind's default (vendor

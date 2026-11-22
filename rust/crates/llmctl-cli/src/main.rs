@@ -263,6 +263,11 @@ enum Command {
         /// for ollama and lm_studio).
         #[arg(long, value_parser = ["at_start", "on_demand"])]
         gpu_claim: Option<String>,
+        /// Seconds a start waits for readiness (1 to 3600; default 120).
+        /// Set it above the slowest cold load: a timeout rolls the start
+        /// back.
+        #[arg(long)]
+        readiness_timeout: Option<u64>,
         #[arg(long)]
         json: bool,
     },
@@ -939,6 +944,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             allow_unverified,
             engine_kind,
             gpu_claim,
+            readiness_timeout,
             json,
         } => {
             let req = AdoptRequest {
@@ -952,6 +958,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
                 allow_unverified,
                 engine_kind,
                 gpu_claim,
+                readiness_timeout_secs: readiness_timeout,
             };
             cmd_adopt(cli, req, json).await
         }
@@ -1299,12 +1306,17 @@ async fn cmd_adopt(cli: &Cli, req: AdoptRequest, json: bool) -> Result<u8, CliEr
                 println!("\nnot adoptable: fix the failed check(s) above, then preview again");
             } else if let Some(digest) = &preview.digest {
                 println!(
-                    "\nto transfer ownership:\n  llmctl-next adopt {} --name {} --model {} --port {} --gpus {} --confirm {}{}",
+                    "\nto transfer ownership:\n  llmctl-next adopt {} --name {} --model {} --port {} --gpus {}{} --confirm {}{}",
                     req.unit,
                     req.workload,
                     req.model,
                     req.port,
                     req.gpus.iter().map(u32::to_string).collect::<Vec<_>>().join(","),
+                    // The transfer takes it from its own request, not from
+                    // the preview.
+                    req.readiness_timeout_secs
+                        .map(|s| format!(" --readiness-timeout {s}"))
+                        .unwrap_or_default(),
                     digest,
                     if preview.has_unverified() { " --allow-unverified" } else { "" }
                 );

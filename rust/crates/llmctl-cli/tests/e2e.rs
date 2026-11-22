@@ -758,6 +758,57 @@ async fn a_target_that_will_not_stop_keeps_the_evicted_engine_off_its_cards() {
     assert_ne!(status.workloads.iter().find(|w| w.name == "helper").unwrap().process, "Running");
 }
 
+/// `adopt --readiness-timeout`: shown by the preview, range-checked, and a
+/// default wait is called out (Strata lanes load for 11-20 minutes).
+#[tokio::test]
+async fn adopt_preview_shows_the_readiness_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("control.sock");
+    // An empty PATH: the preview cannot reach a service manager.
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("daemon")
+        .env("PATH", dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let readiness = |extra: &[&str]| -> serde_json::Value {
+        let out = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+            .arg("--socket")
+            .arg(&d.socket)
+            .args(["adopt", "llmctl-next-fake-lane.service", "--name", "lane", "--model", "fake/lane"])
+            .args(["--port", "8199", "--gpus", "0", "--json"])
+            .args(extra)
+            .output()
+            .unwrap();
+        let preview: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
+        preview["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "readiness_timeout")
+            .cloned()
+            .unwrap_or_default()
+    };
+    let given = readiness(&["--readiness-timeout", "1800"]);
+    assert_eq!(given["status"], "pass", "{given}");
+    assert!(given["detail"].as_str().unwrap().contains("1800"), "{given}");
+    let default = readiness(&[]);
+    assert_eq!(default["status"], "warn", "{default}");
+    assert!(default["detail"].as_str().unwrap().contains("120"), "{default}");
+    assert_eq!(readiness(&["--gpu-claim", "on_demand"])["status"], "pass");
+    for bad in ["0", "3601"] {
+        assert_eq!(readiness(&["--readiness-timeout", bad])["status"], "fail", "{bad}");
+    }
+}
+
 #[tokio::test]
 async fn cancellation_between_phases_is_recorded() {
     let d = spawn_daemon();

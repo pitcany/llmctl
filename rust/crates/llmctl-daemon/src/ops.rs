@@ -2350,7 +2350,7 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100)
 /// Upper bound on one readiness wait. 600 s (the M1 value) silently cut
 /// real cold starts short: a Strata lane needs ~615 s from NVMe, the
 /// DeepSeek lane's own unit allows 3600 s (M4b window, 2026-11-17).
-const MAX_POLL_TIMEOUT_SECS: u64 = 3600;
+pub(crate) const MAX_POLL_TIMEOUT_SECS: u64 = 3600;
 
 fn set_phase(phases: &mut [PhaseRecord], index: usize, f: impl FnOnce(&mut PhaseRecord)) {
     if let Some(p) = phases.get_mut(index) {

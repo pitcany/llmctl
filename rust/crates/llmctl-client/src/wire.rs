@@ -91,6 +91,11 @@ pub struct AdoptRequest {
     /// on_demand for Ollama and LM Studio, at_start otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_claim: Option<String>,
+    /// Seconds a start waits for readiness. Absent → the agent's default
+    /// (120 s). An agent older than this field ignores it; its preview
+    /// then has no `readiness_timeout` check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
