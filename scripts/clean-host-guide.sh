@@ -106,7 +106,10 @@ snapshot() {
 # same_tree BEFORE: the tree equals BEFORE. macOS writes into a logged-in
 # account all the time: controls with no llmctl running saw 10 changes in
 # 25 s and 186 in 40 s (2026-11-22). Only the roots below are allowed, each
-# seen in those controls or a system store of the same kind. Anything else,
+# seen changing in those controls or the first run. A fresh account also
+# creates other Apple stores in its first hour: a run can fail on one
+# (null control: 3 of 6 idle windows). Do not widen the list for that; read
+# the paths the failure prints and run again. Anything else,
 # and any path that names llmctl or the test service, fails. LaunchAgents,
 # Preferences, Application Support, Logs and all outside ~/Library stay
 # strict.
@@ -123,7 +126,7 @@ same_tree() {
     if [ "$os" = macos ]; then
       case "${path#"$HOME"/Library/}" in
         Containers/*|"Daemon Containers"/*|"Application Scripts"/*|Trial/*|IdentityServices/delete*|\
-        Caches/*|Metadata/*|Biome/*|HTTPStorages/*|DuetExpertCenter/*|Logs/DiagnosticReports/*)
+        Caches/*|Metadata/*|Biome/*)
           allowed=$((allowed + 1)); continue ;;
       esac
     fi
@@ -237,7 +240,16 @@ else
 EOF
   env -i /bin/launchctl bootstrap "gui/$uid" "$sleeper"
 fi
-check "test service runs" sleeper_runs
+# A fresh launchd job reads `xpcproxy` for a moment before `running`.
+sleeper_starts() {
+  local n=0
+  until sleeper_runs; do
+    n=$((n + 1))
+    if [ "$n" -ge 50 ]; then return 1; fi
+    sleep 0.2
+  done
+}
+check "test service runs" sleeper_starts
 sleeper_sum=$(digest <"$sleeper")
 snapshot >"$work/before"
 
