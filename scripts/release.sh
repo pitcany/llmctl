@@ -84,7 +84,8 @@ buildinfo="$out/BUILDINFO"
 
 # pack TARGET BINARY: a reproducible tar.gz in $out.
 pack() {
-  local target=$1 bin=$2 name="llmctl-next-$version-$target"
+  local target=$1 bin=$2
+  local name="llmctl-next-$version-$target"
   local d="$work/pkg/$name"
   mkdir -p "$d"
   install -m 0755 "$bin" "$d/llmctl-next"
