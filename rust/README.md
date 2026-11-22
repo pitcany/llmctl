@@ -1,12 +1,18 @@
 # rust/ — the llmctl successor (Rust)
 
 Implementation of [docs/RUST-SUCCESSOR-PLAN.md](../docs/RUST-SUCCESSOR-PLAN.md).
-Status: **first implementation batch complete** (see the plan's "First
-implementation batch" section). This is `llmctl-next`, a dev-stage control
-plane that runs against a fake engine by default — nothing here touches the
-installed inference stack or the Python llmctl data. M2 has started: a
-`systemd` adapter drives user units, but only units an inventory workload
-explicitly enrolls with `engine: "systemd"` (see below).
+This is `llmctl-next`, the control plane that will replace the Python
+`llmctl`. For its state, see the milestone table in the plan and the
+`docs/RUST-M*-PROGRESS.md` records.
+
+## Install
+
+Use a release archive and [docs/INSTALL.md](../docs/INSTALL.md). Build the
+archives with `scripts/release.sh`. Test them with
+`scripts/clean-host-test.sh linux|macos <archive>`.
+
+The sections below are for development. `cargo run` uses a development
+data directory with a fake engine and does not touch installed engines.
 
 ## Layout
 
