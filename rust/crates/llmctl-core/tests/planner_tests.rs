@@ -182,17 +182,107 @@ fn run_plan_ignores_unknown_process_state_for_conflicts() {
 }
 
 #[test]
-fn rollback_restarts_evicted_workloads_and_stops_target() {
+fn rollback_stops_the_target_then_restores_and_checks_the_evicted() {
     let inv = inventory();
-    // big (gpu 0+1) evicts coder (gpu 0); rollback restores coder first,
-    // then stops the failed target.
+    // big (gpu 0+1) evicts coder (gpu 0); rollback frees the cards first,
+    // then starts coder and proves that it serves again.
     let observations = vec![obs("coder", &[0], true)];
     let target = WorkloadName::new("big").unwrap();
     let plan = plan_run(&inv, &observations, &target).unwrap();
     let rollback: Vec<String> = plan.rollback.iter().map(|s| s.label()).collect();
     assert_eq!(
         rollback,
-        vec!["record intent: coder → Running", "start coder", "stop big"]
+        vec![
+            "stop big",
+            "record intent: coder → Running",
+            "start coder",
+            "wait for coder readiness",
+            "verify coder serves fake/coder",
+        ]
+    );
+}
+
+#[test]
+fn rollback_starts_every_evicted_workload_before_it_waits_for_one() {
+    // A slow or broken neighbour must not keep the other one from starting.
+    let inv = inventory();
+    let observations = [obs("coder", &[0], true), obs("helper", &[1], true)];
+    let plan = plan_run(&inv, &observations, &wn("big")).unwrap();
+    assert_eq!(
+        labels(&plan.rollback),
+        vec![
+            "stop big",
+            "record intent: helper → Running",
+            "start helper",
+            "record intent: coder → Running",
+            "start coder",
+            "wait for helper readiness",
+            "verify helper serves fake/helper",
+            "wait for coder readiness",
+            "verify coder serves fake/coder",
+        ]
+    );
+}
+
+#[test]
+fn rollback_asks_of_an_evicted_workload_only_what_it_did_before() {
+    let inv = inventory();
+    // Still loading when evicted: started again, not waited for.
+    let mut loading = obs("coder", &[0], true);
+    loading.readiness = Readiness::Loading;
+    let plan = plan_run(&inv, &[loading], &wn("big")).unwrap();
+    assert_eq!(
+        labels(&plan.rollback),
+        vec!["stop big", "record intent: coder → Running", "start coder"]
+    );
+
+    // Ready with no verified identity: waited for, no identity to verify.
+    let mut unnamed = obs("coder", &[0], true);
+    unnamed.served_model = ServedModel::Unknown;
+    let plan = plan_run(&inv, &[unnamed], &wn("big")).unwrap();
+    assert_eq!(
+        labels(&plan.rollback),
+        vec!["stop big", "record intent: coder → Running", "start coder", "wait for coder readiness"]
+    );
+
+    // It returns to what it served, which is not always the recorded model.
+    let mut other = obs("coder", &[0], true);
+    other.served_model = ServedModel::Verified { model: "fake/coder-awq".into() };
+    let plan = plan_run(&inv, &[other], &wn("big")).unwrap();
+    assert_eq!(
+        labels(&plan.rollback).last().map(String::as_str),
+        Some("verify coder serves fake/coder-awq")
+    );
+}
+
+#[test]
+fn rollback_waits_as_long_as_the_evicted_workload_needs_to_load() {
+    let mut inv = inventory();
+    inv.workloads[0].readiness_timeout_secs = Some(1800);
+    let plan = plan_run(&inv, &[obs("coder", &[0], true)], &wn("big")).unwrap();
+    assert!(plan.rollback.iter().any(|s| matches!(
+        s,
+        PlanStep::AwaitReadiness { workload, timeout_secs: 1800, .. } if workload == &wn("coder")
+    )));
+}
+
+#[test]
+fn rollback_of_a_restart_starts_the_neighbour_before_it_waits_for_the_target() {
+    let inv = inventory();
+    let observations = [obs("coder", &[0], true), obs("big", &[0, 1], true)];
+    let plan = plan_run(&inv, &observations, &wn("big")).unwrap();
+    assert_eq!(
+        labels(&plan.rollback),
+        vec![
+            "stop big",
+            "record intent: coder → Running",
+            "start coder",
+            "start big",
+            "wait for big readiness",
+            "verify big serves fake/big",
+            "wait for coder readiness",
+            "verify coder serves fake/coder",
+        ]
     );
 }
 
@@ -459,7 +549,13 @@ fn swap_plan_unloads_on_demand_models_before_stopping_conflicts() {
     // reloaded: an on-demand service loads them again on its next request.
     assert_eq!(
         labels(&plan.rollback),
-        vec!["record intent: coder → Running", "start coder", "stop big"]
+        vec![
+            "stop big",
+            "record intent: coder → Running",
+            "start coder",
+            "wait for coder readiness",
+            "verify coder serves fake/coder",
+        ]
     );
 
     // A restart of the running target is the same swap.
@@ -642,6 +738,8 @@ fn profile_run_of_a_stopped_target_evicts_and_restores_like_any_run() {
             "restore the previous env of big (serves fake/big)",
             "record intent: coder → Running",
             "start coder",
+            "wait for coder readiness",
+            "verify coder serves fake/coder",
         ]
     );
     // The plan still round-trips through the journal.
@@ -744,11 +842,13 @@ fn hooks_wrap_every_start_and_stop_and_their_undo_ends_the_rollback() {
     assert_eq!(
         labels(&plan.rollback),
         vec![
+            "stop big",
             "record intent: coder → Running",
             "start coder",
-            // Nothing verifies coder in a rollback: right after its start.
+            "wait for coder readiness",
+            "verify coder serves fake/coder",
+            // As for a target: post_start waits for the verification.
             "hook adopt (post_start of coder)",
-            "stop big",
             // The undo of each forward hook, last run first.
             "hook announce (undo of big)",
             "hook free-vram (undo of big)",

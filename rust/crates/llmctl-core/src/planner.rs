@@ -171,6 +171,13 @@ fn plan_run_raw(
         }
     }
 
+    // The rollback frees the cards first: an evicted engine that starts
+    // while the failed target still holds them runs out of memory.
+    rollback.push(PlanStep::StopUnit {
+        workload: target.clone(),
+        unit: def.unit.clone(),
+    });
+
     // Conflicts are stopped in stable (name) order; rollback restarts them
     // in reverse so the last evicted is restored first.
     let mut conflicted: Vec<&crate::inventory::WorkloadDefinition> =
@@ -185,20 +192,16 @@ fn plan_run_raw(
             workload: c.name.clone(),
             unit: c.unit.clone(),
         });
-        rollback.insert(
-            0,
-            PlanStep::StartUnit {
-                workload: c.name.clone(),
-                unit: c.unit.clone(),
-            },
-        );
-        rollback.insert(
-            0,
-            PlanStep::PersistIntent {
-                workload: c.name.clone(),
-                intent: DesiredIntent::Running,
-            },
-        );
+    }
+    for c in conflicted.iter().rev() {
+        rollback.push(PlanStep::PersistIntent {
+            workload: c.name.clone(),
+            intent: DesiredIntent::Running,
+        });
+        rollback.push(PlanStep::StartUnit {
+            workload: c.name.clone(),
+            unit: c.unit.clone(),
+        });
     }
 
     // If the target itself is running, the plan stops it first so `run` is
@@ -227,10 +230,6 @@ fn plan_run_raw(
         unit: def.unit.clone(),
         model: def.model.clone(),
     });
-    rollback.push(PlanStep::StopUnit {
-        workload: target.clone(),
-        unit: def.unit.clone(),
-    });
     // The target was serving when this plan was made (a restart, or a run
     // of something already up): the state to go back to is "running", so
     // the rollback starts it again and checks it, after clearing whatever
@@ -252,6 +251,11 @@ fn plan_run_raw(
             model: def.model.clone(),
         });
     }
+    // Every start comes before the first wait, so a neighbour that is slow
+    // or broken does not keep another one down.
+    for c in conflicted.iter().rev() {
+        rollback.extend(restoration_checks(c, observations));
+    }
 
     Ok(Plan {
         id: OperationId::generate(),
@@ -263,6 +267,34 @@ fn plan_run_raw(
         steps,
         rollback,
     })
+}
+
+/// What proves that an evicted workload is back where it was: ready again
+/// if it was ready, and serving what it verifiably served. One that was
+/// still loading or broken is only started again.
+fn restoration_checks(
+    evicted: &crate::inventory::WorkloadDefinition,
+    observations: &[Observation],
+) -> Vec<PlanStep> {
+    let Some(before) = observations
+        .iter()
+        .find(|o| o.workload == evicted.name && o.confirmed_running())
+    else {
+        return Vec::new();
+    };
+    let mut checks = vec![PlanStep::AwaitReadiness {
+        workload: evicted.name.clone(),
+        unit: evicted.unit.clone(),
+        timeout_secs: evicted.readiness_timeout_secs(),
+    }];
+    if let crate::observation::ServedModel::Verified { model } = &before.served_model {
+        checks.push(PlanStep::VerifyServedModel {
+            workload: evicted.name.clone(),
+            unit: evicted.unit.clone(),
+            model: model.clone(),
+        });
+    }
+    checks
 }
 
 /// One env-file profile switch (M4c): which `EnvironmentFile` of the target
@@ -337,23 +369,10 @@ pub fn plan_run_profile(
     }
     plan.expected_model = model.to_string();
 
-    let was_running = observations
-        .iter()
-        .any(|o| &o.workload == target && o.process == ProcessState::Running);
-    // The run plan's rollback is "evicted workloads back, then stop the
-    // target". Here the target is stopped first, so nothing restarts onto
-    // cards a half-started engine still holds and the env is restored
-    // under a stopped unit.
-    let evicted_back: Vec<PlanStep> = plan
-        .rollback
-        .drain(..)
-        .filter(|s| s.workload() != target)
-        .collect();
-    let mut rollback = vec![
-        PlanStep::StopUnit {
-            workload: target.clone(),
-            unit: def.unit.clone(),
-        },
+    // The run plan's rollback stops the target first; the old env goes back
+    // under that stopped unit, before anything starts again.
+    plan.rollback.insert(
+        1,
         PlanStep::ApplyEnvFile {
             workload: target.clone(),
             unit: def.unit.clone(),
@@ -363,25 +382,7 @@ pub fn plan_run_profile(
             backup: None,
             model: def.model.clone(),
         },
-    ];
-    if was_running {
-        rollback.push(PlanStep::StartUnit {
-            workload: target.clone(),
-            unit: def.unit.clone(),
-        });
-        rollback.push(PlanStep::AwaitReadiness {
-            workload: target.clone(),
-            unit: def.unit.clone(),
-            timeout_secs: def.readiness_timeout_secs(),
-        });
-        rollback.push(PlanStep::VerifyServedModel {
-            workload: target.clone(),
-            unit: def.unit.clone(),
-            model: def.model.clone(),
-        });
-    }
-    rollback.extend(evicted_back);
-    plan.rollback = rollback;
+    );
     Ok(with_hooks(inventory, plan))
 }
 
@@ -392,8 +393,8 @@ pub fn plan_run_profile(
 /// * `pre_stop` / `post_stop` wrap each `StopUnit` of that workload;
 /// * `pre_start` goes before each `StartUnit`;
 /// * `post_start` goes after the workload's `VerifyServedModel` when the
-///   same list verifies it (the target), else right after the start (a
-///   workload a rollback brings back).
+///   same list verifies it, else right after the start (a workload a
+///   rollback brings back that was not serving before).
 pub fn with_hooks(inventory: &crate::inventory::HostInventory, mut plan: Plan) -> Plan {
     use crate::inventory::{Hook, HookWhen};
     if inventory.workloads.iter().all(|w| w.hooks.is_empty()) {
