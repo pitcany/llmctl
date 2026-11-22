@@ -1113,6 +1113,12 @@ async fn cmd_agent(cli: &Cli, cmd: AgentCmd) -> Result<u8, CliError> {
             println!("agent {what}: {} as {} (host id {})", r.manifest.binary.display(), r.manifest.service, r.manifest.host_id);
             println!("service file: {}", r.manifest.service_file.display());
             println!("manifest: {}", l.manifest_path().display());
+            if r.seeded_inventory {
+                println!(
+                    "inventory: empty, GPU slots {:?} (enroll an existing unit with `llmctl-next adopt`)",
+                    l.gpu_slots
+                );
+            }
             for n in &r.notes {
                 println!("note: {n}");
             }

@@ -91,6 +91,13 @@ for tool in busctl df du tar; do
   check "agent dependency present: $tool" docker exec "$ctr" sh -c "command -v $tool"
 done
 
+# An existing user unit to enroll later (the way a real host gets
+# workloads); written before the snapshot, so it is in both lists.
+ux mkdir -p /home/tester/.config/systemd/user
+ux sh -c 'printf "[Unit]\nDescription=clean-host test unit\n[Service]\nExecStart=/bin/sleep infinity\n" > /home/tester/.config/systemd/user/sleeper.service'
+ux systemctl --user daemon-reload
+check "test unit sleeper.service starts" ux systemctl --user start sleeper.service
+
 before=$(snapshot)
 
 # ---- download and check -------------------------------------------------------
@@ -110,16 +117,22 @@ inst=/home/tester/.local/bin/llmctl-next
 data=/home/tester/.local/state/llmctl-next
 
 # ---- install --------------------------------------------------------------------
-check "agent install" bash -c "$(declare -f ux); ctr=$ctr; ux $bin agent install --host-id clean-box | grep -q 'agent installed'"
+install_out=$(ux "$bin" agent install --host-id clean-box 2>&1); echo "$install_out" >>"$log"
+check "agent install" grep -q 'agent installed' <<<"$install_out"
+check "install seeds an empty inventory with one GPU slot (no NVIDIA here)" grep -q 'inventory: empty, GPU slots \[0\]' <<<"$install_out"
 check "unit written where systemd looks" ux test -f /home/tester/.config/systemd/user/llmctl-next.service
 check "unit is enabled" ux systemctl --user is-enabled llmctl-next.service
 check "agent status: active and answering" bash -c "$(declare -f ux); ctr=$ctr; s=\$(ux $inst agent status); echo \"\$s\"; echo \"\$s\" | grep -q 'service: active' && echo \"\$s\" | grep -q 'socket: answers'"
-check "status: host clean-box, integrations off" bash -c "$(declare -f ux); ctr=$ctr; s=\$(ux $inst --data-dir $data status); echo \"\$s\"; echo \"\$s\" | grep -q 'host clean-box' && echo \"\$s\" | grep -q 'integrations: router config: off'"
+status_out=$(ux "$inst" --data-dir "$data" status 2>&1); echo "$status_out" >>"$log"
+check "status: host clean-box, 0 workloads, integrations off" bash -c \
+  "grep -q 'host clean-box' <<<\"\$0\" && grep -q '0 workloads' <<<\"\$0\" && grep -q 'integrations: router config: off' <<<\"\$0\"" "$status_out"
 
-# ---- operate a workload (the fake engine of the sample inventory) ------------
-check "run coder --wait" ux "$inst" --data-dir "$data" run coder --wait
-check "stop coder --wait" ux "$inst" --data-dir "$data" stop coder --wait
-check "ops shows the run and the stop" bash -c "$(declare -f ux); ctr=$ctr; o=\$(ux $inst --data-dir $data ops --json); echo \"\$o\"; [ \$(echo \"\$o\" | grep -c '\"workload\": \"coder\"') -ge 2 ]"
+# ---- enrolling an existing unit: adopt preview (real systemd D-Bus import) --
+adopt_out=$(ux "$inst" --data-dir "$data" adopt sleeper.service --name sleeper --model none --port 9 --gpus 0 2>&1); adopt_rc=$?
+echo "$adopt_out" >>"$log"
+check "adopt preview of sleeper.service runs (exit 0)" test "$adopt_rc" = 0
+check "adopt preview imports the unit's ExecStart over D-Bus" grep -q '/bin/sleep' <<<"$adopt_out"
+check "adopt preview changed nothing (still 0 workloads)" bash -c "$(declare -f ux); ctr=$ctr; ux $inst --data-dir $data status | grep -q '0 workloads'"
 
 # ---- idempotent install ------------------------------------------------------
 check "second install upgrades in place" bash -c "$(declare -f ux); ctr=$ctr; ux $bin agent install | grep -q 'agent upgraded'"

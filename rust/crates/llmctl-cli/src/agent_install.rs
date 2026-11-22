@@ -63,6 +63,8 @@ pub struct Layout {
     /// systemd: unit name without `.service`; launchd: the job label.
     pub service: String,
     pub host_id: String,
+    /// GPU slots a fresh inventory declares ([`detect_gpu_slots`]).
+    pub gpu_slots: Vec<u32>,
 }
 
 impl Layout {
@@ -98,6 +100,7 @@ impl Layout {
             config_home,
             home,
             host_id,
+            gpu_slots: detect_gpu_slots(flavor),
         })
     }
 
@@ -153,6 +156,25 @@ impl Layout {
             }
         }
     }
+}
+
+/// GPU slots for a fresh inventory: on Linux the NVIDIA indices
+/// `nvidia-smi` lists; otherwise (no NVIDIA card, macOS) one slot `0` for
+/// the host's memory, as the Macs' unified memory is modelled. A workload
+/// needs at least one slot, so an inventory always declares one.
+pub fn detect_gpu_slots(flavor: Flavor) -> Vec<u32> {
+    if flavor == Flavor::Systemd {
+        if let Ok(out) = run(
+            "nvidia-smi",
+            &["--query-gpu=index", "--format=csv,noheader"],
+        ) {
+            let found: Vec<u32> = out.lines().filter_map(|l| l.trim().parse().ok()).collect();
+            if !found.is_empty() {
+                return found;
+            }
+        }
+    }
+    vec![0]
 }
 
 /// The machine's short host name as a host id: lowercase, up to the first
@@ -398,6 +420,43 @@ fn create_dir_tracked(path: &Path, created: &mut Vec<PathBuf>) -> Result<(), Str
     Ok(())
 }
 
+/// Seed `<data-dir>/inventory.json` with an empty inventory (no
+/// workloads; the layout's GPU slots) when the data dir has none, so a fresh agent does
+/// not bootstrap the dev sample (three fake workloads, two GPUs). An
+/// existing inventory is never touched. Workloads are enrolled with
+/// `llmctl-next adopt`. Returns whether it wrote the file.
+pub fn seed_empty_inventory(l: &Layout) -> Result<bool, String> {
+    let path = l.data_dir.join("inventory.json");
+    if path.exists() {
+        return Ok(false);
+    }
+    let host = llmctl_core::HostId::new(&l.host_id)
+        .map_err(|e| format!("host id {:?}: {e}", l.host_id))?;
+    let inventory = llmctl_core::HostInventory {
+        host: host.clone(),
+        platform: match l.flavor {
+            Flavor::Systemd => llmctl_core::Platform::Linux,
+            Flavor::Launchd => llmctl_core::Platform::Macos,
+        },
+        gpus: l
+            .gpu_slots
+            .iter()
+            .map(|i| llmctl_core::GpuId::new(host.clone(), *i))
+            .collect(),
+        workloads: Vec::new(),
+        stores: Vec::new(),
+        gpu_tolerated: Vec::new(),
+        revision: 1,
+    };
+    inventory
+        .validate()
+        .map_err(|e| format!("empty inventory invalid: {e}"))?;
+    let file = llmctl_daemon::app::InventoryFile { inventory };
+    let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+    write_atomic(&path, text.as_bytes(), 0o644)?;
+    Ok(true)
+}
+
 // ---- service manager --------------------------------------------------------
 
 /// The service-manager calls an install makes. Real implementations shell
@@ -575,6 +634,8 @@ pub struct InstallReport {
     pub mode: InstallMode,
     pub manifest: Manifest,
     pub notes: Vec<String>,
+    /// True when this install wrote an empty inventory.json.
+    pub seeded_inventory: bool,
 }
 
 /// Why something already on disk is not ours to replace.
@@ -687,6 +748,7 @@ pub fn install(
         create_dir_tracked(&logs, &mut created)?;
     }
     let wants_before = l.wants_dir().map(|w| w.exists());
+    let seeded_inventory = seed_empty_inventory(l)?;
 
     let bin_bytes =
         std::fs::read(src_binary).map_err(|e| format!("reading {}: {e}", src_binary.display()))?;
@@ -732,6 +794,7 @@ pub fn install(
         mode,
         manifest,
         notes: sm.notes(l),
+        seeded_inventory,
     })
 }
 
@@ -830,6 +893,7 @@ fn adopt_existing(
         mode: InstallMode::Adopted,
         manifest,
         notes: Vec::new(),
+        seeded_inventory: false,
     })
 }
 
@@ -1014,6 +1078,7 @@ mod tests {
             data_dir: home.join(".local/state/llmctl-next"),
             service: "llmctl-next-test".into(),
             host_id: "box-1".into(),
+            gpu_slots: vec![0],
             home,
         }
     }
@@ -1496,5 +1561,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.manifest.host_id, "box-1");
+    }
+
+    #[test]
+    fn a_fresh_install_seeds_an_empty_inventory_and_never_replaces_one() {
+        let root = tempfile::tempdir().unwrap();
+        let l = layout(root.path(), Flavor::Systemd);
+        let fake = Fake::default();
+        let r = install(&l, &src_binary(root.path(), b"v1"), &fake, false, true, T).unwrap();
+        assert!(r.seeded_inventory);
+        let inv_path = l.data_dir.join("inventory.json");
+        let file: llmctl_daemon::app::InventoryFile =
+            serde_json::from_slice(&std::fs::read(&inv_path).unwrap()).unwrap();
+        assert!(file.inventory.workloads.is_empty());
+        assert_eq!(
+            file.inventory.gpus.len(),
+            1,
+            "one slot: {:?}",
+            file.inventory.gpus
+        );
+        assert_eq!(file.inventory.host.as_str(), "box-1");
+        assert_eq!(file.inventory.platform, llmctl_core::Platform::Linux);
+
+        // The owner's inventory survives an upgrade byte for byte.
+        std::fs::write(&inv_path, b"{\"owner\": \"edited\"}").unwrap();
+        let r = install(&l, &src_binary(root.path(), b"v2"), &fake, false, false, T).unwrap();
+        assert!(!r.seeded_inventory);
+        assert_eq!(
+            std::fs::read(&inv_path).unwrap(),
+            b"{\"owner\": \"edited\"}"
+        );
+    }
+
+    #[test]
+    fn adopt_seeds_no_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        let l = layout(root.path(), Flavor::Launchd);
+        std::fs::create_dir_all(l.binary().parent().unwrap()).unwrap();
+        std::fs::write(l.binary(), b"old").unwrap();
+        std::fs::create_dir_all(l.service_file().parent().unwrap()).unwrap();
+        std::fs::write(l.service_file(), l.render_service().unwrap()).unwrap();
+        let r = install(
+            &l,
+            &src_binary(root.path(), b"x"),
+            &Fake::default(),
+            true,
+            false,
+            T,
+        )
+        .unwrap();
+        assert!(!r.seeded_inventory);
+        assert!(!l.data_dir.join("inventory.json").exists());
     }
 }
