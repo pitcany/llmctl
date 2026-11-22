@@ -116,6 +116,45 @@ so the run stopped with exit 3 as designed.
 - The full macOS run needs the user logged in, left by fast user
   switching.
 
+## macOS run 2 — final series (2026-11-22, commit `6a6951b`)
+
+Release `0.1.0-6a6951b05a45`, scripts from a fresh clone at that commit,
+user `llmctltest` with a desktop session. A series of five runs was fixed
+before it started. Every run is listed.
+
+| Run (UTC) | Result | Detail |
+|---|---|---|
+| 1 (17:36:44) | 49/50 | tree check: `~/Library/MediaAnalysis` (Apple photo analysis) |
+| 2 (17:36:59) | 49/50 | tree check: Adobe GrowthSDK database side files |
+| 3 (17:37:13) | **50/50** | 2 changed paths in allowed system stores |
+| 4 (17:37:27) | **50/50** | 2 changed paths in allowed system stores |
+| 5 (17:37:41) | **50/50** | **tree after `--purge` identical, no allowed path needed** |
+
+- Linux on the same release and scripts: **78/78**.
+- Upgrade stress on the same archive: **150 upgrades, 0 failed**.
+- After the series the test account had no job, process, agent file or
+  temp directory left.
+- The binary links only `CoreFoundation`, `libiconv` and `libSystem`
+  (`otool -L`), `minos 13.0`. The test user's PATH is
+  `/usr/bin:/bin:/usr/sbin:/sbin`. Homebrew is installed system-wide on
+  mbp2, so its absence is shown by linkage and PATH only.
+- macOS 13 to 26 were not tested.
+- Pilot untouched: `audit --all --since 2026-11-22T15:56:00Z` shows 0
+  foreign writes on the three hosts; the mbp2 agent kept pid 60385 and
+  binary `273f2847742447b2`.
+
+**The tree check is noisy on macOS.** With no llmctl running, 3 of 6 idle
+20 s windows failed it (Apple stores created in a new account's first
+hour). The allowed roots are `Containers`, `Daemon Containers`,
+`Application Scripts`, `Trial`, `IdentityServices/delete`, `Caches`,
+`Metadata` and `Biome` under `~/Library`. A path that names llmctl is
+never allowed. Do not widen the list to get a pass: read the printed
+paths and run again.
+
+**Earlier runs the same day**, on `ad18687` (the fix below): 2 of 8 passed
+50/50. Four failed the tree check on system files. Two failed a race in
+the test's fixture, fixed in `b292692`.
+
 ## Findings
 
 1. ~~**A fresh agent bootstraps the dev sample inventory**~~ **resolved in
@@ -137,5 +176,14 @@ so the run stopped with exit 3 as designed.
    leaves the empty directories `~/.local` and `~/.local/state` (the
    second install did not create them, so it does not record them).
    Reproduced in the container. Stated in `INSTALL.md`.
+5. **Bug, fixed in `ad18687`: a macOS upgrade could leave the agent
+   down.** `launchctl bootout` returns before launchd releases the job.
+   The next bootstrap then fails with `5: Input/output error`. Seen in 1
+   of 30 real upgrades, and in 2 of 3 under heavy load. The retry works
+   at once. `agent install` now waits for the job to go and retries only
+   that error.
+6. **The same race is on `main` in `host add` / `host upgrade`**
+   (`enroll.rs`: bootout, then bootstrap, no wait, no retry). M6 deploys
+   the Macs with `host upgrade`. Not changed here: owner decision open.
 
 Raw transcript kept outside the repo (`llmctl-clean-host.Kgf1Rf.log`).

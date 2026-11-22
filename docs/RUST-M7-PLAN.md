@@ -4,7 +4,8 @@ Status 2026-11-21: **plan agreed — all eight owner decisions taken, each
 as recommended** (end of this file).
 Reviewed the same day by an independent read-only review (Claude Fable
 5.2 subagent); its findings are folded in below (one blocker, ten
-should-fix). Nothing of M7 is built.
+should-fix). Built and tested by 2026-11-22 (see
+[progress](RUST-M7-PROGRESS.md)); not merged or deployed.
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table,
 M7 row). Runs while the M5 pilot counts its seven days
 ([progress](RUST-M5-PROGRESS.md)); M6 (cutover) is not started.
