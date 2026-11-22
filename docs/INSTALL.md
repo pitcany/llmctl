@@ -15,7 +15,7 @@ command block as written (`scripts/clean-host-test.sh`).
 | Host | Requirement | Clean-host test |
 |---|---|---|
 | Linux x86_64 | systemd with a user manager | Debian 12 |
-| macOS arm64 | macOS 13.0 or later, user logged in to the desktop | Not run yet |
+| macOS arm64 | macOS 13.0 or later, user logged in to the desktop | macOS 27.2.1 only |
 
 On macOS the agent is a LaunchAgent in the `gui/<uid>` domain. That
 domain exists only while the user is logged in to the desktop:
