@@ -17,8 +17,13 @@ command block as written (`scripts/clean-host-test.sh`).
 | Linux x86_64 | systemd with a user manager | Debian 12 |
 | macOS arm64 | macOS 13.0 or later, user logged in to the desktop | Not run yet |
 
-On macOS the agent is a LaunchAgent in the `gui/<uid>` domain. Log the
-user in to the desktop one time after each restart of the Mac.
+On macOS the agent is a LaunchAgent in the `gui/<uid>` domain. That
+domain exists only while the user is logged in to the desktop:
+
+- Log the user in after each restart of the Mac.
+- Do not log the user out. To use a different account, use fast user
+  switching. It keeps the first user logged in.
+- An install over ssh works only during such a desktop session.
 
 Other hosts are not supported.
 

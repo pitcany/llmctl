@@ -102,6 +102,20 @@ the owner's account (exit 2). Its document parsing, tree comparison and
 bash 3.2 syntax were rehearsed on mbp2 with no service-manager call. The
 GUI-domain question is open until the run.
 
+## macOS run 1 — no desktop session (2026-11-22T16:53:10Z)
+
+Release `0.1.0-27c182a4fbd1`, user `llmctltest` (uid 503, not an admin),
+macOS 27.2.1. The user's console login had ended at 08:51 PST (`last`),
+so the run stopped with exit 3 as designed.
+
+- **The plan's open point is confirmed:** with ssh alone, and after a
+  logout, `gui/503` does not exist. `agent install` fails there.
+- The failed install uninstalls with no agent files left (checked).
+- The test left its own `/tmp/llmctl-guide.*` directory on an early exit.
+  Fixed.
+- The full macOS run needs the user logged in, left by fast user
+  switching.
+
 ## Findings
 
 1. ~~**A fresh agent bootstraps the dev sample inventory**~~ **resolved in
