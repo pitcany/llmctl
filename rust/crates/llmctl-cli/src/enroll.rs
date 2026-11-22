@@ -250,13 +250,63 @@ pub fn build_on_host(alias: &str, source_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// launchd polls in an agent restart: 120 × 0.25 s = 30 s, for the old job
+/// to go and again for a bootstrap it refuses meanwhile.
+const RESTART_TRIES: u32 = 120;
+const RESTART_PAUSE: &str = "0.25";
+
+/// The remote command that restarts the agent's LaunchAgent.
+///
+/// `bootout` returns while the agent still shuts down, and for a moment
+/// after it launchd refuses a bootstrap with error 5 (Input/output error),
+/// also when `print` no longer finds the job (macOS 27.2.1, 2026-11-22).
+/// Either left the agent down. So: wait until the job is gone, then retry
+/// that error only.
+///
+/// It is one remote command, so no new ssh login is needed while the agent
+/// is down, and it runs under /bin/sh whatever the login shell is (no
+/// single quote may appear in the script). `print` output is discarded (it
+/// shows the job's environment). `env -i`: a bootstrap inherits the
+/// caller's exported variables; the agent gets none.
+fn agent_restart_command(
+    launchctl: &str,
+    label: &str,
+    plist: &str,
+    tries: u32,
+    pause: &str,
+) -> String {
+    let script = format!(
+        r#"d="gui/$(id -u)"
+t="$d/{label}"
+{launchctl} bootout "$t" >/dev/null 2>&1
+n=0
+while {launchctl} print "$t" >/dev/null 2>&1; do
+  n=$((n + 1))
+  if [ "$n" -ge {tries} ]; then echo "$t is still loaded after bootout" >&2; exit 1; fi
+  sleep {pause}
+done
+n=0
+while :; do
+  if err=$(env -i {launchctl} bootstrap "$d" "{plist}" 2>&1); then exit 0; fi
+  case "$err" in *"Bootstrap failed: 5:"*) ;; *) break ;; esac
+  n=$((n + 1))
+  if [ "$n" -ge {tries} ]; then break; fi
+  sleep {pause}
+done
+echo "$err" >&2
+exit 1"#
+    );
+    format!("/bin/sh -c '{script}'")
+}
+
 /// Install the agent's LaunchAgent and wait for its control socket.
 pub fn bootstrap_agent(alias: &str, host_name: &str) -> Result<(), String> {
     let remote_home = ssh(alias, "echo $HOME")?
         .trim()
         .to_string();
     let plist = agent_plist(&remote_home, host_name)?;
-    let remote_plist = format!("~/Library/LaunchAgents/{AGENT_LABEL}.plist");
+    let plist_rel = format!("Library/LaunchAgents/{AGENT_LABEL}.plist");
+    let remote_plist = format!("~/{plist_rel}");
     push_bytes(
         alias,
         plist.as_bytes(),
@@ -265,18 +315,21 @@ pub fn bootstrap_agent(alias: &str, host_name: &str) -> Result<(), String> {
     )?;
     // A previous agent (upgrade, interrupted add) is booted out first;
     // bootout of a not-loaded job is tolerated.
-    let _ = ssh(
-        alias,
-        &format!(
-            "launchctl bootout gui/$(id -u)/{AGENT_LABEL} 2>/dev/null || true"
-        ),
+    let restart = agent_restart_command(
+        "launchctl",
+        AGENT_LABEL,
+        &format!("$HOME/{plist_rel}"),
+        RESTART_TRIES,
+        RESTART_PAUSE,
     );
-    ssh(
-        alias,
-        // env -i: a bootstrap inherits the caller's exported variables
-        // (the ssh login shell exports secrets); the agent gets none.
-        &format!("env -i launchctl bootstrap gui/$(id -u) {remote_plist}"),
-    )?;
+    ssh(alias, &restart).map_err(|e| {
+        // ssh's error quotes the whole script; keep what follows it.
+        let why = e.rsplit_once(" exited ").map_or(e.as_str(), |(_, why)| why);
+        format!(
+            "restarting the agent on {alias}: {why}\n\
+             the agent may be down; `host add {alias} --name {host_name}` starts it again"
+        )
+    })?;
     // Wait for the socket (the agent binds it on start).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
@@ -479,6 +532,112 @@ pub fn host_remove(name: &str, purge: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs the restart command against a fake launchctl in a temp dir: no
+    /// service manager. The job stays loaded for `loaded_for` prints after
+    /// a bootout, then bootstrap fails `failures` times with `error`.
+    /// Returns (exit ok, stdout + stderr, the calls in order).
+    fn restart_with_fake(
+        loaded_for: u32,
+        failures: u32,
+        error: &str,
+    ) -> (bool, String, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let fake = d.join("launchctl.sh");
+        let script = format!(
+            r#"d="{dir}"
+echo "$1" >> "$d/calls"
+count() {{ n=$(cat "$d/n.$1" 2>/dev/null || echo 0); echo $((n + 1)) > "$d/n.$1"; }}
+case "$1" in
+  print)
+    count print
+    [ "$n" -lt {loaded_for} ] && {{ echo "environment = SECRET_FROM_PRINT"; exit 0; }}
+    exit 113 ;;
+  bootstrap)
+    [ -z "$RESTART_TEST_LEAK" ] || {{ echo "environment leaked" >&2; exit 9; }}
+    count bootstrap
+    [ "$n" -lt {failures} ] && {{ echo "{error}" >&2; exit 5; }}
+    exit 0 ;;
+esac
+exit 0
+"#,
+            dir = d.display()
+        );
+        std::fs::write(&fake, script).unwrap();
+        // Started through sh: writing and then executing a file races with
+        // forks in other test threads (ETXTBSY).
+        let launchctl = format!("/bin/sh {}", fake.display());
+        let cmd =
+            agent_restart_command(&launchctl, "com.example.agent", "/x/agent.plist", 8, "0.01");
+        let out = std::process::Command::new("sh")
+            .args(["-c", &cmd])
+            .env("RESTART_TEST_LEAK", "1")
+            .output()
+            .unwrap();
+        let calls = std::fs::read_to_string(d.join("calls")).unwrap_or_default();
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            calls.lines().map(str::to_string).collect(),
+        )
+    }
+
+    const EIO: &str = "Bootstrap failed: 5: Input/output error";
+
+    fn bootstraps(calls: &[String]) -> usize {
+        calls.iter().filter(|c| *c == "bootstrap").count()
+    }
+
+    #[test]
+    fn restart_waits_until_launchd_released_the_old_job() {
+        let (ok, out, calls) = restart_with_fake(3, 0, EIO);
+        assert!(ok, "{out}");
+        assert_eq!(
+            calls,
+            ["bootout", "print", "print", "print", "print", "bootstrap"]
+        );
+        assert!(
+            !out.contains("SECRET_FROM_PRINT"),
+            "print shows the job's environment: {out}"
+        );
+    }
+
+    #[test]
+    fn restart_retries_launchds_transient_bootstrap_error() {
+        let (ok, out, calls) = restart_with_fake(0, 2, EIO);
+        assert!(ok, "{out}");
+        assert_eq!(bootstraps(&calls), 3);
+    }
+
+    #[test]
+    fn restart_gives_up_on_a_lasting_error_and_shows_it() {
+        let (ok, out, calls) = restart_with_fake(0, 1000, EIO);
+        assert!(!ok);
+        assert_eq!(bootstraps(&calls), 8);
+        assert!(out.contains(EIO), "{out}");
+    }
+
+    #[test]
+    fn restart_does_not_retry_other_errors() {
+        let other = "Bootstrap failed: 125: Domain does not support specified action";
+        let (ok, out, calls) = restart_with_fake(0, 1000, other);
+        assert!(!ok);
+        assert_eq!(bootstraps(&calls), 1);
+        assert!(out.contains(other), "{out}");
+    }
+
+    #[test]
+    fn restart_never_bootstraps_over_a_job_that_stays_loaded() {
+        let (ok, out, calls) = restart_with_fake(1000, 0, EIO);
+        assert!(!ok);
+        assert_eq!(bootstraps(&calls), 0);
+        assert!(out.contains("still loaded"), "{out}");
+    }
 
     #[test]
     fn agent_plist_renders_canonical_xml() {
