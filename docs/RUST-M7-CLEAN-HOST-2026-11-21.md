@@ -78,6 +78,30 @@ Changes to the checks:
   workloads after.
 - The fake-workload run/stop checks are gone (no sample workloads exist).
 
+## Run 3 — INSTALL.md as written (2026-11-22, commit `27c182a`)
+
+Run at 2026-11-22T16:40:31Z on release `0.1.0-27c182a4fbd1`, with the
+scripts from a fresh clone at that commit. **78/78 PASS**: the 29 checks
+of run 2 and 49 checks of the install guide (`clean-host-guide.sh`).
+
+- The guide runner takes `INSTALL.md` from the archive and runs each
+  tagged command block as written. An untagged block or a block that did
+  not run is a failure.
+- New coverage: the printed adopt confirm command, an enrolled service
+  that keeps running through `--purge`, three upgrades in a row, uninstall
+  with the data kept, install over kept data, `agent install --adopt`.
+- The image now has `polkitd`, so the user can run
+  `loginctl enable-linger` as the guide says.
+- Negative control (a trial archive with a planted wrong command, a
+  leftover file, an untagged block and a block that never runs): each
+  one failed the test.
+
+**macOS: not run.** The account `llmctltest` does not exist on mbp2 yet
+(`scripts/mac-test-user.sh`, run by the owner). The macOS mode refused
+the owner's account (exit 2). Its document parsing, tree comparison and
+bash 3.2 syntax were rehearsed on mbp2 with no service-manager call. The
+GUI-domain question is open until the run.
+
 ## Findings
 
 1. ~~**A fresh agent bootstraps the dev sample inventory**~~ **resolved in
@@ -90,5 +114,14 @@ Changes to the checks:
 2. Cosmetic: uninstall prints the purged data dir after the created
    directories (report order), so `~/.local/state/llmctl-next/` appears
    after `~/.local/`. The removal itself is correct (check 21).
+3. **`llmctl-next status` after an install finds no agent** (run 3): the
+   CLI's default data dir is `~/.local/state/llmctl-next-dev`, and
+   `agent install` uses `~/.local/state/llmctl-next`. `INSTALL.md` sets
+   `LLMCTL_NEXT_DATA_DIR`. The default is not changed: owner decision
+   open.
+4. Minor: uninstall with the data kept, install again, then `--purge`
+   leaves the empty directories `~/.local` and `~/.local/state` (the
+   second install did not create them, so it does not record them).
+   Reproduced in the container. Stated in `INSTALL.md`.
 
 Raw transcript kept outside the repo (`llmctl-clean-host.Kgf1Rf.log`).
