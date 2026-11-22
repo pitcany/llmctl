@@ -182,8 +182,22 @@ the test's fixture, fixed in `b292692`.
    of 30 real upgrades, and in 2 of 3 under heavy load. The retry works
    at once. `agent install` now waits for the job to go and retries only
    that error.
-6. **The same race is on `main` in `host add` / `host upgrade`**
-   (`enroll.rs`: bootout, then bootstrap, no wait, no retry). M6 deploys
-   the Macs with `host upgrade`. Not changed here: owner decision open.
+6. ~~**The same race is on `main` in `host add` / `host upgrade`**~~
+   **fixed on `main` in `62b94a7`** (owner go-ahead 2026-11-22). The
+   restart is one remote command: wait for the job to go, retry error 5.
+   Proven with the real `host upgrade` as `llmctltest`:
+   - agent that takes 3 s to exit: `main` before failed round 1 and stayed
+     down; fixed 30 of 30;
+   - normal agent: before 100 of 100, fixed 81 of 81.
+
+   **M6:** the fix is in the CLI that runs the upgrade. Run `host upgrade`
+   with a workstation binary built from `62b94a7` or later, not with the
+   installed one. The ignored drill tests (`m3_drills.rs`,
+   `m3_pilot_drills.rs`) still restart without a wait.
+7. **Two e2e tests fail often in a parallel run on a busy workstation**
+   (`bridge_subcommand_relays_http_to_the_socket`,
+   `recovery_budget_exhausts…`). With one test binary and only
+   `llmctl-next` swapped (load 19 to 29): 11 of 47 runs failed with the
+   `62b94a7` fix and 9 of 47 without it. The tests were not edited.
 
 Raw transcript kept outside the repo (`llmctl-clean-host.Kgf1Rf.log`).
