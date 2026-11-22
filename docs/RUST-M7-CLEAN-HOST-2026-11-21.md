@@ -6,8 +6,8 @@ Plan: [RUST-M7-PLAN.md](RUST-M7-PLAN.md) (M7e). Script:
 `0.1.0-f0d04dfc7b69` (commit `f0d04df`, M7c). Run at 2026-11-22T00:46:51Z
 (16:46 PST 2026-11-21) on the workstation's Docker 29.10.
 
-**Result: 27 of 27 checks PASS.** macOS half not run yet (needs the
-throwaway mbp2 user).
+**Result: run 1 27/27 PASS; run 2 (after the empty-inventory change) 29/29
+PASS.** macOS half not run yet (needs the throwaway mbp2 user).
 
 ## Environment
 
@@ -58,9 +58,30 @@ directories the install created (`~/.config/systemd/user/`,
 `now unmanaged (still in their last state; no engine was stopped): coder
 (Stopped), helper (Stopped), big (Stopped)`.
 
+## Run 2 — empty inventory (commit `eb1da4f`, release `0.1.0-eb1da4fb43fb`)
+
+Run at 2026-11-22T01:30:06Z after the owner chose an empty inventory for
+fresh installs (finding 1 below). Same image and flags. **29/29 PASS.**
+Changes to the checks:
+
+- Before the snapshot, a user unit `sleeper.service` (`/bin/sleep
+  infinity`) is written and started: an existing unit to enroll, the way
+  a real host gets workloads.
+- `agent install` prints `inventory: empty, GPU slots [0] (enroll an
+  existing unit with llmctl-next adopt)` (no NVIDIA card in the
+  container, so one slot for the host's memory).
+- `status`: `host clean-box (Linux) · inventory revision 1 · 0 workloads`.
+- `adopt sleeper.service --name sleeper --model none --port 9 --gpus 0`
+  (preview, no `--confirm`): exit 0, imports `/bin/sleep` through the
+  unit's D-Bus definition (`busctl`), prints the confirm command with a
+  digest and `--allow-unverified` (the unit serves no endpoint); still 0
+  workloads after.
+- The fake-workload run/stop checks are gone (no sample workloads exist).
+
 ## Findings
 
-1. **A fresh agent bootstraps the dev sample inventory**: three fake
+1. ~~**A fresh agent bootstraps the dev sample inventory**~~ **resolved in
+   run 2** (owner: empty inventory; `eb1da4f`): three fake
    workloads (`coder`, `helper`, `big`) and two GPUs, on a host with no
    GPU (`status`: `3 workloads`). Useful for this test; wrong for a real
    clean install. Owner decision open: `agent install` seeds an empty
