@@ -338,6 +338,9 @@ enum Command {
         #[arg(long)]
         repin: bool,
     },
+    /// This binary's build identity as JSON: version, git commit, target,
+    /// compiler, profile (M7c). A dev build reports the commit as "dev".
+    BuildInfo,
     /// Run the daemon in the foreground (binds the control socket).
     Daemon {
         #[arg(long)]
@@ -987,6 +990,10 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Llamacpp { cmd } => llamacpp_cmd::cmd_llamacpp(cli, cmd).await,
         Command::Install { cmd } => cmd_install(cli, cmd).await,
         Command::Version { name, repin } => cmd_version(cli, &name, repin).await,
+        Command::BuildInfo => {
+            println!("{}", serde_json::to_string_pretty(&build_info()).unwrap());
+            Ok(0)
+        }
         Command::Recipe { cmd } => cmd_recipe(cli, cmd).await,
         Command::Forget { name, yes } => cmd_forget(cli, &name, yes).await,
         Command::Adopt {
@@ -1062,6 +1069,19 @@ async fn cmd_bridge(cli: &Cli) -> Result<u8, CliError> {
     }
     let _ = stdout.flush().await;
     Ok(0)
+}
+
+/// What `build-info` prints (values fixed at compile time by build.rs).
+fn build_info() -> serde_json::Value {
+    serde_json::json!({
+        "name": "llmctl-next",
+        "version": env!("CARGO_PKG_VERSION"),
+        "git_sha": env!("LLMCTL_BUILD_GIT_SHA"),
+        "target": env!("LLMCTL_BUILD_TARGET"),
+        "profile": env!("LLMCTL_BUILD_PROFILE"),
+        "rustc": env!("LLMCTL_BUILD_RUSTC"),
+        "build_host": env!("LLMCTL_BUILD_HOST"),
+    })
 }
 
 async fn cmd_agent(cli: &Cli, cmd: AgentCmd) -> Result<u8, CliError> {

@@ -1,0 +1,8 @@
+# Pinned compiler for every build of this workspace (M7c,
+# docs/RUST-M7-PLAN.md). The release image is rust:<channel>-alpine.
+# Change both together; install the new toolchain on mbp2 first, so a
+# `host upgrade --source` does not stall on the download.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
