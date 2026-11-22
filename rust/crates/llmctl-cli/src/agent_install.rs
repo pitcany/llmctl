@@ -556,6 +556,33 @@ impl ServiceManager for Systemd {
     }
 }
 
+/// How long a restart waits for launchd to let go of the old job, and how
+/// long it retries a bootstrap that launchd refuses meanwhile.
+const LAUNCHD_SETTLE: Duration = Duration::from_secs(30);
+const LAUNCHD_POLL: Duration = Duration::from_millis(250);
+
+/// launchd can refuse a bootstrap for a moment after a bootout with error 5
+/// (Input/output error), also when `print` no longer finds the job. An
+/// upgrade that stops there leaves the agent down, so retry that error
+/// only, until `timeout`.
+fn bootstrap_with_retry(
+    mut bootstrap: impl FnMut() -> Result<(), String>,
+    timeout: Duration,
+    every: Duration,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match bootstrap() {
+            Err(e)
+                if e.contains("Bootstrap failed: 5:") && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(every);
+            }
+            done => return done,
+        }
+    }
+}
+
 /// `launchctl` in the user's GUI domain.
 pub struct Launchd;
 
@@ -563,6 +590,16 @@ impl Launchd {
     fn domain() -> String {
         // SAFETY: getuid has no preconditions.
         format!("gui/{}", unsafe { libc::getuid() })
+    }
+    /// Whether the GUI domain has the job. Only the exit status is read:
+    /// `print` shows the job's environment, so its output is discarded.
+    fn loaded(label: &str) -> bool {
+        std::process::Command::new("launchctl")
+            .args(["print", &format!("{}/{label}", Self::domain())])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
     }
     /// The job's row in `launchctl list` (`PID Status Label`). The bare
     /// list shows no environment, unlike `launchctl print`.
@@ -577,24 +614,40 @@ impl Launchd {
 
 impl ServiceManager for Launchd {
     fn start(&self, l: &Layout) -> Result<(), String> {
-        let _ = self.stop(l);
+        self.stop(l)?;
         let plist = l.service_file().display().to_string();
+        let domain = Self::domain();
         // env -i: a bootstrap inherits the caller's exported variables.
-        run(
-            "env",
-            &["-i", "launchctl", "bootstrap", &Self::domain(), &plist],
+        bootstrap_with_retry(
+            || run("env", &["-i", "launchctl", "bootstrap", &domain, &plist]).map(|_| ()),
+            LAUNCHD_SETTLE,
+            LAUNCHD_POLL,
         )
-        .map(|_| ())
     }
     fn stop(&self, l: &Layout) -> Result<(), String> {
-        if Self::row(&l.service).is_none() {
+        // `list` lags behind `print` after a bootout: ask both.
+        if Self::row(&l.service).is_none() && !Self::loaded(&l.service) {
             return Ok(());
         }
-        run(
-            "launchctl",
-            &["bootout", &format!("{}/{}", Self::domain(), l.service)],
-        )
-        .map(|_| ())
+        let target = format!("{}/{}", Self::domain(), l.service);
+        match run("launchctl", &["bootout", &target]) {
+            Ok(_) => {}
+            // Already gone: nothing to stop.
+            Err(e) if e.contains("No such process") => return Ok(()),
+            Err(e) => return Err(e),
+        }
+        // bootout returns while the agent is still shutting down.
+        let deadline = std::time::Instant::now() + LAUNCHD_SETTLE;
+        while Self::loaded(&l.service) {
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "{target} is still loaded {} s after bootout",
+                    LAUNCHD_SETTLE.as_secs()
+                ));
+            }
+            std::thread::sleep(LAUNCHD_POLL);
+        }
+        Ok(())
     }
     fn forget(&self, _l: &Layout) -> Result<(), String> {
         Ok(())
@@ -1023,6 +1076,59 @@ pub fn status(l: &Layout, sm: &dyn ServiceManager) -> Result<StatusReport, Strin
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    /// launchd's answer for a moment after a bootout (seen on macOS 27.2.1,
+    /// 1 in 30 upgrades). No launchctl call in these tests.
+    const EIO: &str = "env -i launchctl bootstrap gui/503 /x.plist exited exit status: 5: \
+                       Bootstrap failed: 5: Input/output error";
+
+    #[test]
+    fn bootstrap_is_retried_through_launchds_transient_error() {
+        let tries = std::cell::Cell::new(0);
+        let r = bootstrap_with_retry(
+            || {
+                tries.set(tries.get() + 1);
+                if tries.get() < 3 {
+                    Err(EIO.to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+        );
+        assert_eq!((r, tries.get()), (Ok(()), 3));
+    }
+
+    #[test]
+    fn bootstrap_gives_up_at_the_deadline_with_launchds_error() {
+        let tries = std::cell::Cell::new(0);
+        let r = bootstrap_with_retry(
+            || {
+                tries.set(tries.get() + 1);
+                Err(EIO.to_string())
+            },
+            Duration::from_millis(20),
+            Duration::from_millis(1),
+        );
+        assert_eq!(r, Err(EIO.to_string()));
+        assert!(tries.get() > 1);
+    }
+
+    #[test]
+    fn bootstrap_does_not_retry_other_errors() {
+        let other = "Bootstrap failed: 125: Domain does not support specified action";
+        let tries = std::cell::Cell::new(0);
+        let r = bootstrap_with_retry(
+            || {
+                tries.set(tries.get() + 1);
+                Err(other.to_string())
+            },
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+        );
+        assert_eq!((r, tries.get()), (Err(other.to_string()), 1));
+    }
 
     /// Records calls; never touches a real service manager (rule 4).
     #[derive(Default)]
