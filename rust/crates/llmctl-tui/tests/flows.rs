@@ -304,6 +304,7 @@ async fn gpu_screen_gathers_lanes_and_engine_models_and_hosts_show_them_as_rows(
         servable: vec!["gpt-oss-120b".into()],
         loaded: Some(vec!["gpt-oss-120b".into()]),
         supports_unload: true,
+        supports_load: false,
     });
     let mut r = runner(vec![target(fake, true), target(mac.clone(), false)], false, T);
     settle(&mut r, T, "hosts", |r| r.app.hosts.len() == 2).await;
@@ -353,4 +354,137 @@ async fn audit_screen_lists_each_hosts_findings() {
     assert!(text.contains("Audit: foreign writes (1)"), "{text}");
     assert!(text.contains("stopped -> running pid=77"), "{text}");
     assert!(text.contains("no foreign writes"), "{text}");
+}
+
+// ---- M5e: the Run screen on presets, the Catalog screen ----------------------
+
+fn preset_fake(profile: Option<String>) -> Arc<Fake> {
+    let fake = ws();
+    fake.presets
+        .lock()
+        .unwrap()
+        .push(common::preset("qwen38-unc", "ready"));
+    *fake.preset_profile.lock().unwrap() = profile;
+    fake
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_preset_previews_resolves_its_profile_and_admits_with_it() {
+    let fake = preset_fake(Some("~/.config/llmctl/vllm-engine.env.qwen38-unc".into()));
+    let mut r = runner(vec![target(fake.clone(), true)], false, T);
+    settle(&mut r, T, "hosts", |r| !r.app.hosts.is_empty()).await;
+    r.step(key('w')).unwrap();
+    settle(&mut r, T, "presets", |r| !r.app.presets.is_empty()).await;
+    // The preset is the first row; its state shows.
+    assert!(screen_text(&r).contains("qwen38-unc"), "{}", screen_text(&r));
+
+    // Enter on the preset: resolve (read-only) + plan, then the preview.
+    r.step(code(KeyCode::Enter)).unwrap();
+    settle(&mut r, T, "preset plan", |r| matches!(&r.app.modal, Some(Modal::Preview { plan: Some(Ok(_)), alias: Some(_), .. }))).await;
+    let text = screen_text(&r);
+    assert!(text.contains("preset qwen38-unc: switch vllm-engine to vllm-engine.env.qwen38-unc"), "{text}");
+    r.step(key('y')).unwrap();
+    settle(&mut r, T, "op done", |r| {
+        matches!(&r.app.modal, Some(Modal::Progress { op: Some(o), .. }) if o.status == OpStatus::Succeeded)
+    })
+    .await;
+    // The admit carried the resolved profile; the resolve wrote nothing.
+    let calls = fake.calls();
+    let admit = calls.iter().find(|c| c.starts_with("admit")).expect("admit ran");
+    assert_eq!(
+        admit,
+        r#"admit run vllm-engine rev=Some(42) stops=Some(["ollama-gpu1"]) profile=vllm-engine.env.qwen38-unc"#
+    );
+    assert!(calls.contains(&"preset-run qwen38-unc sync=false".to_string()));
+    assert!(!calls.iter().any(|c| c.contains("sync=true")), "nothing may be written by the preview");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drifted_preset_offers_the_sync_which_replans_and_then_admits() {
+    let fake = preset_fake(Some(String::new())); // "" = drifted profile
+    let mut r = runner(vec![target(fake.clone(), true)], false, T);
+    settle(&mut r, T, "hosts", |r| !r.app.hosts.is_empty()).await;
+    r.step(key('w')).unwrap();
+    settle(&mut r, T, "presets", |r| !r.app.presets.is_empty()).await;
+    r.step(code(KeyCode::Enter)).unwrap();
+    settle(&mut r, T, "drift", |r| matches!(&r.app.modal, Some(Modal::Preview { plan: Some(Err(_)), .. }))).await;
+    let text = screen_text(&r);
+    assert!(text.contains("preset_drift"), "{text}");
+    assert!(text.contains("s syncs the profile env"), "{text}");
+    // n on the sync question sends nothing and closes; the preview reopens
+    // with enter from the still-selected preset row.
+    r.step(key('s')).unwrap();
+    assert!(matches!(&r.app.modal, Some(Modal::Confirm { .. })));
+    r.step(key('n')).unwrap();
+    assert!(!fake.calls().iter().any(|c| c.contains("sync=true")));
+    assert!(r.app.modal.is_none());
+    r.step(code(KeyCode::Enter)).unwrap();
+    settle(&mut r, T, "drift again", |r| matches!(&r.app.modal, Some(Modal::Preview { plan: Some(Err(_)), .. }))).await;
+    // s then y: the sync writes, the plan runs again, and admits.
+    r.step(key('s')).unwrap();
+    r.step(key('y')).unwrap();
+    settle(&mut r, T, "replan", |r| matches!(&r.app.modal, Some(Modal::Preview { plan: Some(Ok(_)), alias: Some(_), .. }))).await;
+    r.step(key('y')).unwrap();
+    settle(&mut r, T, "op done", |r| {
+        matches!(&r.app.modal, Some(Modal::Progress { op: Some(o), .. }) if o.status == OpStatus::Succeeded)
+    })
+    .await;
+    let calls = fake.calls();
+    let sync_at = calls.iter().position(|c| c == "preset-run qwen38-unc sync=true").expect("sync ran");
+    let admit_at = calls.iter().position(|c| c.starts_with("admit")).expect("admit ran");
+    assert!(sync_at < admit_at, "the sync precedes the admit: {calls:?}");
+    assert_eq!(calls.iter().filter(|c| c.starts_with("admit")).count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_catalog_screen_lists_scans_and_writes_behind_confirmations() {
+    let fake = ws();
+    fake.catalog
+        .lock()
+        .unwrap()
+        .push(common::catalog_record("qwen3-coder:30b", "ollama", Some("ollama")));
+    let mut r = runner(vec![target(fake.clone(), true)], false, T);
+    settle(&mut r, T, "hosts", |r| !r.app.hosts.is_empty()).await;
+    r.step(key('m')).unwrap();
+    settle(&mut r, T, "catalog", |r| !r.app.catalog.is_empty()).await;
+    assert!(screen_text(&r).contains("qwen3-coder:30b"), "{}", screen_text(&r));
+
+    // D asks first; no sends nothing; y disables the record.
+    r.step(key('D')).unwrap();
+    assert!(matches!(&r.app.modal, Some(Modal::Confirm { .. })), "{}", screen_text(&r));
+    r.step(key('n')).unwrap();
+    assert!(!fake.calls().iter().any(|c| c.starts_with("model-enable")));
+    r.step(key('D')).unwrap();
+    r.step(key('y')).unwrap();
+    settle(&mut r, T, "disabled", |r| r.app.message.as_deref().is_some_and(|m| m.contains("disabled"))).await;
+    assert!(fake.calls().iter().any(|c| c == "model-enable m-qwen3-coder:30b false"));
+
+    // s scans (a read), the found weight becomes a row, a records it.
+    fake.scan_found.lock().unwrap().push(llmctl_client::catalog::ScanFound {
+        store: "hf-cache".into(),
+        engine: "vllm".into(),
+        source: "Maya-M".into(),
+        path: "~/models/maya-m".into(),
+        record: None,
+    });
+    r.step(key('s')).unwrap();
+    settle(&mut r, T, "scan", |r| !r.app.scans.is_empty()).await;
+    let text = screen_text(&r);
+    assert!(text.contains("Maya-M"), "{text}");
+    assert!(text.contains("R records"), "{text}");
+    // The found row is the last selectable row.
+    let found_idx = r
+        .app
+        .catalog_rows()
+        .iter()
+        .rposition(|row| matches!(row, llmctl_tui::app::CatalogRow::Found { .. }))
+        .unwrap_or_else(|| panic!("no found row: {text}"));
+    while r.app.catalog_sel < found_idx {
+        r.step(code(KeyCode::Down)).unwrap();
+    }
+    r.step(key('R')).unwrap();
+    assert!(matches!(&r.app.modal, Some(Modal::Confirm { .. })));
+    r.step(key('y')).unwrap();
+    settle(&mut r, T, "added", |r| r.app.message.as_deref().is_some_and(|m| m.contains("recorded"))).await;
+    assert!(fake.calls().iter().any(|c| c == "model-add Maya-M engine=vllm"));
 }

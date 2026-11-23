@@ -59,6 +59,13 @@ fn kind_of_req(r: &Request) -> &'static str {
         Request::Admit { .. } => "admit",
         Request::Cancel { .. } => "cancel",
         Request::Ack { .. } => "ack",
+        Request::RefreshPresets { .. } => "presets",
+        Request::RefreshCatalog { .. } => "catalog",
+        Request::PresetPlan { .. } => "presets",
+        Request::PresetSync { .. } => "presets",
+        Request::ModelEnable { .. } | Request::ModelAdd { .. } | Request::ModelScan { .. } => {
+            "catalog"
+        }
     }
 }
 
@@ -75,6 +82,11 @@ fn kind_of_msg(m: &Msg) -> &'static str {
         Msg::OpUpdate { .. } => "op",
         Msg::WriteDone { what: "cancel", .. } => "cancel",
         Msg::WriteDone { .. } => "ack",
+        Msg::Presets(_) => "presets",
+        Msg::Catalog(_) => "catalog",
+        Msg::PresetPlanned { .. } => "presets",
+        Msg::ScanDone { .. } => "catalog",
+        Msg::SimpleWrite { .. } => "catalog",
     }
 }
 

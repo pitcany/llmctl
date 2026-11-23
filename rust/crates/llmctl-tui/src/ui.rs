@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{op_active, short, App, Modal, Screen};
+use crate::app::{op_active, short, App, CatalogRow, Modal, RunRow, Screen};
 
 const DIM: Style = Style::new().fg(Color::DarkGray);
 const BOLD: Style = Style::new().add_modifier(Modifier::BOLD);
@@ -29,7 +29,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Ops => draw_ops(f, app, rows[1]),
         Screen::Logs => draw_logs(f, app, rows[1]),
         Screen::Gpu => draw_gpu(f, app, rows[1]),
-        Screen::Catalog => draw_catalog(f, rows[1]),
+        Screen::Catalog => draw_catalog(f, app, rows[1]),
         Screen::Audit => draw_audit(f, app, rows[1]),
     }
     draw_footer(f, app, rows[2]);
@@ -82,10 +82,12 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let hints = match app.screen {
         Screen::Hosts => "↑↓ select · enter logs · r refresh · ? help · q quit",
-        Screen::Run => "↑↓ select · enter run (preview) · S stop · T restart · r refresh · q quit",
+        Screen::Run => "↑↓ select · enter run (presets, preview) · S stop · T restart (workloads) · q quit",
         Screen::Ops => "↑↓ select · C cancel · A acknowledge · r refresh · q quit",
         Screen::Logs => "↑↓ pick · enter open · f follow · PgUp/PgDn scroll · End newest · q quit",
-        Screen::Gpu | Screen::Audit | Screen::Catalog => "r refresh · ? help · q quit",
+        Screen::Gpu => "r refresh · ? help · q quit",
+        Screen::Audit => "r refresh · ? help · q quit",
+        Screen::Catalog => "↑↓ select · E enable · D disable · s scan · R record a scanned weight · q quit",
     };
     let msg = app.message.clone().unwrap_or_default();
     let lines = vec![Line::from(Span::styled(msg, BOLD)), Line::from(Span::styled(hints, DIM))];
@@ -202,25 +204,75 @@ fn draw_hosts(f: &mut Frame, app: &App, area: Rect) {
 
 // ---- Run ----------------------------------------------------------------
 
+/// A preset line's state word, the CLI `preset list`'s vocabulary.
+fn preset_state(p: &llmctl_client::catalog::PresetSummary) -> (&'static str, Style) {
+    match (&p.link, &p.link_error) {
+        (Some(l), _) if l.active => ("serving", GOOD),
+        (Some(l), _) if l.profile_env.is_none() => ("no-profile", STALE),
+        (Some(l), _) if l.drift.is_empty() => ("ready", Style::new()),
+        (Some(_), _) => ("drift", BAD),
+        (None, Some(_)) => ("unlinked", STALE),
+        (None, None) => ("-", DIM),
+    }
+}
+
 fn draw_run(f: &mut Frame, app: &App, area: Rect) {
-    let parts = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1)])
-        .split(area);
-    f.render_widget(
-        Paragraph::new(vec![
-            Line::styled("Presets: pending — they land when M5c (presets and catalog) merges.", STALE),
-            Line::styled(
-                "Until then this runs workloads: enter shows the plan, y admits it, progress follows.",
-                DIM,
-            ),
-        ]),
-        parts[0],
-    );
-    let (items, selectable) = host_items(app, false);
+    let rows = app.run_rows();
+    let mut items: Vec<ListItem<'static>> = Vec::new();
+    let mut selectable: Vec<usize> = Vec::new();
+    // Presets first (per host that answered), then workloads — a header
+    // for each section on each host.
+    let mut last: Option<(&str, bool)> = None; // (host, is_preset)
+    for row in &rows {
+        match row {
+            RunRow::Preset { host, preset, stale } => {
+                if last != Some((host, true)) {
+                    let h = app.hosts.iter().find(|h| h.name == *host);
+                    let note = match (&app.presets, h.map(|h| h.is_stale())) {
+                        (_, Some(true)) => " STALE", // unreachable in practice: filtered
+                        (p, _) if p.is_empty() => " asking…",
+                        _ => "",
+                    };
+                    items.push(ListItem::new(Line::styled(format!(" presets on {host}{note}"), BOLD)));
+                    last = Some((host, true));
+                }
+                let (state, style) = preset_state(preset);
+                let line_style = if *stale { STALE } else { Style::new() };
+                selectable.push(items.len());
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled(format!("  {:<22} ", truncate(&preset.alias, 22)), line_style),
+                    Span::styled(format!("{:<22} ", truncate(&preset.served_name, 22)), line_style),
+                    Span::styled(format!("tp {:<2} ctx {:<6}", preset.tensor_parallel_size, preset.max_model_len), DIM),
+                    Span::styled(format!(" {state:<10}"), style),
+                ])));
+            }
+            RunRow::Workload(w) => {
+                if last != Some((w.host, false)) {
+                    items.push(ListItem::new(Line::styled(format!(" workloads on {}", w.host), BOLD)));
+                    last = Some((w.host, false));
+                }
+                selectable.push(items.len());
+                items.push(ListItem::new(workload_line(app, w.workload, w.stale)));
+            }
+        }
+    }
+    if items.is_empty() {
+        let preset_errs: Vec<String> = app
+            .presets
+            .iter()
+            .filter_map(|h| h.result.as_ref().err().map(|e| format!("{}: {e}", h.host)))
+            .collect();
+        if preset_errs.is_empty() {
+            items.push(ListItem::new(Line::styled("asking the agents…", DIM)));
+        } else {
+            for e in preset_errs {
+                items.push(ListItem::new(Line::styled(e, STALE)));
+            }
+        }
+    }
     let mut state = ListState::default().with_selected(selectable.get(app.run_sel).copied());
-    let list = List::new(items).block(boxed(" Run: workloads ".into())).highlight_style(SEL);
-    f.render_stateful_widget(list, parts[1], &mut state);
+    let list = List::new(items).block(boxed(" Run: presets and workloads ".into())).highlight_style(SEL);
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 // ---- Operations ---------------------------------------------------------
@@ -426,17 +478,33 @@ fn draw_gpu(f: &mut Frame, app: &App, area: Rect) {
         // Cards: occupancy from the status answer, free memory from vram.
         let snap = app.hosts.iter().find(|h| h.name == g.host).and_then(|h| h.shown());
         let free = g.vram.as_ref().and_then(|v| v.as_ref().ok()).and_then(|v| v.free_mib.clone());
+        // No VRAM endpoint (the Macs' unified memory): no per-card free
+        // column at all — the lane budget lines below are the memory
+        // picture there (M5e leftover: no more `free ?` per card).
+        let mut vram_note_shown = false;
         if let Some(s) = snap {
             for c in &s.gpus {
                 if let Some(err) = &c.error {
                     lines.push(Line::styled(format!("  gpu {:<3} occupancy unknown: {err}", c.index), STALE));
                     continue;
                 }
-                let free_s = free
-                    .as_ref()
-                    .and_then(|m| m.get(&c.index))
-                    .map(|m| format!("free {:<9}", gib(*m)))
-                    .unwrap_or_else(|| "free ?        ".into());
+                let free_s = match &free {
+                    None => {
+                        if !vram_note_shown {
+                            vram_note_shown = true;
+                            lines.push(Line::styled(
+                                "  (no per-card free VRAM on this host; the memory budget below is the picture)",
+                                DIM,
+                            ));
+                        }
+                        "".to_string()
+                    }
+                    Some(m) => match m.get(&c.index) {
+                        Some(mib) => format!("free {:<9}", gib(*mib)),
+                        // The map answered but not for this card: a real unknown.
+                        None => "free ?        ".into(),
+                    },
+                };
                 let enrolled = if c.enrolled.is_empty() { "-".into() } else { c.enrolled.join(",") };
                 let foreign = if c.foreign.is_empty() {
                     "-".to_string()
@@ -513,16 +581,125 @@ fn draw_gpu(f: &mut Frame, app: &App, area: Rect) {
 
 // ---- Catalog ------------------------------------------------------------
 
-fn draw_catalog(f: &mut Frame, area: Rect) {
-    let lines = vec![
-        Line::styled("Catalog: pending.", STALE),
-        Line::raw(""),
-        Line::raw("This screen lands after M5c (presets and catalog) merges to main:"),
-        Line::raw("models per host and store; add/rm through the same previews as the CLI."),
-        Line::raw(""),
-        Line::styled("Meanwhile: `llmctl-next stores` and `llmctl-next model` from the shell.", DIM),
-    ];
-    f.render_widget(Paragraph::new(lines).block(boxed(" Catalog ".into())), area);
+fn draw_catalog(f: &mut Frame, app: &App, area: Rect) {
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+    let rows = app.catalog_rows();
+    let mut items: Vec<ListItem<'static>> = Vec::new();
+    let mut selectable: Vec<usize> = Vec::new();
+    if app.catalog.is_empty() && app.scans.is_empty() {
+        items.push(ListItem::new(Line::styled("asking the agents…", DIM)));
+    }
+    for h in &app.catalog {
+        let line_style = if app.host_stale(&h.host) { STALE } else { Style::new() };
+        match &h.result {
+            Err(e) => items.push(ListItem::new(Line::styled(format!("{}: {e}", h.host), STALE))),
+            Ok(c) => {
+                let mut tail = format!("rev {} · {} models", c.revision, c.models.len());
+                if c.disabled_hidden > 0 {
+                    tail.push_str(&format!(" · {} disabled", c.disabled_hidden));
+                }
+                if c.unmapped > 0 {
+                    tail.push_str(&format!(" · {} bundle-only", c.unmapped));
+                }
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:<12}", h.host), BOLD),
+                    Span::styled(format!(" {tail}"), line_style),
+                ])));
+                let mut last_store: Option<String> = None;
+                for m in &c.models {
+                    let store = m.store.clone().unwrap_or_else(|| "(no store)".into());
+                    if last_store.as_deref() != Some(store.as_str()) {
+                        items.push(ListItem::new(Line::styled(format!("  [{store}]"), DIM)));
+                        last_store = Some(store);
+                    }
+                    let style = if m.enabled { line_style } else { DIM };
+                    let mark = if m.enabled { "" } else { "  (disabled)" };
+                    selectable.push(items.len());
+                    items.push(ListItem::new(Line::styled(
+                        format!(
+                            "    {:<34} {:<10} {}{}",
+                            truncate(&m.name, 34),
+                            m.engine,
+                            m.source.as_deref().or(m.path.as_deref()).unwrap_or("-"),
+                            mark
+                        ),
+                        style,
+                    )));
+                }
+            }
+        }
+    }
+    for (host, scan) in &app.scans {
+        let (title, lines): (String, Vec<Line<'static>>) = match scan {
+            Ok(s) => {
+                let fresh: Vec<_> = s.found.iter().filter(|f| f.record.is_none()).collect();
+                let t = format!("scan on {host}: {} weights, {} not cataloged", s.found.len(), fresh.len());
+                let mut out = Vec::new();
+                for fdat in fresh {
+                    selectable.push(items.len());
+                    out.push(Line::styled(
+                        format!("  + {:<34} {:<9} {} · R records", truncate(&fdat.source, 34), fdat.engine, fdat.store),
+                        GOOD,
+                    ));
+                }
+                for m in &s.missing {
+                    out.push(Line::styled(
+                        format!("  ! gone: {} ({})", m.name, m.path.as_deref().unwrap_or("-")),
+                        BAD,
+                    ));
+                }
+                (t, out)
+            }
+            Err(e) => (format!("scan on {host} failed"), vec![Line::styled(format!("  {e}"), STALE)]),
+        };
+        items.push(ListItem::new(Line::styled(format!(" {title}"), BOLD)));
+        items.extend(lines.into_iter().map(ListItem::new));
+    }
+    let title = format!(" Catalog ({} rows){} ", rows.len(), stale_note(app));
+    let mut state = ListState::default().with_selected(selectable.get(app.catalog_sel).copied());
+    let list = List::new(items).block(boxed(title)).highlight_style(SEL);
+    f.render_stateful_widget(list, parts[0], &mut state);
+
+    let detail = match rows.get(app.catalog_sel) {
+        Some(CatalogRow::Model { host, model, .. }) => {
+            let mut out = vec![
+                Line::styled(format!("{} · {}", host, model.name), BOLD),
+                Line::raw(format!("id {} · engine {} · origin {}", model.id, model.engine, model.origin)),
+                Line::raw(format!(
+                    "store {} · source {}",
+                    model.store.as_deref().unwrap_or("-"),
+                    model.source.as_deref().unwrap_or("-")
+                )),
+            ];
+            if let Some(p) = &model.path {
+                out.push(Line::raw(format!("path {p}")));
+            }
+            out.push(Line::raw(if model.enabled {
+                "enabled (D disables)".to_string()
+            } else {
+                "disabled · hidden from `model list`, exported inactive (E enables)".to_string()
+            }));
+            for (k, v) in &model.extra {
+                out.push(Line::styled(format!("{k}: {v}"), DIM));
+            }
+            out
+        }
+        Some(CatalogRow::Found { host, found, .. }) => vec![
+            Line::styled(format!("{host} · scanned weight"), BOLD),
+            Line::raw(format!("{} · engine {}", found.source, found.engine)),
+            Line::raw(format!("store {} · {}", found.store, found.path)),
+            Line::styled("R records it in the catalog", GOOD),
+        ],
+        None if app.catalog.is_empty() => vec![Line::styled("asking the agents…", DIM)],
+        None => vec![Line::styled("nothing selected", DIM)],
+    };
+    f.render_widget(
+        Paragraph::new(detail).block(boxed(" Details ".into())).wrap(Wrap { trim: false }),
+        parts[1],
+    );
 }
 
 // ---- Audit --------------------------------------------------------------
@@ -655,7 +832,9 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                 Line::styled("Everywhere", BOLD),
                 Line::raw("  r refresh now (unreachable hosts too) · ? help · q / ctrl-c quit · esc clear message"),
                 Line::styled("Writes (each previewed or confirmed first)", BOLD),
-                Line::raw("  Run: enter run · S stop · T restart → plan preview → y admits"),
+                Line::raw("  Run: enter run (preset or workload) → plan preview → y admits · S stop · T restart (workloads)"),
+                Line::raw("  Run on a drifted preset: s syncs the profile env, then the preview returns"),
+                Line::raw("  Catalog: E enable · D disable · R record a scanned weight → y/n · s scans (a read)"),
                 Line::raw("  Operations: C cancel · A acknowledge → y/n"),
                 Line::raw(""),
                 Line::raw("A host that does not answer within LLMCTL_NEXT_STATUS_TIMEOUT_S (default 10 s)"),
@@ -670,7 +849,7 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
             l.push(Line::styled("y confirm · n / esc cancel", BOLD));
             (format!(" {title} "), l)
         }
-        Modal::Preview { host, kind, workload, plan, refused } => {
+        Modal::Preview { host, kind, workload, alias, profile, plan, refused } => {
             let mut l = Vec::new();
             if let Some(r) = refused {
                 l.push(Line::styled("REFUSED: the plan changed since the preview — nothing ran.", BAD));
@@ -678,20 +857,45 @@ fn draw_modal(f: &mut Frame, app: &App, m: &Modal, area: Rect) {
                 l.push(Line::styled("Review the fresh plan below and confirm again.", BAD));
                 l.push(Line::raw(""));
             }
+            let what = match alias {
+                Some(a) => format!("preset {a}"),
+                None => format!("{kind} {workload}"),
+            };
             match plan {
-                None => l.push(Line::styled(format!("planning {kind} {workload} on {host}…"), DIM)),
+                None => l.push(Line::styled(format!("planning {what} on {host}…"), DIM)),
                 Some(Err(e)) => {
                     l.push(Line::styled(format!("no plan: {e}"), BAD));
-                    l.push(Line::raw(""));
-                    l.push(Line::styled("esc close", BOLD));
+                    if e.is(crate::api::DRIFT_CODE) && alias.is_some() {
+                        l.push(Line::raw(""));
+                        l.push(Line::styled("s syncs the profile env from the preset (a write), then plans again", BOLD));
+                        l.push(Line::styled("n / esc close", BOLD));
+                    } else {
+                        l.push(Line::raw(""));
+                        l.push(Line::styled("esc close", BOLD));
+                    }
                 }
                 Some(Ok(p)) => {
+                    if let (Some(a), Some(pr)) = (alias, profile) {
+                        let name = pr.env_source.rsplit('/').next().unwrap_or(&pr.env_source);
+                        l.push(Line::styled(
+                            format!("preset {a}: switch {workload} to {name} (serves {})", pr.model),
+                            DIM,
+                        ));
+                    } else if alias.is_some() {
+                        l.push(Line::styled(
+                            format!(
+                                "preset {}: the active env already renders it; an ordinary run",
+                                alias.as_deref().unwrap_or("")
+                            ),
+                            DIM,
+                        ));
+                    }
                     l.extend(plan_lines(p, host));
                     l.push(Line::raw(""));
                     l.push(Line::styled("y admit this plan · n / esc cancel", BOLD));
                 }
             }
-            (format!(" {kind} {workload} on {host}: preview "), l)
+            (format!(" {what} on {host}: preview "), l)
         }
         Modal::Progress { host, kind, workload, op, error } => {
             let mut l = Vec::new();

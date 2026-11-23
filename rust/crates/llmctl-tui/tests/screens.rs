@@ -48,6 +48,7 @@ fn base_app() -> App {
                 servable: vec!["gpt-oss-120b".into(), "qwen3-coder".into()],
                 loaded: Some(vec!["gpt-oss-120b".into(), "qwen3-coder".into()]),
                 supports_unload: true,
+                supports_load: false,
             }],
             error: None,
         },
@@ -67,6 +68,54 @@ fn base_app() -> App {
             error: None,
         },
     ];
+    // The Run screen's presets (workstation only; the Macs hold none) and
+    // the Catalog screen's records.
+    app.presets = vec![HostResult {
+        host: "workstation".into(),
+        result: Ok(llmctl_client::catalog::PresetListResponse {
+            dirs: vec!["~/.config/llmctl/presets".into()],
+            presets: vec![preset("qwen27b", "serving"), preset("qwen38-unc", "drift")],
+            invalid: vec![],
+        }),
+    }];
+    app.catalog = vec![
+        HostResult {
+            host: "workstation".into(),
+            result: Ok(llmctl_client::catalog::CatalogListResponse {
+                host: "workstation".into(),
+                host_names: vec!["yannik-desktop".into()],
+                revision: 1,
+                disabled_hidden: 1,
+                unmapped: 20,
+                profiles: 2,
+                models: vec![
+                    catalog_record("qwen3-coder:30b", "ollama", Some("ollama")),
+                    catalog_record("Qwen3.8-27B", "vllm", Some("hf-cache")),
+                ],
+            }),
+        },
+        HostResult {
+            host: "m5".into(),
+            result: Ok(llmctl_client::catalog::CatalogListResponse {
+                host: "m5".into(),
+                host_names: vec!["Yanniks-MacBook-Pro.local".into()],
+                revision: 1,
+                disabled_hidden: 0,
+                unmapped: 60,
+                profiles: 2,
+                models: vec![catalog_record("huihui-mlx", "lmstudio", Some("lmstudio"))],
+            }),
+        },
+    ];
+    app.catalog[0]
+        .result
+        .as_mut()
+        .unwrap()
+        .models
+        .push(llmctl_client::catalog::CatalogModel {
+            enabled: false,
+            ..catalog_record("gemma-27b", "vllm", Some("hf-cache"))
+        });
     app
 }
 
@@ -171,11 +220,16 @@ fn audit_screen() {
 }
 
 #[test]
-fn catalog_screen_is_marked_pending() {
+fn catalog_screen_lists_records_by_host_and_store_with_details() {
     let mut app = base_app();
     app.screen = Screen::Catalog;
+    app.catalog_sel = 1;
     let text = render(&app, W, H);
-    assert!(text.contains("Catalog: pending"), "{text}");
+    assert!(text.contains("workstation"), "{text}");
+    assert!(text.contains("[hf-cache]"), "{text}");
+    assert!(text.contains("qwen3-coder:30b"), "{text}");
+    assert!(text.contains("(disabled)"), "{text}");
+    assert!(text.contains("Details"), "{text}");
     assert_snapshot("catalog", &text);
 }
 
@@ -187,10 +241,52 @@ fn preview_modal() {
         host: "workstation".into(),
         kind: OpKind::Run,
         workload: "vllm-engine".into(),
+        alias: None,
+        profile: None,
         plan: Some(Ok(plan_response(OpKind::Run, "vllm-engine", 42, &["ollama-gpu1"]))),
         refused: None,
     });
     assert_snapshot("preview", &render(&app, W, H));
+}
+
+#[test]
+fn preview_modal_of_a_preset_names_its_profile() {
+    let mut app = base_app();
+    app.screen = Screen::Run;
+    app.modal = Some(Modal::Preview {
+        host: "workstation".into(),
+        kind: OpKind::Run,
+        workload: "vllm-engine".into(),
+        alias: Some("qwen27b".into()),
+        profile: Some(llmctl_client::wire::ProfileRequest {
+            env_source: "~/.config/llmctl/vllm-engine.env.qwen27b".into(),
+            model: "qwen3.8-27b".into(),
+        }),
+        plan: Some(Ok(plan_response(OpKind::Run, "vllm-engine", 42, &["ollama-gpu1"]))),
+        refused: None,
+    });
+    assert_snapshot("preview_preset", &render(&app, W, H));
+}
+
+#[test]
+fn preview_modal_of_a_drifted_preset_offers_the_sync() {
+    let mut app = base_app();
+    app.screen = Screen::Run;
+    app.modal = Some(Modal::Preview {
+        host: "workstation".into(),
+        kind: OpKind::Run,
+        workload: "vllm-engine".into(),
+        alias: Some("qwen38-unc".into()),
+        profile: None,
+        plan: Some(Err(llmctl_tui::api::ApiErr::api(
+            llmctl_tui::api::DRIFT_CODE,
+            "profile does not render preset qwen38-unc (VLLM_MAX_MODEL_LEN); `--sync` writes it",
+        ))),
+        refused: None,
+    });
+    let text = render(&app, W, H);
+    assert!(text.contains("s syncs the profile env"), "{text}");
+    assert_snapshot("preview_drift", &text);
 }
 
 #[test]
@@ -201,6 +297,8 @@ fn stale_refused_preview_modal() {
         host: "workstation".into(),
         kind: OpKind::Run,
         workload: "vllm-engine".into(),
+        alias: None,
+        profile: None,
         plan: Some(Ok(plan_response(OpKind::Run, "vllm-engine", 43, &["ollama-gpu1", "llama-router"]))),
         refused: Some("inventory revision moved 42 -> 43: the stop targets changed".into()),
     });

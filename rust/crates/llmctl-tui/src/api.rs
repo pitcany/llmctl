@@ -7,6 +7,10 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use llmctl_client::catalog::{
+    CatalogListResponse, ModelAddRequest, ModelEnableRequest, ModelWriteResponse,
+    PresetListResponse, PresetRunRequest, PresetRunResponse, ScanRequest, ScanResponse,
+};
 use llmctl_client::wire::{
     AdmitRequest, AdmitResponse, AuditResponse, EngineReport, HealthResponse, LaneLogsRequest,
     LaneLogsResponse, LaneMemoryRequest, LaneMemoryResponse, LaneStatusResponse,
@@ -70,6 +74,10 @@ impl From<ClientError> for ApiErr {
 pub type ApiResult<T> = Result<T, ApiErr>;
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = ApiResult<T>> + Send + 'a>>;
 
+/// The agent's code for "this preset's profile env does not render what
+/// the preset says" — the Run screen offers the sync on exactly this.
+pub const DRIFT_CODE: &str = llmctl_client::catalog::codes::PRESET_DRIFT;
+
 /// Everything the screens read or write. Reads are side-effect free on the
 /// agent; the three writes (`admit`, `cancel`, `acknowledge`) are the same
 /// admitted operations the CLI issues.
@@ -96,6 +104,21 @@ pub trait AgentApi: Send + Sync {
     fn admit(&self, req: AdmitRequest) -> BoxFut<'_, AdmitResponse>;
     fn cancel(&self, id: String) -> BoxFut<'_, OperationView>;
     fn acknowledge(&self, id: String) -> BoxFut<'_, OperationView>;
+    // ---- presets and the catalog (M5c, wired into the screens in M5e) ----
+    /// Every preset with its workload link and drift (read-only).
+    fn presets(&self) -> BoxFut<'_, PresetListResponse>;
+    /// Resolve a preset for a run. `dry_run` and no `sync` writes nothing:
+    /// the read the Run screen's preview starts from (a drifted profile
+    /// answers `preset_drift`, which the screen offers to sync).
+    fn preset_run(&self, req: PresetRunRequest) -> BoxFut<'_, PresetRunResponse>;
+    /// This host's catalog records (every one with `all`).
+    fn catalog_models(&self, all: bool) -> BoxFut<'_, CatalogListResponse>;
+    /// Enable or disable one record.
+    fn model_enable(&self, req: ModelEnableRequest) -> BoxFut<'_, ModelWriteResponse>;
+    /// Record one weight the scan found.
+    fn model_add(&self, req: ModelAddRequest) -> BoxFut<'_, ModelWriteResponse>;
+    /// Walk the declared stores; `add` false changes nothing.
+    fn model_scan(&self, req: ScanRequest) -> BoxFut<'_, ScanResponse>;
 }
 
 /// The real agent: a local socket or the SSH bridge to an enrolled host.
@@ -179,6 +202,24 @@ impl AgentApi for ClientApi {
     fn acknowledge(&self, id: String) -> BoxFut<'_, OperationView> {
         Box::pin(async move { self.0.acknowledge(&id, None).await.map_err(ApiErr::from) })
     }
+    fn presets(&self) -> BoxFut<'_, PresetListResponse> {
+        call!(self.0.presets())
+    }
+    fn preset_run(&self, req: PresetRunRequest) -> BoxFut<'_, PresetRunResponse> {
+        call!(self.0.preset_run(&req))
+    }
+    fn catalog_models(&self, all: bool) -> BoxFut<'_, CatalogListResponse> {
+        call!(self.0.catalog_models(all))
+    }
+    fn model_enable(&self, req: ModelEnableRequest) -> BoxFut<'_, ModelWriteResponse> {
+        call!(self.0.model_enable(&req))
+    }
+    fn model_add(&self, req: ModelAddRequest) -> BoxFut<'_, ModelWriteResponse> {
+        call!(self.0.model_add(&req))
+    }
+    fn model_scan(&self, req: ScanRequest) -> BoxFut<'_, ScanResponse> {
+        call!(self.0.model_scan(&req))
+    }
 }
 
 /// An agent that cannot be reached at all (no local socket): every call
@@ -214,5 +255,11 @@ impl AgentApi for Unreachable {
         admit(req: AdmitRequest) -> AdmitResponse;
         cancel(id: String) -> OperationView;
         acknowledge(id: String) -> OperationView;
+        presets() -> PresetListResponse;
+        preset_run(req: PresetRunRequest) -> PresetRunResponse;
+        catalog_models(all: bool) -> CatalogListResponse;
+        model_enable(req: ModelEnableRequest) -> ModelWriteResponse;
+        model_add(req: ModelAddRequest) -> ModelWriteResponse;
+        model_scan(req: ScanRequest) -> ScanResponse;
     }
 }

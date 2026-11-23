@@ -6,6 +6,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use llmctl_client::catalog::{
+    ModelAddRequest, ModelEnableRequest, PresetRunRequest, ScanRequest,
+};
 use llmctl_client::wire::{
     codes, AdmitRequest, LaneLogsRequest, LogsRequest, OperationView, PlanRequest,
     MAX_LOG_LINES, PROTOCOL_VERSION,
@@ -15,7 +18,7 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{AgentApi, ApiErr, ApiResult};
-use crate::app::{HostGpu, HostResult, LaneHost, LogPage, LogTarget, Msg, Request};
+use crate::app::{HostGpu, HostResult, LaneHost, LogPage, LogTarget, Msg, PresetResolved, Request};
 use crate::fleet::{fetch_one, HostTarget};
 
 /// Bound on one write (admit, cancel, acknowledge).
@@ -132,15 +135,17 @@ impl Worker {
                 };
                 self.send(Msg::Logs { gen, target, result });
             }
-            Request::Plan { host, kind, workload } => {
+            Request::Plan { host, kind, workload, profile } => {
                 let result = match self.api(&host) {
                     None => Err(ApiErr::transport(format!("unknown host {host}"))),
-                    Some(api) => bounded(self.timeout, api.plan(plan_req(kind, &workload))).await,
+                    Some(api) => {
+                        bounded(self.timeout, api.plan(plan_req(kind, &workload, profile))).await
+                    }
                 };
                 self.send(Msg::Planned { host, kind, workload, result });
             }
-            Request::Admit { host, kind, workload, revision, stop_targets } => {
-                self.admit(host, kind, workload, revision, stop_targets).await;
+            Request::Admit { host, kind, workload, revision, stop_targets, profile } => {
+                self.admit(host, kind, workload, revision, stop_targets, profile).await;
             }
             Request::Cancel { host, id } => {
                 let result = match self.api(&host) {
@@ -156,7 +161,159 @@ impl Worker {
                 };
                 self.send(Msg::WriteDone { host, what: "acknowledge", result });
             }
+            Request::RefreshPresets { hosts } => {
+                let res = self
+                    .per_host(hosts, |api, limit| async move {
+                        bounded(limit, api.presets()).await
+                    })
+                    .await;
+                self.send(Msg::Presets(res));
+            }
+            Request::RefreshCatalog { hosts } => {
+                let res = self
+                    .per_host(hosts, |api, limit| async move {
+                        bounded(limit, api.catalog_models(true)).await
+                    })
+                    .await;
+                self.send(Msg::Catalog(res));
+            }
+            Request::PresetPlan { host, alias } => {
+                let result = match self.api(&host) {
+                    None => Err(ApiErr::transport(format!("unknown host {host}"))),
+                    Some(api) => self.preset_plan(api, &host, &alias).await,
+                };
+                self.send(Msg::PresetPlanned { host, alias, result: result.map(Box::new) });
+            }
+            Request::PresetSync { host, alias } => {
+                let result = match self.api(&host) {
+                    None => Err(ApiErr::transport(format!("unknown host {host}"))),
+                    Some(api) => {
+                        bounded(
+                            WRITE_TIMEOUT,
+                            api.preset_run(PresetRunRequest {
+                                protocol: PROTOCOL_VERSION,
+                                alias,
+                                workload: None,
+                                sync: true,
+                                dry_run: false,
+                            }),
+                        )
+                        .await
+                        .map(|resp| {
+                            if resp.synced {
+                                format!(
+                                    "wrote {} from preset {}",
+                                    resp.profile_env.as_deref().unwrap_or("?"),
+                                    resp.alias
+                                )
+                            } else {
+                                "the profile already renders it".to_string()
+                            }
+                        })
+                    }
+                };
+                self.send(Msg::SimpleWrite { host, what: "sync", result });
+            }
+            Request::ModelEnable { host, model, enabled } => {
+                let result = match self.api(&host) {
+                    None => Err(ApiErr::transport(format!("unknown host {host}"))),
+                    Some(api) => {
+                        bounded(
+                            WRITE_TIMEOUT,
+                            api.model_enable(ModelEnableRequest {
+                                protocol: PROTOCOL_VERSION,
+                                model,
+                                enabled,
+                            }),
+                        )
+                        .await
+                        .map(|r| {
+                            format!(
+                                "{} {}",
+                                if enabled { "enabled" } else { "disabled" },
+                                r.model.name
+                            )
+                        })
+                    }
+                };
+                self.send(Msg::SimpleWrite {
+                    host,
+                    what: if enabled { "enable" } else { "disable" },
+                    result,
+                });
+            }
+            Request::ModelAdd { host, found } => {
+                let result = match self.api(&host) {
+                    None => Err(ApiErr::transport(format!("unknown host {host}"))),
+                    Some(api) => {
+                        bounded(
+                            WRITE_TIMEOUT,
+                            api.model_add(ModelAddRequest {
+                                protocol: PROTOCOL_VERSION,
+                                name: found.source.clone(),
+                                engine: found.engine.clone(),
+                                source: Some(found.source.clone()),
+                                path: Some(found.path.clone()),
+                                store: Some(found.store.clone()),
+                                set: Vec::new(),
+                            }),
+                        )
+                        .await
+                        .map(|r| format!("recorded {}", r.model.name))
+                    }
+                };
+                self.send(Msg::SimpleWrite { host, what: "add", result });
+            }
+            Request::ModelScan { host } => {
+                let result = match self.api(&host) {
+                    None => Err(ApiErr::transport(format!("unknown host {host}"))),
+                    Some(api) => {
+                        bounded(
+                            WRITE_TIMEOUT,
+                            api.model_scan(ScanRequest {
+                                protocol: PROTOCOL_VERSION,
+                                store: None,
+                                add: false,
+                            }),
+                        )
+                        .await
+                    }
+                };
+                self.send(Msg::ScanDone { host, result });
+            }
         }
+    }
+
+    /// Resolve a preset (read-only: `dry_run`, no `sync` — a drifted
+    /// profile answers `preset_drift`) and plan the run with its profile,
+    /// exactly the CLI's `run <preset>` path.
+    async fn preset_plan(
+        &self,
+        api: Arc<dyn AgentApi>,
+        _host: &str,
+        alias: &str,
+    ) -> ApiResult<PresetResolved> {
+        let resp = bounded(
+            self.timeout,
+            api.preset_run(PresetRunRequest {
+                protocol: PROTOCOL_VERSION,
+                alias: alias.to_string(),
+                workload: None,
+                sync: false,
+                dry_run: true,
+            }),
+        )
+        .await?;
+        let profile = resp.profile_env.clone().map(|env_source| llmctl_client::wire::ProfileRequest {
+            env_source,
+            model: resp.model.clone(),
+        });
+        let plan = bounded(
+            self.timeout,
+            api.plan(plan_req(OpKind::Run, &resp.workload, profile.clone())),
+        )
+        .await;
+        Ok(PresetResolved { workload: resp.workload, profile, plan })
     }
 
     /// Ask each host concurrently; a host the worker does not know is an
@@ -192,9 +349,18 @@ impl Worker {
     }
 
     /// The CLI's admit path (`cmd_mutate`): protocol check, admit the
-    /// previewed revision and stop targets under a fresh idempotency key,
-    /// resolve a lost acknowledgement by key, then follow the operation.
-    async fn admit(&self, host: String, kind: OpKind, workload: String, revision: u64, stop_targets: Vec<String>) {
+    /// previewed revision and stop targets (and a preset's profile) under
+    /// a fresh idempotency key, resolve a lost acknowledgement by key,
+    /// then follow the operation.
+    async fn admit(
+        &self,
+        host: String,
+        kind: OpKind,
+        workload: String,
+        revision: u64,
+        stop_targets: Vec<String>,
+        profile: Option<llmctl_client::wire::ProfileRequest>,
+    ) {
         let Some(api) = self.api(&host) else {
             self.send(Msg::Admitted { host: host.clone(), result: Err(ApiErr::transport(format!("unknown host {host}"))) });
             return;
@@ -233,14 +399,15 @@ impl Worker {
             expected_revision: Some(revision),
             expected_stop_targets: Some(stop_targets),
             force: false,
-            profile: None,
+            profile: profile.clone(),
         };
         let mut retried = false;
         let landed: Result<(OperationView, bool), ApiErr> = loop {
             match bounded(WRITE_TIMEOUT, api.admit(req.clone())).await {
                 Ok(resp) => break Ok((resp.operation, resp.replayed)),
                 Err(e) if e.is(codes::STALE_PLAN) => {
-                    let fresh = bounded(self.timeout, api.plan(plan_req(kind, &workload))).await;
+                    let fresh =
+                        bounded(self.timeout, api.plan(plan_req(kind, &workload, profile))).await;
                     self.send(Msg::StaleRefused { host, kind, workload, reason: e.message, fresh });
                     return;
                 }
@@ -287,8 +454,12 @@ impl Worker {
     }
 }
 
-fn plan_req(kind: OpKind, workload: &str) -> PlanRequest {
-    PlanRequest { kind, workload: workload.to_string(), profile: None }
+fn plan_req(
+    kind: OpKind,
+    workload: &str,
+    profile: Option<llmctl_client::wire::ProfileRequest>,
+) -> PlanRequest {
+    PlanRequest { kind, workload: workload.to_string(), profile }
 }
 
 fn describe_read_error(e: &ApiErr) -> String {

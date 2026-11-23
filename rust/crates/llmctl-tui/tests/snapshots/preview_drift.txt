@@ -1,0 +1,30 @@
+ llmctl-next  d Hosts  w Run  o Operations  l Logs  g GPUs/memory  m Catalog  a Audit
+┌ Run: presets and workloads ──────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ presets on workstation                                                                                                           │
+│  qwen27b                qwen-qwen27b           tp 2  ctx 262144 serving                                                          │
+│  qwen38-unc             qwen-qwen38-unc        tp 2  ctx 262144 drift                                                            │
+│ workloads on workstation                                                                                                         │
+│  vllm-engine          Running  Ready     intent running          qwen3.8-27b ✓                  managed  4 s ago                 │
+│  llama-router         Running  Ready     intent running          router ✓                       managed  4 s ago                 │
+│  ollama-gpu1          Stopped  NotReady  intent stopped (manual) -                              managed  4 s ago                 │
+│ workloads on m5                                                                                                                  │
+│  llama-swap           Running  Ready     intent running          -                              managed  4 s ago                 │
+│ workloads on mbp2                                                                                                                │
+│  llama-swap     ┌ preset qwen38-unc on workstation: preview ───────────────────────────────────────────────────┐ [stale]         │
+│                 │no plan: preset_drift: profile does not render preset qwen38-unc (VLLM_MAX_MODEL_LEN);        │                 │
+│                 │`--sync` writes it                                                                            │                 │
+│                 │                                                                                              │                 │
+│                 │s syncs the profile env from the preset (a write), then plans again                           │                 │
+│                 └──────────────────────────────────────────────────────────────────────────────────────────────┘                 │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+↑↓ select · enter run (presets, preview) · S stop · T restart (workloads) · q quit

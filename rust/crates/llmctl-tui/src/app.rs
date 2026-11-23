@@ -8,9 +8,12 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use llmctl_client::catalog::{
+    CatalogListResponse, CatalogModel, PresetListResponse, PresetSummary, ScanFound, ScanResponse,
+};
 use llmctl_client::wire::{
     AuditFinding, EngineReport, LogEntry, LogSource, OpStatus, OperationView, PlanResponse,
-    VramResponse, WorkloadView,
+    ProfileRequest, VramResponse, WorkloadView,
 };
 use llmctl_core::OpKind;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -24,6 +27,9 @@ pub const OPS_EVERY: Duration = Duration::from_secs(3);
 pub const OPS_ACTIVE_EVERY: Duration = Duration::from_secs(1);
 pub const GPU_EVERY: Duration = Duration::from_secs(10);
 pub const AUDIT_EVERY: Duration = Duration::from_secs(30);
+/// Presets and the catalog change by hand and rarely.
+pub const PRESETS_EVERY: Duration = Duration::from_secs(30);
+pub const CATALOG_EVERY: Duration = Duration::from_secs(30);
 pub const LOGS_FOLLOW_EVERY: Duration = Duration::from_secs(1);
 /// An unreachable host is asked again on its own at most this often:
 /// every ssh attempt can wake a sleeping Mac (DarkWake), and each costs a
@@ -113,13 +119,37 @@ pub enum Request {
     /// asked per workload).
     RefreshGpu { hosts: Vec<(String, Vec<String>)> },
     Logs { gen: u64, target: LogTarget, cursor: Option<String> },
-    /// The plan preview (read-only on the agent).
-    Plan { host: String, kind: OpKind, workload: String },
+    /// The plan preview (read-only on the agent). `profile`: a preset's
+    /// resolved router profile env, applied by the run.
+    Plan { host: String, kind: OpKind, workload: String, profile: Option<ProfileRequest> },
     /// Admit exactly the previewed plan: the agent refuses with
     /// `stale_plan` if the revision or the stop targets moved.
-    Admit { host: String, kind: OpKind, workload: String, revision: u64, stop_targets: Vec<String> },
+    Admit {
+        host: String,
+        kind: OpKind,
+        workload: String,
+        revision: u64,
+        stop_targets: Vec<String>,
+        profile: Option<ProfileRequest>,
+    },
     Cancel { host: String, id: String },
     Ack { host: String, id: String },
+    /// The Run screen's preset list (read-only).
+    RefreshPresets { hosts: Vec<String> },
+    /// The Catalog screen's records (read-only).
+    RefreshCatalog { hosts: Vec<String> },
+    /// Resolve a preset and plan its run (writes nothing; a drifted
+    /// profile answers `preset_drift`).
+    PresetPlan { host: String, alias: String },
+    /// Write a preset's render into its profile env (the `s` key on a
+    /// drift refusal), then the App plans again.
+    PresetSync { host: String, alias: String },
+    /// Enable or disable one catalog record.
+    ModelEnable { host: String, model: String, enabled: bool },
+    /// Record one weight a scan found.
+    ModelAdd { host: String, found: ScanFound },
+    /// Walk one host's stores; adds nothing.
+    ModelScan { host: String },
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +212,30 @@ pub enum Msg {
     OpUpdate { host: String, op: OperationView },
     /// A cancel or acknowledge answered.
     WriteDone { host: String, what: &'static str, result: Result<OperationView, ApiErr> },
+    /// The Run screen's preset lists.
+    Presets(Vec<HostResult<PresetListResponse>>),
+    /// The Catalog screen's record lists.
+    Catalog(Vec<HostResult<CatalogListResponse>>),
+    /// One preset resolved: the workload to run, the profile to switch to
+    /// (`None` = the active env already renders it) and the plan preview.
+    PresetPlanned {
+        host: String,
+        alias: String,
+        result: Result<Box<PresetResolved>, ApiErr>,
+    },
+    /// A store scan answered (read-only; rows for the `a` key).
+    ScanDone { host: String, result: Result<ScanResponse, ApiErr> },
+    /// A preset sync or a catalog write answered; `text` is the one line
+    /// to show (the App re-plans a preset after its sync).
+    SimpleWrite { host: String, what: &'static str, result: Result<String, ApiErr> },
+}
+
+/// What a resolved preset runs on (M5e Run screen).
+#[derive(Debug, Clone)]
+pub struct PresetResolved {
+    pub workload: String,
+    pub profile: Option<ProfileRequest>,
+    pub plan: Result<PlanResponse, ApiErr>,
 }
 
 #[derive(Debug, Clone)]
@@ -190,11 +244,15 @@ pub enum Modal {
     /// A yes/no question in front of a write that has no plan (cancel,
     /// acknowledge).
     Confirm { title: String, lines: Vec<String>, on_yes: Request },
-    /// The plan preview of a run/stop/restart; `y` admits it.
+    /// The plan preview of a run/stop/restart; `y` admits it. `alias`
+    /// names a preset run (resolved with its `profile`); a `preset_drift`
+    /// refusal offers `s` to sync the profile env and re-plan.
     Preview {
         host: String,
         kind: OpKind,
         workload: String,
+        alias: Option<String>,
+        profile: Option<ProfileRequest>,
         plan: Option<Result<PlanResponse, ApiErr>>,
         /// Set when the agent refused the previous confirmation as stale.
         refused: Option<String>,
@@ -251,6 +309,28 @@ pub struct WorkloadRow<'a> {
     pub stale: bool,
 }
 
+/// One selectable line of the Run screen (M5e: presets above workloads).
+#[derive(Debug, Clone)]
+pub enum RunRow<'a> {
+    Preset { host: &'a str, preset: &'a PresetSummary, stale: bool },
+    Workload(WorkloadRow<'a>),
+}
+
+/// One selectable line of the Catalog screen.
+#[derive(Debug, Clone)]
+pub enum CatalogRow<'a> {
+    Model { host: &'a str, model: &'a CatalogModel, stale: bool },
+    Found { host: &'a str, found: &'a ScanFound, stale: bool },
+}
+
+impl CatalogRow<'_> {
+    pub fn host(&self) -> &str {
+        match self {
+            CatalogRow::Model { host, .. } | CatalogRow::Found { host, .. } => host,
+        }
+    }
+}
+
 pub struct App {
     pub screen: Screen,
     /// Wall clock for "seen 3 s ago"; set by the loop, fixed in tests.
@@ -274,12 +354,24 @@ pub struct App {
     pub modal: Option<Modal>,
     /// One line at the bottom: the last result or refusal.
     pub message: Option<String>,
+    /// The Run screen's preset lists, per host (the Macs hold none).
+    pub presets: Vec<HostResult<PresetListResponse>>,
+    /// The Catalog screen's records, per host.
+    pub catalog: Vec<HostResult<CatalogListResponse>>,
+    pub catalog_sel: usize,
+    /// Latest store scan per host (read-only; rows the `a` key records).
+    pub scans: Vec<(String, Result<ScanResponse, String>)>,
+    /// The preset whose profile sync was confirmed and is being written;
+    /// its answer re-opens the preview and re-plans.
+    pending_preset: Option<(String, String)>,
     /// Hosts never asked yet: the first refresh asks every host.
     first_hosts: bool,
     hosts_pace: Pace,
     ops_pace: Pace,
     audit_pace: Pace,
     gpu_pace: Pace,
+    presets_pace: Pace,
+    catalog_pace: Pace,
 }
 
 impl App {
@@ -303,15 +395,60 @@ impl App {
             logs: LogsView { follow: true, ..LogsView::default() },
             modal: None,
             message: None,
+            presets: Vec::new(),
+            catalog: Vec::new(),
+            catalog_sel: 0,
+            scans: Vec::new(),
+            pending_preset: None,
             first_hosts: true,
             hosts_pace: Pace::default(),
             ops_pace: Pace::default(),
             audit_pace: Pace::default(),
             gpu_pace: Pace::default(),
+            presets_pace: Pace::default(),
+            catalog_pace: Pace::default(),
         }
     }
 
     // ---- derived views ------------------------------------------------------
+
+    /// One selectable row of the Run screen: a preset (first, per host) or
+    /// a workload.
+    pub fn run_rows(&self) -> Vec<RunRow<'_>> {
+        let mut rows = Vec::new();
+        for h in &self.presets {
+            if let Ok(p) = &h.result {
+                for p in &p.presets {
+                    rows.push(RunRow::Preset { host: &h.host, preset: p, stale: self.host_stale(&h.host) });
+                }
+            }
+        }
+        for r in self.workload_rows() {
+            rows.push(RunRow::Workload(r));
+        }
+        rows
+    }
+
+    /// One selectable row of the Catalog screen: a record, or a weight the
+    /// latest scan found uncataloged (the `a` key records it).
+    pub fn catalog_rows(&self) -> Vec<CatalogRow<'_>> {
+        let mut rows = Vec::new();
+        for h in &self.catalog {
+            if let Ok(c) = &h.result {
+                for m in &c.models {
+                    rows.push(CatalogRow::Model { host: &h.host, model: m, stale: self.host_stale(&h.host) });
+                }
+            }
+        }
+        for (host, scan) in &self.scans {
+            if let Ok(s) = scan {
+                for f in s.found.iter().filter(|f| f.record.is_none()) {
+                    rows.push(CatalogRow::Found { host, found: f, stale: self.host_stale(host) });
+                }
+            }
+        }
+        rows
+    }
 
     /// Workload lines across hosts, in Hosts-screen order.
     pub fn workload_rows(&self) -> Vec<WorkloadRow<'_>> {
@@ -333,7 +470,7 @@ impl App {
         self.hosts.iter().filter(|h| !h.is_stale()).map(|h| h.name.clone()).collect()
     }
 
-    fn host_stale(&self, host: &str) -> bool {
+    pub fn host_stale(&self, host: &str) -> bool {
         self.hosts.iter().find(|h| h.name == host).is_none_or(|h| h.is_stale())
     }
 
@@ -430,6 +567,12 @@ impl App {
             }
             Screen::Audit if self.audit_pace.due(now, AUDIT_EVERY) => out.push(self.audit_request(now)),
             Screen::Gpu if self.gpu_pace.due(now, GPU_EVERY) => out.push(self.gpu_request(now)),
+            Screen::Run if self.presets_pace.due(now, PRESETS_EVERY) => {
+                out.push(self.presets_request(now))
+            }
+            Screen::Catalog if self.catalog_pace.due(now, CATALOG_EVERY) => {
+                out.push(self.catalog_request(now))
+            }
             Screen::Logs => {
                 // Lanes come with the memory answer; ask once for the picker.
                 if self.gpu.is_empty() && self.gpu_pace.due(now, GPU_EVERY) {
@@ -490,6 +633,16 @@ impl App {
         Request::RefreshGpu { hosts }
     }
 
+    fn presets_request(&mut self, now: Instant) -> Request {
+        self.presets_pace.start(now);
+        Request::RefreshPresets { hosts: self.reachable_hosts() }
+    }
+
+    fn catalog_request(&mut self, now: Instant) -> Request {
+        self.catalog_pace.start(now);
+        Request::RefreshCatalog { hosts: self.reachable_hosts() }
+    }
+
     fn logs_poll(&mut self, now: Instant) -> Option<Request> {
         let target = self.logs.target.clone()?;
         if !self.logs.follow || self.logs.in_flight {
@@ -518,6 +671,8 @@ impl App {
             Screen::Ops if !self.ops_pace.in_flight => out.push(self.ops_request(now)),
             Screen::Audit if !self.audit_pace.in_flight => out.push(self.audit_request(now)),
             Screen::Gpu if !self.gpu_pace.in_flight => out.push(self.gpu_request(now)),
+            Screen::Run if !self.presets_pace.in_flight => out.push(self.presets_request(now)),
+            Screen::Catalog if !self.catalog_pace.in_flight => out.push(self.catalog_request(now)),
             Screen::Logs => {
                 if let Some(t) = self.logs.target.clone() {
                     if !self.logs.in_flight {
@@ -572,6 +727,8 @@ impl App {
             Screen::Ops if !self.ops_pace.in_flight => out.push(self.ops_request(now)),
             Screen::Audit if !self.audit_pace.in_flight => out.push(self.audit_request(now)),
             Screen::Gpu if !self.gpu_pace.in_flight => out.push(self.gpu_request(now)),
+            Screen::Run if !self.presets_pace.in_flight => out.push(self.presets_request(now)),
+            Screen::Catalog if !self.catalog_pace.in_flight => out.push(self.catalog_request(now)),
             _ => {}
         }
         out
@@ -602,17 +759,42 @@ impl App {
                 Vec::new()
             }
             Screen::Run => {
-                let n = self.workload_rows().len();
+                let n = self.run_rows().len();
                 step(&mut self.run_sel, n, up, down);
+                // Owned before any &mut self call: which row is selected.
+                enum Picked {
+                    Preset { host: String, alias: String, stale: bool },
+                    Workload,
+                    None,
+                }
+                let rows = self.run_rows();
+                let picked = match rows.get(self.run_sel) {
+                    Some(RunRow::Preset { host, preset, stale }) => Picked::Preset {
+                        host: host.to_string(),
+                        alias: preset.alias.clone(),
+                        stale: *stale,
+                    },
+                    Some(RunRow::Workload(_)) => Picked::Workload,
+                    None => Picked::None,
+                };
                 let kind = match key.code {
                     KeyCode::Enter => Some(OpKind::Run),
                     KeyCode::Char('S') => Some(OpKind::Stop),
                     KeyCode::Char('T') => Some(OpKind::Restart),
                     _ => None,
                 };
-                match kind {
-                    Some(kind) => self.start_preview(kind),
-                    None => Vec::new(),
+                match (picked, kind) {
+                    (Picked::Preset { host, alias, stale }, Some(OpKind::Run)) => {
+                        self.start_preset_preview(&host, &alias, stale)
+                    }
+                    (Picked::Preset { alias, .. }, Some(_)) => {
+                        self.message = Some(format!(
+                            "preset {alias}: enter runs it (a preset is always a run)"
+                        ));
+                        Vec::new()
+                    }
+                    (Picked::Workload, Some(kind)) => self.start_preview(kind),
+                    _ => Vec::new(),
                 }
             }
             Screen::Ops => {
@@ -663,7 +845,48 @@ impl App {
                     _ => Vec::new(),
                 }
             }
-            Screen::Gpu | Screen::Catalog => Vec::new(),
+            Screen::Gpu => Vec::new(),
+            Screen::Catalog => {
+                let n = self.catalog_rows().len();
+                step(&mut self.catalog_sel, n, up, down);
+                // Owned before any &mut self call: which row is selected.
+                enum Picked {
+                    Model { host: String },
+                    Found { host: String, found: ScanFound, stale: bool },
+                    None,
+                }
+                let rows = self.catalog_rows();
+                let picked = match rows.get(self.catalog_sel) {
+                    Some(CatalogRow::Model { host, .. }) => Picked::Model { host: host.to_string() },
+                    Some(CatalogRow::Found { host, found, stale }) => Picked::Found {
+                        host: host.to_string(),
+                        found: (*found).clone(),
+                        stale: *stale,
+                    },
+                    None => Picked::None,
+                };
+                match (key.code, picked) {
+                    // Capitals act (the app's write-key convention): the
+                    // lowercase `d`/`a` are the Hosts and Audit screen keys.
+                    (KeyCode::Char('E'), Picked::Model { .. }) => self.confirm_model_write(true),
+                    (KeyCode::Char('D'), Picked::Model { .. }) => self.confirm_model_write(false),
+                    // A scan with `add` false is a read: allowed even
+                    // read-only (`R`, which records, stays off).
+                    (KeyCode::Char('s'), Picked::Model { host, .. })
+                    | (KeyCode::Char('s'), Picked::Found { host, .. }) => {
+                        self.message = Some(format!("{host}: scanning the stores…"));
+                        vec![Request::ModelScan { host }]
+                    }
+                    (KeyCode::Char('R'), Picked::Found { host, found, stale }) => {
+                        self.confirm_model_add(&host, &found, stale)
+                    }
+                    (KeyCode::Char('R'), _) => {
+                        self.message = Some("R records a scanned weight; s scans first".into());
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
+                }
+            }
         }
     }
 
@@ -685,9 +908,12 @@ impl App {
 
     fn start_preview(&mut self, kind: OpKind) -> Vec<Request> {
         let Some((host, workload, stale)) = self
-            .workload_rows()
+            .run_rows()
             .get(self.run_sel)
-            .map(|r| (r.host.to_string(), r.workload.name.clone(), r.stale))
+            .and_then(|r| match r {
+                RunRow::Workload(w) => Some((w.host.to_string(), w.workload.name.clone(), w.stale)),
+                RunRow::Preset { .. } => None,
+            })
         else {
             return Vec::new();
         };
@@ -705,10 +931,93 @@ impl App {
             host: host.clone(),
             kind,
             workload: workload.clone(),
+            alias: None,
+            profile: None,
             plan: None,
             refused: None,
         });
-        vec![Request::Plan { host, kind, workload }]
+        vec![Request::Plan { host, kind, workload, profile: None }]
+    }
+
+    /// Enter on a preset: resolve it on the agent (read-only), then the
+    /// preview shows the plan for its workload with its profile.
+    fn start_preset_preview(&mut self, host: &str, alias: &str, stale: bool) -> Vec<Request> {
+        if self.read_only {
+            self.message = Some("read-only (--read-only): writes are off".into());
+            return Vec::new();
+        }
+        if stale {
+            self.message =
+                Some(format!("{host} is STALE (no answer): no plan against cached observations"));
+            return Vec::new();
+        }
+        let (host, alias) = (host.to_string(), alias.to_string());
+        self.modal = Some(Modal::Preview {
+            host: host.clone(),
+            kind: OpKind::Run,
+            workload: String::new(),
+            alias: Some(alias.clone()),
+            profile: None,
+            plan: None,
+            refused: None,
+        });
+        vec![Request::PresetPlan { host, alias }]
+    }
+
+    /// `e`/`d` on a catalog record: enable or disable, behind y/n.
+    fn confirm_model_write(&mut self, enable: bool) -> Vec<Request> {
+        let rows = self.catalog_rows();
+        let Some(CatalogRow::Model { host, model, stale }) = rows.get(self.catalog_sel) else {
+            return Vec::new();
+        };
+        if self.read_only {
+            self.message = Some("read-only (--read-only): writes are off".into());
+            return Vec::new();
+        }
+        if *stale {
+            self.message = Some(format!("{host} is STALE (no answer): no write against cached records"));
+            return Vec::new();
+        }
+        let verb = if enable { "Enable" } else { "Disable" };
+        let on_yes = Request::ModelEnable {
+            host: host.to_string(),
+            model: model.id.clone(),
+            enabled: enable,
+        };
+        self.modal = Some(Modal::Confirm {
+            title: verb.to_string(),
+            lines: vec![
+                format!("{verb} {} on {host}?", model.name),
+                format!("engine {} · store {}", model.engine, model.store.as_deref().unwrap_or("-")),
+                "A disabled record is kept, hidden from `model list`, exported inactive.".into(),
+            ],
+            on_yes,
+        });
+        Vec::new()
+    }
+
+    /// `a` on a scanned weight the catalog does not name: record it,
+    /// behind y/n. Every field comes from the scan; nothing to type.
+    fn confirm_model_add(&mut self, host: &str, found: &ScanFound, stale: bool) -> Vec<Request> {
+        if self.read_only {
+            self.message = Some("read-only (--read-only): writes are off".into());
+            return Vec::new();
+        }
+        if stale {
+            self.message = Some(format!("{host} is STALE (no answer): no write against cached records"));
+            return Vec::new();
+        }
+        let on_yes = Request::ModelAdd { host: host.to_string(), found: found.clone() };
+        self.modal = Some(Modal::Confirm {
+            title: "Record model".into(),
+            lines: vec![
+                format!("Record {} on {host}?", found.source),
+                format!("engine {} · store {} · {}", found.engine, found.store, found.path),
+                "The name is what the engine calls it; edit it later with `model edit`.".into(),
+            ],
+            on_yes,
+        });
+        Vec::new()
     }
 
     fn confirm_op_write(&mut self, cancel: bool) -> Vec<Request> {
@@ -771,7 +1080,29 @@ impl App {
                     Vec::new()
                 }
             }
-            Some(Modal::Preview { host, kind, workload, plan, refused }) => {
+            Some(Modal::Preview { host, kind, workload, alias, profile, plan, refused }) => {
+                // `s` on a preset whose profile drifted: offer the sync (a
+                // write: comments kept, previous bytes beside the file).
+                let drift = matches!(&plan, Some(Err(e)) if e.is(crate::api::DRIFT_CODE));
+                if key.code == KeyCode::Char('s') && drift && alias.is_some() {
+                    if self.read_only {
+                        self.message = Some("read-only (--read-only): writes are off".into());
+                        self.modal = Some(Modal::Preview { host, kind, workload, alias, profile, plan, refused });
+                        return Vec::new();
+                    }
+                    let a = alias.clone().expect("checked");
+                    self.pending_preset = Some((host.clone(), a.clone()));
+                    self.modal = Some(Modal::Confirm {
+                        title: "Sync preset".into(),
+                        lines: vec![
+                            format!("Write preset {a}'s values into its router profile env on {host}?"),
+                            "Values merged, comments kept, previous bytes kept beside it.".into(),
+                            "The plan then previews again with the synced profile.".into(),
+                        ],
+                        on_yes: Request::PresetSync { host, alias: a },
+                    });
+                    return Vec::new();
+                }
                 match (&plan, yes, no) {
                     (Some(Ok(p)), true, _) => {
                         let req = Request::Admit {
@@ -780,16 +1111,29 @@ impl App {
                             workload: workload.clone(),
                             revision: p.revision,
                             stop_targets: p.stop_targets.clone(),
+                            profile: profile.clone(),
                         };
-                        self.modal = Some(Modal::Progress { host, kind, workload, op: None, error: None });
+                        self.modal =
+                            Some(Modal::Progress { host, kind, workload, op: None, error: None });
                         vec![req]
                     }
                     (_, _, true) => {
-                        self.message = Some(format!("{kind} {workload}: not admitted"));
+                        self.message = Some(match &alias {
+                            Some(a) => format!("preset {a}: not admitted"),
+                            None => format!("{kind} {workload}: not admitted"),
+                        });
                         Vec::new()
                     }
                     _ => {
-                        self.modal = Some(Modal::Preview { host, kind, workload, plan, refused });
+                        self.modal = Some(Modal::Preview {
+                            host,
+                            kind,
+                            workload,
+                            alias,
+                            profile,
+                            plan,
+                            refused,
+                        });
                         Vec::new()
                     }
                 }
@@ -822,7 +1166,8 @@ impl App {
                 self.hosts.sort_by_key(|h| order.iter().position(|n| *n == h.name).unwrap_or(usize::MAX));
                 let n = self.workload_rows().len();
                 clamp(&mut self.hosts_sel, n);
-                clamp(&mut self.run_sel, n);
+                let run_n = self.run_rows().len();
+                clamp(&mut self.run_sel, run_n);
                 // The first answer unblocks the shown screen's own request.
                 self.on_enter_if_idle(now)
             }
@@ -900,11 +1245,23 @@ impl App {
             }
             Msg::StaleRefused { host, kind, workload, reason, fresh } => {
                 // The old confirmation is void: show the fresh plan and ask
-                // again. Nothing ran.
+                // again. Nothing ran. A preset preview keeps its alias and
+                // profile (the fresh plan may change them: re-resolving is
+                // the `s`/retry path, not this one).
+                let (alias, profile) = match &self.modal {
+                    Some(Modal::Preview { host: h, kind: k, workload: w, alias, profile, .. })
+                        if *h == host && *k == kind && *w == workload =>
+                    {
+                        (alias.clone(), profile.clone())
+                    }
+                    _ => (None, None),
+                };
                 self.modal = Some(Modal::Preview {
                     host,
                     kind,
                     workload,
+                    alias,
+                    profile,
                     plan: Some(fresh),
                     refused: Some(reason),
                 });
@@ -963,6 +1320,105 @@ impl App {
                 }
                 Vec::new()
             }
+            Msg::Presets(per_host) => {
+                self.presets_pace.in_flight = false;
+                self.presets = per_host;
+                let n = self.run_rows().len();
+                clamp(&mut self.run_sel, n);
+                Vec::new()
+            }
+            Msg::Catalog(per_host) => {
+                self.catalog_pace.in_flight = false;
+                // Drop scan rows of hosts whose catalog answer failed; a
+                // write against them would race a stale view.
+                self.catalog = per_host;
+                let live: Vec<String> =
+                    self.catalog.iter().filter(|h| h.result.is_ok()).map(|h| h.host.clone()).collect();
+                self.scans.retain(|(h, _)| live.contains(h));
+                let n = self.catalog_rows().len();
+                clamp(&mut self.catalog_sel, n);
+                Vec::new()
+            }
+            Msg::PresetPlanned { host, alias, result } => {
+                if let Some(Modal::Preview { host: h, alias: a, workload, profile, plan, .. }) =
+                    &mut self.modal
+                {
+                    if *h == host && a.as_deref() == Some(alias.as_str()) {
+                        match result {
+                            Ok(boxed) => {
+                                let resolved = *boxed;
+                                *workload = resolved.workload;
+                                *profile = resolved.profile;
+                                *plan = Some(resolved.plan);
+                            }
+                            Err(e) => *plan = Some(Err(e)),
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            Msg::ScanDone { host, result } => {
+                match result {
+                    Ok(s) => {
+                        let new: Vec<&str> = s.found.iter().filter(|f| f.record.is_none()).map(|f| f.source.as_str()).collect();
+                        self.message = Some(format!(
+                            "{host}: {} weights in the stores, {} not cataloged{}",
+                            s.found.len(),
+                            new.len(),
+                            if s.missing.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", {} records point at weights that are gone", s.missing.len())
+                            }
+                        ));
+                        match self.scans.iter_mut().find(|(h, _)| h == &host) {
+                            Some(slot) => *slot = (host, Ok(s)),
+                            None => self.scans.push((host, Ok(s))),
+                        }
+                        let n = self.catalog_rows().len();
+                        clamp(&mut self.catalog_sel, n);
+                    }
+                    Err(e) => {
+                        self.message = Some(format!("{host}: scan failed: {e}"));
+                        match self.scans.iter_mut().find(|(h, _)| h == &host) {
+                            Some(slot) => *slot = (host.clone(), Err(e.to_string())),
+                            None => self.scans.push((host, Err(e.to_string()))),
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            Msg::SimpleWrite { host, what, result } => {
+                match result {
+                    Ok(text) => {
+                        self.message = Some(format!("{host}: {text}"));
+                        if what == "sync" {
+                            // The profile now renders the preset: reopen the
+                            // preview (the sync's confirm closed it) and
+                            // plan again.
+                            if let Some((p_host, alias)) = self.pending_preset.take() {
+                                if p_host == host {
+                                    self.modal = Some(Modal::Preview {
+                                        host: p_host.clone(),
+                                        kind: OpKind::Run,
+                                        workload: String::new(),
+                                        alias: Some(alias.clone()),
+                                        profile: None,
+                                        plan: None,
+                                        refused: None,
+                                    });
+                                    return vec![Request::PresetPlan { host: p_host, alias }];
+                                }
+                            }
+                        }
+                        if matches!(what, "enable" | "disable" | "add") {
+                            self.catalog_pace.last = None;
+                        }
+                    }
+                    Err(e) => self.message = Some(format!("{host}: {what} refused: {e}")),
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -971,6 +1427,8 @@ impl App {
             Screen::Ops => self.ops_pace.last.is_none(),
             Screen::Audit => self.audit_pace.last.is_none(),
             Screen::Gpu => self.gpu_pace.last.is_none(),
+            Screen::Run => self.presets_pace.last.is_none(),
+            Screen::Catalog => self.catalog_pace.last.is_none(),
             _ => false,
         };
         if idle {

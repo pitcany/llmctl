@@ -1,30 +1,30 @@
  llmctl-next  d Hosts  w Run  o Operations  l Logs  g GPUs/memory  m Catalog  a Audit
-┌ Catalog ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│Catalog: pending.                                                                                                                 │
-│                                                                                                                                  │
-│This screen lands after M5c (presets and catalog) merges to main:                                                                 │
-│models per host and store; add/rm through the same previews as the CLI.                                                           │
-│                                                                                                                                  │
-│Meanwhile: `llmctl-next stores` and `llmctl-next model` from the shell.                                                           │
-│                                                                                                                                  │
-│                                                                                                                                  │
-│                                                                                                                                  │
-│                                                                                                                                  │
-│                                                                                                                                  │
-│                                                                                                                                  │
-│                                                                                                                                  │
-│                                                                                                                                  │
-│                                                                                                                                  │
-│                                                                                                                                  │
-│                                                                                                                                  │
-│                                                                                                                                  │
-│                                                                                                                                  │
-│                                                                                                                                  │
+┌ Catalog (4 rows) · mbp2 STALE, skipped ──────────────────────────────────────────────────────────────────────────────────────────┐
+│workstation  rev 1 · 3 models · 1 disabled · 20 bundle-only                                                                       │
+│  [ollama]                                                                                                                        │
+│    qwen3-coder:30b                    ollama     hf:qwen3-coder:30b                                                              │
+│  [hf-cache]                                                                                                                      │
+│    Qwen3.8-27B                        vllm       hf:Qwen3.8-27B                                                                  │
+│    gemma-27b                          vllm       hf:gemma-27b  (disabled)                                                        │
+│m5           rev 1 · 1 models · 60 bundle-only                                                                                    │
+│  [lmstudio]                                                                                                                      │
+│    huihui-mlx                         lmstudio   hf:huihui-mlx                                                                   │
 │                                                                                                                                  │
 │                                                                                                                                  │
 │                                                                                                                                  │
 │                                                                                                                                  │
 │                                                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Details ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│workstation · Qwen3.8-27B                                                                                                         │
+│id m-Qwen3.8-27B · engine vllm · origin registry                                                                                  │
+│store hf-cache · source hf:Qwen3.8-27B                                                                                            │
+│path ~/.cache/huggingface/Qwen3.8-27B                                                                                             │
+│enabled (D disables)                                                                                                              │
+│estimated_vram_gb: 18.5                                                                                                           │
+│                                                                                                                                  │
+│                                                                                                                                  │
+│                                                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
-r refresh · ? help · q quit
+↑↓ select · E enable · D disable · s scan · R record a scanned weight · q quit

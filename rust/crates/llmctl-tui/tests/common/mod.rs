@@ -7,6 +7,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
+use llmctl_client::catalog::{
+    CatalogListResponse, CatalogModel, ModelAddRequest, ModelEnableRequest, ModelWriteResponse,
+    PresetLink, PresetListResponse, PresetRunRequest, PresetRunResponse, PresetSummary,
+    ScanFound, ScanRequest, ScanResponse,
+};
 use llmctl_client::wire::{
     AdmitRequest, AdmitResponse, AuditFinding, AuditResponse, EngineReport, GpuOccupantView,
     GpuView, HealthResponse, LaneLogsRequest, LaneLogsResponse, LaneMemoryResponse,
@@ -178,6 +183,15 @@ pub struct Fake {
     pub stale_next_admit: AtomicBool,
     /// Every call, in order (`admit rev=42 stops=[...]`).
     pub calls: Mutex<Vec<String>>,
+    /// Presets the Run screen lists (None: the host has none).
+    pub presets: Mutex<Vec<PresetSummary>>,
+    /// The resolve answer's profile env; None = already active (ordinary
+    /// run). Empty string forces `preset_drift` on resolve.
+    pub preset_profile: Mutex<Option<String>>,
+    /// Catalog records the Catalog screen lists.
+    pub catalog: Mutex<Vec<CatalogModel>>,
+    /// Weights the scan finds (record None = not cataloged).
+    pub scan_found: Mutex<Vec<ScanFound>>,
 }
 
 #[derive(Clone)]
@@ -204,6 +218,10 @@ impl Fake {
             engines: Mutex::new(Vec::new()),
             stale_next_admit: AtomicBool::new(false),
             calls: Mutex::new(Vec::new()),
+            presets: Mutex::new(Vec::new()),
+            preset_profile: Mutex::new(Some(String::new())),
+            catalog: Mutex::new(Vec::new()),
+            scan_found: Mutex::new(Vec::new()),
         }
     }
 
@@ -398,7 +416,12 @@ impl AgentApi for Fake {
         })
     }
     fn admit(&self, req: AdmitRequest) -> BoxFut<'_, AdmitResponse> {
-        fake!(self, format!("admit {} {} rev={:?} stops={:?}", req.kind, req.workload, req.expected_revision, req.expected_stop_targets), {
+        let profile = req
+            .profile
+            .as_ref()
+            .map(|p| format!(" profile={}", p.env_source.rsplit('/').next().unwrap_or(&p.env_source)))
+            .unwrap_or_default();
+        fake!(self, format!("admit {} {} rev={:?} stops={:?}{profile}", req.kind, req.workload, req.expected_revision, req.expected_stop_targets), {
             if self.stale_next_admit.swap(false, Ordering::SeqCst) {
                 let old = self.revision.fetch_add(1, Ordering::SeqCst);
                 return Err(ApiErr::api(
@@ -436,6 +459,162 @@ impl AgentApi for Fake {
             o.acknowledged = true;
             Ok(o.clone())
         })
+    }
+    fn presets(&self) -> BoxFut<'_, PresetListResponse> {
+        fake!(self, "presets".into(), Ok(PresetListResponse {
+            dirs: vec!["~/.config/llmctl/presets".into()],
+            presets: self.presets.lock().unwrap().clone(),
+            invalid: vec![],
+        }))
+    }
+    fn preset_run(&self, req: PresetRunRequest) -> BoxFut<'_, PresetRunResponse> {
+        fake!(self, format!("preset-run {} sync={}", req.alias, req.sync), {
+            let known = self.presets.lock().unwrap().iter().any(|p| p.alias == req.alias);
+            if !known {
+                return Err(ApiErr::api("unknown_preset", format!("no preset {}", req.alias)));
+            }
+            // Bound before the match: an arm below re-locks this mutex (the
+            // sync writes the profile), and a guard held across the whole
+            // match would deadlock against it.
+            let profile = self.preset_profile.lock().unwrap().clone();
+            match profile {
+                // Empty string stands for a drifted profile: refused until
+                // the caller syncs — the sync write happens and the profile
+                // is named from then on.
+                Some(p) if p.is_empty() && !req.sync => {
+                    Err(ApiErr::api("preset_drift", "profile does not render the preset; --sync writes it"))
+                }
+                Some(p) if p.is_empty() => {
+                    let written = format!("~/.config/llmctl/vllm-engine.env.{}", req.alias);
+                    *self.preset_profile.lock().unwrap() = Some(written.clone());
+                    Ok(PresetRunResponse {
+                        alias: req.alias.clone(),
+                        workload: "vllm-engine".into(),
+                        model: "qwen3.8-27b".into(),
+                        profile_env: Some(written),
+                        synced: true,
+                        drift: vec![],
+                    })
+                }
+                Some(p) => Ok(PresetRunResponse {
+                    alias: req.alias,
+                    workload: "vllm-engine".into(),
+                    model: "qwen3.8-27b".into(),
+                    profile_env: Some(p),
+                    synced: req.sync,
+                    drift: vec![],
+                }),
+                None => Ok(PresetRunResponse {
+                    alias: req.alias,
+                    workload: "vllm-engine".into(),
+                    model: "qwen3.8-27b".into(),
+                    profile_env: None,
+                    synced: false,
+                    drift: vec![],
+                }),
+            }
+        })
+    }
+    fn catalog_models(&self, all: bool) -> BoxFut<'_, CatalogListResponse> {
+        fake!(self, format!("catalog all={all}"), Ok(CatalogListResponse {
+            host: self.host.clone(),
+            host_names: vec![self.host.clone()],
+            revision: 1,
+            disabled_hidden: 0,
+            unmapped: 0,
+            profiles: 0,
+            models: self.catalog.lock().unwrap().clone(),
+        }))
+    }
+    fn model_enable(&self, req: ModelEnableRequest) -> BoxFut<'_, ModelWriteResponse> {
+        fake!(self, format!("model-enable {} {}", req.model, req.enabled), {
+            let mut models = self.catalog.lock().unwrap();
+            let m = models.iter_mut().find(|m| m.id == req.model || m.name == req.model)
+                .ok_or_else(|| ApiErr::api("unknown_model", format!("no record {}", req.model)))?;
+            m.enabled = req.enabled;
+            Ok(ModelWriteResponse { model: m.clone(), changes: vec![], revision: 2 })
+        })
+    }
+    fn model_add(&self, req: ModelAddRequest) -> BoxFut<'_, ModelWriteResponse> {
+        fake!(self, format!("model-add {} engine={}", req.name, req.engine), {
+            let m = catalog_record(&req.name, &req.engine, req.store.as_deref());
+            Ok(ModelWriteResponse { model: m, changes: vec![], revision: 3 })
+        })
+    }
+    fn model_scan(&self, req: ScanRequest) -> BoxFut<'_, ScanResponse> {
+        fake!(self, format!("scan add={}", req.add), Ok(ScanResponse {
+            stores: vec!["hf-cache".into()],
+            found: self.scan_found.lock().unwrap().clone(),
+            missing: vec![],
+            added: 0,
+            revision: 1,
+        }))
+    }
+}
+
+/// A catalog record with the fields the screen reads.
+pub fn catalog_record(name: &str, engine: &str, store: Option<&str>) -> CatalogModel {
+    CatalogModel {
+        id: format!("m-{name}"),
+        name: name.into(),
+        engine: engine.into(),
+        source: Some(format!("hf:{name}")),
+        path: Some(format!("~/.cache/huggingface/{name}")),
+        store: store.map(String::from),
+        enabled: true,
+        size_bytes: Some(19_000_000_000),
+        extra: [(
+            "estimated_vram_gb".to_string(),
+            serde_json::json!(18.5),
+        )]
+        .into_iter()
+        .collect(),
+        origin: "registry".into(),
+    }
+}
+
+/// A preset summary with the given alias and link state.
+pub fn preset(alias: &str, state: &str) -> PresetSummary {
+    let (link, link_error) = match state {
+        "serving" => (Some(PresetLink {
+            workload: "vllm-engine".into(),
+            profile_env: Some(format!("~/.config/llmctl/vllm-engine.env.{alias}")),
+            found_by: "router".into(),
+            drift: vec![],
+            active: true,
+        }), None),
+        "ready" => (Some(PresetLink {
+            workload: "vllm-engine".into(),
+            profile_env: Some(format!("~/.config/llmctl/vllm-engine.env.{alias}")),
+            found_by: "router".into(),
+            drift: vec![],
+            active: false,
+        }), None),
+        "drift" => (Some(PresetLink {
+            workload: "vllm-engine".into(),
+            profile_env: Some(format!("~/.config/llmctl/vllm-engine.env.{alias}")),
+            found_by: "router".into(),
+            drift: vec![llmctl_client::catalog::EnvDrift {
+                key: "VLLM_MAX_MODEL_LEN".into(),
+                file: Some("262144".into()),
+                render: Some("131072".into()),
+            }],
+            active: false,
+        }), None),
+        other => (None, Some(format!("no vLLM workload for a preset here ({other})"))),
+    };
+    PresetSummary {
+        alias: alias.into(),
+        served_name: format!("qwen-{alias}"),
+        model_id: format!("Qwen/Qwen-{alias}"),
+        quantization: "fp8".into(),
+        tensor_parallel_size: 2,
+        max_model_len: 262144,
+        family: Some("qwen".into()),
+        param_count_b: Some(27.0),
+        source_path: format!("~/.config/llmctl/presets/{alias}.yaml"),
+        link,
+        link_error,
     }
 }
 
