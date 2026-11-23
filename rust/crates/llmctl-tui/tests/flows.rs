@@ -436,6 +436,59 @@ async fn a_drifted_preset_offers_the_sync_which_replans_and_then_admits() {
     assert_eq!(calls.iter().filter(|c| c.starts_with("admit")).count(), 1);
 }
 
+/// Review of the TUI leftovers: a sync answer that lands while another
+/// modal is open leaves that modal alone and says how to preview again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_sync_answer_never_replaces_an_open_modal() {
+    let mut f = Fake::new("workstation", workstation_status());
+    f.delay = Duration::from_millis(400);
+    f.presets.lock().unwrap().push(common::preset("qwen38-unc", "ready"));
+    *f.preset_profile.lock().unwrap() = Some(String::new());
+    let fake = Arc::new(f);
+    let mut r = runner(vec![target(fake.clone(), true)], false, T);
+    settle(&mut r, T, "hosts", |r| !r.app.hosts.is_empty()).await;
+    r.step(key('w')).unwrap();
+    settle(&mut r, T, "presets", |r| !r.app.presets.is_empty()).await;
+    r.step(code(KeyCode::Enter)).unwrap();
+    settle(&mut r, T, "drift", |r| matches!(&r.app.modal, Some(Modal::Preview { plan: Some(Err(_)), .. }))).await;
+    r.step(key('s')).unwrap();
+    r.step(key('y')).unwrap();
+    // The sync is in flight (400 ms); the user opens help meanwhile.
+    r.step(key('?')).unwrap();
+    assert!(matches!(&r.app.modal, Some(Modal::Help)), "{}", screen_text(&r));
+    settle(&mut r, T, "sync answer", |r| {
+        r.app.message.as_deref().is_some_and(|m| m.contains("previews it again"))
+    })
+    .await;
+    assert!(matches!(&r.app.modal, Some(Modal::Help)), "{}", screen_text(&r));
+    assert!(fake.calls().iter().any(|c| c == "preset-run qwen38-unc sync=true"));
+    assert!(!fake.calls().iter().any(|c| c.starts_with("admit")));
+}
+
+/// Review of the TUI leftovers: with an empty catalog there is no row to
+/// take a host from; `s` scans every host that answers, so `R` can be
+/// reached.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_catalog_can_still_be_scanned() {
+    let fake = ws();
+    fake.scan_found.lock().unwrap().push(llmctl_client::catalog::ScanFound {
+        store: "hf-cache".into(),
+        engine: "vllm".into(),
+        source: "Maya-M".into(),
+        path: "~/models/maya-m".into(),
+        record: None,
+    });
+    let mut r = runner(vec![target(fake.clone(), true)], false, T);
+    settle(&mut r, T, "hosts", |r| !r.app.hosts.is_empty()).await;
+    r.step(key('m')).unwrap();
+    settle(&mut r, T, "catalog", |r| !r.app.catalog.is_empty()).await;
+    assert!(r.app.catalog_rows().is_empty());
+    r.step(key('s')).unwrap();
+    settle(&mut r, T, "scan", |r| !r.app.scans.is_empty()).await;
+    assert!(screen_text(&r).contains("Maya-M"), "{}", screen_text(&r));
+    assert!(!r.app.catalog_rows().is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_catalog_screen_lists_scans_and_writes_behind_confirmations() {
     let fake = ws();

@@ -877,6 +877,23 @@ impl App {
                         self.message = Some(format!("{host}: scanning the stores…"));
                         vec![Request::ModelScan { host }]
                     }
+                    // No row to pick a host from (an empty catalog, no scan
+                    // yet): scan every host that answers, or `R` could
+                    // never be reached.
+                    (KeyCode::Char('s'), Picked::None) => {
+                        let live: Vec<String> = self
+                            .hosts
+                            .iter()
+                            .filter(|h| !h.is_stale())
+                            .map(|h| h.name.clone())
+                            .collect();
+                        self.message = Some(if live.is_empty() {
+                            "no host answers: nothing to scan".into()
+                        } else {
+                            format!("scanning the stores on {}…", live.join(", "))
+                        });
+                        live.into_iter().map(|host| Request::ModelScan { host }).collect()
+                    }
                     (KeyCode::Char('R'), Picked::Found { host, found, stale }) => {
                         self.confirm_model_add(&host, &found, stale)
                     }
@@ -1074,6 +1091,10 @@ impl App {
                     vec![on_yes]
                 } else if no {
                     self.message = Some(format!("{title}: not sent"));
+                    // A declined sync leaves no preview to reopen later.
+                    if matches!(on_yes, Request::PresetSync { .. }) {
+                        self.pending_preset = None;
+                    }
                     Vec::new()
                 } else {
                     self.modal = Some(Modal::Confirm { title, lines, on_yes });
@@ -1396,8 +1417,14 @@ impl App {
                             // The profile now renders the preset: reopen the
                             // preview (the sync's confirm closed it) and
                             // plan again.
+                            // Only when no other modal opened meanwhile: the
+                            // answer must not replace what the user is in.
                             if let Some((p_host, alias)) = self.pending_preset.take() {
-                                if p_host == host {
+                                if p_host == host && self.modal.is_some() {
+                                    self.message = Some(format!(
+                                        "{host}: {text}; Enter on preset {alias} previews it again"
+                                    ));
+                                } else if p_host == host {
                                     self.modal = Some(Modal::Preview {
                                         host: p_host.clone(),
                                         kind: OpKind::Run,
@@ -1415,7 +1442,12 @@ impl App {
                             self.catalog_pace.last = None;
                         }
                     }
-                    Err(e) => self.message = Some(format!("{host}: {what} refused: {e}")),
+                    Err(e) => {
+                        if what == "sync" {
+                            self.pending_preset = None;
+                        }
+                        self.message = Some(format!("{host}: {what} refused: {e}"));
+                    }
                 }
                 Vec::new()
             }
