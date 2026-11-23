@@ -1265,20 +1265,39 @@ async fn cmd_status_all(cli: &Cli, json: bool) -> Result<u8, CliError> {
 
     let mut hosts = enroll::load_hosts();
     let mut dirty = false;
-    for h in &mut hosts.hosts {
-        let client = ControlClient::connect_bridge(&h.ssh_alias);
-        // A sleeping Mac does not refuse the bridge, it lets ssh wait (and a
-        // Wi-Fi wake can follow a minute later). Bound the wait so the view
-        // shows the cached observations as STALE instead of hanging; the
-        // dropped future drops the bridge, whose ssh is killed on drop.
-        let limit = remote_status_timeout();
-        let answer = match tokio::time::timeout(limit, client.status()).await {
-            Ok(r) => r.map_err(|e| e.to_string()),
-            Err(_) => Err(format!(
-                "no answer within {} s: asleep or unreachable (LLMCTL_NEXT_STATUS_TIMEOUT_S sets the limit)",
-                limit.as_secs()
-            )),
-        };
+    // Ask every enrolled host concurrently (the TUI's bounded multi-host
+    // call, same shape): a sleeping Mac's timeout no longer holds back the
+    // hosts behind it. A sleeping Mac does not refuse the bridge, it lets
+    // ssh wait (and a Wi-Fi wake can follow a minute later); each ask is
+    // bounded by the status timeout, and the dropped future drops the
+    // bridge, whose ssh is killed on drop. Output order stays the
+    // enrollment order.
+    let limit = remote_status_timeout();
+    let tasks: Vec<tokio::task::JoinHandle<(usize, String, Result<StatusResponse, String>)>> =
+        hosts.hosts.iter().enumerate().map(|(i, h)| {
+            let alias = h.ssh_alias.clone();
+            let name = h.name.clone();
+            tokio::spawn(async move {
+                let client = ControlClient::connect_bridge(&alias);
+                let answer = match tokio::time::timeout(limit, client.status()).await {
+                    Ok(r) => r.map_err(|e| e.to_string()),
+                    Err(_) => Err(format!(
+                        "no answer within {} s: asleep or unreachable (LLMCTL_NEXT_STATUS_TIMEOUT_S sets the limit)",
+                        limit.as_secs()
+                    )),
+                };
+                (i, name, answer)
+            })
+        })
+        .collect();
+    // All asks run concurrently; collect as they finish (the total wait is
+    // the slowest one), then print in enrollment order.
+    let mut answers: Vec<(usize, String, Result<StatusResponse, String>)> = Vec::with_capacity(tasks.len());
+    for t in tasks {
+        answers.push(t.await.expect("a status task cannot panic"));
+    }
+    answers.sort_by_key(|(i, _, _)| *i);
+    for (h, (_, _, answer)) in hosts.hosts.iter_mut().zip(answers) {
         match answer {
             Ok(status) => {
                 h.last_seen = Some(chrono::Utc::now());
