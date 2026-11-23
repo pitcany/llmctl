@@ -31,6 +31,9 @@ pub struct LoadInputs<'a> {
     /// Free VRAM per card index right now; `None` = the cards could not
     /// be read, which never fits.
     pub free: Option<&'a llmctl_core::CardMib>,
+    /// What the engine reports resident on its cards right now (`None` =
+    /// it could not say, and then the fit runs).
+    pub resident: Option<&'a [String]>,
 }
 
 /// Why a load was refused before anything ran.
@@ -107,6 +110,19 @@ pub fn plan_load(
     if force {
         return Ok(plan);
     }
+    // Already resident: the load only renews its keep-alive and takes no
+    // new VRAM, while the card's free figure already excludes the copy
+    // the engine holds. Fitting it again would refuse a no-op on a full
+    // card.
+    let protocol = crate::engine_api::EngineProtocol::for_kind(&def.engine_kind);
+    let resident = inputs
+        .resident
+        .unwrap_or_default()
+        .iter()
+        .any(|m| crate::engine_api::same_model(protocol, m, model));
+    if resident {
+        return Ok(plan);
+    }
     // The need: a measured record first, else the catalog's estimate.
     let key = format!("{}|{}", def.name, model.trim());
     let cards: Vec<u32> = def.gpus.iter().map(|g| g.index).collect();
@@ -172,6 +188,33 @@ pub fn plan_load(
     Ok(plan)
 }
 
+/// The VRAM need a finished load records for the next plan. The engine's
+/// own `size_vram` (bytes) is the figure for this model; the cards'
+/// free-VRAM drop (MiB per card) has the real per-card split but also
+/// counts whatever else an on-demand engine loaded or evicted while the
+/// load ran. The drop is used only when its total is within 25 % of
+/// `size_vram`, or when the engine named no size; otherwise `size_vram`
+/// is split evenly over `cards`. `None` = nothing measured.
+pub fn measured_need(
+    drop: llmctl_core::CardMib,
+    size_vram: Option<u64>,
+    cards: &[u32],
+) -> Option<llmctl_core::CardMib> {
+    let engine_mib = size_vram.filter(|_| !cards.is_empty()).map(|b| b / 1_048_576);
+    let drop_total: u64 = drop.values().sum();
+    let drop_agrees = match engine_mib {
+        Some(e) => drop_total * 4 >= e * 3 && drop_total * 4 <= e * 5,
+        None => true,
+    };
+    if !drop.is_empty() && drop_agrees {
+        return Some(drop);
+    }
+    engine_mib.filter(|mib| *mib > 0).map(|mib| {
+        let each = mib.div_ceil(cards.len() as u64);
+        cards.iter().map(|c| (*c, each)).collect()
+    })
+}
+
 /// Enrolled workloads observed running that share one of `target`'s cards,
 /// name order: who the load would sit beside.
 fn running_neighbours(inputs: &LoadInputs<'_>, target: &WorkloadName) -> Vec<String> {
@@ -203,5 +246,31 @@ mod tests {
     #[test]
     fn headroom_is_one_gib() {
         assert_eq!(HEADROOM_MIB, 1024);
+    }
+}
+
+#[cfg(test)]
+mod need_tests {
+    use super::measured_need;
+
+    const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn the_drop_wins_only_when_it_agrees_with_the_engine() {
+        // Drop agrees with size_vram (18 GiB vs 18 GiB): the real split.
+        let drop = [(0, 9 * 1024), (1, 9 * 1024)].into_iter().collect();
+        assert_eq!(measured_need(drop, Some(18 * GIB), &[0, 1]), Some([(0, 9216), (1, 9216)].into_iter().collect()));
+        // Another model loaded meanwhile (drop 30 GiB): size_vram, even split.
+        let drop = [(0, 30 * 1024)].into_iter().collect();
+        assert_eq!(measured_need(drop, Some(18 * GIB), &[0, 1]), Some([(0, 9216), (1, 9216)].into_iter().collect()));
+        // A model evicted meanwhile (drop 2 GiB): size_vram again.
+        let drop = [(0, 2 * 1024)].into_iter().collect();
+        assert_eq!(measured_need(drop, Some(18 * GIB), &[0]), Some([(0, 18 * 1024)].into_iter().collect()));
+        // No size from the engine: the drop is all there is.
+        let drop = [(0, 5000)].into_iter().collect();
+        assert_eq!(measured_need(drop, None, &[0]), Some([(0, 5000)].into_iter().collect()));
+        // Nothing at all, or no cards: nothing measured.
+        assert_eq!(measured_need(Default::default(), None, &[0]), None);
+        assert_eq!(measured_need(Default::default(), Some(18 * GIB), &[]), None);
     }
 }

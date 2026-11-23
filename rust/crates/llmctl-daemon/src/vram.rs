@@ -59,6 +59,22 @@ pub async fn measure(engine: &dyn Engine, def: &WorkloadDefinition) -> Option<Ca
     (!out.is_empty()).then_some(out)
 }
 
+/// One writer at a time for `vram.json`: the readiness measurement, the
+/// `vram record` endpoint and a vendor load's measured need all
+/// read-modify-write the same store, and an unserialised pair can drop a
+/// record.
+static STORE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Insert one record under the store lock (read, insert, atomic write).
+pub async fn insert(path: &Path, key: String, record: VramRecord) -> Result<(), String> {
+    let _held = STORE_LOCK.lock().await;
+    let mut store = load(path).await;
+    store.insert(key, record);
+    crate::engine::write_json_atomic(path, &store)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Measure a serving workload and remember it. Best effort: returns what
 /// was recorded, or `None` when nothing could be measured or written.
 pub async fn remember(
@@ -73,9 +89,6 @@ pub async fn remember(
         per_card,
         measured_at: Utc::now(),
     };
-    let path = store_path(data_dir);
-    let mut store = load(&path).await;
-    store.insert(key(def), record.clone());
-    crate::engine::write_json_atomic(&path, &store).await.ok()?;
+    insert(&store_path(data_dir), key(def), record.clone()).await.ok()?;
     Some(record)
 }

@@ -1469,6 +1469,18 @@ async fn a_failed_load_rolls_back_cleanly_and_the_engine_gets_the_source_name() 
     .unwrap();
     assert!(vram.get("svc|qwen3-coder:30b").is_some(), "{vram}");
     assert!(vram.get("svc|coder").is_none(), "{vram}");
+
+    // Resident already, on a now-full card: the reload only renews the
+    // keep-alive, so the fit is skipped instead of refusing a no-op. (The
+    // fake engine's loaded list mirrors what the stand-in Ollama holds.)
+    set_loaded(&d, "svc", &["qwen3-coder:30b"]);
+    std::fs::write(d.data_dir().join("gpu_free.json"), r#"{"0": 2000}"#).unwrap();
+    let out = cli(&d.socket, &["load", "svc", "coder", "--wait"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // A model not resident on that full card is still refused.
+    set_loaded(&d, "svc", &[]);
+    let out = cli(&d.socket, &["load", "svc", "coder", "--wait"]);
+    assert_eq!(out.status.code(), Some(4), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 /// Set what a fake vendor service holds in memory (`world.json`).

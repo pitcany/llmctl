@@ -369,7 +369,7 @@ impl Unloaded {
 
 /// True when `listed` (a name from the engine's loaded list) is `model`.
 /// Ollama lists `name:latest` for a model asked for as `name`.
-fn same_model(protocol: EngineProtocol, listed: &str, model: &str) -> bool {
+pub(crate) fn same_model(protocol: EngineProtocol, listed: &str, model: &str) -> bool {
     listed == model
         || (protocol == EngineProtocol::Ollama
             && (listed.strip_suffix(":latest") == Some(model)
@@ -506,6 +506,7 @@ pub async fn load(
         return Err(LoadError::ServiceIdentity(model.to_string()));
     }
     let body = json!({"model": model, "keep_alive": keep_alive_secs});
+    let sent = tokio::time::Instant::now();
     match probe_http::request(port, Method::POST, "/api/generate", Some(&body), timeout).await {
         Ok((status, _)) if (200..300).contains(&status) => {}
         Ok((status, body)) => {
@@ -514,11 +515,23 @@ pub async fn load(
                 String::from_utf8_lossy(&body).chars().take(200).collect::<String>()
             )))
         }
+        // The request timeout and a refused connection both come back as
+        // Err(()); the elapsed time tells them apart. After a timeout the
+        // engine may still be loading — the rollback's unload covers that.
+        Err(()) if sent.elapsed() >= timeout => {
+            return Err(LoadError::Failed(format!(
+                "ollama did not answer the load within {timeout:?} (it may still be loading)"
+            )))
+        }
         Err(()) => return Err(LoadError::Failed("ollama unreachable".into())),
     }
     let deadline = tokio::time::Instant::now() + confirm_within;
     loop {
-        match get_json(port, "/api/ps", timeout).await {
+        // Each `/api/ps` read is bounded by what is left of the confirm
+        // window (at least 1 s), so the window really is `confirm_within`.
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let per_call = left.max(Duration::from_secs(1)).min(timeout);
+        match get_json(port, "/api/ps", per_call).await {
             Ok(ps) => {
                 let names = ollama_names(&ps);
                 if names.iter().any(|m| same_model(protocol, m, model)) {
@@ -689,6 +702,63 @@ mod tests {
             load(EngineProtocol::Ollama, dead, "qwen3-coder:30b", -1, T, T).await,
             Err(LoadError::Failed(_))
         ));
+    }
+
+    /// Review of the load verb: a load the engine never answers says so
+    /// (not "unreachable"), and a hanging `/api/ps` cannot stretch the
+    /// confirm window to the per-request timeout.
+    #[tokio::test]
+    async fn a_silent_load_says_timed_out_and_the_confirm_window_holds() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Accepts, reads, never answers.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let silent_port = silent.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let Ok((sock, _)) = silent.accept().await else { return };
+                held.push(sock);
+            }
+        });
+        let short = Duration::from_millis(300);
+        match load(EngineProtocol::Ollama, silent_port, "qwen3-coder:30b", -1, short, T).await {
+            Err(LoadError::Failed(m)) => assert!(m.contains("did not answer"), "{m}"),
+            other => panic!("expected a timeout failure, got {other:?}"),
+        }
+        // Answers the load, then hangs on every `/api/ps`.
+        let half = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let half_port = half.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = half.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if String::from_utf8_lossy(&buf[..n]).starts_with("POST /api/generate") {
+                        let text = "{\"done\":true}";
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                            text.len()
+                        );
+                        let _ = sock.write_all(head.as_bytes()).await;
+                        let _ = sock.write_all(text.as_bytes()).await;
+                    }
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                });
+            }
+        });
+        let started = std::time::Instant::now();
+        let got = load(
+            EngineProtocol::Ollama,
+            half_port,
+            "qwen3-coder:30b",
+            -1,
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(got, Err(LoadError::NotLoaded { .. })), "{got:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     }
 
     #[tokio::test]

@@ -644,9 +644,8 @@ impl OpManager {
         model: &str,
         per_card: llmctl_core::CardMib,
     ) -> Result<(), String> {
-        let path = crate::vram::store_path(data_dir);
-        let mut store = crate::vram::load(&path).await;
-        store.insert(
+        crate::vram::insert(
+            &crate::vram::store_path(data_dir),
             format!("{workload}|{model}"),
             crate::vram::VramRecord {
                 workload: workload.to_string(),
@@ -654,8 +653,8 @@ impl OpManager {
                 per_card,
                 measured_at: Utc::now(),
             },
-        );
-        crate::engine::write_json_atomic(&path, &store).await.map_err(|e| e.to_string())
+        )
+        .await
     }
 
     /// One `Acquire` step (M4c item 1): run the download, and while it
@@ -1074,12 +1073,14 @@ impl OpManager {
                     }
                 };
                 let free = self.engine.gpu_free_mib(&def.gpus).await;
+                let resident = self.engine.loaded_models(def).await;
                 let inputs = crate::vendor_load::LoadInputs {
                     inventory: &inv,
                     observations: &observations,
                     catalog: &catalog,
                     vram: &vram_store,
                     free: free.as_ref(),
+                    resident: resident.as_deref(),
                 };
                 crate::vendor_load::plan_load(&inputs, &params.workload, &model, keep_alive_secs, force)
                     .map_err(|e| match e {
@@ -1464,9 +1465,8 @@ impl OpManager {
                 .await
                 {
                     Ok(size_vram) => {
-                        // The measured need for the next plan: the cards'
-                        // free-VRAM drop, else the engine's own size_vram
-                        // split evenly (M4c fit rule: measured, never guessed).
+                        // The measured need for the next plan
+                        // (`vendor_load::measured_need`).
                         let mut report = format!("{model} resident on {workload}");
                         let after =
                             if gpus.is_empty() { None } else { self.engine.gpu_free_mib(&gpus).await };
@@ -1482,14 +1482,8 @@ impl OpManager {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        let need = if !drop.is_empty() {
-                            Some(drop)
-                        } else {
-                            size_vram.filter(|_| !gpus.is_empty()).map(|bytes| {
-                                let each = ((bytes / 1_048_576) as u64).div_ceil(gpus.len() as u64);
-                                gpus.iter().map(|g| (g.index, each)).collect()
-                            })
-                        };
+                        let cards: Vec<u32> = gpus.iter().map(|g| g.index).collect();
+                        let need = crate::vendor_load::measured_need(drop, size_vram, &cards);
                         match (&self.own_ctx, need) {
                             (Some(ctx), Some(need)) => {
                                 match Self::record_model_need(

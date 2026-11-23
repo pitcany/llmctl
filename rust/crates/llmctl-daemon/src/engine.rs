@@ -848,7 +848,11 @@ pub(crate) async fn write_json_atomic<T: Serialize>(
     path: &std::path::Path,
     value: &T,
 ) -> Result<(), EngineError> {
-    let tmp = path.with_extension("json.tmp");
+    // A tmp name per write: two writers of one file must never share (and
+    // interleave into) one tmp file.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.tmp.{}.{seq}", std::process::id()));
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| EngineError::Io(format!("serialize {}: {e}", path.display())))?;
     let mut f = tokio::fs::File::create(&tmp)

@@ -692,12 +692,14 @@ async fn admit_load(
         .map_err(|e| crate::ops::OpsError::Engine(format!("catalog could not be read: {e}")))?;
     let vram = crate::vram::load(&crate::vram::store_path(&state.paths.data_dir)).await;
     let free = state.ops.engine().gpu_free_mib(&def.gpus).await;
+    let resident = state.ops.engine().loaded_models(def).await;
     let inputs = crate::vendor_load::LoadInputs {
         inventory: &inv,
         observations: &observed,
         catalog: &catalog,
         vram: &vram,
         free: free.as_ref(),
+        resident: resident.as_deref(),
     };
     let provisional = crate::vendor_load::plan_load(
         &inputs,
