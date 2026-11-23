@@ -1273,11 +1273,12 @@ async fn cmd_status_all(cli: &Cli, json: bool) -> Result<u8, CliError> {
     // bridge, whose ssh is killed on drop. Output order stays the
     // enrollment order.
     let limit = remote_status_timeout();
-    let tasks: Vec<tokio::task::JoinHandle<(usize, String, Result<StatusResponse, String>)>> =
+    // The index stays outside the task: a task that panics becomes that
+    // host's error, never the whole command's (and every cache write).
+    let tasks: Vec<(usize, tokio::task::JoinHandle<Result<StatusResponse, String>>)> =
         hosts.hosts.iter().enumerate().map(|(i, h)| {
             let alias = h.ssh_alias.clone();
-            let name = h.name.clone();
-            tokio::spawn(async move {
+            (i, tokio::spawn(async move {
                 let client = ControlClient::connect_bridge(&alias);
                 let answer = match tokio::time::timeout(limit, client.status()).await {
                     Ok(r) => r.map_err(|e| e.to_string()),
@@ -1286,18 +1287,21 @@ async fn cmd_status_all(cli: &Cli, json: bool) -> Result<u8, CliError> {
                         limit.as_secs()
                     )),
                 };
-                (i, name, answer)
-            })
+                answer
+            }))
         })
         .collect();
     // All asks run concurrently; collect as they finish (the total wait is
     // the slowest one), then print in enrollment order.
-    let mut answers: Vec<(usize, String, Result<StatusResponse, String>)> = Vec::with_capacity(tasks.len());
-    for t in tasks {
-        answers.push(t.await.expect("a status task cannot panic"));
+    let mut answers: Vec<(usize, Result<StatusResponse, String>)> = Vec::with_capacity(tasks.len());
+    for (i, t) in tasks {
+        let answer = t
+            .await
+            .unwrap_or_else(|e| Err(format!("the status ask for this host failed: {e}")));
+        answers.push((i, answer));
     }
-    answers.sort_by_key(|(i, _, _)| *i);
-    for (h, (_, _, answer)) in hosts.hosts.iter_mut().zip(answers) {
+    answers.sort_by_key(|(i, _)| *i);
+    for (h, (_, answer)) in hosts.hosts.iter_mut().zip(answers) {
         match answer {
             Ok(status) => {
                 h.last_seen = Some(chrono::Utc::now());
