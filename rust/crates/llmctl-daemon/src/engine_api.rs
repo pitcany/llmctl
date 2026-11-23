@@ -472,6 +472,81 @@ pub(crate) fn lms_binary() -> std::path::PathBuf {
     "lms".into()
 }
 
+/// Why a preload did not happen (M5c item 4).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LoadError {
+    #[error("{0} has no engine-level load; a request loads it, or use the engine's own tool")]
+    Unsupported(&'static str),
+    #[error("refusing to load {0:?}: name one model, not the service")]
+    ServiceIdentity(String),
+    #[error("load request failed: {0}")]
+    Failed(String),
+    #[error("{model} is still not loaded {waited:?} after the load request")]
+    NotLoaded { model: String, waited: Duration },
+}
+
+/// Ask the engine to load `model` and keep it resident, then confirm through
+/// the engine's own loaded list (Ollama today: a load-only
+/// `POST /api/generate` with `keep_alive`, per the qwen3coder30b-start
+/// script). Loading a model that is already loaded succeeds (the end state
+/// is what was asked for). Returns the model's `size_vram` in bytes when
+/// the engine reports one (Ollama's `/api/ps`), for the VRAM record.
+pub async fn load(
+    protocol: EngineProtocol,
+    port: u16,
+    model: &str,
+    keep_alive_secs: i64,
+    timeout: Duration,
+    confirm_within: Duration,
+) -> Result<Option<u64>, LoadError> {
+    if protocol != EngineProtocol::Ollama {
+        return Err(LoadError::Unsupported(protocol.name()));
+    }
+    if model.is_empty() || Some(model) == protocol.service_identity() {
+        return Err(LoadError::ServiceIdentity(model.to_string()));
+    }
+    let body = json!({"model": model, "keep_alive": keep_alive_secs});
+    match probe_http::request(port, Method::POST, "/api/generate", Some(&body), timeout).await {
+        Ok((status, _)) if (200..300).contains(&status) => {}
+        Ok((status, body)) => {
+            return Err(LoadError::Failed(format!(
+                "ollama answered {status}: {}",
+                String::from_utf8_lossy(&body).chars().take(200).collect::<String>()
+            )))
+        }
+        Err(()) => return Err(LoadError::Failed("ollama unreachable".into())),
+    }
+    let deadline = tokio::time::Instant::now() + confirm_within;
+    loop {
+        match get_json(port, "/api/ps", timeout).await {
+            Ok(ps) => {
+                let names = ollama_names(&ps);
+                if names.iter().any(|m| same_model(protocol, m, model)) {
+                    let vram = ps
+                        .get("models")
+                        .and_then(Value::as_array)
+                        .and_then(|ms| {
+                            ms.iter().find(|m| {
+                                m.get("name")
+                                    .or_else(|| m.get("model"))
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|n| same_model(protocol, n, model))
+                            })
+                        })
+                        .and_then(|m| m.get("size_vram"))
+                        .and_then(Value::as_u64);
+                    return Ok(vram.filter(|v| *v > 0));
+                }
+            }
+            Err(_) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(LoadError::NotLoaded { model: model.to_string(), waited: confirm_within });
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 async fn lms_unload(model: &str, timeout: Duration) -> Result<(), UnloadError> {
     // Always an explicit identifier: without one `lms unload` prompts.
     let mut cmd = tokio::process::Command::new(lms_binary());
@@ -524,8 +599,19 @@ mod tests {
                 let line = req.lines().next().unwrap_or("").to_string();
                 let key: String = line.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
                 let body = if key == "POST /api/generate" {
+                    let model = req
+                        .split("\"model\":\"")
+                        .nth(1)
+                        .and_then(|r| r.split('"').next())
+                        .unwrap_or("")
+                        .to_string();
                     if req.contains("\"keep_alive\":0") {
                         l2.lock().unwrap().clear();
+                    } else if !model.is_empty() {
+                        let mut ps = l2.lock().unwrap();
+                        if !ps.iter().any(|m| *m == model) {
+                            ps.push(model);
+                        }
                     }
                     Some(json!({"done": true}))
                 } else if key == "GET /api/ps" {
@@ -533,7 +619,7 @@ mod tests {
                         .lock()
                         .unwrap()
                         .iter()
-                        .map(|n| json!({"name": n}))
+                        .map(|n| json!({"name": n, "size_vram": 19_000_000_000u64}))
                         .collect();
                     Some(json!({ "models": names }))
                 } else {
@@ -564,6 +650,45 @@ mod tests {
             assert_eq!(EngineProtocol::for_kind(&k), EngineProtocol::OpenAi);
         }
         assert!(!EngineProtocol::OpenAi.supports_unload());
+    }
+
+    /// The vendor `load` (M5c item 4): Ollama only, confirmed through
+    /// `/api/ps`, `size_vram` reported for the VRAM record.
+    #[tokio::test]
+    async fn ollama_loads_one_model_and_confirms_it_resident() {
+        let (port, loaded) = fake(vec![
+            ("GET /api/version", json!({"version": "0.33.1"})),
+            ("GET /api/tags", json!({"models": [{"name": "qwen3-coder:30b"}]})),
+        ])
+        .await;
+        // Only Ollama; the service identity is refused; a name resolves.
+        assert_eq!(
+            load(EngineProtocol::LmStudio, port, "qwen3-coder:30b", -1, T, T).await,
+            Err(LoadError::Unsupported("lmstudio"))
+        );
+        assert_eq!(
+            load(EngineProtocol::Ollama, port, "ollama", -1, T, T).await,
+            Err(LoadError::ServiceIdentity("ollama".into()))
+        );
+        // Loads, confirms, and reports the engine's own size_vram.
+        assert_eq!(
+            load(EngineProtocol::Ollama, port, "qwen3-coder:30b", -1, T, T).await,
+            Ok(Some(19_000_000_000))
+        );
+        assert_eq!(loaded.lock().unwrap().last().unwrap(), "qwen3-coder:30b");
+        // Already loaded: the end state holds; still Ok.
+        assert_eq!(
+            load(EngineProtocol::Ollama, port, "qwen3-coder:30b", -1, T, T).await,
+            Ok(Some(19_000_000_000))
+        );
+        // A service that dies: the request fails honestly.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead = free.local_addr().unwrap().port();
+        drop(free);
+        assert!(matches!(
+            load(EngineProtocol::Ollama, dead, "qwen3-coder:30b", -1, T, T).await,
+            Err(LoadError::Failed(_))
+        ));
     }
 
     #[tokio::test]

@@ -54,6 +54,7 @@ pub fn is_gpu_operation(kind: OpKind, def: &WorkloadDefinition) -> bool {
                 | OpKind::Restart
                 | OpKind::Upgrade
                 | OpKind::Unload
+                | OpKind::Load
                 | OpKind::LaneSwap
                 | OpKind::LaneWrite
                 | OpKind::RouterModel

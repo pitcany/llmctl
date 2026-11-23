@@ -133,6 +133,25 @@ enum Command {
         #[arg(long)]
         key: Option<String>,
     },
+    /// Load one model onto a running vendor service (Ollama) and keep it
+    /// resident; the model must be in this host's catalog and the VRAM
+    /// must fit (a measured need or the catalog's estimate against the
+    /// free cards; --force skips the fit once and records the measured
+    /// need). The mirror of `unload`.
+    Load {
+        name: String,
+        model: String,
+        /// How long the engine may keep the model resident, seconds
+        /// (-1 = until unloaded; 0 is refused — that is `unload`).
+        #[arg(long, default_value_t = -1, allow_negative_numbers = true)]
+        keep_alive: i64,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long)]
+        key: Option<String>,
+    },
     /// What a workload's engine reports: readiness, servable and loaded
     /// models.
     Engine {
@@ -708,6 +727,7 @@ fn exit_code_for_client_error(e: &ClientError) -> u8 {
             llmctl_client::catalog::codes::PRESET_REFUSED
             | llmctl_client::catalog::codes::PRESET_DRIFT
             | llmctl_client::catalog::codes::CATALOG_REFUSED => 4,
+            codes::LOAD_REFUSED => 4,
             codes::INVALID_REQUEST | codes::PROTOCOL_MISMATCH => 6,
             codes::STALE_PLAN
             | codes::OVERLAPPING_OPERATION
@@ -892,6 +912,14 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             wait,
             key,
         } => cmd_unload(cli, &name, &model, wait, key).await,
+        Command::Load {
+            name,
+            model,
+            keep_alive,
+            force,
+            wait,
+            key,
+        } => cmd_load(cli, &name, &model, keep_alive, force, wait, key).await,
         Command::Engine { name, json } => cmd_engine(cli, &name, json).await,
         Command::Restart {
             name,
@@ -2684,6 +2712,76 @@ async fn cmd_lanes(cli: &Cli, cmd: LanesCmd) -> Result<u8, CliError> {
     watch_and_report(&client, &op.id, DEFAULT_WATCH).await
 }
 
+/// `load <workload> <model>` (M5c item 4): the mirror of `unload`. The
+/// agent checks the catalog and the VRAM fit and re-plans under its
+/// admission lock; a refusal (exit 4, `load_refused`) names the way out.
+#[allow(clippy::too_many_arguments)]
+async fn cmd_load(
+    cli: &Cli,
+    name: &str,
+    model: &str,
+    keep_alive: i64,
+    force: bool,
+    wait: bool,
+    key: Option<String>,
+) -> Result<u8, CliError> {
+    let client = connect(cli)?;
+    ensure_protocol(&client).await?;
+    let idempotency_key = key.unwrap_or_else(|| {
+        // Model tags carry ':' and '/'; keys allow [A-Za-z0-9._-] only.
+        let safe: String = model
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+            .take(64)
+            .collect();
+        format!(
+            "load-{name}-{safe}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or_default()
+        )
+    });
+    let req = llmctl_client::wire::LoadRequest {
+        protocol: PROTOCOL_VERSION,
+        idempotency_key: idempotency_key.clone(),
+        workload: name.to_string(),
+        model: model.to_string(),
+        keep_alive_secs: keep_alive,
+        force,
+    };
+    let admit = match client.load(&req).await {
+        Ok(a) => a,
+        // Lost-ACK rule, as for run/stop: resolve by key before retrying.
+        Err(e @ (ClientError::Disconnected(_) | ClientError::Unreachable { .. })) => {
+            eprintln!("transport error during admit ({e}); resolving by key {idempotency_key}");
+            let retry = connect(cli)?;
+            match retry.operation_by_key(&idempotency_key).await {
+                Ok(op) => llmctl_client::wire::AdmitResponse {
+                    operation: op,
+                    replayed: true,
+                },
+                Err(ClientError::Api { code, .. }) if code == codes::UNKNOWN_OPERATION => {
+                    retry.load(&req).await?
+                }
+                Err(e2) => return Err(CliError::Client(e2)),
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let op = admit.operation;
+    if admit.replayed {
+        println!("replaying existing operation {} (same idempotency key)", op.id);
+    } else {
+        println!("admitted operation {} ({})", op.id, op.idempotency_key);
+    }
+    if !wait {
+        println!("progress: llmctl-next op {} --watch", op.id);
+        return Ok(0);
+    }
+    watch_and_report(&client, &op.id, DEFAULT_WATCH).await
+}
+
 async fn cmd_unload(
     cli: &Cli,
     name: &str,
@@ -2764,6 +2862,9 @@ async fn cmd_engine(cli: &Cli, name: &str, json: bool) -> Result<u8, CliError> {
     }
     if r.supports_unload {
         println!("  unload:   llmctl-next unload {} <model>", r.workload);
+    }
+    if r.supports_load {
+        println!("  load:     llmctl-next load {} <model>", r.workload);
     }
     Ok(if r.state == "ready" { 0 } else { 1 })
 }

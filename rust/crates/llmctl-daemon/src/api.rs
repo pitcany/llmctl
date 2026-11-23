@@ -64,6 +64,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/workloads/{name}/forget", post(workload_forget))
         .route("/v1/workloads/{name}/engine", get(workload_engine))
         .route("/v1/unloads", post(admit_unload))
+        .route("/v1/loads", post(admit_load))
         .route("/v1/lanes/import", post(lanes_import))
         .route("/v1/lanes/edit", post(lanes_edit))
         .route("/v1/lane-swaps", post(lanes_swap))
@@ -663,7 +664,83 @@ async fn workload_engine(
             .collect(),
         loaded: ans.loaded,
         supports_unload: def.engine_kind.has_engine_unload(),
+        supports_load: def.engine_kind.has_engine_load(),
     }))
+}
+
+/// Engine-level load of one model onto a running vendor service (M5c item
+/// 4): a provisional plan (catalog + fit checked against live state), then
+/// the ordinary admission, which re-plans under its lock.
+async fn admit_load(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<llmctl_client::wire::LoadRequest>,
+) -> Result<Response, ApiError> {
+    let name = llmctl_core::WorkloadName::new(&req.workload)
+        .map_err(|e| crate::ops::OpsError::Invalid(e.to_string()))?;
+    let inv = state.ops.inventory().await;
+    let observed = state
+        .ops
+        .engine()
+        .observe(&inv)
+        .await
+        .map_err(|e| crate::ops::OpsError::Engine(e.to_string()))?;
+    let def = inv
+        .workload(&name)
+        .ok_or_else(|| crate::ops::OpsError::UnknownWorkload(req.workload.clone()))?;
+    let catalog = crate::catalog::load(&state)
+        .await
+        .map_err(|e| crate::ops::OpsError::Engine(format!("catalog could not be read: {e}")))?;
+    let vram = crate::vram::load(&crate::vram::store_path(&state.paths.data_dir)).await;
+    let free = state.ops.engine().gpu_free_mib(&def.gpus).await;
+    let inputs = crate::vendor_load::LoadInputs {
+        inventory: &inv,
+        observations: &observed,
+        catalog: &catalog,
+        vram: &vram,
+        free: free.as_ref(),
+    };
+    let provisional = crate::vendor_load::plan_load(
+        &inputs,
+        &req.workload,
+        &req.model,
+        req.keep_alive_secs,
+        req.force,
+    )
+    .map_err(|e| match e {
+        crate::vendor_load::LoadPlanError::Core(c) => crate::ops::plan_error(c),
+        crate::vendor_load::LoadPlanError::Refused(m) => crate::ops::OpsError::LoadRefused(m),
+    })?;
+    let outcome = state
+        .ops
+        .admit(crate::ops::AdmitParams {
+            protocol: req.protocol,
+            idempotency_key: req.idempotency_key,
+            kind: llmctl_core::OpKind::Load,
+            workload: req.workload,
+            expected_revision: None,
+            expected_stop_targets: None,
+            force: false,
+            profile: None,
+            request_payload: Some(serde_json::json!({
+                "model": req.model,
+                "keep_alive_secs": req.keep_alive_secs,
+                "force": req.force
+            })),
+            plan_override: Some(provisional),
+        })
+        .await?;
+    let (row, replayed, status) = match outcome {
+        AdmitOutcome::Admitted(row) => (row, false, StatusCode::ACCEPTED),
+        AdmitOutcome::Replayed(row) => (row, true, StatusCode::OK),
+    };
+    Ok((
+        status,
+        Json(AdmitResponse {
+            operation: operation_view(&row),
+            replayed,
+        }),
+    )
+        .into_response())
 }
 
 async fn lanes_import(

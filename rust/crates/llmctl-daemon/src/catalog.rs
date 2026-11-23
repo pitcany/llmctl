@@ -64,8 +64,14 @@ pub fn store_path(state: &AppState) -> PathBuf {
 }
 
 pub async fn load(state: &AppState) -> Result<CatalogStore, CatalogError> {
-    let path = store_path(state);
-    match tokio::fs::read(&path).await {
+    load_at(&store_path(state)).await
+}
+
+/// The catalog store at a path: the agent's own (`load`) or a data dir
+/// the operation manager reaches without an `AppState` (the `load` verb's
+/// re-plan under the admission lock).
+pub async fn load_at(path: &Path) -> Result<CatalogStore, CatalogError> {
+    match tokio::fs::read(path).await {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|e| CatalogError::Io(format!("{}: {e}", path.display()))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CatalogStore::default()),

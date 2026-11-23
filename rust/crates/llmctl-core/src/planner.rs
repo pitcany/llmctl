@@ -625,6 +625,93 @@ pub fn plan_unload(
     })
 }
 
+/// Build a load plan (M5c item 4): one engine-level load of `model` onto a
+/// running vendor service, the mirror of [`plan_unload`]. No intent change
+/// (the service stays up). A failed load runs one unload rollback so a
+/// partial load gives its VRAM back. The catalog check and the VRAM fit are
+/// the daemon's (they need the catalog store and free-VRAM reads); this
+/// builder refuses the same structural cases as the unload: an engine
+/// without a load, the service identity, a target not observed running.
+pub fn plan_load(
+    inventory: &crate::inventory::HostInventory,
+    observations: &[Observation],
+    target: &WorkloadName,
+    model: &str,
+    keep_alive_secs: i64,
+) -> CoreResult<Plan> {
+    let def = inventory
+        .workload(target)
+        .ok_or_else(|| CoreError::UnknownWorkload(target.to_string()))?;
+    if !def.authority.supports_lifecycle() {
+        return Err(CoreError::InvalidConfig {
+            workload: target.to_string(),
+            reason: "control authority is observe-only; lifecycle ownership not proven".into(),
+        });
+    }
+    if !def.engine_kind.has_engine_load() {
+        return Err(CoreError::InvalidConfig {
+            workload: target.to_string(),
+            reason: format!(
+                "engine kind {} has no engine-level load; a request loads it, or use the engine's own tool",
+                def.engine_kind
+            ),
+        });
+    }
+    let model = model.trim();
+    if model.is_empty() || model == "ollama" || model == "lmstudio" {
+        return Err(CoreError::InvalidConfig {
+            workload: target.to_string(),
+            reason: format!("load needs one model name, not {model:?}"),
+        });
+    }
+    if keep_alive_secs == 0 {
+        return Err(CoreError::InvalidConfig {
+            workload: target.to_string(),
+            reason: "keep_alive 0 unloads immediately; that is what `unload` is for".into(),
+        });
+    }
+    let state = observations
+        .iter()
+        .find(|o| &o.workload == target)
+        .map(|o| o.process);
+    if state != Some(ProcessState::Running) {
+        return Err(CoreError::NotRunning {
+            workload: target.to_string(),
+            state: match state {
+                Some(ProcessState::Stopped) => "stopped",
+                Some(ProcessState::Unknown) => "state unknown",
+                Some(ProcessState::Running) | None => "not observed",
+            }
+            .into(),
+        });
+    }
+    Ok(Plan {
+        id: OperationId::generate(),
+        kind: OpKind::Load,
+        target: target.clone(),
+        revision: inventory.revision,
+        expected_model: def.model.clone(),
+        affected_gpus: def.gpus.clone(),
+        steps: vec![PlanStep::LoadModel {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+            model: model.to_string(),
+            keep_alive_secs,
+            timeout_secs: LOAD_TIMEOUT_SECS,
+        }],
+        rollback: vec![PlanStep::UnloadModel {
+            workload: target.clone(),
+            unit: def.unit.clone(),
+            model: model.to_string(),
+        }],
+    })
+}
+
+/// How long the one load step may take: a cold Ollama load of a 30 B model
+/// reads tens of GB from disk (the qwen3coder30b-start script waited 600 s;
+/// this covers a slower disk and the confirm loop).
+pub const LOAD_TIMEOUT_SECS: u64 = 900;
+
 /// Build an upgrade (promote) plan (plan D.5): stop, swap the owned
 /// definition to `next`, start, await readiness, verify the served model,
 /// then verify the environment itself reports the target versions. Failure

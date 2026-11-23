@@ -20,6 +20,10 @@ pub enum OpKind {
     /// Engine-level unload of one model from a vendor service (Ollama, LM
     /// Studio): the process keeps running (M4b step 1).
     Unload,
+    /// Engine-level load of one model onto a running vendor service
+    /// (Ollama): the process keeps running (M5c item 4, the mirror of
+    /// `Unload` — what the router's `qwen3coder30b` handover needs).
+    Load,
     /// Write a llama-swap config rendered from lane records and confirm
     /// llama-swap reloaded it (M4b step 4).
     LaneWrite,
@@ -45,6 +49,7 @@ impl std::fmt::Display for OpKind {
             OpKind::Restart => "restart",
             OpKind::Upgrade => "upgrade",
             OpKind::Unload => "unload",
+            OpKind::Load => "load",
             OpKind::LaneWrite => "lane_write",
             OpKind::LaneSwap => "lane_swap",
             OpKind::Acquire => "acquire",
@@ -116,6 +121,18 @@ pub enum PlanStep {
         workload: WorkloadName,
         unit: UnitName,
         model: String,
+    },
+    /// External: ask the engine to load one model and confirm through its
+    /// loaded list (vendor services; Ollama today, M5c item 4). The service
+    /// keeps running; `keep_alive_secs` is how long the engine may keep it
+    /// resident (-1 = until unloaded). A failed load runs the plan's
+    /// unload rollback so a partial load frees its VRAM.
+    LoadModel {
+        workload: WorkloadName,
+        unit: UnitName,
+        model: String,
+        keep_alive_secs: i64,
+        timeout_secs: u64,
     },
     /// External: make `source`'s bytes the unit's `EnvironmentFile` at
     /// `path` (a profile switch, M4c) and re-pin the workload to it: the
@@ -267,6 +284,7 @@ impl PlanStep {
             | PlanStep::ApplyDefinition { workload, .. }
             | PlanStep::VerifyVersion { workload, .. }
             | PlanStep::UnloadModel { workload, .. }
+            | PlanStep::LoadModel { workload, .. }
             | PlanStep::ApplyEnvFile { workload, .. }
             | PlanStep::LoadLane { workload, .. }
             | PlanStep::UnloadLane { workload, .. }
@@ -318,6 +336,9 @@ impl PlanStep {
             PlanStep::UnloadModel {
                 workload, model, ..
             } => format!("unload {model} from {workload}"),
+            PlanStep::LoadModel { workload, model, .. } => {
+                format!("load {model} onto {workload}")
+            }
             PlanStep::ApplyEnvFile {
                 workload,
                 source,

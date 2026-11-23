@@ -94,6 +94,8 @@ pub enum OpsError {
     InvalidState(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
+    #[error("load refused: {0}")]
+    LoadRefused(String),
     #[error(transparent)]
     Db(#[from] crate::db::DbError),
     #[error("engine error: {0}")]
@@ -143,6 +145,7 @@ impl OpsError {
             OpsError::UnknownOperation(_) => (llmctl_client::wire::codes::UNKNOWN_OPERATION, 404),
             OpsError::InvalidState(_) => (llmctl_client::wire::codes::INVALID_STATE, 409),
             OpsError::Unsupported(_) => (llmctl_client::wire::codes::UNSUPPORTED, 501),
+            OpsError::LoadRefused(_) => (llmctl_client::wire::codes::LOAD_REFUSED, 409),
             OpsError::Db(_) | OpsError::Engine(_) => {
                 (llmctl_client::wire::codes::DAEMON_ERROR, 500)
             }
@@ -633,6 +636,28 @@ impl OpManager {
         Some((decision, names, units))
     }
 
+    /// Record one model's measured VRAM need after a vendor `load` (M5c
+    /// item 4), keyed like any other record (`workload|model`).
+    async fn record_model_need(
+        data_dir: &std::path::Path,
+        workload: &WorkloadName,
+        model: &str,
+        per_card: llmctl_core::CardMib,
+    ) -> Result<(), String> {
+        let path = crate::vram::store_path(data_dir);
+        let mut store = crate::vram::load(&path).await;
+        store.insert(
+            format!("{workload}|{model}"),
+            crate::vram::VramRecord {
+                workload: workload.to_string(),
+                model: model.to_string(),
+                per_card,
+                measured_at: Utc::now(),
+            },
+        );
+        crate::engine::write_json_atomic(&path, &store).await.map_err(|e| e.to_string())
+    }
+
     /// One `Acquire` step (M4c item 1): run the download, and while it
     /// runs report how much has landed, honour a cancel, stop at the
     /// timeout, and stop if the disk gets down to half the store's reserve.
@@ -816,6 +841,11 @@ impl OpManager {
             OpKind::Unload => {
                 return Err(OpsError::Unsupported(
                     "unload plans name a model; use `unload <workload> <model>`".into(),
+                ))
+            }
+            OpKind::Load => {
+                return Err(OpsError::Unsupported(
+                    "load plans name a model; use `load <workload> <model>`".into(),
                 ))
             }
             OpKind::LaneWrite => {
@@ -1011,9 +1041,56 @@ impl OpManager {
                 llmctl_core::plan_unload(&inv, &observations, &name, &model)
                     .map_err(plan_error)?
             }
+            // Re-planned the same way under the admission lock (M5c item 4):
+            // a service that stopped, a catalog row that went away or a
+            // fuller card since the caller planned refuses here, before
+            // anything is journaled.
+            (OpKind::Load, Some(_)) => {
+                let payload = params.request_payload.as_ref().ok_or_else(|| {
+                    OpsError::Invalid("load admission needs its request payload".into())
+                })?;
+                let model = payload
+                    .get("model")
+                    .and_then(|m| m.as_str())
+                    .ok_or_else(|| OpsError::Invalid("load admission needs its model".into()))?
+                    .to_string();
+                let keep_alive_secs =
+                    payload.get("keep_alive_secs").and_then(|m| m.as_i64()).unwrap_or(-1);
+                let force = payload.get("force").and_then(|m| m.as_bool()).unwrap_or(false);
+                let (catalog, vram_store) = match &self.own_ctx {
+                    Some(ctx) => (
+                        crate::catalog::load_at(&ctx.paths.data_dir.join("catalog.json"))
+                            .await
+                            .map_err(|e| {
+                                OpsError::Engine(format!("catalog could not be read: {e}"))
+                            })?,
+                        crate::vram::load(&crate::vram::store_path(&ctx.paths.data_dir)).await,
+                    ),
+                    None => {
+                        return Err(OpsError::LoadRefused(
+                            "this daemon has no data directory; the catalog cannot be checked"
+                                .into(),
+                        ))
+                    }
+                };
+                let free = self.engine.gpu_free_mib(&def.gpus).await;
+                let inputs = crate::vendor_load::LoadInputs {
+                    inventory: &inv,
+                    observations: &observations,
+                    catalog: &catalog,
+                    vram: &vram_store,
+                    free: free.as_ref(),
+                };
+                crate::vendor_load::plan_load(&inputs, &params.workload, &model, keep_alive_secs, force)
+                    .map_err(|e| match e {
+                        crate::vendor_load::LoadPlanError::Core(c) => plan_error(c),
+                        crate::vendor_load::LoadPlanError::Refused(m) => OpsError::LoadRefused(m),
+                    })?
+            }
             (
                 OpKind::Upgrade
                 | OpKind::Unload
+                | OpKind::Load
                 | OpKind::LaneWrite
                 | OpKind::LaneSwap
                 | OpKind::Acquire
@@ -1356,6 +1433,95 @@ impl OpManager {
                     applied,
                 )
                 .await
+            }
+            PlanStep::LoadModel {
+                workload,
+                model,
+                keep_alive_secs,
+                timeout_secs,
+                ..
+            } => {
+                set_phase(&mut row.phases, index, |p| p.status = PhaseStatus::EffectPending);
+                if self.persist(row).await.is_err() {
+                    return StepOutcome::Failed("journaling effect boundary failed".into());
+                }
+                let inv = self.inventory().await;
+                let Some(def) = inv.workload(workload) else {
+                    return StepOutcome::Failed(format!("{workload} left the inventory"));
+                };
+                let protocol = crate::engine_api::EngineProtocol::for_kind(&def.engine_kind);
+                let gpus = def.gpus.clone();
+                let before =
+                    if gpus.is_empty() { None } else { self.engine.gpu_free_mib(&gpus).await };
+                match crate::engine_api::load(
+                    protocol,
+                    def.port,
+                    model,
+                    *keep_alive_secs,
+                    std::time::Duration::from_secs(*timeout_secs),
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                {
+                    Ok(size_vram) => {
+                        // The measured need for the next plan: the cards'
+                        // free-VRAM drop, else the engine's own size_vram
+                        // split evenly (M4c fit rule: measured, never guessed).
+                        let mut report = format!("{model} resident on {workload}");
+                        let after =
+                            if gpus.is_empty() { None } else { self.engine.gpu_free_mib(&gpus).await };
+                        let drop: llmctl_core::CardMib = before
+                            .zip(after.as_ref())
+                            .map(|(b, a)| {
+                                b.iter()
+                                    .filter_map(|(c, free_b)| {
+                                        let free_a = a.get(c)?;
+                                        let d = free_b.saturating_sub(*free_a);
+                                        (d > 0).then_some((*c, d))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let need = if !drop.is_empty() {
+                            Some(drop)
+                        } else {
+                            size_vram.filter(|_| !gpus.is_empty()).map(|bytes| {
+                                let each = ((bytes / 1_048_576) as u64).div_ceil(gpus.len() as u64);
+                                gpus.iter().map(|g| (g.index, each)).collect()
+                            })
+                        };
+                        match (&self.own_ctx, need) {
+                            (Some(ctx), Some(need)) => {
+                                match Self::record_model_need(
+                                    &ctx.paths.data_dir,
+                                    workload,
+                                    model,
+                                    need.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(()) => report.push_str(&format!(
+                                        "; measured need {}",
+                                        llmctl_core::fit::format_mib(&need)
+                                    )),
+                                    Err(e) => {
+                                        report.push_str(&format!("; measured need not recorded: {e}"))
+                                    }
+                                }
+                            }
+                            (Some(_), None) => {
+                                report.push_str(
+                                    "; need not measured (no VRAM drop and the engine named none)",
+                                );
+                            }
+                            (None, _) => {}
+                        }
+                        applied.push(format!("vendor-load:{workload}:{model}"));
+                        set_phase(&mut row.phases, index, |p| p.detail = Some(report));
+                        StepOutcome::Done
+                    }
+                    Err(e) => StepOutcome::Failed(e.to_string()),
+                }
             }
             PlanStep::LoadRouterModel {
                 workload,
@@ -1935,6 +2101,11 @@ impl OpManager {
                 PlanStep::UnloadModel { .. } => {
                     Err("an unload is not a restoration step".to_string())
                 }
+                // A vendor load is a forward step only; restoring means the
+                // unload rollback, which is what a failed load runs.
+                PlanStep::LoadModel { .. } => {
+                    Err("a load is not a restoration step".to_string())
+                }
                 PlanStep::ApplyEnvFile { .. } => self.apply_env_file(&step).await.map(Some),
                 // Never planned as a restoration step: weights are not removed
                 // or re-fetched by a rollback.
@@ -2371,7 +2542,7 @@ impl From<llmctl_core::Observation> for ObservationLite {
 }
 /// A planner refusal about the workload's current state (restart of a
 /// stopped unit) is a 409 state conflict, not a malformed request.
-fn plan_error(e: llmctl_core::CoreError) -> OpsError {
+pub(crate) fn plan_error(e: llmctl_core::CoreError) -> OpsError {
     match e {
         llmctl_core::CoreError::NotRunning { .. } => OpsError::InvalidState(e.to_string()),
         other => OpsError::Invalid(other.to_string()),

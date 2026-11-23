@@ -847,6 +847,28 @@ pub struct UnloadRequest {
     pub model: String,
 }
 
+/// Engine-level load of one model onto a running vendor service (M5c item
+/// 4, the mirror of [`UnloadRequest`]). `keep_alive_secs` is how long the
+/// engine may keep the model resident (-1 = until unloaded); `force` skips
+/// only the VRAM fit check, never the catalog check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadRequest {
+    pub protocol: u32,
+    pub idempotency_key: String,
+    pub workload: String,
+    pub model: String,
+    #[serde(default = "default_keep_alive")]
+    pub keep_alive_secs: i64,
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Keep until unloaded — what a preload for llm-router's readiness check
+/// needs (the qwen3coder30b-start script's choice).
+fn default_keep_alive() -> i64 {
+    -1
+}
+
 /// What a workload's engine reports right now (M4b step 1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineReport {
@@ -861,6 +883,9 @@ pub struct EngineReport {
     /// Models in memory now; `None` when the protocol cannot say.
     pub loaded: Option<Vec<String>>,
     pub supports_unload: bool,
+    /// The `load` verb can preload one model (M5c item 4; Ollama today).
+    #[serde(default)]
+    pub supports_load: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1082,4 +1107,7 @@ pub mod codes {
     /// llm-router has requests in flight on a workload this operation
     /// would stop; retry, or force it (M4c).
     pub const REQUESTS_IN_FLIGHT: &str = "requests_in_flight";
+    /// A vendor `load` was refused before anything ran (not in the catalog,
+    /// no need ever measured, or the cards cannot hold it) — M5c item 4.
+    pub const LOAD_REFUSED: &str = "load_refused";
 }

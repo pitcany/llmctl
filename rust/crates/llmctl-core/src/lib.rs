@@ -47,6 +47,6 @@ pub use plan::{BinaryCheck, OpKind, Plan, PlanStep};
 pub use acquire::{ModelStore, Source, StoreKind};
 pub use fit::{CardMib, FitDecision};
 pub use planner::{
-    plan_restart, plan_restart_with, plan_run, plan_run_profile, plan_run_with, plan_stop,
-    plan_unload, plan_upgrade, ProfileSwap,
+    plan_load, plan_restart, plan_restart_with, plan_run, plan_run_profile, plan_run_with,
+    plan_stop, plan_unload, plan_upgrade, ProfileSwap, LOAD_TIMEOUT_SECS,
 };

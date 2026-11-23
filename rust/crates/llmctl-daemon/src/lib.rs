@@ -46,6 +46,7 @@ pub mod recover;
 pub mod records;
 pub mod supervisor;
 pub mod upgrade;
+pub mod vendor_load;
 pub mod version;
 pub mod vram;
 pub mod weights;

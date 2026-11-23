@@ -143,6 +143,7 @@ pub(crate) async fn record_effects(manager: &crate::ops::OpManager, row: &mut cr
                     PlanStep::StartUnit { .. }
                         | PlanStep::StopUnit { .. }
                         | PlanStep::UnloadModel { .. }
+                        | PlanStep::LoadModel { .. }
                         | PlanStep::LoadLane { .. }
                         | PlanStep::UnloadLane { .. }
                         | PlanStep::WriteSwapConfig { .. }

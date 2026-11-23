@@ -1218,6 +1218,173 @@ async fn on_demand_claims_pass_the_guard_and_name_the_unload() {
     );
 }
 
+/// A stand-in Ollama HTTP server: `/api/ps` names what is resident (with a
+/// `size_vram`), a load-only `POST /api/generate` with a non-zero
+/// `keep_alive` makes the model resident, `keep_alive: 0` drops it.
+async fn stand_in_ollama() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let loaded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let l2 = loaded.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let l3 = l2.clone();
+            tokio::spawn(async move {
+                loop {
+                    let mut buf = vec![0u8; 16384];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let line = req.lines().next().unwrap_or("").to_string();
+                    let body: serde_json::Value = if line.starts_with("POST /api/generate") {
+                        let model = req
+                            .split("\"model\":\"")
+                            .nth(1)
+                            .and_then(|r| r.split('"').next())
+                            .unwrap_or("")
+                            .to_string();
+                        if req.contains("\"keep_alive\":0") {
+                            l3.lock().unwrap().retain(|m| m != &model);
+                        } else if !model.is_empty() {
+                            let mut ps = l3.lock().unwrap();
+                            if !ps.iter().any(|m| *m == model) {
+                                ps.push(model);
+                            }
+                        }
+                        serde_json::json!({"done": true})
+                    } else if line.starts_with("GET /api/ps") {
+                        let models: Vec<serde_json::Value> = l3
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .map(|m| serde_json::json!({"name": m, "size_vram": 19_000_000_000u64}))
+                            .collect();
+                        serde_json::json!({ "models": models })
+                    } else if line.starts_with("GET /api/version") {
+                        serde_json::json!({"version": "0.33.1"})
+                    } else if line.starts_with("GET /api/tags") {
+                        let models: Vec<serde_json::Value> = l3
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .map(|m| serde_json::json!({"name": m}))
+                            .collect();
+                        serde_json::json!({ "models": models })
+                    } else {
+                        serde_json::json!({})
+                    };
+                    let text = body.to_string();
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                        text.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(text.as_bytes()).await;
+                }
+            });
+        }
+    });
+    (port, loaded)
+}
+
+/// M5c item 4: `load` preloads one model onto a running Ollama service —
+/// catalog-checked, fit-checked, confirmed through `/api/ps`, and the
+/// measured need recorded for the next plan. Multi-thread runtime: the
+/// stand-in Ollama must answer the daemon while `cli()` blocks a worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_load_verb_preloads_an_ollama_model_checked_and_measured() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("control.sock");
+    let (port, loaded) = stand_in_ollama().await;
+    let host = "workstation";
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [{
+            "name": "svc", "engine": "fake", "engine_kind": "ollama", "model": "ollama",
+            "gpu_claim": "on_demand",
+            "gpus": [{"host": host, "index": 0}], "port": port,
+            "unit": {"scope": "user", "name": "llmctl-next-fake-svc.service"},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": "llmctl-next-fake-svc.service"},
+            "ownership": {"kind": "external"}
+        }],
+        "revision": 1
+    }});
+    std::fs::write(dir.path().join("inventory.json"), inv.to_string()).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(&socket).arg("--data-dir").arg(dir.path()).arg("daemon")
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let client = d.client();
+
+    // The catalog knows the model, with an estimate (GiB).
+    std::fs::write(
+        d.data_dir().join("catalog.json"),
+        serde_json::json!({
+            "revision": 1,
+            "models": [{
+                "id": "m-1", "name": "qwen3-coder:30b", "engine": "ollama",
+                "source": "qwen3-coder:30b", "enabled": true, "origin": "registry",
+                "extra": {"estimated_vram_gb": 18.5}
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // A stopped service refuses before anything is journaled.
+    let out = cli(&d.socket, &["load", "svc", "qwen3-coder:30b", "--wait"]);
+    assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    // Start it (the on-demand service claims nothing at start).
+    run_to_success(&d, "svc", "load-e2e-1").await;
+
+    // A model the catalog does not name: refused, exit 4, nothing journaled.
+    let out = cli(&d.socket, &["load", "svc", "unknown:1b", "--wait"]);
+    assert_eq!(out.status.code(), Some(4), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not in this host's catalog"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Free VRAM comes from `gpu_free.json` (absent = unreadable = never
+    // free). A card too small for the estimate: refused with the numbers.
+    std::fs::write(d.data_dir().join("gpu_free.json"), r#"{"0": 2000}"#).unwrap();
+    let out = cli(&d.socket, &["load", "svc", "qwen3-coder:30b", "--wait"]);
+    assert_eq!(out.status.code(), Some(4));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("gpu 0"), "{err}");
+
+    // The card roomy again: the load runs, confirms through /api/ps, and
+    // records the engine-reported size_vram as the measured need.
+    std::fs::write(d.data_dir().join("gpu_free.json"), r#"{"0": 32000}"#).unwrap();
+    let out = cli(&d.socket, &["load", "svc", "qwen3-coder:30b", "--wait"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(loaded.lock().unwrap().last().unwrap(), "qwen3-coder:30b");
+    let vram: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(d.data_dir().join("vram.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        vram["svc|qwen3-coder:30b"]["per_card"]["0"].as_u64(),
+        Some(19_000_000_000u64 / 1_048_576),
+        "{vram}"
+    );
+    // The engine report names the load.
+    let report = client.engine_report("svc").await.unwrap();
+    assert!(report.supports_load);
+
+    // Already loaded: the same load succeeds again (the end state holds).
+    let out = cli(&d.socket, &["load", "svc", "qwen3-coder:30b", "--wait"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
 /// Set what a fake vendor service holds in memory (`world.json`).
 fn set_loaded(d: &DaemonGuard, name: &str, models: &[&str]) {
     let path = d.data_dir().join("world.json");

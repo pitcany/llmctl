@@ -374,6 +374,54 @@ fn wn(s: &str) -> WorkloadName {
     WorkloadName::new(s).unwrap()
 }
 
+#[test]
+fn load_is_planned_only_for_a_running_loadable_service_with_one_model() {
+    let mut inv = inventory();
+    // An OpenAI-style engine: refused — nothing for `load` to talk to.
+    let err = llmctl_core::plan_load(&inv, &[obs("coder", &[0], true)], &wn("coder"), "m", -1)
+        .unwrap_err();
+    assert!(matches!(err, CoreError::InvalidConfig { .. }), "{err:?}");
+    // LM Studio loads by request, not by verb: refused even though it can unload.
+    inv.workloads[0].engine_kind = EngineKind::LmStudio;
+    assert!(llmctl_core::plan_load(&inv, &[obs("coder", &[0], true)], &wn("coder"), "m", -1).is_err());
+
+    inv.workloads[0].engine_kind = EngineKind::Ollama;
+    inv.workloads[0].model = "ollama".into();
+    // Running Ollama: one external load step, one unload rollback, the
+    // service's cards affected, no intent change.
+    let plan = llmctl_core::plan_load(
+        &inv,
+        &[obs("coder", &[0], true)],
+        &wn("coder"),
+        "qwen3-coder:30b",
+        -1,
+    )
+    .unwrap();
+    assert_eq!(plan.kind, llmctl_core::OpKind::Load);
+    assert_eq!(plan.affected_gpus, inv.workloads[0].gpus);
+    assert!(matches!(
+        plan.steps.as_slice(),
+        [PlanStep::LoadModel { model, keep_alive_secs: -1, .. }] if model == "qwen3-coder:30b"
+    ));
+    assert!(matches!(
+        plan.rollback.as_slice(),
+        [PlanStep::UnloadModel { model, .. }] if model == "qwen3-coder:30b"
+    ));
+    assert!(plan.steps.iter().all(|s| !matches!(s, PlanStep::PersistIntent { .. })));
+    // The service identity, an empty name, keep_alive 0, a stopped service.
+    for bad in ["ollama", "", "  "] {
+        assert!(
+            llmctl_core::plan_load(&inv, &[obs("coder", &[0], true)], &wn("coder"), bad, -1).is_err()
+        );
+    }
+    assert!(
+        llmctl_core::plan_load(&inv, &[obs("coder", &[0], true)], &wn("coder"), "m", 0).is_err()
+    );
+    let err = llmctl_core::plan_load(&inv, &[obs("coder", &[0], false)], &wn("coder"), "m", -1)
+        .unwrap_err();
+    assert!(matches!(err, CoreError::NotRunning { .. }), "{err:?}");
+}
+
 // ---- M4c: on-demand GPU claims ------------------------------------------------
 
 #[test]

@@ -44,6 +44,14 @@ impl EngineKind {
         matches!(self, EngineKind::Ollama | EngineKind::LmStudio | EngineKind::LlamaCppRouter)
     }
 
+    /// Vendor services the `load` verb can preload one model on (M5c item 4):
+    /// Ollama today (a load-only `POST /api/generate`, confirmed through
+    /// `/api/ps`). A llama.cpp router loads through `llamacpp load`, not
+    /// this verb; LM Studio loads by request.
+    pub fn has_engine_load(&self) -> bool {
+        matches!(self, EngineKind::Ollama)
+    }
+
     /// The placeholder stored when an inventory predates `engine_kind`.
     pub fn legacy() -> Self {
         EngineKind::Other("legacy".into())

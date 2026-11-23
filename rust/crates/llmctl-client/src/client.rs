@@ -304,6 +304,15 @@ impl ControlClient {
         self.post_json("/v1/unloads", req).await
     }
 
+    /// Engine-level load of one model onto a running vendor service
+    /// (M5c item 4): `/v1/loads`, admitted like `unload`.
+    pub async fn load(
+        &self,
+        req: &crate::wire::LoadRequest,
+    ) -> Result<AdmitResponse, ClientError> {
+        self.post_json("/v1/loads", req).await
+    }
+
     pub async fn lanes_import(
         &self,
         req: &crate::wire::LaneImportRequest,
