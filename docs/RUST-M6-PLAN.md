@@ -1,7 +1,8 @@
 # Rust successor — M6 plan (cutover)
 
-Status 2026-11-22: **draft for owner review. No owner decision is taken.**
-M6 is not started. M5 is in its pilot: clean days 1 and 2 of 7 are closed.
+Status 2026-11-22: **owner decisions taken.** The owner took the
+recommendation in each of the 16 owner decisions ("Take your
+recommendations", 2026-11-22). M6 is not started. M5 is in its pilot: clean days 1 and 2 of 7 are closed.
 The earliest M5 exit is 12:52 PST 2026-11-27. No agent is redeployed before
 that time.
 Parent: [RUST-SUCCESSOR-PLAN.md](RUST-SUCCESSOR-PLAN.md) (milestone table,
@@ -69,7 +70,7 @@ the M7 merge; the web dashboard; SGLang and FreeToken; the workspace
 | 2 | **Rollback fix deploy and flash adoption.** Follow `RUST-FLASH-LANE-RUNBOOK.md` on branch `fix/run-rollback-order`. | Built and tested. Not merged, not deployed (checked: `git log main..fix/run-rollback-order`, 4 commits). | **Yes.** M6 adopts three more lanes. With build `55c83de`, a failed lane start can leave the default model failed. |
 | 3 | **M5d step 7** (`gpt-oss-120b` into the llama.cpp router). | Not run. Four blockers are open (checked: branch `docs/m5d-step7-runbook`). The owner decided on 2026-11-22 to switch after the M5 exit. | **No, if the owner takes decision 2.** Recommended: do it after the M6 exit. |
 | 4 | **M5f rehearsal** (migration and reversal on temporary state). | Not done. `docs/RUST-M5-REHEARSAL.md` does not exist on `main` (checked: `git ls-tree main docs/`). | **Yes.** The parent requires a rehearsal of both directions before live use. M6c extends it. |
-| 5 | **M5c leftovers.** (a) `hf` on m5. (b) Vendor `load` verb for the `qwen3coder30b` gap (B4). (c) Live use of `lanes matrix` on m5. (d) A store for `~/models/gpt-oss-120b`. | (a) `hf` is installed on m5 (checked: `ls /opt/homebrew/bin/hf` over ssh); the progress file says it is open. (b) Open. (c), (d) Open. | (a), (c), (d): no. (b): **yes**, it becomes M6b item 5. |
+| 5 | **M5c leftovers.** (a) `hf` on m5. (b) Vendor `load` verb for the `qwen3coder30b` gap (B4). (c) Live use of `lanes matrix` on m5. (d) A store for `~/models/gpt-oss-120b`. | (a) `hf` is installed on m5 (checked: `ls /opt/homebrew/bin/hf` over ssh); the progress file says it is open. (b) Built for Ollama on 2026-11-22 on branch `worktree-m5-leftovers` (`779accb`), not merged, not deployed. (c), (d) Open. | (a), (c), (d): no. (b): **yes**, it becomes M6b item 5. |
 | 6 | **M5e leftovers.** (a) TUI Run on presets and the Catalog screen. (b) mbp2 screens seen live. | (a) Inferred done: the TUI source has catalog code and no "pending" text (checked: `git grep` in `rust/crates/llmctl-tui/src`). (b) Open. | (a): **yes, verify it.** M6 turns off the Python TUI. (b): no, do it in M6a. |
 | 7 | **M5b leftover.** Move the llmctl-stack pin and `uv.lock` to the deployed Python commit. | Open (checked: progress file). | No. M6d does it with the M6 Python build. |
 
@@ -354,7 +355,10 @@ Each item ships with its switch off.
    model against the catalog, plans the GPU claim as M4c does for an
    on-demand claim, loads, and confirms through the engine's loaded list.
    The router backend `qwen3coder30b` then names the workload and the
-   model.
+   model. **Status 2026-11-22:** the Ollama half is built on branch
+   `worktree-m5-leftovers` (`779accb`, not merged). LM Studio is not in
+   it. M6b keeps the review, the merge, LM Studio if a router lane needs
+   it, and the router handoff, which waits for `fix/run-rollback-order`.
 6. **Scripts.** Each unit verb in the lane scripts goes through
    `llm-unit`. A gate check in the `~/AI` repository fails when a script
    has a raw `systemctl` start, stop or restart of an enrolled unit.
@@ -678,7 +682,10 @@ binaries are in the m4a data dir (`llmctl-next.bin.pre-*`; checked: `ls`).
 
 ## Owner decisions
 
-Each has a recommendation. None is taken.
+Decided 2026-11-22: the owner took each recommendation ("Take your
+recommendations"). In each item, the recommended option is the decision.
+The other option stays here as the record of what was not chosen.
+Vault: ADR-068.
 
 1. **Split M6 into M6a–M6g** as above, a check at the end of each, about
    9–12 working days plus the 7-day window. *Recommended.*
