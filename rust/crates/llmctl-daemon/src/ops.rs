@@ -2096,11 +2096,25 @@ impl OpManager {
                 // Restoring the *version* is what ApplyDefinition in this
                 // rollback already did; no separate action.
                 PlanStep::VerifyVersion { .. } => Ok(None),
-                // Never planned as a restoration step (an unload has no
-                // rollback); refuse rather than guess.
-                PlanStep::UnloadModel { .. } => {
-                    Err("an unload is not a restoration step".to_string())
-                }
+                // The rollback of a vendor load (plan_load): free what the
+                // failed load may have left resident. Unloading a model that
+                // never loaded is the asked-for end state on every engine,
+                // so this is safe after a load that failed before Ollama
+                // took the model.
+                PlanStep::UnloadModel {
+                    workload,
+                    unit,
+                    model,
+                } => self
+                    .engine
+                    .apply(Effect::UnloadModel {
+                        workload: workload.clone(),
+                        unit: unit.clone(),
+                        model: model.clone(),
+                    })
+                    .await
+                    .map(|o| Some(o.identity))
+                    .map_err(|e| e.to_string()),
                 // A vendor load is a forward step only; restoring means the
                 // unload rollback, which is what a failed load runs.
                 PlanStep::LoadModel { .. } => {

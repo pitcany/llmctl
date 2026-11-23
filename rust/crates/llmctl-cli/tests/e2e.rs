@@ -1220,7 +1220,8 @@ async fn on_demand_claims_pass_the_guard_and_name_the_unload() {
 
 /// A stand-in Ollama HTTP server: `/api/ps` names what is resident (with a
 /// `size_vram`), a load-only `POST /api/generate` with a non-zero
-/// `keep_alive` makes the model resident, `keep_alive: 0` drops it.
+/// `keep_alive` makes the model resident, `keep_alive: 0` drops it. A load
+/// of a model whose name starts with `broken` is answered 500.
 async fn stand_in_ollama() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1240,6 +1241,7 @@ async fn stand_in_ollama() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>
                     }
                     let req = String::from_utf8_lossy(&buf[..n]).to_string();
                     let line = req.lines().next().unwrap_or("").to_string();
+                    let mut status = "200 OK";
                     let body: serde_json::Value = if line.starts_with("POST /api/generate") {
                         let model = req
                             .split("\"model\":\"")
@@ -1249,6 +1251,8 @@ async fn stand_in_ollama() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>
                             .to_string();
                         if req.contains("\"keep_alive\":0") {
                             l3.lock().unwrap().retain(|m| m != &model);
+                        } else if model.starts_with("broken") {
+                            status = "500 Internal Server Error";
                         } else if !model.is_empty() {
                             let mut ps = l3.lock().unwrap();
                             if !ps.iter().any(|m| *m == model) {
@@ -1279,7 +1283,7 @@ async fn stand_in_ollama() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>
                     };
                     let text = body.to_string();
                     let head = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
                         text.len()
                     );
                     let _ = sock.write_all(head.as_bytes()).await;
@@ -1383,6 +1387,88 @@ async fn the_load_verb_preloads_an_ollama_model_checked_and_measured() {
     // Already loaded: the same load succeeds again (the end state holds).
     let out = cli(&d.socket, &["load", "svc", "qwen3-coder:30b", "--wait"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// Review of the M5c load verb (2026-11-22): a load that fails after
+/// admission runs its unload rollback and ends `failed` — not
+/// `needs_attention`, which would block every later admission on the host
+/// — and a model matched by its catalog name is sent to the engine under
+/// the record's `source`, the name the engine knows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_load_rolls_back_cleanly_and_the_engine_gets_the_source_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("control.sock");
+    let (port, loaded) = stand_in_ollama().await;
+    let host = "workstation";
+    let inv = serde_json::json!({"inventory": {
+        "host": host, "platform": "linux",
+        "gpus": [{"host": host, "index": 0}],
+        "workloads": [{
+            "name": "svc", "engine": "fake", "engine_kind": "ollama", "model": "ollama",
+            "gpu_claim": "on_demand",
+            "gpus": [{"host": host, "index": 0}], "port": port,
+            "unit": {"scope": "user", "name": "llmctl-next-fake-svc.service"},
+            "authority": {"kind": "systemd_unit", "scope": "user", "unit": "llmctl-next-fake-svc.service"},
+            "ownership": {"kind": "external"}
+        }],
+        "revision": 1
+    }});
+    std::fs::write(dir.path().join("inventory.json"), inv.to_string()).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket").arg(&socket).arg("--data-dir").arg(dir.path()).arg("daemon")
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let client = d.client();
+    std::fs::write(
+        d.data_dir().join("catalog.json"),
+        serde_json::json!({
+            "revision": 1,
+            "models": [
+                {
+                    "id": "m-1", "name": "coder", "engine": "ollama",
+                    "source": "qwen3-coder:30b", "enabled": true, "origin": "registry",
+                    "extra": {"estimated_vram_gb": 18.5}
+                },
+                {
+                    "id": "m-2", "name": "broken:1b", "engine": "ollama",
+                    "source": "broken:1b", "enabled": true, "origin": "registry",
+                    "extra": {"estimated_vram_gb": 1.0}
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(d.data_dir().join("gpu_free.json"), r#"{"0": 32000}"#).unwrap();
+    run_to_success(&d, "svc", "load-fail-e2e-1").await;
+
+    // The engine refuses the load: the operation fails, its unload
+    // rollback runs, and nothing is left to acknowledge.
+    let out = cli(&d.socket, &["load", "svc", "broken:1b", "--wait"]);
+    assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    let ops = client.list_operations().await.unwrap().operations;
+    let op = ops
+        .iter()
+        .find(|o| o.kind == llmctl_core::OpKind::Load)
+        .expect("a load operation");
+    assert_eq!(op.status, OpStatus::Failed, "{op:?}");
+    let recovery = op.recovery.as_ref().expect("recovery recorded");
+    assert_eq!(recovery["outcome"], "restored", "{recovery}");
+    assert!(!loaded.lock().unwrap().iter().any(|m| m == "broken:1b"));
+
+    // Nothing blocks the host: the next load is admitted. It names the
+    // catalog record by `name`, and the engine is asked for `source`.
+    let out = cli(&d.socket, &["load", "svc", "coder", "--wait"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let held = loaded.lock().unwrap().clone();
+    assert_eq!(held, vec!["qwen3-coder:30b".to_string()], "{held:?}");
+    let vram: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(d.data_dir().join("vram.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(vram.get("svc|qwen3-coder:30b").is_some(), "{vram}");
+    assert!(vram.get("svc|coder").is_none(), "{vram}");
 }
 
 /// Set what a fake vendor service holds in memory (`world.json`).

@@ -51,16 +51,17 @@ pub enum LoadPlanError {
 pub fn plan_load(
     inputs: &LoadInputs<'_>,
     workload: &str,
-    model: &str,
+    model_asked: &str,
     keep_alive_secs: i64,
     force: bool,
 ) -> Result<Plan, LoadPlanError> {
+    let model = model_asked;
     let name = WorkloadName::new(workload)?;
     let def = inputs
         .inventory
         .workload(&name)
         .ok_or_else(|| CoreError::UnknownWorkload(workload.to_string()))?;
-    let plan = llmctl_core::plan_load(
+    let mut plan = llmctl_core::plan_load(
         inputs.inventory,
         inputs.observations,
         &name,
@@ -70,17 +71,39 @@ pub fn plan_load(
     // The catalog check: this host must know the model, enabled, on this
     // engine. The catalog is what names "which model, on which store".
     let engine = def.engine_kind.to_string();
-    let known = inputs.catalog.models.iter().find(|m| {
-        m.enabled
-            && m.engine == engine
-            && (m.source.as_deref() == Some(model.trim()) || m.name == model.trim())
-    });
+    // The engine's own name first, then the catalog name.
+    let usable = |m: &&llmctl_core::catalog::CatalogModel| m.enabled && m.engine == engine;
+    let known = inputs
+        .catalog
+        .models
+        .iter()
+        .filter(usable)
+        .find(|m| m.source.as_deref() == Some(model.trim()))
+        .or_else(|| inputs.catalog.models.iter().filter(usable).find(|m| m.name == model.trim()));
     let record = known.ok_or_else(|| {
         LoadPlanError::Refused(format!(
             "{model:?} is not in this host's catalog (engine {engine}, enabled); \
              `llmctl-next model list` shows what is; `model add` records it"
         ))
     })?;
+    // The engine knows the model by the record's `source` (what the
+    // engine calls it); a match on the catalog `name` must not send that
+    // name to Ollama. Re-plan with the engine's name when they differ.
+    let model = record
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(model.trim());
+    if model != model_asked.trim() {
+        plan = llmctl_core::plan_load(
+            inputs.inventory,
+            inputs.observations,
+            &name,
+            model,
+            keep_alive_secs,
+        )?;
+    }
     if force {
         return Ok(plan);
     }
