@@ -350,12 +350,22 @@ reversal" section describes:
 
 ### M5g. Seven-day pilot (calendar time, at least 7 days)
 
-Daily use from llmctl-next on all three hosts. A day counts when (a) the
-owner used llmctl-next (TUI or CLI) on that day and (b) `audit` shows no
-unexplained foreign write on any host for owned workloads. A day that
-fails (b) restarts the count after the cause is fixed. A short daily line
-goes into `docs/RUST-M5-PILOT.md` (date, workflows used, operations,
-findings, anything that needed the old tools).
+Daily use from llmctl-next on all three hosts. A day counts when `audit`
+shows no unexplained foreign write on any host for owned workloads. A day
+that fails this rule restarts the count after the cause is fixed.
+
+Amended 2026-11-22 by the owner ("Audit rule counts"). The first text
+also required that the owner used llmctl-next (TUI or CLI) on the day.
+That part is removed. Reason: most daily traffic reaches the agent through
+llm-router, `longjob` and the Python delegation, not through the CLI. The
+M6 acceptance window tests daily use again. Explained, not unexplained:
+llama-swap request and TTL swaps on m5 (by design), and a pid change of a
+managed unit right after a host restart that the log identifies. A day
+with no agent operation still counts; its line says so.
+
+A short daily line goes into `docs/RUST-M5-PILOT.md` (window, counted or
+not, agent operations, foreign writes per host, findings, anything that
+needed the old tools).
 
 ## Exit checklist (maps to the parent criterion)
 
