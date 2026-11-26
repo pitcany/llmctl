@@ -356,6 +356,33 @@ fn validation_refuses_before_anything_is_written() {
     assert_eq!(std::fs::read_to_string(&config).unwrap(), CONFIG);
 }
 
+#[test]
+fn a_lane_write_is_refused_while_llama_swap_does_not_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.yaml");
+    let log = dir.path().join("swap.log");
+    std::fs::write(&config, CONFIG).unwrap();
+    std::fs::write(&log, "").unwrap();
+    let swap = fake_swap(config.clone(), log.clone());
+    let agent = dir.path().join("agent");
+    let d = spawn(&agent, swap.port);
+    let (cfg_s, log_s) = (config.to_str().unwrap(), log.to_str().unwrap());
+    let (_, text) = cli(&d.socket, &["lanes", "import", "swap", "--config", cfg_s, "--log", log_s]);
+    let digest = token_after(&text, "--confirm ");
+    let (ok, text) = cli(&d.socket, &["lanes", "import", "swap", "--config", cfg_s, "--log", log_s, "--confirm", &digest]);
+    assert!(ok, "{text}");
+    // Same records, but the port has nothing behind it (llama-swap stopped).
+    drop(d);
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let d = spawn(&agent, dead);
+    let (ok, text) = cli(&d.socket, &["lanes", "macro", "swap", "eng", "/opt/eng-2.0/bin/serve"]);
+    assert!(ok, "{text}");
+    let plan = token_after(&text, "--confirm ");
+    let (ok, text) = cli(&d.socket, &["lanes", "macro", "swap", "eng", "/opt/eng-2.0/bin/serve", "--confirm", &plan, "--wait"]);
+    assert!(!ok && text.contains("does not answer GET /running"), "{text}");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), CONFIG);
+}
+
 /// M4c lane swap: the records predict what llama-swap evicts, the lane is
 /// requested, and the journal says whether the eviction matched.
 #[test]

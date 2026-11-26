@@ -749,6 +749,14 @@ pub async fn apply(
         return Err(refuse("the render equals the live file; nothing to write"));
     }
     let (inv, def) = router_def(state, workload).await?;
+    // The write is confirmed (and rolled back) through the router's reload,
+    // so a router that does not answer would leave both unconfirmed.
+    if list_models(def.port, Duration::from_secs(5)).await.is_none() {
+        return Err(refuse(format!(
+            "{workload} does not answer GET /models on port {}: it is stopped or not ready, so the reload could not be confirmed; start it first",
+            def.port
+        )));
+    }
     let store_file = store_path(state, workload).display().to_string();
     let previous = String::from_utf8(p.current_bytes.clone()).map_err(|_| refuse("the live preset is not UTF-8"))?;
     let step = |content: String, expect: String, models: Vec<String>, summary: String| PlanStep::WriteRouterPreset {

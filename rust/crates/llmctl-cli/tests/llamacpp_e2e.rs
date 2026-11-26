@@ -465,6 +465,23 @@ fn preset_writes_reload_keep_notes_and_roll_back_when_the_router_does_not_take_t
 }
 
 #[test]
+fn a_preset_write_is_refused_while_the_router_does_not_answer() {
+    let Setup { _dir, agent, preset, d, .. } = setup(&[]);
+    // Same records, but the router's port has nothing behind it (stopped).
+    drop(d);
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let d = spawn(&agent, dead);
+    let before = std::fs::read_to_string(&preset).unwrap();
+    let (ok, text) = cli(&d.socket, &["llamacpp", "set", "router", "small", "ctx-size", "4096"]);
+    assert!(ok, "{text}");
+    let plan = token_after(&text, "--confirm ");
+    let (ok, text) = cli(&d.socket, &["llamacpp", "set", "router", "small", "ctx-size", "4096", "--confirm", &plan, "--wait"]);
+    assert!(!ok && text.contains("does not answer GET /models"), "{text}");
+    assert_eq!(std::fs::read_to_string(&preset).unwrap(), before);
+    assert!(!Path::new(&format!("{}.llmctl-previous", preset.display())).exists());
+}
+
+#[test]
 fn the_preload_guard_refuses_missing_shards_live_downloads_and_a_low_floor() {
     let s = setup(&[]);
     let sock = &s.d.socket;

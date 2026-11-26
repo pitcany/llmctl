@@ -608,6 +608,14 @@ pub async fn apply(
         .workload(&name)
         .cloned()
         .ok_or_else(|| OpsError::UnknownWorkload(workload.to_string()))?;
+    // The write is confirmed (and rolled back) through llama-swap's reload,
+    // so a router that does not answer would leave both unconfirmed.
+    if running_on_checked(def.port).await.is_none() {
+        return Err(refuse(format!(
+            "{workload} does not answer GET /running on port {}: it is stopped or not ready, so the reload could not be confirmed; start it first",
+            def.port
+        )));
+    }
     let store_file = store_path(state, workload).display().to_string();
     let next_lanes: Vec<String> = p.next.lanes.iter().map(|l| l.id.clone()).collect();
     let prev_lanes: Vec<String> = p.store.records.lanes.iter().map(|l| l.id.clone()).collect();
