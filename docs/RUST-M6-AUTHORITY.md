@@ -114,7 +114,7 @@ All eight have ownership `managed` and a systemd user unit.
 
 | Workload | Unit, port, cards | State, intent | Writers now | M6 disposition | Proof |
 |---|---|---|---|---|---|
-| `vllm-engine` | `vllm-engine.service`, 8003, 0+1 | Running, running | agent; llm-router (through the agent); Python llmctl, `llm-unit`, `take-gpus`, `longjob` (through the guard); `llm-heal` (direct `systemctl`); the W13 scripts and study scripts (raw `systemctl`); systemd `Restart=on-failure` | agent only. W1, W4, W5, W7, W13, W14 as in the plan | M6f step 9 drills; **finding 1 first** |
+| `vllm-engine` | `vllm-engine.service`, 8003, 0+1 | Running, running | agent; llm-router (through the agent); Python llmctl, `llm-unit`, `take-gpus`, `longjob` (through the guard); `llm-heal` (direct `systemctl`); the W13 scripts and study scripts (raw `systemctl`); systemd `Restart=on-failure` | agent only. W1, W4, W5, W7, W13, W14 as in the plan | M6f step 9 drills; finding 1 (resolved for the router's path) |
 | `ollama` | `ollama.service`, 11434, 0 | Running, running | agent; the guard writers; llm-router `evict_ollama` (unloads models directly); `llm-heal`; `Restart=always` | agent only. W6: the eviction goes through the agent | M6f step 9 |
 | `llmster` | `llmster.service`, 1234, 0+1 | Stopped, **running**, `gave_up` | agent; the guard writers; **a `llmster` process outside the unit holds the port** (finding 2) | agent only, after finding 2 and the intent of section 5 | signature equal |
 | `llamacpp-router` | `llamacpp-router.service`, 8012, 0+1 | Stopped, **running**, `gave_up` | agent (unit, router models, preset INI); Python llmctl **directly** (not in the unit map, finding 4) | agent only. Add the unit to `llmctl_next.units` | drill: `llm-unit` on the unit is redirected |
@@ -397,6 +397,23 @@ Nothing here was fixed. Each needs the owner or a change to the M6 plan.
    A later change that keeps the user site out of each engine
    (`PYTHONNOUSERSITE=1`) changes a unit file, so it is not for M6
    (design decision 5).
+
+   **Resolved 2026-11-27 16:0x PST (owner: "Remove packages").** The
+   directory `~/.local/lib/python3.12` and the script `~/.local/bin/httpx`
+   were moved to `~/.local/lib/python3.12.removed-2026-11-27` (nothing was
+   deleted; no process had the files open). After the move: `version
+   vllm-engine` shows no drift and the live lock digest equals the pin
+   (`635b205d…`). The router's form (`run vllm-engine --profile-env …
+   --model … --dry-run`) and a switch to another preset (`run qwen27b-awq
+   --dry-run`) give a plan. The serving signature digest is the same as
+   before (`2e267a06…`) and `audit` shows 0 foreign writes. What stays:
+   `run vllm-engine --dry-run` and `run qwen27b --dry-run` (the preset
+   that serves now) still answer `definition_drift … environment_files`.
+   The pinned digest of `vllm-engine.env` is older than the file (the
+   profile envs were edited at 19:50 PST 2026-11-24), and only a profile
+   switch accepts a content difference (`ops.rs:349`). It can come back:
+   the longjob `ch-portfolio-m4b` (custom-harness) runs until about 18:25
+   PST and the first run of that job made the install.
 2. **An LM Studio server runs outside its unit** (checked: `ss -ltnp`,
    `/proc/<pid>/cgroup`). Process `llmster`, pid 3820672, started 18:43
    PST 2026-11-26 in `session-3.scope`, listens on 127.0.0.1:1234.

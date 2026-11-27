@@ -130,7 +130,7 @@ Nothing on a host was changed.
 
 | # | Result | Evidence |
 |---|---|---|
-| W1 | pass in the pilot; **refused on 2026-11-27, gap, open** | The router switched `vllm-engine` through the agent on pilot days 2, 3, 4 and 6 and on 2026-11-27 (22:38 UTC, succeeded). `run <preset>` and the TUI Run screen on presets are in the deployed build. No pilot line shows a use of `run <preset>` by name. On 2026-11-27 at 23:42 UTC each run of `vllm-engine` is refused with `definition_drift` (finding 1 below). |
+| W1 | pass in the pilot; **refused on 2026-11-27, gap, open** | The router switched `vllm-engine` through the agent on pilot days 2, 3, 4 and 6 and on 2026-11-27 (22:38 UTC, succeeded). `run <preset>` and the TUI Run screen on presets are in the deployed build. No pilot line shows a use of `run <preset>` by name. On 2026-11-27 at 23:42 UTC each run of `vllm-engine` is refused with `definition_drift` (finding 1 below). Finding 1 was resolved the same day: `run qwen27b-awq --dry-run` gives a plan (a preset switch by name). A plain `run vllm-engine` is still refused on `environment_files`. |
 | W2 | pass for owned lanes; gap, accepted for the others | m5: 24 `LaneSwap` operations on pilot day 2. Workstation: `strata-fast`, `flash` (round trip on 2026-11-27) and `gpt-oss-120b` go through the agent. `flash-uncensored`, `dsv41` and `glm53` are not adopted: M6 decision 6, M6e item 1. |
 | W3 | pass | A manual stop of `vllm-engine` and `gpt-oss-120b` held from 18:09 UTC 2026-11-24 through pilot day 5. No recovery and no healer started them. |
 | W4 | pass | `restart` ran on `llamacpp-router` on pilot day 3. Router models were unloaded by verb on days 3 and 4. `unload` exists for Ollama and LM Studio. |
@@ -222,6 +222,23 @@ These are live facts from 2026-11-27. No fix was applied.
    vLLM profile is refused, and `llmctl_next_refusal_final` is `true`.
    The `environment_files` difference alone is a content difference that
    a profile switch accepts.
+
+   **Resolved 2026-11-27 16:0x PST (owner: "Remove packages").** The
+   directory `~/.local/lib/python3.12` and the script `~/.local/bin/httpx`
+   were moved to `~/.local/lib/python3.12.removed-2026-11-27` (nothing was
+   deleted; no process had the files open). After the move: `version
+   vllm-engine` shows no drift and the live lock digest equals the pin
+   (`635b205d…`). The router's form (`run vllm-engine --profile-env …
+   --model … --dry-run`) and a switch to another preset (`run qwen27b-awq
+   --dry-run`) give a plan. The serving signature digest is the same as
+   before (`2e267a06…`) and `audit` shows 0 foreign writes. What stays:
+   `run vllm-engine --dry-run` and `run qwen27b --dry-run` (the preset
+   that serves now) still answer `definition_drift … environment_files`.
+   The pinned digest of `vllm-engine.env` is older than the file (the
+   profile envs were edited at 19:50 PST 2026-11-24), and only a profile
+   switch accepts a content difference (`ops.rs:349`). It can come back:
+   the longjob `ch-portfolio-m4b` (custom-harness) runs until about 18:25
+   PST and the first run of that job made the install.
 2. **An LM Studio server runs outside its unit on the workstation.** A
    process `llmster` (pid 3820672, started 18:43 PST 2026-11-26, in
    `session-3.scope`) listens on 127.0.0.1:1234. `llmster.service` is
