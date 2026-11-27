@@ -9,7 +9,17 @@ agents run it since 21:22 UTC 2026-11-27 (built on mbp2, SHA-256
 `host upgrade <host> --binary`; real-launchd suite 7 of 7 on mbp2; the old
 binary and a journal snapshot in each Mac's `deploy-backups/2026-11-27-ccabf75/`).
 After both upgrades: journals 100 / 19 / 49 operations, zero foreign writes.
-The flash adoption below is not done.
+Flash adoption, 2026-11-27 22:10 UTC: steps 1-8 of "Deploy and adopt" done
+(`strata-fast` readiness 1800 s; workload `flash` adopted, inventory revision 55,
+readiness 1800 s; llm-router `50e5b39` adds `llmctl_next: flash`; unit map line
+added; router restarted). The round-trip test failed at the flash start: the
+lane config `strata-unsloth-ud-q4_k_xl.2gpu.res.json` reads
+`~/models/Qwen3.8-Flash-Next-UD-Q4_K_XL-ple-nvme/`, which the NVMe cleanup of
+2026-11-24 deleted; Strata exits in 1 s (`cannot open the text model`). The
+rollback fix worked on real hardware: the agent stopped the failed target,
+restarted `vllm-engine` and verified it; the tutor served again after 3 min
+19 s, and the audit shows zero foreign writes. Flash stays broken until its
+weights path is restored or changed; then repeat the Test section.
 
 Checks before the swap: Rust workspace 356 passed, 1 failed (the known
 `bridge_subcommand_relays_http_to_the_socket` flake; 3 of 3 passed on rerun).
