@@ -18,8 +18,13 @@ lane config `strata-unsloth-ud-q4_k_xl.2gpu.res.json` reads
 2026-11-24 deleted; Strata exits in 1 s (`cannot open the text model`). The
 rollback fix worked on real hardware: the agent stopped the failed target,
 restarted `vllm-engine` and verified it; the tutor served again after 3 min
-19 s, and the audit shows zero foreign writes. Flash stays broken until its
-weights path is restored or changed; then repeat the Test section.
+19 s, and the audit shows zero foreign writes. Restored 2026-11-27 22:26 UTC (owner
+choice): shard `00002` (holds `per_layer_token_embd`, 46.4 GiB) copied back
+from `/mnt/storage/models/Qwen3.8-Flash-Next/UD-Q4_K_XL/` and checked with
+`cmp`; shards `00001`, `00003`, `00004` are symlinks to the HDD copy. Test
+repeated 22:27-22:40 UTC through llm-router `/admin/switch`: tutor to flash
+683 s (model check ok, request answered), flash to tutor 113 s (model check
+ok, request answered); audit zero foreign writes. Tutor downtime 13 min 17 s.
 
 Checks before the swap: Rust workspace 356 passed, 1 failed (the known
 `bridge_subcommand_relays_http_to_the_socket` flake; 3 of 3 passed on rerun).
