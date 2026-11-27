@@ -81,7 +81,7 @@ idle-revert veto live in llm-router; pause/resume lives in llm-heal.
 | Ollama | vendor tarball 0.33.1 in `/usr/local` | **system** `ollama.service` + drop-in; user `ollama-gpu1` (:11435, bwrap GPU pin) | models `~/.ollama/models` |
 | LM Studio | `llmster` 0.0.18-1 under `~/.lmstudio/llmster/<ver>/` | **none** (session scope, PPID 1) | `lms` at `~/.lmstudio/bin/lms` |
 | Strata | git clones `~/AI/strata` (v0.1.44.1) and `~/AI/strata-0.2.8` (prebuilt `strata-dsv41` engine) | five user units, all inactive; GLM-5.3 via `~/AI/maya-src` | JSON lane files |
-| ds4 | `~/Work/ds41-workstation-74aa754`, fork `pitcany/ds41-m5` branch `workstation/glm-ram-tier`, built `ds4-server` | **none** | nothing launches it |
+| ds4 | `~/Projects/ds41-workstation-74aa754`, fork `pitcany/ds41-m5` branch `workstation/glm-ram-tier`, built `ds4-server` | **none** | nothing launches it |
 
 Coordination actors: llm-router (:4100; swaps by copying a profile env onto
 `vllm-engine.env`, `sudo -n systemctl restart vllm-engine`, waits for
