@@ -92,7 +92,8 @@ def gpu_holdings():
         )
     )
     held = {}
-    apps = sh("nvidia-smi", "--query-compute-apps=pid,gpu_uuid,used_memory", "--format=csv,noheader,nounits")
+    query = "--query-compute-apps=pid,gpu_uuid,used_memory"
+    apps = sh("nvidia-smi", query, "--format=csv,noheader,nounits")
     for line in apps.splitlines():
         try:
             pid, uuid, mib = (p.strip() for p in line.split(","))
@@ -112,7 +113,8 @@ def observe(workload, launchctl_table, held):
         active = pid is not None
     else:
         user = ["--user"] if scope == "user" else []
-        active, pid = parse_show(sh("systemctl", *user, "show", unit, "-p", "ActiveState", "-p", "MainPID"))
+        show = sh("systemctl", *user, "show", unit, "-p", "ActiveState", "-p", "MainPID")
+        active, pid = parse_show(show)
     port = workload["port"]
     up = listening(port)
     loaded = None
@@ -153,15 +155,18 @@ def compare(agent_workloads, records):
         # A vendor app has no launchd job of its own: a listening port counts.
         up = r["active"] or r["listening"]
         if (w.get("process") == "Running") != up:
-            out.append(f"{w['name']}: agent says {w.get('process')}, observed active={r['active']} listening={r['listening']}")
+            seen_now = f"active={r['active']} listening={r['listening']}"
+            out.append(f"{w['name']}: agent says {w.get('process')}, observed {seen_now}")
         if w.get("readiness") == "Ready" and not r["listening"]:
             out.append(f"{w['name']}: agent says Ready, port {r['port']} does not listen")
         # shortcut: only an endpoint that lists one id is compared. For a
         # service with many models (Ollama, LM Studio, llama-swap) the agent
         # records the service identity, not a model id. Upgrade when
         # `status --json` carries the engine kind.
-        if w.get("served_model_verified") and r["models"] and len(r["models"]) == 1 and w.get("served_model") not in r["models"]:
-            out.append(f"{w['name']}: agent says it serves {w.get('served_model')}, endpoint lists {r['models']}")
+        one = r["models"] if r["models"] and len(r["models"]) == 1 else None
+        if w.get("served_model_verified") and one and w.get("served_model") not in one:
+            served = w.get("served_model")
+            out.append(f"{w['name']}: agent says it serves {served}, endpoint lists {one}")
     return out
 
 
@@ -182,7 +187,10 @@ def main():
     json.dump(
         {
             "host": status.get("host"),
-            "taken_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            # timezone.utc, not datetime.UTC: the Macs run this on Python 3.9.
+            "taken_at": datetime.datetime.now(datetime.timezone.utc).isoformat(  # noqa: UP017
+                timespec="seconds"
+            ),
             "inventory_revision": status.get("inventory_revision"),
             "digest": digest(records),
             "workloads": records,
