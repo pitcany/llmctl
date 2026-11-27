@@ -1,8 +1,18 @@
 # Rollback fix and agent-owned flash lane
 
-Status on 2026-11-22: built and tested on `fix/run-rollback-order`. Not pushed,
-not merged, not deployed. Do not deploy before the M5 exit (earliest 12:52 PST
-2026-11-27). Get the owner's approval for the window.
+Status on 2026-11-27: merged to `main` as `ccabf75` (with `e15c58c`, the
+router-stopped write refusal). The workstation agent runs it since 21:14 UTC
+2026-11-27 (binary SHA-256 `208bdf1c4cb29829f4cdf0e65d2c6425bd81c1b5906cedccfb5d8a289276502c`;
+backups in `<agent-data-dir>/deploy-backups/2026-11-27-ccabf75/`). The Mac
+agents still run `55c83de`. The flash adoption below is not done.
+
+Checks before the swap: Rust workspace 356 passed, 1 failed (the known
+`bridge_subcommand_relays_http_to_the_socket` flake; 3 of 3 passed on rerun).
+Real-systemd suite 21 of 22: `logs_show_output_and_run_boundaries_and_follow_a_restart`
+fails on systemd 255 (Zorin 18) only by wording. systemd 255 writes
+`Started <unit> - <description>`; the test expects the systemd 249 form
+`Started <description>`. After the swap: journal 100 operations unchanged,
+zero foreign writes, `vllm-engine` pid unchanged and serving.
 
 Do not deploy llm-router `fix/lane-script-lock-handoff` in place of this
 procedure. With that branch the tutor cannot return.
