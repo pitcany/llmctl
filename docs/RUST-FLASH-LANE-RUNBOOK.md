@@ -4,7 +4,12 @@ Status on 2026-11-27: merged to `main` as `ccabf75` (with `e15c58c`, the
 router-stopped write refusal). The workstation agent runs it since 21:14 UTC
 2026-11-27 (binary SHA-256 `208bdf1c4cb29829f4cdf0e65d2c6425bd81c1b5906cedccfb5d8a289276502c`;
 backups in `<agent-data-dir>/deploy-backups/2026-11-27-ccabf75/`). The Mac
-agents still run `55c83de`. The flash adoption below is not done.
+agents run it since 21:22 UTC 2026-11-27 (built on mbp2, SHA-256
+`f559fbc83b43196b69cda738e21e13cbf4f88456571c574d3da60b6628fa6a80`, through
+`host upgrade <host> --binary`; real-launchd suite 7 of 7 on mbp2; the old
+binary and a journal snapshot in each Mac's `deploy-backups/2026-11-27-ccabf75/`).
+After both upgrades: journals 100 / 19 / 49 operations, zero foreign writes.
+The flash adoption below is not done.
 
 Checks before the swap: Rust workspace 356 passed, 1 failed (the known
 `bridge_subcommand_relays_http_to_the_socket` flake; 3 of 3 passed on rerun).
