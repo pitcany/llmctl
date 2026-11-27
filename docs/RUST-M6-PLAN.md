@@ -1,5 +1,12 @@
 # Rust successor — M6 plan (cutover)
 
+Status 2026-11-27: **M6a done** (read-only). The result is in
+[RUST-M6-AUTHORITY.md](RUST-M6-AUTHORITY.md): the authority map, the
+serving signature of the three hosts, and nine findings. The M5 pilot
+ended on 2026-11-27 with seven counted days; the close-out walk is in
+[RUST-M5-WORKFLOWS.md](RUST-M5-WORKFLOWS.md#close-out-walk-2026-11-27).
+The text below is the 2026-11-22 plan and is not changed.
+
 Status 2026-11-22: **owner decisions taken.** The owner took the
 recommendation in each of the 16 owner decisions ("Take your
 recommendations", 2026-11-22). M6 is not started. M5 is in its pilot: clean days 1 and 2 of 7 are closed.
