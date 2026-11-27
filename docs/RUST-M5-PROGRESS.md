@@ -3,6 +3,11 @@
 Work log for [RUST-M5-PLAN.md](RUST-M5-PLAN.md). Rows are dated; newest
 at the bottom of each section. Status line first.
 
+**Status 2026-11-27:** the pilot ended with seven counted days
+([pilot log](RUST-M5-PILOT.md)). The close-out walk of the workflow matrix
+is in [RUST-M5-WORKFLOWS.md](RUST-M5-WORKFLOWS.md#close-out-walk-2026-11-27):
+it lists the open gaps that the owner must accept, and four live findings.
+
 **Status 2026-11-18 (end of day):** M5a built, deployed to all three
 agents, baseline day running. M5b's guards built, tested and committed on
 every writer (Python guard `8f30377`, take-gpus `26e52b8d` in llmctl-stack,
