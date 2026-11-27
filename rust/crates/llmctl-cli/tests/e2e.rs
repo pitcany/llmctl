@@ -676,6 +676,139 @@ async fn failed_rollback_becomes_needs_attention_and_blocks() {
     run_to_success(&d, "coder", "k-na-3").await;
 }
 
+/// A failed lane start: the lane leaves the cards before the evicted engine
+/// starts, and the rollback proves that the engine serves again.
+#[tokio::test]
+async fn rollback_frees_the_cards_before_the_evicted_engine_returns() {
+    let d = spawn_daemon();
+    run_to_success(&d, "helper", "k-order-setup").await;
+    d.write_faults(serde_json::json!({"fail_effects": [
+        {"unit": "user/llmctl-next-fake-big.service", "kind": "start", "mode": "after"}
+    ]}));
+    let resp = d.client().admit(admit_req(OpKind::Run, "big", "k-order")).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Failed, "{op:?}");
+    let recovery = op.recovery.expect("restoration recorded");
+    let steps: Vec<&str> = recovery["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["step"].as_str())
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            "stop big",
+            "record intent: helper → Running",
+            "start helper",
+            "wait for helper readiness",
+            "verify helper serves fake/helper",
+        ],
+        "{recovery}"
+    );
+}
+
+/// "Restored" means serving: an evicted engine that returns wrong is
+/// needs_attention, not a restored operation.
+#[tokio::test]
+async fn an_evicted_engine_that_does_not_serve_again_needs_attention() {
+    let d = spawn_daemon();
+    run_to_success(&d, "helper", "k-unserved-setup").await;
+    d.write_faults(serde_json::json!({"effect_delay_ms": 700}));
+    let resp = d.client().admit(admit_req(OpKind::Run, "big", "k-unserved")).await.unwrap();
+    // After planning saw helper serving: every engine now answers wrong, so
+    // big fails its verification and helper cannot prove its return.
+    d.write_faults(serde_json::json!({"effect_delay_ms": 700, "serve_wrong_model": true}));
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::NeedsAttention, "{op:?}");
+    assert_eq!(op.recovery.unwrap()["outcome"], "restoration_failed");
+}
+
+/// Stop-first must not strand the evicted engine: a stop that reports an
+/// error for a target that is down (a missing unit, a slow stop) is done.
+#[tokio::test]
+async fn a_stop_error_for_a_target_that_is_down_still_restores_the_evicted() {
+    let d = spawn_daemon();
+    run_to_success(&d, "helper", "k-down-setup").await;
+    d.write_faults(serde_json::json!({"fail_effects": [
+        {"unit": "user/llmctl-next-fake-big.service", "kind": "start", "mode": "before"},
+        {"unit": "user/llmctl-next-fake-big.service", "kind": "stop", "mode": "before"}
+    ]}));
+    let resp = d.client().admit(admit_req(OpKind::Run, "big", "k-down")).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::Failed, "{op:?}");
+    assert_eq!(op.recovery.unwrap()["outcome"], "restored");
+    let status = d.client().status().await.unwrap();
+    assert_eq!(status.workloads.iter().find(|w| w.name == "helper").unwrap().process, "Running");
+}
+
+/// A target that really still runs holds the cards: nothing starts on them.
+#[tokio::test]
+async fn a_target_that_will_not_stop_keeps_the_evicted_engine_off_its_cards() {
+    let d = spawn_daemon();
+    run_to_success(&d, "helper", "k-stuck-setup").await;
+    d.write_faults(serde_json::json!({"fail_effects": [
+        {"unit": "user/llmctl-next-fake-big.service", "kind": "start", "mode": "after"},
+        {"unit": "user/llmctl-next-fake-big.service", "kind": "stop", "mode": "before"}
+    ]}));
+    let resp = d.client().admit(admit_req(OpKind::Run, "big", "k-stuck")).await.unwrap();
+    let op = d.wait_terminal(&resp.operation.id).await;
+    assert_eq!(op.status, OpStatus::NeedsAttention, "{op:?}");
+    let status = d.client().status().await.unwrap();
+    assert_ne!(status.workloads.iter().find(|w| w.name == "helper").unwrap().process, "Running");
+}
+
+/// `adopt --readiness-timeout`: shown by the preview, range-checked, and a
+/// default wait is called out (Strata lanes load for 11-20 minutes).
+#[tokio::test]
+async fn adopt_preview_shows_the_readiness_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("control.sock");
+    // An empty PATH: the preview cannot reach a service manager.
+    let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+        .arg("--socket")
+        .arg(&socket)
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("daemon")
+        .env("PATH", dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let d = DaemonGuard { child, dir, socket };
+    wait_socket(&d.socket).await;
+    let readiness = |extra: &[&str]| -> serde_json::Value {
+        let out = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+            .arg("--socket")
+            .arg(&d.socket)
+            .args(["adopt", "llmctl-next-fake-lane.service", "--name", "lane", "--model", "fake/lane"])
+            .args(["--port", "8199", "--gpus", "0", "--json"])
+            .args(extra)
+            .output()
+            .unwrap();
+        let preview: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
+        preview["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "readiness_timeout")
+            .cloned()
+            .unwrap_or_default()
+    };
+    let given = readiness(&["--readiness-timeout", "1800"]);
+    assert_eq!(given["status"], "pass", "{given}");
+    assert!(given["detail"].as_str().unwrap().contains("1800"), "{given}");
+    let default = readiness(&[]);
+    assert_eq!(default["status"], "warn", "{default}");
+    assert!(default["detail"].as_str().unwrap().contains("120"), "{default}");
+    assert_eq!(readiness(&["--gpu-claim", "on_demand"])["status"], "pass");
+    for bad in ["0", "3601"] {
+        assert_eq!(readiness(&["--readiness-timeout", bad])["status"], "fail", "{bad}");
+    }
+}
+
 #[tokio::test]
 async fn cancellation_between_phases_is_recorded() {
     let d = spawn_daemon();
@@ -2068,7 +2201,16 @@ async fn a_manual_stop_is_reported_survives_eviction_and_is_not_restored() {
         .filter(|s| s["outcome"] == "skipped")
         .filter_map(|s| s["step"].as_str())
         .collect();
-    assert_eq!(skipped, vec!["record intent: coder → Running", "start coder"], "{recovery}");
+    assert_eq!(
+        skipped,
+        vec![
+            "record intent: coder → Running",
+            "start coder",
+            "wait for coder readiness",
+            "verify coder serves fake/coder",
+        ],
+        "{recovery}"
+    );
     assert!(recovery.to_string().contains("manually stopped"), "{recovery}");
     let st = client.status().await.unwrap();
     assert!(!running(&st, "coder") && !running(&st, "big"));

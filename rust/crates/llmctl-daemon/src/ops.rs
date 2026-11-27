@@ -1978,10 +1978,12 @@ impl OpManager {
 
             // A swap's rollback never restarts a manual stop (plan item 6):
             // the workload was running against the owner's recorded wish,
-            // and "restoring" it would repeat that.
+            // and "restoring" it would repeat that. Nor does it wait for one.
             let restores_other = matches!(
                 &step,
                 PlanStep::StartUnit { workload, .. }
+                | PlanStep::AwaitReadiness { workload, .. }
+                | PlanStep::VerifyServedModel { workload, .. }
                 | PlanStep::PersistIntent { workload, intent: llmctl_core::DesiredIntent::Running }
                     if *workload != row.plan.target
             );
@@ -2001,15 +2003,28 @@ impl OpManager {
             }
 
             let outcome: Result<Option<String>, String> = match &step {
-                PlanStep::StopUnit { workload, unit } => self
-                    .engine
-                    .apply(Effect::StopUnit {
-                        workload: workload.clone(),
-                        unit: unit.clone(),
-                    })
-                    .await
-                    .map(|o| Some(o.identity))
-                    .map_err(|e| e.to_string()),
+                PlanStep::StopUnit { workload, unit } => {
+                    let stopped = self
+                        .engine
+                        .apply(Effect::StopUnit {
+                            workload: workload.clone(),
+                            unit: unit.clone(),
+                        })
+                        .await;
+                    match stopped {
+                        Ok(o) => Ok(Some(o.identity)),
+                        // The stop is for free cards. A unit observed down
+                        // has freed them, whatever its stop reported; one
+                        // that still runs, or cannot be read, ends the
+                        // restoration before anything starts on them.
+                        Err(e) => match self.engine.probe(unit).await {
+                            Ok(UnitProbe { process: ProcessState::Stopped, .. }) => {
+                                Ok(Some(format!("already stopped: {unit} (stop said: {e})")))
+                            }
+                            _ => Err(e.to_string()),
+                        },
+                    }
+                }
                 PlanStep::StartUnit { workload, unit, .. } => {
                     // What this restoration expects the unit to serve: a
                     // profile rollback starts the target on its *previous*
@@ -2514,7 +2529,7 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100)
 /// Upper bound on one readiness wait. 600 s (the M1 value) silently cut
 /// real cold starts short: a Strata lane needs ~615 s from NVMe, the
 /// DeepSeek lane's own unit allows 3600 s (M4b window, 2026-11-17).
-const MAX_POLL_TIMEOUT_SECS: u64 = 3600;
+pub(crate) const MAX_POLL_TIMEOUT_SECS: u64 = 3600;
 
 fn set_phase(phases: &mut [PhaseRecord], index: usize, f: impl FnOnce(&mut PhaseRecord)) {
     if let Some(p) = phases.get_mut(index) {

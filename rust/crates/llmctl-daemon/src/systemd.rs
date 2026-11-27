@@ -222,14 +222,14 @@ impl SystemdEngine {
 }
 
 /// `LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS` overrides the fixed effect
-/// timeout (dev/test hook for stop-timeout drills; default 100 s, just
-/// above systemd's 90 s default stop timeout).
+/// timeout (dev/test hook for stop-timeout drills; default 150 s, above
+/// the 120 s `TimeoutStopSec` of the slowest lanes).
 fn systemd_effect_timeout() -> Duration {
     std::env::var("LLMCTL_NEXT_SYSTEMD_EFFECT_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_millis)
-        .unwrap_or_else(|| Duration::from_secs(100))
+        .unwrap_or_else(|| Duration::from_secs(150))
 }
 
 impl Engine for SystemdEngine {
@@ -686,6 +686,13 @@ mod tests {
         assert_eq!(empty.main_pid, None);
         assert_eq!(empty.invocation_id, None);
         assert_eq!(empty.process(), ProcessState::Stopped);
+    }
+
+    #[test]
+    fn a_stop_may_take_as_long_as_the_slowest_lane() {
+        // The Strata lanes and gpt-oss have TimeoutStopSec=120; an earlier
+        // give-up leaves a rollback unable to free the cards.
+        assert!(systemd_effect_timeout() > Duration::from_secs(120));
     }
 
     #[test]
