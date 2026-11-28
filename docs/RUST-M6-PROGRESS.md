@@ -2,6 +2,16 @@
 
 Work log for [RUST-M6-PLAN.md](RUST-M6-PLAN.md). Newest status first.
 
+**Status 2026-11-28:** M6c passed: the cutover, R1 and R2 ran twice in a
+row from a fresh Debian 12 container, 75 of 75 checks each at `fb4a2cc`
+([RUST-M6-REHEARSAL.md](RUST-M6-REHEARSAL.md), `scripts/rehearsal_m6c.sh`).
+Three findings: R2 must run `catalog export` before the agent stops (a
+procedure change); a delegated `start` of a running unit restarted it
+(fixed in `llm-unit`, `~/AI` `1752e34f`, branch `fix/llm-unit-start-noop`);
+`audit` missed a raw stop right after an agent stop and run (fixed in the
+agent, `5ac909b`). Nothing merged to `main`, nothing deployed. Next: merge
+llmctl `m6c-rehearsal` and `~/AI` `fix/llm-unit-start-noop`, then M6d.
+
 **Status 2026-11-27:** M6b repository work is built for all eight items.
 Nothing is merged, pushed or deployed, and every switch is off. Next: the
 review of these branches, then M6c (rehearsal of the cutover in a Debian
