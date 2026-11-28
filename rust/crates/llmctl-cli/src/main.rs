@@ -17,6 +17,8 @@ use llmctl_core::{OpKind, Plan};
 
 mod enroll;
 mod catalog_cmds;
+mod config_cmds;
+mod health_cmd;
 mod lanes_matrix;
 mod preset_cmds;
 mod records_cmds;
@@ -55,6 +57,23 @@ enum Command {
         /// observations shown stale, never "stopped").
         #[arg(long)]
         all: bool,
+    },
+    /// One pass or fail per host: a workload passes when what the agent
+    /// observes equals its recorded intent (`unmanaged` is skipped). Exit 0
+    /// = healthy, 1 = not.
+    Health {
+        /// Every enrolled host too; a host that does not answer fails.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Router aliases of the Python gateway (`router_aliases.json` beside
+    /// settings.yaml, over settings.yaml `router.aliases`). A file on
+    /// this host: `--host` cannot reach it.
+    Alias {
+        #[command(subcommand)]
+        cmd: config_cmds::AliasCmd,
     },
     /// Plan (and by default execute) running a workload. --dry-run only previews.
     Run {
@@ -498,6 +517,11 @@ enum StoresCmd {
     },
     /// Forget a store. The weights in it stay.
     Remove { name: String },
+    /// The roots of the Python `model_dirs.yaml` against the declared
+    /// stores, and the broken symlinks under each root (the Python
+    /// `validate` check). Exit 1 when a broken symlink exists. A file on
+    /// this host: `--host` cannot reach it.
+    Roots,
 }
 
 #[derive(Subcommand, Clone)]
@@ -935,6 +959,12 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         } => cmd_mutate(cli, OpKind::Restart, &name, dry_run, wait, key, force, None).await,
         Command::Intent { name, json } => cmd_intent(cli, name.as_deref(), json).await,
         Command::Audit { since, all, json } => cmd_audit(cli, since.as_deref(), all, json).await,
+        Command::Health { all, json } => health_cmd::cmd_health(cli, all, json).await,
+        Command::Alias { cmd } => config_cmds::cmd_alias(cli, cmd).await,
+        // Before `cmd_stores`: the roots check must work with no agent.
+        Command::Stores { cmd: Some(StoresCmd::Roots), json } => {
+            config_cmds::cmd_roots(cli, json).await
+        }
         Command::Stores { cmd, json } => cmd_stores(cli, cmd, json).await,
         Command::Tolerate { cmd, json } => cmd_tolerate(cli, cmd, json).await,
         Command::Model { cmd } => cmd_model(cli, cmd).await,
@@ -1201,6 +1231,49 @@ fn parse_status_timeout(v: Option<&str>) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// The status of every enrolled host, in enrollment order. Asked
+/// concurrently (the TUI's bounded multi-host call, same shape): a
+/// sleeping Mac's timeout no longer holds back the
+/// hosts behind it. A sleeping Mac does not refuse the bridge, it lets
+/// ssh wait (and a Wi-Fi wake can follow a minute later); each ask is
+/// bounded by the status timeout, and the dropped future drops the
+/// bridge, whose ssh is killed on drop. Output order stays the
+/// enrollment order.
+async fn ask_enrolled(
+    hosts: &enroll::Hosts,
+) -> Vec<Result<llmctl_client::wire::StatusResponse, String>> {
+    let limit = remote_status_timeout();
+    // The index stays outside the task: a task that panics becomes that
+    // host's error, never the whole command's (and every cache write).
+    let tasks: Vec<(usize, tokio::task::JoinHandle<Result<llmctl_client::wire::StatusResponse, String>>)> =
+        hosts.hosts.iter().enumerate().map(|(i, h)| {
+            let alias = h.ssh_alias.clone();
+            (i, tokio::spawn(async move {
+                let client = ControlClient::connect_bridge(&alias);
+                let answer = match tokio::time::timeout(limit, client.status()).await {
+                    Ok(r) => r.map_err(|e| e.to_string()),
+                    Err(_) => Err(format!(
+                        "no answer within {} s: asleep or unreachable (LLMCTL_NEXT_STATUS_TIMEOUT_S sets the limit)",
+                        limit.as_secs()
+                    )),
+                };
+                answer
+            }))
+        })
+        .collect();
+    // All asks run concurrently; collect as they finish (the total wait is
+    // the slowest one), then print in enrollment order.
+    let mut answers = Vec::with_capacity(tasks.len());
+    for (i, t) in tasks {
+        let answer = t
+            .await
+            .unwrap_or_else(|e| Err(format!("the status ask for this host failed: {e}")));
+        answers.push((i, answer));
+    }
+    answers.sort_by_key(|(i, _)| *i);
+    answers.into_iter().map(|(_, answer)| answer).collect()
+}
+
 /// `status --all`: local host first, then every enrolled host, each with
 /// freshness. An unreachable host shows its last cached observations
 /// marked STALE — never as "stopped" (M3-E.2).
@@ -1272,43 +1345,8 @@ async fn cmd_status_all(cli: &Cli, json: bool) -> Result<u8, CliError> {
 
     let mut hosts = enroll::load_hosts();
     let mut dirty = false;
-    // Ask every enrolled host concurrently (the TUI's bounded multi-host
-    // call, same shape): a sleeping Mac's timeout no longer holds back the
-    // hosts behind it. A sleeping Mac does not refuse the bridge, it lets
-    // ssh wait (and a Wi-Fi wake can follow a minute later); each ask is
-    // bounded by the status timeout, and the dropped future drops the
-    // bridge, whose ssh is killed on drop. Output order stays the
-    // enrollment order.
-    let limit = remote_status_timeout();
-    // The index stays outside the task: a task that panics becomes that
-    // host's error, never the whole command's (and every cache write).
-    let tasks: Vec<(usize, tokio::task::JoinHandle<Result<StatusResponse, String>>)> =
-        hosts.hosts.iter().enumerate().map(|(i, h)| {
-            let alias = h.ssh_alias.clone();
-            (i, tokio::spawn(async move {
-                let client = ControlClient::connect_bridge(&alias);
-                let answer = match tokio::time::timeout(limit, client.status()).await {
-                    Ok(r) => r.map_err(|e| e.to_string()),
-                    Err(_) => Err(format!(
-                        "no answer within {} s: asleep or unreachable (LLMCTL_NEXT_STATUS_TIMEOUT_S sets the limit)",
-                        limit.as_secs()
-                    )),
-                };
-                answer
-            }))
-        })
-        .collect();
-    // All asks run concurrently; collect as they finish (the total wait is
-    // the slowest one), then print in enrollment order.
-    let mut answers: Vec<(usize, Result<StatusResponse, String>)> = Vec::with_capacity(tasks.len());
-    for (i, t) in tasks {
-        let answer = t
-            .await
-            .unwrap_or_else(|e| Err(format!("the status ask for this host failed: {e}")));
-        answers.push((i, answer));
-    }
-    answers.sort_by_key(|(i, _)| *i);
-    for (h, (_, answer)) in hosts.hosts.iter_mut().zip(answers) {
+    let answers = ask_enrolled(&hosts).await;
+    for (h, answer) in hosts.hosts.iter_mut().zip(answers) {
         match answer {
             Ok(status) => {
                 h.last_seen = Some(chrono::Utc::now());
@@ -2015,7 +2053,7 @@ async fn cmd_stores(cli: &Cli, cmd: Option<StoresCmd>, json: bool) -> Result<u8,
             );
             return Ok(0);
         }
-        None => {}
+        Some(StoresCmd::Roots) | None => {}
     }
     let resp = client.stores().await?;
     if json {

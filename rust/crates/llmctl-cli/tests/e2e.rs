@@ -3997,3 +3997,70 @@ async fn tolerated_gpu_occupants_let_a_run_through_until_one_outgrows_its_cap() 
     let listed = String::from_utf8(cli(&d.socket, &["tolerate"]).stdout).unwrap();
     assert!(!listed.contains("speaches.main") && listed.contains("rustdesk"), "{listed}");
 }
+
+// ---- M5 close-out: health, alias, stores roots ---------------------------------
+
+/// `health` is one pass or fail for the host, and the two Python config
+/// files beside settings.yaml are read in place.
+#[test]
+fn health_passes_or_fails_and_the_python_config_files_are_read_in_place() {
+    let d = spawn_daemon();
+    let config = tempfile::tempdir().unwrap();
+    // `--socket` first, as `cli`; the settings path keeps the files in a temp dir.
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
+            .env("LLMCTL_NEXT_SETTINGS", config.path().join("settings.yaml"))
+            .arg("--socket")
+            .arg(&d.socket)
+            .args(args)
+            .output()
+            .expect("run llmctl-next")
+    };
+    let text = |out: &std::process::Output| String::from_utf8_lossy(&out.stdout).into_owned();
+
+    assert!(run(&["run", "coder", "--wait", "--key", "k-health-run"]).status.success());
+    let out = run(&["health"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(text(&out).contains("healthy"), "{}", text(&out));
+
+    // An alias is bound in the overlay file; its target serves now.
+    let out = run(&["alias", "set", "coding", "fake/coder"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        std::fs::read_to_string(config.path().join("router_aliases.json")).unwrap(),
+        "{\n  \"coding\": \"fake/coder\"\n}"
+    );
+    let listed = text(&run(&["alias", "list"]));
+    assert!(listed.contains("coding") && listed.contains("healthy"), "{listed}");
+    // The file is local: another host's agent cannot read it.
+    let out = run(&["--host", "elsewhere", "alias", "list"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--host elsewhere cannot reach it"));
+
+    // A manual stop holds; a start from outside then goes against the intent.
+    assert!(run(&["stop", "coder", "--wait", "--key", "k-health-stop"]).status.success());
+    assert_eq!(run(&["health"]).status.code(), Some(0));
+    start_fake_unit_outside(&d, "coder");
+    let out = run(&["health"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("UNHEALTHY"), "{}", text(&out));
+    assert!(text(&out).contains("FAIL coder"), "{}", text(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&run(&["health", "--json"]).stdout).unwrap();
+    assert_eq!(doc["healthy"], false);
+
+    // model_dirs.yaml: one root with one broken symlink is exit 1.
+    let root = config.path().join("models");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        config.path().join("model_dirs.yaml"),
+        format!("model_roots:\n  - name: test-root\n    default_path: {}\n", root.display()),
+    )
+    .unwrap();
+    let out = run(&["stores", "roots"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(text(&out).contains("test-root") && text(&out).contains("0 broken"), "{}", text(&out));
+    std::os::unix::fs::symlink(root.join("gone"), root.join("dead")).unwrap();
+    let out = run(&["stores", "roots"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("broken: ") && text(&out).contains("dead"), "{}", text(&out));
+}

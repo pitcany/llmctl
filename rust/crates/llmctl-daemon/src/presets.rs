@@ -52,7 +52,7 @@ pub enum PresetsError {
     Io(String),
 }
 
-fn home() -> PathBuf {
+pub(crate) fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
@@ -446,7 +446,7 @@ pub fn digest(bytes: &[u8]) -> String {
 /// in the same directory, set `mode`, fsync, rename. A reader never sees a
 /// half-written file, and the bytes are never readable beyond `mode`, not
 /// even for a moment (env profiles may hold credentials).
-fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), PresetsError> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), PresetsError> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let io = |what: &str, e: std::io::Error| PresetsError::Io(format!("{what} {}: {e}", path.display()));
