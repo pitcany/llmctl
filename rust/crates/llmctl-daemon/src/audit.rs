@@ -123,6 +123,22 @@ fn explains(effect: &EffectObservation, current: &SeenState, baseline_at: DateTi
         })
 }
 
+/// Only the workload's newest effect since the baseline can explain its
+/// current state: an older one describes a state the agent left again
+/// (a stop, then a run, then a raw stop before any pass — M6c finding 3).
+fn explained_by_newest(
+    effects: &[EffectObservation],
+    workload: &str,
+    current: &SeenState,
+    baseline_at: DateTime<Utc>,
+) -> bool {
+    effects
+        .iter()
+        .filter(|e| e.workload == workload && e.at >= baseline_at)
+        .max_by_key(|e| e.at)
+        .is_some_and(|e| explains(e, current, baseline_at))
+}
+
 /// Capture the result of completed effects while this executor still
 /// holds the host lock. No-op plans and later acknowledgements get no
 /// new evidence. Unknown observations cannot explain a transition.
@@ -283,11 +299,12 @@ pub async fn compare(state: &Arc<AppState>, observations: &[Observation]) -> Vec
         let unit_changed = unit_change(&baseline, &current);
         let lanes_changed = lane_change(&baseline, &current);
         if unit_changed || lanes_changed {
-            let explained = ops
+            let done: Vec<EffectObservation> = ops
                 .iter()
                 .filter(|op| op.status.is_terminal())
                 .flat_map(effects)
-                .any(|e| e.workload == name && explains(&e, &current, baseline_at));
+                .collect();
+            let explained = explained_by_newest(&done, name, &current, baseline_at);
             if !explained {
                 let actor = match (&baseline.lanes, &current.lanes) {
                     (Some(before), Some(after)) => {
@@ -470,6 +487,37 @@ mod tests {
             &seen("running", Some(100), Some("different")),
             at
         ));
+    }
+
+    #[test]
+    fn only_the_newest_effect_since_the_baseline_explains() {
+        // M6c finding 3: an agent stop, then an agent run, then a raw stop
+        // before any observation pass. The old stop must not explain it.
+        let base = Utc::now();
+        let stop = EffectObservation {
+            workload: "lane".into(),
+            at: base + chrono::Duration::seconds(1),
+            state: seen("stopped", None, None),
+        };
+        let run = EffectObservation {
+            workload: "lane".into(),
+            at: base + chrono::Duration::seconds(2),
+            state: seen("running", Some(200), Some("m")),
+        };
+        let other = EffectObservation {
+            workload: "engine".into(),
+            at: base + chrono::Duration::seconds(3),
+            state: seen("stopped", None, None),
+        };
+        let effects = [run.clone(), stop.clone(), other];
+        let raw_stop = seen("stopped", None, None);
+        assert!(!explained_by_newest(&effects, "lane", &raw_stop, base));
+        assert!(explained_by_newest(&effects, "lane", &run.state, base));
+        // One effect: unchanged behaviour.
+        assert!(explained_by_newest(std::slice::from_ref(&stop), "lane", &raw_stop, base));
+        let later = base + chrono::Duration::seconds(5);
+        assert!(!explained_by_newest(&[stop], "lane", &raw_stop, later));
+        assert!(!explained_by_newest(&[], "lane", &raw_stop, base));
     }
 
     #[test]

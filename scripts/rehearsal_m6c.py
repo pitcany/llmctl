@@ -763,16 +763,17 @@ def main():
             rc == 0 and wait_for(lambda: served(LANE_PORT) == ["reh/lane"]),
             tail(out, err),
         )
-        # Finding 3 repro: stop op, run op, then a raw stop before any observation pass.
+        # Finding 3: stop op, run op, then a raw stop before any observation pass.
         n_find = len(audit_findings()[1])
         agent("stop", "reh-lane", "--wait")
         agent("run", "reh-lane", "--wait")
         systemctl("stop", f"{LANE}.service")
         agent("status", "--json")
-        print(
-            f"INFO  N13b raw stop right after an agent stop+run: findings {n_find} -> {len(audit_findings()[1])}"
-            " (a recorded stop needs +1)",
-            flush=True,
+        n_after = len(audit_findings()[1])
+        check(
+            "N13b a raw stop right after an agent stop and run: one new finding (finding 3, fixed)",
+            n_after == n_find + 1,
+            f"{n_find} -> {n_after} finding(s)",
         )
         agent("run", "reh-lane", "--wait")
         wait_for(lambda: served(LANE_PORT) == ["reh/lane"])
