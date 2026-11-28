@@ -229,6 +229,8 @@ the date, host and result for each check in [RUST-M5-PROGRESS.md](RUST-M5-PROGRE
   paths, results and cleanup.
 
 After both checks pass, mark M5 done in its plan and the parent plan.
+Gap 3's workstation part needs `model delete` (owner choice, 2026-11-27),
+which reaches the agents with the M6d deploy: it runs after M6d.
 
 ### Built for gaps 1, 4 and 5 (2026-11-27)
 

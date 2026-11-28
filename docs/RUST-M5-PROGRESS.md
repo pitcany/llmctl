@@ -47,6 +47,13 @@ again. Before, it was refused with `definition_drift` on
 
 Gap 3 remains open for the live catalog add/edit and record cleanup.
 
+**2026-11-27, later:** the owner chose a delete verb over a disabled
+leftover row ("Add a catalog delete"). `model delete <model>` is built
+on branch `m6b-cutover` (`df4d113`): a preview with a token, refused while
+a workload or a preset names the record; the weights stay. It reaches the
+agents with the M6d deploy, so the workstation `model add`, `model edit`
+and `model delete` check runs after M6d, before the M6f switch.
+
 ## Earlier status
 
 **Status 2026-11-27, later:** the M5f rehearsal passed two times
