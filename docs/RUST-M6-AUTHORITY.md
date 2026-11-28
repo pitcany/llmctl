@@ -434,7 +434,18 @@ Nothing here was fixed. Each needs the owner or a change to the M6 plan.
    the engine definitions. It changes a pinned definition (design
    decision 5), and the agent's `pip freeze` probe must then run with the
    same variable.
-2. **An LM Studio server runs outside its unit** (checked: `ss -ltnp`,
+2. **Resolved 2026-11-27 19:33 PST: the cause was the llmctl test suite.**
+   `tests/test_adapters.py::test_lmstudio_discovery` ran the real `lms
+   link status --json`, and `lms` starts LM Studio's `llmster` daemon on
+   almost any command, in the caller's session. The 18:22 process came
+   from a suite run at 18:22:30; a second run at 19:24:29 started another
+   one (seen: parent `lms link status --json`). Fix on `m6b-cutover`:
+   `lms_binary()` honours `LLMCTL_LMS_BIN`, and the suite sets `none` with
+   a failing `lms` first on PATH. After `lms daemon down` and a full suite
+   run, port 1234 stayed closed and the serving signature agrees with the
+   agent. Inferred: the 2026-11-26 18:43 process had the same cause. The
+   text below is the first finding.
+   **An LM Studio server runs outside its unit** (checked: `ss -ltnp`,
    `/proc/<pid>/cgroup`). Process `llmster`, pid 3820672, started 18:43
    PST 2026-11-26 in `session-3.scope`, listens on 127.0.0.1:1234.
    `llmster.service` is inactive. The agent's record says Stopped and the

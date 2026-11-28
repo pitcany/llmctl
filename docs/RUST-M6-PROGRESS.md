@@ -48,5 +48,7 @@ e2e agent reads no presets of the owner.
 
 - `llm-unit` start, stop or restart with extra options (`--no-block`)
   keeps the systemctl path, also in cutover mode.
-- The intent-only verb, `ConflictedBy` and the stray `llmster` process
-  (M6a findings 3, 5 and 6) are not built.
+- The intent-only verb and `ConflictedBy` (M6a findings 5 and 6) are not
+  built.
+- The stray `llmster` (M6a finding 2) is fixed: the test suite started it
+  through the real `lms` CLI. `llmster` keeps its manual stop.
