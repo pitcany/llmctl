@@ -1,9 +1,16 @@
 # Rust successor — M6c rehearsal (the cutover and both reversals)
 
 Status 2026-11-28: **passed twice in a row from a fresh container**,
-73 of 73 checks each run, at llmctl `__SHA__`. The rehearsal found three
-facts that change the M6f procedure or need an owner decision (findings
-1 to 3). No live host changed.
+73 of 73 checks each run, at llmctl `da6dc70` (2026-11-28 07:14 UTC).
+The rehearsal found three facts that change the M6f procedure or need an
+owner decision (findings 1 to 3). No live host changed.
+
+The recorded run: the agent is the static build of `51ff6b5` (`rust/` is
+the same at `da6dc70`), sha256 `725303c880662293…`; `~/AI` `c489f514`,
+llm-router `ca42338`, local-llm `19d46dc`; the DB copy sha256
+`fb28a7cedb5cba3f…`. Log: `rust/dist/m6c-rehearsal-da6dc7056447.log`
+(gitignored). After the runs: no container left, the live agent active,
+`engine-pins-check` ok, port 1234 free.
 
 Plan text: [RUST-M6-PLAN.md](RUST-M6-PLAN.md), M6c, and the "Reversal"
 section. M6c extends the M5f rehearsal
