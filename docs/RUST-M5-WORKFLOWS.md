@@ -3,7 +3,7 @@
 Status 2026-11-27: **close-out walk done**, see
 [Close-out walk](#close-out-walk-2026-11-27) at the end. Of 28 rows, 13 pass with no gap. The owner
 decided the six gaps on 2026-11-27: gaps 1, 4 and 5 are built (three
-verbs on branch `m5-gap-verbs`, not deployed), gaps 2, 3 and 6 are
+verbs, on main since `6d1ff10`, not deployed), gaps 2, 3 and 6 are
 accepted. No open gap is left. The tables below are the 2026-11-18 text
 and are not changed.
 
@@ -209,7 +209,8 @@ was "Build 1, 4, and 5". Thus gaps 1, 4 and 5 are built (below), and gaps
 
 ### Built for gaps 1, 4 and 5 (2026-11-27)
 
-Three verbs of the `llmctl-next` CLI, on branch `m5-gap-verbs`. They add
+Three verbs of the `llmctl-next` CLI (branch `m5-gap-verbs`, merged into
+main as `6d1ff10`). They add
 no API route and no wire field, thus the protocol stays 1. They are **not
 deployed**: they reach the hosts with the M6d deploy.
 
