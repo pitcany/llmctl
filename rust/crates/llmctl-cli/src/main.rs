@@ -117,6 +117,12 @@ enum Command {
         #[command(subcommand)]
         cmd: catalog_cmds::CatalogCmd,
     },
+    /// The frozen Python history (M6): import a copy of the Python DB's
+    /// sessions and operations as read-only rows, and list them.
+    History {
+        #[command(subcommand)]
+        cmd: catalog_cmds::HistoryCmd,
+    },
     /// Enroll a workload `adopt` cannot prove: an observe-only endpoint
     /// (--observe URL) or a vendor app's own controls (--start/--stop).
     /// A preview until --confirm.
@@ -986,6 +992,7 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
         Command::Enroll(a) => records_cmds::cmd_enroll(cli, a).await,
         Command::Authority(a) => records_cmds::cmd_authority(cli, a).await,
         Command::Catalog { cmd } => catalog_cmds::cmd_catalog(cli, cmd).await,
+        Command::History { cmd } => catalog_cmds::cmd_history(cli, cmd).await,
         Command::Vram { measure, json } => cmd_vram(cli, measure.as_deref(), json).await,
         Command::Ops { json } => cmd_ops(cli, json).await,
         Command::Op { id, watch } => cmd_op(cli, &id, watch).await,

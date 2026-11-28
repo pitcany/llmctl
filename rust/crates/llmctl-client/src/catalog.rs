@@ -314,6 +314,68 @@ pub struct ModelEnableRequest {
     pub enabled: bool,
 }
 
+/// One row of the Python DB snapshot (`sessions` or `operations`), every
+/// column as it is stored (text stays text).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryRow {
+    /// `session` or `operation`.
+    pub kind: String,
+    pub row: serde_json::Map<String, serde_json::Value>,
+}
+
+/// `history import` (M6 decision 9). Without `confirm`, a report only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryImportRequest {
+    pub protocol: u32,
+    /// sha256 of the snapshot file the rows were read from.
+    pub snapshot_sha256: String,
+    /// Host names in the rows that mean this host (`--as yannik-desktop`).
+    #[serde(default)]
+    pub host_names: Vec<String>,
+    pub rows: Vec<HistoryRow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryRowReport {
+    /// `py:<host>:<id>`, or the source id when the row has none usable.
+    pub id: String,
+    pub kind: String,
+    /// `new`, `present`, `conflicting`, `other_host` or `unsupported`.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryImportResponse {
+    pub rows: Vec<HistoryRowReport>,
+    pub counts: std::collections::BTreeMap<String, usize>,
+    pub confirm: String,
+    pub applied: bool,
+    /// Legacy rows in the journal after this call.
+    pub total: usize,
+}
+
+/// An imported row as `history list` shows it: no env, no request body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub id: String,
+    pub kind: String,
+    pub host: String,
+    pub imported_at: chrono::DateTime<chrono::Utc>,
+    /// A few identifying fields of the source row (kind/target/phase for an
+    /// operation; runtime/status/unit for a session; created_at).
+    pub summary: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryListResponse {
+    pub host: String,
+    pub entries: Vec<HistoryEntry>,
+}
+
 /// Delete one catalog record (M5 gap 3). Without `confirm` it is a preview:
 /// the record, what still names it, and the token that applies exactly this.
 /// The weights are not touched (`model rm` removes weights).
@@ -419,6 +481,14 @@ impl ControlClient {
 
     pub async fn model_delete(&self, req: &ModelDeleteRequest) -> Result<ModelDeleteResponse, ClientError> {
         self.post_json("/v1/catalog/models/delete", req).await
+    }
+
+    pub async fn history_import(&self, req: &HistoryImportRequest) -> Result<HistoryImportResponse, ClientError> {
+        self.post_json("/v1/history/import", req).await
+    }
+
+    pub async fn history_list(&self) -> Result<HistoryListResponse, ClientError> {
+        self.get_json("/v1/history").await
     }
 
     pub async fn model_scan(&self, req: &ScanRequest) -> Result<ScanResponse, ClientError> {

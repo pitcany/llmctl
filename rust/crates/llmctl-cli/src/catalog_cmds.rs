@@ -107,6 +107,87 @@ pub enum CatalogCmd {
     Export { out: std::path::PathBuf },
 }
 
+/// `history import` / `history list` (M6 decision 9).
+#[derive(Subcommand, Clone)]
+pub enum HistoryCmd {
+    /// Import the sessions and operations of a Python DB copy (take it with
+    /// `sqlite3 <db> ".backup <copy>"`; a live DB is refused). The rows stay
+    /// verbatim and read-only as `py:<host>:<id>`; none authorizes an action.
+    /// Without --confirm only reports what each row becomes.
+    Import {
+        snapshot: std::path::PathBuf,
+        /// A host name in the rows (`owner.hostname`) that means this host,
+        /// e.g. `--as yannik-desktop`. Rows of other hosts are reported.
+        #[arg(long = "as", value_name = "HOSTNAME")]
+        host_names: Vec<String>,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The imported rows: id, kind and a few fields (no env, no request body).
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+pub async fn cmd_history(cli: &Cli, cmd: HistoryCmd) -> Result<u8, CliError> {
+    use llmctl_client::catalog::HistoryImportRequest;
+    let client = connect(cli)?;
+    match cmd {
+        HistoryCmd::Import { snapshot, host_names, confirm, json } => {
+            ensure_protocol(&client).await?;
+            let (sha, rows) = llmctl_daemon::history::read_snapshot(&snapshot).map_err(CliError::Daemon)?;
+            let applying = confirm.is_some();
+            let resp = client
+                .history_import(&HistoryImportRequest {
+                    protocol: PROTOCOL_VERSION,
+                    snapshot_sha256: sha.clone(),
+                    host_names,
+                    rows,
+                    confirm,
+                })
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                return Ok(0);
+            }
+            println!("snapshot {} (sha256 {})", snapshot.display(), &sha[..16]);
+            for r in resp.rows.iter().filter(|r| r.outcome != "new" && r.outcome != "present") {
+                println!("  {:<11} {:<9} {}  {}", r.outcome, r.kind, r.id, r.reason.as_deref().unwrap_or(""));
+            }
+            let counts: Vec<String> = resp.counts.iter().map(|(k, v)| format!("{v} {k}")).collect();
+            println!("{} rows: {}", resp.rows.len(), counts.join(", "));
+            if resp.applied {
+                println!("imported; {} legacy rows in the journal", resp.total);
+            } else if !applying {
+                println!("dry run. Apply exactly this report with --confirm {}", resp.confirm);
+            }
+            Ok(0)
+        }
+        HistoryCmd::List { json } => {
+            let resp = client.history_list().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                return Ok(0);
+            }
+            if resp.entries.is_empty() {
+                println!("no legacy history on {}", resp.host);
+            }
+            for e in &resp.entries {
+                let s: Vec<String> = e
+                    .summary
+                    .iter()
+                    .map(|(k, v)| format!("{k}={}", v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())))
+                    .collect();
+                println!("{:<9} {}  {}", e.kind, e.id, s.join(" "));
+            }
+            Ok(0)
+        }
+    }
+}
+
 fn pairs(set: &[String]) -> Result<Vec<(String, String)>, CliError> {
     set.iter()
         .map(|s| {

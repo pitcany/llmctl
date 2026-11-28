@@ -31,4 +31,5 @@ libc = "0.2.191"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rusqlite = { workspace = true }
 uuid = { workspace = true }

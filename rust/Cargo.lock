@@ -744,6 +744,7 @@ dependencies = [
  "llmctl-core",
  "llmctl-daemon",
  "llmctl-tui",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
