@@ -75,17 +75,35 @@ pub fn status_cache_path(name: &str) -> PathBuf {
 }
 
 pub fn load_hosts() -> Hosts {
-    load_hosts_at(&hosts_path(), &llmctl_daemon::app::legacy_data_dir().join("hosts.json"))
+    let legacy = legacy_store_for(&store_dir(), &llmctl_daemon::app::legacy_data_dir());
+    load_hosts_at(&hosts_path(), legacy.as_deref())
+}
+
+/// The workstation's live data dir. The M6d deploy moves `hosts.json` into
+/// it; until then its `--data-dir` calls must still find the Macs.
+const LIVE_WORKSTATION_DIR: &str = "llmctl-next-m4a";
+
+/// The pre-M6 store (`<legacy_dir>/hosts.json`) that `store_dir` may fall back
+/// to, or None. Only two data dirs may: the default one and the workstation's
+/// live one, both under the same state home as `legacy_dir`. Any other dir
+/// (`--data-dir`, `--socket` or `LLMCTL_NEXT_DATA_DIR` to a temp or test
+/// agent) gets none: such an agent must never bridge to the real Macs.
+fn legacy_store_for(store_dir: &std::path::Path, legacy_dir: &std::path::Path) -> Option<PathBuf> {
+    let state_home = legacy_dir.parent()?;
+    [llmctl_daemon::app::DEFAULT_DATA_DIR_SUFFIX, LIVE_WORKSTATION_DIR]
+        .iter()
+        .any(|name| store_dir == state_home.join(name))
+        .then(|| legacy_dir.join("hosts.json"))
 }
 
 /// The store at `path`. While it does not exist, the pre-M6 store at `legacy`
-/// is read (the workstation's enrollments were written there before the data
-/// dir default changed); the next save writes `path`.
-fn load_hosts_at(path: &std::path::Path, legacy: &std::path::Path) -> Hosts {
+/// (if this data dir has one, see [`legacy_store_for`]) is read; the next
+/// save writes `path`.
+fn load_hosts_at(path: &std::path::Path, legacy: Option<&std::path::Path>) -> Hosts {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(_) => match std::fs::read_to_string(legacy) {
-            Ok(text) if legacy != path => {
+        Err(_) => match legacy.map(|l| (l, std::fs::read_to_string(l))) {
+            Some((legacy, Ok(text))) if legacy != path => {
                 eprintln!(
                     "note: no {}; reading the enrollments at {} (copy hosts.json and hosts/ into the data dir)",
                     path.display(),
@@ -704,11 +722,39 @@ exit 0
             last_seen: None,
         });
         std::fs::write(&legacy, serde_json::to_string(&old).unwrap()).unwrap();
-        assert_eq!(load_hosts_at(&new, &legacy), old, "absent store: the legacy one is read");
+        assert_eq!(load_hosts_at(&new, Some(&legacy)), old, "absent store: the legacy one is read");
+        assert_eq!(load_hosts_at(&new, None), Hosts::default(), "no legacy store for this dir");
         std::fs::create_dir_all(new.parent().unwrap()).unwrap();
         std::fs::write(&new, r#"{"hosts":[]}"#).unwrap();
-        assert_eq!(load_hosts_at(&new, &legacy), Hosts::default(), "an existing store wins");
-        assert_eq!(load_hosts_at(&legacy, &legacy), old);
+        assert_eq!(load_hosts_at(&new, Some(&legacy)), Hosts::default(), "an existing store wins");
+        assert_eq!(load_hosts_at(&legacy, Some(&legacy)), old);
+    }
+
+    #[test]
+    fn only_the_default_and_the_live_workstation_dir_read_the_pre_m6_store() {
+        // A state home with real enrollments in the pre-M6 dir.
+        let home = tempfile::tempdir().unwrap();
+        let state = home.path().join(".local/state");
+        let legacy_dir = state.join(llmctl_daemon::app::LEGACY_DATA_DIR_SUFFIX);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let real = r#"{"hosts":[{"name":"m5","io_platform_uuid":"U","ssh_alias":"m5","remote_bin":"b","remote_data_dir":"d","arch":"arm64","enrolled_at":"2026-11-01T00:00:00Z"}]}"#;
+        std::fs::write(legacy_dir.join("hosts.json"), real).unwrap();
+        let load = |dir: &std::path::Path| {
+            load_hosts_at(&dir.join("hosts.json"), legacy_store_for(dir, &legacy_dir).as_deref())
+        };
+
+        // A temp or test agent (--data-dir, --socket, LLMCTL_NEXT_DATA_DIR): never.
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(legacy_store_for(temp.path(), &legacy_dir), None);
+        assert_eq!(load(temp.path()), Hosts::default(), "a temp agent read the real Macs");
+        assert_eq!(load(&state.join("llmctl-next-spike")), Hosts::default());
+
+        // The default dir, and the workstation's live dir until M6d moves the file.
+        for name in [llmctl_daemon::app::DEFAULT_DATA_DIR_SUFFIX, "llmctl-next-m4a"] {
+            let hosts = load(&state.join(name));
+            assert_eq!(hosts.hosts.len(), 1, "{name} must still find the Macs");
+            assert_eq!(hosts.hosts[0].name, "m5");
+        }
     }
 
     #[test]
