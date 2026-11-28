@@ -66,3 +66,35 @@ def test_export_keeps_every_bundle_row_verbatim() -> None:
     for row in bundle["models"]:
         assert by_id[row["id"]] == row, row["name"]
     assert export["profiles"] == bundle["profiles"]
+
+
+def test_a_reversal_into_the_db_it_came_from_needs_update_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1/R2 import the agent's export into the DB that made the bundle: every row exists.
+
+    Found by the M5f rehearsal: without ``--update-models`` an edit that the agent made
+    to an existing row did not reach Python.
+    """
+    live = _roundtrip(FIX / "catalog_bundle.json", tmp_path, monkeypatch, "live")
+    row = live["models"][0]
+    changed = {**row, "notes": "edited by the agent", "active": False}
+    edited = {**live, "models": [changed, *live["models"][1:]]}
+    bundle = tmp_path / "agent-export.json"
+    bundle.write_text(json.dumps(edited))
+
+    def now() -> dict:
+        out = tmp_path / "now.json"
+        assert runner.invoke(app, ["export-registry", str(out)]).exit_code == 0
+        return json.loads(out.read_text())
+
+    assert runner.invoke(app, ["import-registry", str(bundle)]).exit_code == 0
+    assert _rows(now()) == _rows(live)  # the default still skips existing rows
+
+    res = runner.invoke(app, ["import-registry", str(bundle), "--update-models"])
+    assert res.exit_code == 0 and "updated 1 models" in res.output, res.output
+    assert _rows(now()) == _rows(edited)
+    res = runner.invoke(app, ["import-registry", str(bundle), "--update-models"])
+    # A second pass changes nothing.
+    assert "Imported 0 models, updated 0 models" in res.output, res.output
+
