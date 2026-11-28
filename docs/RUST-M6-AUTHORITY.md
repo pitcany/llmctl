@@ -414,6 +414,26 @@ Nothing here was fixed. Each needs the owner or a change to the M6 plan.
    switch accepts a content difference (`ops.rs:349`). It can come back:
    the longjob `ch-portfolio-m4b` (custom-harness) runs until about 18:25
    PST and the first run of that job made the install.
+   **Mechanism found and closed, 2026-11-27 16:20 PST** (checked).
+   The writer was a custom-harness agent session (`20261127-152329-964862`,
+   model `qwen27b-nothink`): `pip install -e .` was refused by PEP 668,
+   then it ran the same with `--break-system-packages`, which is a user
+   install. The harness shell sandbox (`bwrap --dev-bind / /`) keeps
+   `$HOME` writable. The engine processes started at 14:38 and the
+   directory was made at 15:23:41, so the running engine did not load the
+   packages. Three changes, none of them a repin or a restart:
+   (a) `~/.local/lib/python3.12` is a read-only guard directory (mode
+   0555); a user install for Python 3.12 fails with a permission error.
+   (b) `~/AI/bin/engine-pins-check` runs each hour
+   (`engine-pins-check.timer`, `~/AI` `34d5fa69`): it fails when a
+   workload has version drift or when its Python reads a user site that
+   holds packages. (c) custom-harness branch
+   `fix/isolate-python-user-base` (`addb55c`, not merged while the
+   portfolio job runs) gives each harness process a private
+   `PYTHONUSERBASE`. Open for after the M6 exit: `PYTHONNOUSERSITE=1` in
+   the engine definitions. It changes a pinned definition (design
+   decision 5), and the agent's `pip freeze` probe must then run with the
+   same variable.
 2. **An LM Studio server runs outside its unit** (checked: `ss -ltnp`,
    `/proc/<pid>/cgroup`). Process `llmster`, pid 3820672, started 18:43
    PST 2026-11-26 in `session-3.scope`, listens on 127.0.0.1:1234.
