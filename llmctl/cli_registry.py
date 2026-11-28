@@ -972,6 +972,14 @@ def export_registry_cmd(
     )
 
 
+#: What `import-registry --update-models` carries onto an existing row. Not the
+#: runtime or the source: they are the row's identity.
+_UPDATED_ON_IMPORT = (
+    "name", "path", "host", "format", "quantization", "estimated_vram_gb", "max_context",
+    "parameter_count", "notes", "default_profile_id", "active", "tags", "metadata",
+)
+
+
 def import_registry_cmd(
     in_path: Annotated[Path, typer.Argument(help="Input JSON file.")],
     replace_profiles: Annotated[
@@ -979,6 +987,14 @@ def import_registry_cmd(
         typer.Option(
             "--replace-profiles",
             help="Update profiles by name (default: skip existing).",
+        ),
+    ] = False,
+    update_models: Annotated[
+        bool,
+        typer.Option(
+            "--update-models",
+            help="Update models that have the bundle row's id (default: skip existing). "
+            "A reversal from llmctl-next needs it: every row exists already.",
         ),
     ] = False,
 ) -> None:
@@ -1001,14 +1017,28 @@ def import_registry_cmd(
             f"{exc.errors()[0]['loc']} {exc.errors()[0]['msg']}"
         ) from exc
     added_models = 0
+    updated_models = 0
     added_profiles = 0
     with _session() as db:
         reg = RegistryService(db)
         prof = ProfileService(db)
-        existing_models = {
-            (m.runtime.value, m.source or m.name): m for m in reg.list_models(include_inactive=True)
-        }
+        current_models = reg.list_models(include_inactive=True)
+        existing_models = {(m.runtime.value, m.source or m.name): m for m in current_models}
+        # By id, not by key: the key can name two rows, the id names one. llmctl-next's
+        # `catalog export` keeps the ids it imported.
+        by_id = {m.id: m for m in current_models} if update_models else {}
         for model in bundle.models:
+            current = by_id.get(model.id)
+            if current is not None and current.id is not None:
+                changed = {
+                    f: getattr(model, f)
+                    for f in _UPDATED_ON_IMPORT
+                    if getattr(current, f) != getattr(model, f)
+                }
+                if changed:
+                    reg.update_model(current.id, ModelUpdate(**changed))
+                    updated_models += 1
+                continue
             key = (model.runtime.value, model.source or model.name)
             if key in existing_models:
                 continue
@@ -1049,7 +1079,8 @@ def import_registry_cmd(
             added_profiles += 1
     console.print(
         f"[green]Imported[/green] {added_models} models, "
-        f"{added_profiles} profiles "
+        + (f"updated {updated_models} models, " if update_models else "")
+        +         f"{added_profiles} profiles "
         f"({'updates allowed' if replace_profiles else 'skipped existing'})"
     )
 

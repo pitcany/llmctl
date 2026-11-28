@@ -3,6 +3,10 @@
 Work log for [RUST-M5-PLAN.md](RUST-M5-PLAN.md). Rows are dated; newest
 at the bottom of each section. Status line first.
 
+**Status 2026-11-27, later:** the M5f rehearsal passed two times
+([RUST-M5-REHEARSAL.md](RUST-M5-REHEARSAL.md)). Each row of the M5 exit
+checklist now has a pass or an owner-accepted gap.
+
 **Status 2026-11-27:** the pilot ended with seven counted days
 ([pilot log](RUST-M5-PILOT.md)). The close-out walk of the workflow matrix
 is in [RUST-M5-WORKFLOWS.md](RUST-M5-WORKFLOWS.md#close-out-walk-2026-11-27):

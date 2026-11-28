@@ -1,5 +1,11 @@
 # Rust successor — M6 plan (cutover)
 
+Status 2026-11-27, later: **the M5f rehearsal passed** two times
+([RUST-M5-REHEARSAL.md](RUST-M5-REHEARSAL.md)); item 4 of "Before M6" is
+done at the M5 level and M6c extends it. One change for this plan: each
+reversal import is `llmctl import-registry <file> --update-models`, and
+the Python build with that flag must be installed before the cutover.
+
 Status 2026-11-27: **M6a done** (read-only). The result is in
 [RUST-M6-AUTHORITY.md](RUST-M6-AUTHORITY.md): the authority map, the
 serving signature of the three hosts, and nine findings. The M5 pilot
