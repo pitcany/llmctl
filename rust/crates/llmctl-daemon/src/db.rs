@@ -104,10 +104,11 @@ enum DbMsg {
         oneshot::Sender<Result<bool, DbError>>,
     ),
     InsertFinding(Box<FindingRow>, oneshot::Sender<Result<(), DbError>>),
-    /// (since, limit): findings at or after `since`, newest first.
+    /// (since, limit, unexplained): findings at or after `since`, newest first.
     ListFindings(
         Option<DateTime<Utc>>,
         usize,
+        bool,
         oneshot::Sender<Result<Vec<FindingRow>, DbError>>,
     ),
     /// Operations updated at or after `since`, plus all active operations.
@@ -129,7 +130,7 @@ pub struct FindingRow {
     pub id: i64,
     pub host: String,
     pub workload: String,
-    /// Always `foreign_transition` in M5.
+    /// `foreign_transition` or `engine_scheduler`.
     pub kind: String,
     /// What changed: `unit` (process/pid/served model) or `lanes`.
     pub what: String,
@@ -361,9 +362,10 @@ impl Db {
         &self,
         since: Option<DateTime<Utc>>,
         limit: usize,
+        unexplained: bool,
     ) -> Result<Vec<FindingRow>, DbError> {
         let (tx, rx) = oneshot::channel();
-        self.send(DbMsg::ListFindings(since, limit, tx))?;
+        self.send(DbMsg::ListFindings(since, limit, unexplained, tx))?;
         rx.await.map_err(|_| DbError::Closed)?
     }
 
@@ -752,31 +754,27 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
                 });
             let _ = tx.send(out);
         }
-        DbMsg::ListFindings(since, limit, tx) => {
-            let mut stmt = match since {
-                Some(_) => conn.prepare(
+        DbMsg::ListFindings(since, limit, unexplained, tx) => {
+            let out = (|| -> Result<Vec<FindingRow>, DbError> {
+                let mut stmt = conn.prepare(
                     "SELECT id, host, workload, kind, what, before_state, after_state, actor, observed_at
                      FROM audit_findings WHERE observed_at >= ?1
                      ORDER BY observed_at DESC, id DESC LIMIT ?2",
-                )?,
-                None => conn.prepare(
-                    "SELECT id, host, workload, kind, what, before_state, after_state, actor, observed_at
-                     FROM audit_findings
-                     ORDER BY observed_at DESC, id DESC LIMIT ?1",
-                )?,
-            };
-            let out = match since {
-                Some(s) => stmt
-                    .query_map(params![s.to_rfc3339(), limit as i64], finding_row_from)
-                    .map_err(DbError::from)?
+                )?;
+                // Filter before the result limit so a burst of scheduler
+                // events cannot hide older unexplained findings.
+                let cutoff = since.map(|at| at.to_rfc3339()).unwrap_or_default();
+                let sql_limit = if unexplained { -1 } else { limit as i64 };
+                let rows = stmt.query_map(params![cutoff, sql_limit], finding_row_from)?;
+                rows.map(|row| row.map(crate::audit::classify_finding))
+                    .filter(|row| {
+                        !unexplained
+                            || !row.as_ref().is_ok_and(|f| f.kind == crate::audit::ENGINE_SCHEDULER)
+                    })
+                    .take(limit)
                     .collect::<Result<Vec<_>, _>>()
-                    .map_err(DbError::from),
-                None => stmt
-                    .query_map(params![limit as i64], finding_row_from)
-                    .map_err(DbError::from)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(DbError::from),
-            };
+                    .map_err(DbError::from)
+            })();
             let _ = tx.send(out);
         }
         DbMsg::OpsUpdatedSince(since, tx) => {

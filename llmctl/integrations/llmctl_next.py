@@ -1,4 +1,4 @@
-"""Delegate lifecycle writes to llmctl-next for units it owns (Rust M5b).
+"""Delegate lifecycle writes to llmctl-next (Rust M5b and M6b).
 
 Decision 2 of the M5 plan: during the pilot the legacy writers are not
 removed — they delegate. For a workload llmctl-next owns, a
@@ -7,13 +7,16 @@ the agent is down or refuses, that is an honest refusal with a clear
 message, never a silent fallback to the old write path. Units llmctl-next
 does not own keep the old path unchanged.
 
-Reversal is one setting: ``llmctl_next.enabled: false`` in settings.yaml
-(or deleting the section, or ``LLMCTL_NEXT_DISABLED=1``).
+Cutover mode refuses lifecycle writes to units outside the map and refuses
+``LLMCTL_NEXT_DISABLED=1``. Remove ``mode: cutover`` to restore delegate mode.
+In delegate mode, set ``enabled: false`` or use ``LLMCTL_NEXT_DISABLED=1``
+to turn delegation off.
 
 settings.yaml section (all optional; absent = disabled)::
 
     llmctl_next:
       enabled: true
+      mode: cutover  # optional; takes precedence over enabled
       cmd: [/path/to/llmctl-next, --data-dir, /path/to/data]
       units:
         vllm-engine.service: vllm-engine
@@ -46,7 +49,8 @@ from llmctl.services.op_lock import handed_off
 REFUSED_BEFORE_CHANGE = frozenset({3, 4, 5, 6})
 
 _SECTION = "llmctl_next"
-_TIMEOUT_S = 1200.0  # a vLLM cold load is minutes; the CLI waits under --wait
+# Two 1800 s readiness windows (start and rollback), plus stop time.
+_TIMEOUT_S = 4200.0
 
 #: systemctl verb -> llmctl-next verb.
 _VERBS = {"start": "run", "stop": "stop", "restart": "restart"}
@@ -59,6 +63,7 @@ class NextDelegation:
     enabled: bool = False
     cmd: tuple[str, ...] = ("llmctl-next",)
     units: dict[str, str] = field(default_factory=dict)
+    cutover: bool = False
 
     def workload_for(self, unit: str) -> str | None:
         """The llmctl-next workload behind ``unit``, if this host delegates it.
@@ -69,7 +74,7 @@ class NextDelegation:
         normalized so a near-miss key can never silently defeat the gate
         and fall through to systemctl (security review 2026-11-18).
         """
-        if not self.enabled:
+        if not (self.enabled or self.cutover):
             return None
         bare = unit.removesuffix(".service")
         candidates = (unit, bare, f"{bare}.service") if bare != unit else (unit, f"{unit}.service")
@@ -78,15 +83,34 @@ class NextDelegation:
                 return self.units[key]
         return None
 
+    def write_refusal(self, verb: str, unit: str) -> tuple[int, str] | None:
+        """Return a refusal code and message for a write blocked by cutover."""
+        if not self.cutover:
+            return None
+        if os.environ.get("LLMCTL_NEXT_DISABLED") == "1":
+            return 4, "llmctl-next cutover refuses LLMCTL_NEXT_DISABLED=1. Unset it and retry."
+        next_verb = _VERBS.get(verb)
+        if next_verb is None:
+            return 6, f"llmctl-next cutover refuses the systemctl verb {verb!r} on {unit}."
+        if self.workload_for(unit) is None:
+            name = unit.removesuffix(".service")
+            return (
+                5,
+                f"llmctl-next cutover: {unit} has no workload in llmctl_next.units. "
+                f"Use llmctl-next {next_verb} {name} --wait with its enrolled workload name.",
+            )
+        return None
+
 
 def load_delegation(settings_path: Path | None = None) -> NextDelegation:
     """Read the ``llmctl_next:`` section (absent/disabled = no delegation)."""
-    if os.environ.get("LLMCTL_NEXT_DISABLED") == "1":
-        return NextDelegation(enabled=False)
     section = _read_yaml(settings_file_path(settings_path)).get(_SECTION)
     if not isinstance(section, dict):
-        return NextDelegation(enabled=False)
-    enabled = bool(section.get("enabled", False))
+        return NextDelegation()
+    cutover = section.get("mode") == "cutover"
+    if not cutover and os.environ.get("LLMCTL_NEXT_DISABLED") == "1":
+        return NextDelegation()
+    enabled = cutover or bool(section.get("enabled", False))
     units_raw = section.get("units") or {}
     units = {str(k): str(v) for k, v in units_raw.items()} if isinstance(units_raw, dict) else {}
     cmd_raw = section.get("cmd") or ["llmctl-next"]
@@ -94,17 +118,23 @@ def load_delegation(settings_path: Path | None = None) -> NextDelegation:
     env = os.environ.get("LLMCTL_NEXT_CMD")
     if env:
         cmd = tuple(shlex.split(env))
-    return NextDelegation(enabled=enabled, cmd=cmd, units=units)
+    return NextDelegation(enabled=enabled, cmd=cmd, units=units, cutover=cutover)
 
 
-def refusal_message(verb: str, unit: str, workload: str, rc: int, detail: str) -> str:
+def refusal_message(
+    verb: str, unit: str, workload: str, rc: int, detail: str, *, cutover: bool = False
+) -> str:
     """The one-line honest refusal the guard reports through stderr."""
     kind = "refused before anything changed" if rc in REFUSED_BEFORE_CHANGE else "did not succeed"
+    reversal = (
+        "remove llmctl_next.mode: cutover in settings.yaml to restore delegate mode."
+        if cutover
+        else "set llmctl_next.enabled: false in settings.yaml to reverse the handover."
+    )
     return (
         f"llmctl-next {verb} {workload} (unit {unit}, rc={rc}) {kind}: {detail}. "
         "Not falling back to systemctl: the workload is owned by llmctl-next. "
-        "Fix the agent (systemctl --user status llmctl-next) or set "
-        "llmctl_next.enabled: false in settings.yaml to reverse the handover."
+        f"Fix the agent (systemctl --user status llmctl-next) or {reversal}"
     )
 
 
@@ -115,10 +145,14 @@ def delegate(
 
     ``verb`` is the systemctl word (``start``/``stop``/``restart``). Returns
     ``(rc, stdout, stderr)`` with the refusal message folded into stderr on
-    failure, or ``None`` when this unit is not delegated — the caller then
-    keeps its own path. Lock reacquisition failures propagate.
+    failure. In delegate mode, ``None`` leaves the caller on its own path.
+    Lock reacquisition failures propagate.
     """
     delegation = delegation or load_delegation()
+    refusal = delegation.write_refusal(verb, unit)
+    if refusal is not None:
+        rc, message = refusal
+        return rc, "", message
     workload = delegation.workload_for(unit)
     if workload is None:
         return None
@@ -129,7 +163,9 @@ def delegate(
     rc, out, err = _invoke(argv)
     if rc != 0:
         detail = (err.strip() or out.strip()).splitlines()[-1:] or [""]
-        return rc, out, refusal_message(verb, unit, workload, rc, detail[0])
+        return rc, out, refusal_message(
+            verb, unit, workload, rc, detail[0], cutover=delegation.cutover
+        )
     return rc, out, err
 
 
@@ -152,7 +188,9 @@ def run_preset(
     if rc != 0:
         detail = (err.strip() or out.strip()).splitlines()[-1:] or [""]
         verb = f"run (preset {preset}) via"
-        return rc, out, refusal_message(verb, workload, workload, rc, detail[0])
+        return rc, out, refusal_message(
+            verb, workload, workload, rc, detail[0], cutover=delegation.cutover
+        )
     return rc, out, err
 
 

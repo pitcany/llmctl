@@ -3,6 +3,31 @@
 Work log for [RUST-M5-PLAN.md](RUST-M5-PLAN.md). Rows are dated; newest
 at the bottom of each section. Status line first.
 
+## Gap 3 live acceptance — 2026-11-27
+
+- **m5 model get: pass.** On the current agent, downloaded
+  `hf:hf-internal-testing/tiny-random-gpt2` into the declared `models`
+  store. The target `/Users/yannik/Models/huggingface/tiny-random-gpt2`
+  was absent before the test. The agent reported 10 files downloaded.
+  Operation `ee3cfe32-97a4-46ad-b8c2-858288247ed5` succeeded at 18:23 PST.
+  The `--for llama-swap` argument selected the operation journal workload.
+- **m5 model rm: pass.** The preview targeted only that path, reported
+  12,591,104 bytes and listed zero references. The confirmed removal
+  returned `removed: true`. A Mac filesystem check confirmed the path
+  was absent afterward.
+- **Workstation model add and edit: pending.** The deployed CLI and API
+  support disable, which retains the row and its ID in `model list --all`
+  and catalog exports. The requested cleanup requires removing the row.
+  No disposable record or catalog ID was created on any host.
+- **Cleanup verification:** `model list --all --json` was byte-for-byte
+  unchanged on the workstation, m5 and mbp2 (54, 14 and 8 catalog models,
+  all at revision 1). `audit --all --since 2026-11-28T02:23:10Z --json`
+  was unchanged with zero findings on all three hosts.
+
+Gap 3 remains open for the live catalog add/edit and record cleanup.
+
+## Earlier status
+
 **Status 2026-11-27, later:** the M5f rehearsal passed two times
 ([RUST-M5-REHEARSAL.md](RUST-M5-REHEARSAL.md)). Each row of the M5 exit
 checklist now has a pass or an owner-accepted gap.

@@ -2252,6 +2252,7 @@ def vllm_cmd(
     ] = False,
 ) -> None:
     """Run NAME on its engine (``run``; ``swap``, ``switch`` and ``vllm`` are old names)."""
+    from llmctl.integrations.llmctl_next import load_delegation
     from llmctl.services.run_overrides import RunOverrides
 
     overrides = RunOverrides(tp=tp, max_len=max_len, gpu_mem=gpu_mem)
@@ -2267,6 +2268,9 @@ def vllm_cmd(
     if list_only:
         cli_swap.render_table(state, console)
         return
+    cutover = load_delegation().cutover
+    if cutover and save and not dry_run:
+        raise typer.BadParameter("Cutover requires llmctl-next preset edit for saved overrides.")
     target = cli_swap.pick(state, console) if preset is None else resolve(preset, state.catalog)
     if target is None and preset is not None and preset.isdecimal():
         # `llmctl ls` numbers its rows; an exact key/model/alias already won above.
@@ -2281,10 +2285,14 @@ def vllm_cmd(
     if target is None and preset is not None:
         # Not a preset or lane: maybe a registered model of another engine.
         routed = _swap_registry_model(
-            preset, state, settings, dry_run=dry_run, yes=yes, overrides=overrides, save=save
+            preset, state, settings, dry_run=dry_run, yes=yes, overrides=overrides, save=save,
+            cutover=cutover,
         )
         if routed is not None:
             target, state = routed
+    if cutover and not dry_run and target is not None and target.kind in ("lane", "session"):
+        console.print("[red]Cutover requires llmctl-next for lane and session starts.[/red]")
+        raise typer.Exit(1)
     session_parameters: dict[str, Any] = {}
     if target is not None and target.kind == "session" and overrides:
         target, session_parameters = _session_overrides(target, overrides, save=save)
@@ -2309,9 +2317,10 @@ def vllm_cmd(
             cli_swap.remember_serving(state)
         fit = state.fits_alongside(target) if target.kind == "lane" else None
         # A one-card preset gets a card (and maybe the second engine).
-        target = vllm_slots.place(state, target, overrides.tp or target.tp)
-        if not cli_swap.print_preview(state, target, console, force=force):
-            return
+        if not cutover or target.kind != "vllm":
+            target = vllm_slots.place(state, target, overrides.tp or target.tp)
+            if not cli_swap.print_preview(state, target, console, force=force):
+                return
     if overrides:
         console.print(f"  for this run: {escape(overrides.describe())}")
     if target.kind in ("lane", "session") and dry_run:
@@ -2372,7 +2381,8 @@ def vllm_cmd(
         # So does a placed one-card preset: llm-router's vLLM profiles take both cards.
         placed = target.kind == "vllm" and target.cards is not None
         if (
-            not direct
+            not cutover
+            and not direct
             and not dry_run
             and target.kind in ("lane", "vllm")
             and not tuned
@@ -2396,7 +2406,9 @@ def vllm_cmd(
         # By key: a placed one-card preset is a copy of its row (cards set).
         listed = any(row.key == target.key for row in state.catalog)
         stopped_lanes = (
-            cli_swap.stop_lanes_for_vllm(state, console, target) if listed and not dry_run else []
+            cli_swap.stop_lanes_for_vllm(state, console, target)
+            if listed and not dry_run and not cutover
+            else []
         )
         started_at = time.monotonic()
         from llmctl.services.operations import OperationPhase, mark_phase
@@ -2422,16 +2434,19 @@ def vllm_cmd(
             if close:
                 console.print(f"Did you mean: {escape(', '.join(close))}?")
             console.print("Run `llmctl ls` to see what you can run.")
-            cli_swap.restore_lanes(stopped_lanes, console)
+            if not cutover:
+                cli_swap.restore_lanes(stopped_lanes, console)
             raise typer.Exit(2) from exc
         except MissingModelPathError as exc:
             console.print(f"[red]Refusing to start {escape(str(preset))}:[/red] {escape(str(exc))}")
-            cli_swap.restore_lanes(stopped_lanes, console)
+            if not cutover:
+                cli_swap.restore_lanes(stopped_lanes, console)
             raise typer.Exit(2) from exc
         except LauncherEnvError as exc:
             # Nothing was touched: the env file is rendered before any stop.
             console.print(f"[red]Cannot render the launch env:[/red] {escape(str(exc))}")
-            cli_swap.restore_lanes(stopped_lanes, console)
+            if not cutover:
+                cli_swap.restore_lanes(stopped_lanes, console)
             raise typer.Exit(2) from exc
         except Exception as exc:
             # The restart itself raised (systemctl error, timeout). start_vllm_tp
@@ -2444,7 +2459,8 @@ def vllm_cmd(
             console.print(
                 f"[red]vLLM start failed:[/red] {escape(type(exc).__name__)}: {escape(str(exc))}"
             )
-            cli_swap.restore_lanes(stopped_lanes, console)
+            if not cutover:
+                cli_swap.restore_lanes(stopped_lanes, console)
             _print_rollback(SimpleNamespace(rollback=rollback_of(exc)), engine.unit_name)
             raise typer.Exit(1) from exc
 
@@ -2454,7 +2470,8 @@ def vllm_cmd(
             return
         if not result.ok:
             console.print("[red]vLLM start did not complete cleanly.[/red]")
-            cli_swap.restore_lanes(stopped_lanes, console)
+            if not cutover:
+                cli_swap.restore_lanes(stopped_lanes, console)
             if result.fleet_failed:
                 failed = escape(", ".join(result.fleet_failed))
                 console.print(f"  fleet preflight failed on: {failed}")
@@ -2691,6 +2708,7 @@ def _swap_registry_model(
     yes: bool,
     overrides: Any = None,
     save: bool = False,
+    cutover: bool = False,
 ) -> tuple[SwapTarget, Any] | None:
     """Serve a registered model that is not itself a preset or lane.
 
@@ -2724,6 +2742,11 @@ def _swap_registry_model(
         if served.kind == "on-demand":
             raise typer.Exit(0)
         if served.kind == "cannot":
+            raise typer.Exit(1)
+        if cutover and not dry_run:
+            console.print(
+                "[red]Cutover requires llmctl-next to start or configure this model.[/red]"
+            )
             raise typer.Exit(1)
         if served.kind == "start":
             from llmctl.db import ProfileRecord

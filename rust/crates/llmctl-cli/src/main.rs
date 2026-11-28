@@ -216,6 +216,9 @@ enum Command {
         /// Ask every enrolled host too, local first.
         #[arg(long)]
         all: bool,
+        /// Exclude llama-swap scheduler events.
+        #[arg(long)]
+        unexplained: bool,
         #[arg(long)]
         json: bool,
     },
@@ -958,7 +961,12 @@ async fn dispatch(cli: &Cli, command: Command) -> Result<u8, CliError> {
             force,
         } => cmd_mutate(cli, OpKind::Restart, &name, dry_run, wait, key, force, None).await,
         Command::Intent { name, json } => cmd_intent(cli, name.as_deref(), json).await,
-        Command::Audit { since, all, json } => cmd_audit(cli, since.as_deref(), all, json).await,
+        Command::Audit {
+            since,
+            all,
+            unexplained,
+            json,
+        } => cmd_audit(cli, since.as_deref(), all, unexplained, json).await,
         Command::Health { all, json } => health_cmd::cmd_health(cli, all, json).await,
         Command::Alias { cmd } => config_cmds::cmd_alias(cli, cmd).await,
         // Before `cmd_stores`: the roots check must work with no agent.
@@ -2249,15 +2257,29 @@ async fn cmd_intent(cli: &Cli, name: Option<&str>, json: bool) -> Result<u8, Cli
     Ok(0)
 }
 
-/// `audit [--since] [--all] [--json]`: the foreign-write record (M5a).
+/// `audit [--since] [--all] [--unexplained] [--json]`: the foreign-write record.
 /// Read-only; findings land through the agent's observation passes.
-async fn cmd_audit(cli: &Cli, since: Option<&str>, all: bool, json: bool) -> Result<u8, CliError> {
+async fn cmd_audit(
+    cli: &Cli,
+    since: Option<&str>,
+    all: bool,
+    unexplained: bool,
+    json: bool,
+) -> Result<u8, CliError> {
     let since = match since {
         None => None,
         Some(raw) => Some(parse_since(raw)?),
     };
-    let client = connect(cli)?;
+    let fetch = |client: ControlClient| async move {
+        if unexplained {
+            client.audit_unexplained(since).await
+        } else {
+            client.audit(since).await
+        }
+    };
     let mut total = 0usize;
+    let mut missing = 0usize;
+    let label = if unexplained { "unexplained foreign write" } else { "foreign write" };
 
     let report = |host: &str, resp: llmctl_client::wire::AuditResponse| {
         if json {
@@ -2265,18 +2287,19 @@ async fn cmd_audit(cli: &Cli, since: Option<&str>, all: bool, json: bool) -> Res
             return;
         }
         if resp.findings.is_empty() {
-            println!("host {}: no foreign writes", host);
+            println!("host {host}: no {label}s");
             return;
         }
-        println!("host {}: {} foreign write(s)", host, resp.findings.len());
+        println!("host {host}: {} {label}(s)", resp.findings.len());
         for f in &resp.findings {
             println!(
-                "  {}  {:<12} {:<10} {} -> {}{}",
+                "  {}  {:<12} {:<10} {} -> {}{}{}",
                 f.observed_at.format("%Y-%m-%d %H:%M:%S"),
                 f.workload,
                 f.what,
                 fmt_seen(&f.before_state),
                 fmt_seen(&f.after_state),
+                if f.kind == "engine_scheduler" { "  class=engine_scheduler" } else { "" },
                 f.actor
                     .as_deref()
                     .map(|a| format!("  actor={a}"))
@@ -2285,7 +2308,7 @@ async fn cmd_audit(cli: &Cli, since: Option<&str>, all: bool, json: bool) -> Res
         }
     };
 
-    let local = client.audit(since).await?;
+    let local = fetch(connect(cli)?).await?;
     total += local.findings.len();
     report(&local.host.clone(), local);
 
@@ -2293,23 +2316,34 @@ async fn cmd_audit(cli: &Cli, since: Option<&str>, all: bool, json: bool) -> Res
         let hosts = enroll::load_hosts();
         for h in &hosts.hosts {
             let remote = ControlClient::connect_bridge(&h.ssh_alias);
-            let answer = tokio::time::timeout(remote_status_timeout(), remote.audit(since)).await;
+            let answer = tokio::time::timeout(remote_status_timeout(), fetch(remote)).await;
             match answer {
                 Ok(Ok(resp)) => {
                     total += resp.findings.len();
                     report(&h.name.clone(), resp);
                 }
                 Ok(Err(e)) if e.to_string().contains("404") => {
-                    eprintln!("host {}: audit not supported by this agent — upgrade it", h.name);
+                    missing += 1;
+                    eprintln!("host {}: requested audit not supported by this agent — upgrade it", h.name);
                 }
-                Ok(Err(e)) => eprintln!("host {}: {e}", h.name),
-                Err(_) => eprintln!("host {}: no answer within the status timeout", h.name),
+                Ok(Err(e)) => {
+                    missing += 1;
+                    eprintln!("host {}: {e}", h.name);
+                }
+                Err(_) => {
+                    missing += 1;
+                    eprintln!("host {}: no answer within the status timeout", h.name);
+                }
             }
         }
     }
 
     if !json {
-        println!("\n{} foreign write(s){}", total, since.map(|t| format!(" since {}", t.to_rfc3339())).unwrap_or_default());
+        println!("\n{total} {label}(s){}", since.map(|t| format!(" since {}", t.to_rfc3339())).unwrap_or_default());
+    }
+    if unexplained && missing > 0 {
+        eprintln!("audit incomplete: {missing} host(s) did not return findings");
+        return Ok(3);
     }
     Ok(0)
 }

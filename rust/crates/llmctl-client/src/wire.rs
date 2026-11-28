@@ -356,7 +356,7 @@ pub struct AuditFinding {
     pub id: i64,
     pub host: String,
     pub workload: String,
-    /// Always `foreign_transition` in M5.
+    /// `foreign_transition` or `engine_scheduler`.
     pub kind: String,
     /// What changed: `unit`, `lanes`, or `unit+lanes`.
     pub what: String,
