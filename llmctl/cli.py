@@ -2268,7 +2268,8 @@ def vllm_cmd(
     if list_only:
         cli_swap.render_table(state, console)
         return
-    cutover = load_delegation().cutover
+    delegation = load_delegation()
+    cutover = delegation.cutover
     if cutover and save and not dry_run:
         raise typer.BadParameter("Cutover requires llmctl-next preset edit for saved overrides.")
     target = cli_swap.pick(state, console) if preset is None else resolve(preset, state.catalog)
@@ -2291,8 +2292,15 @@ def vllm_cmd(
         if routed is not None:
             target, state = routed
     if cutover and not dry_run and target is not None and target.kind in ("lane", "session"):
-        console.print("[red]Cutover requires llmctl-next for lane and session starts.[/red]")
-        raise typer.Exit(1)
+        # An enrolled lane goes on: the swap is one `llmctl-next run <workload> --wait`
+        # (lane_swap.swap_to_lane). Sessions and lanes with no workload are refused.
+        unit = target.lane.unit if target.kind == "lane" and target.lane is not None else None
+        if unit is None or delegation.workload_for(unit) is None:
+            console.print(
+                "[red]Cutover requires llmctl-next for lane and session starts.[/red] "
+                f"{escape(target.key)} has no workload in llmctl_next.units."
+            )
+            raise typer.Exit(1)
     session_parameters: dict[str, Any] = {}
     if target is not None and target.kind == "session" and overrides:
         target, session_parameters = _session_overrides(target, overrides, save=save)
