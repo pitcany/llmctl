@@ -68,6 +68,8 @@ fn start() -> Agent {
     let socket = root.join("control.sock");
     let child = Command::new(env!("CARGO_BIN_EXE_llmctl-next"))
         .arg("--socket").arg(&socket).arg("--data-dir").arg(&root).arg("daemon")
+        // `model delete` reads the presets: never the owner's.
+        .env("LLMCTL_NEXT_PRESET_DIRS", root.join("presets"))
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("spawn daemon");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while std::os::unix::net::UnixStream::connect(&socket).is_err() {
@@ -208,3 +210,58 @@ fn catalog_import_verbs_scan_and_export() {
     let m = json(&a, &["model", "show", "Unlisted", "--json"]);
     assert_eq!((m["origin"].as_str(), m["store"].as_str()), (Some("scan"), Some("hf2local")));
 }
+
+#[test]
+fn a_record_is_deleted_only_with_its_token_and_while_nothing_names_it() {
+    let a = start();
+    let path = |rel: &str| a.root.join(rel).display().to_string();
+    json(&a, &["model", "add", "disposable", "--engine", "vllm", "--path", &path("models/hf2local/New-Model"), "--json"]);
+    // A workload's model is this record's name; a preset's model_id is that record's path.
+    json(&a, &["model", "add", "fake/coder", "--engine", "vllm", "--path", &path("models/hf2local/Qwen3.8-27B-FP8"), "--json"]);
+    json(&a, &["model", "add", "in-a-preset", "--engine", "vllm", "--path", &path("models/hf2local/Preset-Model"), "--json"]);
+    touch(&a.root.join("presets/p.yaml"));
+    std::fs::write(
+        a.root.join("presets/p.yaml"),
+        format!(
+            "alias: p\nserved_name: x/p\nmodel_id: {}\nquantization: fp8\nvllm_quantization_flag: fp8\n\
+             tensor_parallel_size: 1\nmax_model_len: 4096\n",
+            path("models/hf2local/Preset-Model")
+        ),
+    )
+    .unwrap();
+
+    let preview = json(&a, &["model", "delete", "disposable", "--json"]);
+    assert_eq!((preview["deleted"].as_bool(), preview["references"].as_array().map(Vec::len)), (Some(false), Some(0)));
+    let token = preview["confirm"].as_str().unwrap().to_string();
+    assert!(json(&a, &["model", "show", "disposable", "--json"])["id"].is_string(), "a preview deletes nothing");
+
+    let (code, _, err) = cli(&a, &["model", "delete", "disposable", "--confirm", "del-0000000000000000"]);
+    assert_eq!(code, 4, "a wrong token is refused: {err}");
+    let done = json(&a, &["model", "delete", "disposable", "--confirm", &token, "--json"]);
+    assert_eq!(done["deleted"], true);
+    let (code, _, _) = cli(&a, &["model", "show", "disposable"]);
+    assert_eq!(code, 5, "the record is gone");
+    assert!(a.root.join("models/hf2local/New-Model/config.json").exists(), "the weights stay");
+    let out = a.root.join("export.json");
+    let (code, _, err) = cli(&a, &["catalog", "export", out.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!std::fs::read_to_string(&out).unwrap().contains("\"disposable\""), "not exported");
+
+    for (name, by) in [("fake/coder", "workload coder"), ("in-a-preset", "preset p")] {
+        let v = json(&a, &["model", "delete", name, "--json"]);
+        assert_eq!(v["references"], serde_json::json!([by]), "{v:#}");
+        let (code, _, err) = cli(&a, &["model", "delete", name, "--confirm", v["confirm"].as_str().unwrap()]);
+        assert_eq!(code, 4, "a named record is refused: {err}");
+        assert!(err.contains(by), "{err}");
+    }
+
+    // The token is bound to the catalog revision: any write in between voids it.
+    let stale = json(&a, &["model", "delete", "in-a-preset", "--json"])["confirm"].as_str().unwrap().to_string();
+    json(&a, &["model", "edit", "fake/coder", "--set", "notes=x", "--json"]);
+    std::fs::remove_file(a.root.join("presets/p.yaml")).unwrap();
+    let (code, _, err) = cli(&a, &["model", "delete", "in-a-preset", "--confirm", &stale]);
+    assert_eq!(code, 4, "{err}");
+    let fresh = json(&a, &["model", "delete", "in-a-preset", "--json"])["confirm"].as_str().unwrap().to_string();
+    assert_eq!(json(&a, &["model", "delete", "in-a-preset", "--confirm", &fresh, "--json"])["deleted"], true);
+}
+

@@ -1,6 +1,16 @@
 # Rust successor — M6 plan (cutover)
 
-Status 2026-11-27, later: **the M5f rehearsal passed** two times
+Status 2026-11-27, evening: **M6b built for all eight items** on four
+branches, not merged, not deployed, every switch off:
+[RUST-M6-PROGRESS.md](RUST-M6-PROGRESS.md). Next: review, then M6c.
+
+Status 2026-11-27: **M6b started** in a worktree based on `ea5963a`.
+The opt-in Python guard covers unit writes and vLLM preset runs. The
+agent classifies llama-swap scheduler changes for `audit --unexplained`.
+Close M5 after the [live checks for gaps 2 and 3](RUST-M5-WORKFLOWS.md#live-checks-required-to-close-m5)
+pass on the current agents. Those checks precede the M6d deploy.
+
+Status 2026-11-27, later: **the M5f rehearsal passed** three times
 ([RUST-M5-REHEARSAL.md](RUST-M5-REHEARSAL.md)); item 4 of "Before M6" is
 done at the M5 level and M6c extends it. One change for this plan: each
 reversal import is `llmctl import-registry <file> --update-models`, and

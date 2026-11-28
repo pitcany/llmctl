@@ -83,6 +83,29 @@ def test_list_shows_presets_and_lanes(monkeypatch, calls):
     assert calls["lane"] == [] and calls["stop"] == []
 
 
+@pytest.fixture
+def cutover(tmp_path, monkeypatch):
+    settings = tmp_path / "settings.yaml"
+    settings.write_text("llmctl_next:\n  mode: cutover\n")
+    monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(settings))
+
+
+def test_cutover_direct_preset_refusal_leaves_lanes_running(monkeypatch, calls, cutover):
+    res = _run(
+        monkeypatch, _state({"flash"}, {"ft.service"}), "qwen3.8-27b", "--direct", vllm_ok=False
+    )
+
+    assert res.exit_code == 1 and "boom" in res.output
+    assert calls["stop"] == [] and calls["restore"] == []
+
+
+def test_cutover_refuses_direct_legacy_lane_start(monkeypatch, calls, cutover):
+    res = _run(monkeypatch, _state(set(), set()), "flash", "--direct")
+
+    assert res.exit_code == 1 and "llmctl-next" in res.output
+    assert calls["lane"] == []
+
+
 def test_lane_swap_previews_then_swaps(monkeypatch, calls):
     res = _run(monkeypatch, _state({"qwen3.8-27b"}, set()), "flash")
     assert res.exit_code == 0, res.output

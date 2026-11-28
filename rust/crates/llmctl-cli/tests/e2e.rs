@@ -3860,6 +3860,58 @@ async fn a_foreign_flip_is_a_finding_and_an_operated_flip_is_not() {
     assert!(text.contains("coder") && text.contains("2 foreign write(s)"), "{text}");
 }
 
+#[tokio::test]
+async fn audit_unexplained_keeps_unit_changes_and_filters_legacy_scheduler_rows() {
+    use llmctl_daemon::db::{Db, FindingRow};
+
+    let d = spawn_managed().await;
+    let db = Db::open(&d.data_dir().join("ops.sqlite3")).unwrap();
+    let now = chrono::Utc::now();
+    let insert = |after: &str, observed_at| {
+        let row = FindingRow {
+            id: 0,
+            host: "local".into(),
+            workload: "llama-swap".into(),
+            kind: "foreign_transition".into(),
+            what: "unit+lanes".into(),
+            before_state: r#"{"process":"running","pid":100,"lanes":["old"]}"#.into(),
+            after_state: after.into(),
+            actor: None,
+            observed_at,
+        };
+        let db = db.clone();
+        async move { db.insert_finding(row).await.unwrap() }
+    };
+
+    insert(
+        r#"{"process":"running","pid":101,"lanes":["new"]}"#,
+        now - chrono::Duration::seconds(2),
+    )
+    .await;
+    insert(
+        r#"{"process":"running","lanes":["new"]}"#,
+        now - chrono::Duration::seconds(1),
+    )
+    .await;
+    for _ in 0..500 {
+        insert(r#"{"process":"running","pid":100,"lanes":["new"]}"#, now).await;
+    }
+
+    let out = cli(&d.socket, &["audit", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let all: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(all["findings"].as_array().unwrap().len(), 500);
+    assert_eq!(all["findings"][0]["kind"], "engine_scheduler");
+
+    let out = cli(&d.socket, &["audit", "--unexplained", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let unexplained: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let findings = unexplained["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 2);
+    assert!(findings.iter().all(|f| f["kind"] == "foreign_transition"));
+    assert!(findings[1]["after_state"].as_str().unwrap().contains("101"));
+}
+
 /// Findings live in the journal DB: an agent restart keeps them and does
 /// not re-record what it already knows (M5a tests).
 #[tokio::test]

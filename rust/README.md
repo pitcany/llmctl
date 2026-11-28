@@ -29,16 +29,17 @@ layout hurts.
 ```bash
 cd rust
 cargo test --workspace              # unit + e2e (fake engine, temp dirs only)
-cargo run -p llmctl-cli -- daemon   # foreground, ~/.local/state/llmctl-next-dev
+export LLMCTL_NEXT_DATA_DIR=/tmp/next-dev   # always: the default is the live agent's dir
+cargo run -p llmctl-cli -- daemon   # foreground, fake engine
 cargo run -p llmctl-cli -- status
 cargo run -p llmctl-cli -- run coder --dry-run
 cargo run -p llmctl-cli -- run coder --wait
 cargo run -p llmctl-cli -- ops
-LLMCTL_NEXT_DATA_DIR=/tmp/next-dev cargo run -p llmctl-cli -- daemon   # isolated dir
 ```
 
-The dev data directory (default `~/.local/state/llmctl-next-dev`, or
-`$LLMCTL_NEXT_DATA_DIR`) holds `inventory.json` (bootstrapped with three
+The data directory (`$LLMCTL_NEXT_DATA_DIR`, else `~/.local/state/llmctl-next`,
+which is the live agent's dir on an enrolled host: never develop against the
+default) holds `inventory.json` (bootstrapped with three
 fake workloads: `coder` gpu0, `helper` gpu1, `big` gpu0+1), `world.json`
 (the fake engine's surviving external state), `faults.json` (test hooks),
 `ops.sqlite3` (the journal) and `control.sock` (0600).

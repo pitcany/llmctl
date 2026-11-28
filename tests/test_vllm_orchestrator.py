@@ -779,3 +779,63 @@ def test_an_engine_the_agent_does_not_own_keeps_the_adapter_path(tmp_path: Path)
         deps=deps,
     )
     assert result.ok is True and calls == [] and len(log["adapters_built"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("units", "disabled", "reason"),
+    [
+        ({}, False, "llmctl-next run vllm-tp"),
+        ({"vllm-tp": "vllm-engine"}, True, "LLMCTL_NEXT_DISABLED=1"),
+    ],
+)
+def test_cutover_refuses_direct_preset_before_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    units: dict[str, str],
+    disabled: bool,
+    reason: str,
+) -> None:
+    _write_preset(tmp_path)
+    settings = tmp_path / "config" / "settings.yaml"
+    settings.parent.mkdir()
+    settings.write_text(
+        f"llmctl_next:\n  mode: cutover\n  enabled: true\n  units: {units}\n"
+    )
+    monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(settings))
+    if disabled:
+        monkeypatch.setenv("LLMCTL_NEXT_DISABLED", "1")
+    deps, log = _build_deps(config_dir=tmp_path)
+    deps.next_runner = lambda _: pytest.fail("refused run must not call llmctl-next")
+
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        deps=deps,
+    )
+
+    assert not result.ok
+    assert result.restart is not None and reason in (result.restart.error or "")
+    assert log["preflight_calls"] == []
+    assert log["adapters_built"] == []
+
+
+def test_cutover_places_the_complete_preset_run_with_the_agent(tmp_path: Path) -> None:
+    _write_preset(tmp_path)
+    deps, log = _build_deps(config_dir=tmp_path)
+    calls = _delegated(deps)
+    deps.next_delegation = lambda: NextDelegation(
+        cutover=True, cmd=_NEXT, units={"vllm-tp.service": "vllm-engine"}
+    )
+
+    result = start_vllm_tp(
+        "llama-3.3-70b",
+        managed_unit=ManagedUnitConfig(unit_name="vllm-tp", default_port=8003),
+        deps=deps,
+    )
+
+    assert result.ok
+    assert calls == [
+        [*_NEXT, "run", "llama-3.3-70b", "--preset", "--workload", "vllm-engine", "--wait"]
+    ]
+    assert log["preflight_calls"] == []
+    assert log["adapters_built"] == []

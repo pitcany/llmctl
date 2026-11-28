@@ -333,6 +333,17 @@ def install_unit(
     systemctl = _systemctl_prefix(unit.user)
     write = f"write unit -> {path}" if unit.user else f"sudo tee {path}"
     actions = [write, " ".join([*systemctl, "daemon-reload"])]
+    cutover_note = None
+    if enable:
+        from llmctl.integrations.llmctl_next import load_delegation
+
+        if load_delegation().cutover:
+            # `enable --now` starts the unit: a lifecycle write that llmctl-next owns.
+            enable = False
+            cutover_note = (
+                f"llmctl-next cutover: {unit.name} was not enabled or started. "
+                "Enroll it and use llmctl-next run."
+            )
     if enable:
         actions.append(" ".join([*systemctl, "enable", "--now", unit.name]))
 
@@ -346,7 +357,7 @@ def install_unit(
             messages=["Dry run: no changes were made."],
         )
 
-    messages: list[str] = []
+    messages: list[str] = [cutover_note] if cutover_note else []
     enabled = False
     written = False
     try:

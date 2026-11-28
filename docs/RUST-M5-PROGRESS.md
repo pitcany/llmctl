@@ -3,6 +3,59 @@
 Work log for [RUST-M5-PLAN.md](RUST-M5-PLAN.md). Rows are dated; newest
 at the bottom of each section. Status line first.
 
+## Gap 2 live acceptance — 2026-11-27
+
+**Pass.** The owner approved the window ("Now", 2026-11-27). It ran as
+longjob `m5-gap2-preset --router` at 18:34 PST, right after the
+custom-harness eval `ch-portfolio-handoff2` ended (its local arm used the
+default model). Before the start: no other job, 0 router requests in
+flight. Agent build `ccabf75`, the CLI verb `run <preset> --wait`.
+
+| Step | Result |
+|---|---|
+| Before | `vllm-engine` Running, Ready, `qwen3.8-27b`, port 8003, intent running, pid 4022288, inventory revision 55 |
+| Preview | `run qwen27b-awq --dry-run`: stop, apply profile `vllm-engine.env.qwen27b-awq`, start, readiness, verify; rollback to the previous env |
+| Switch | `run qwen27b-awq --wait`: rc 0 in 284 s, operation `f469da26-3797-433c-b132-739fc9509ae8`. Served `qwen3.8-27b-awq`, pid 1886967, one card (29 GiB on card 0). One request answered `OK` |
+| Return | `run qwen27b --wait`: rc 0 in 103 s, operation `c383e964-b7a9-43a2-ab88-fe4a01cb09c8` |
+| After | `vllm-engine` Running, Ready, `qwen3.8-27b`, port 8003, intent running, pid 1926111, both cards (26 GiB each), inventory revision 57. One request answered `OK`. Model, port and intent equal the start; the pid is new, as each start gives one |
+| Checks | `audit` since the switch: 0 foreign writes. `preset list`: `qwen27b` serving, four ready. llm-router: `qwen27b` loaded, no rollback recorded. `engine-pins-check`: ok |
+
+The default model was away for about 6.5 minutes (two cold loads, the AWQ
+weights from the HDD). Side effect: `run vllm-engine --dry-run` plans
+again. Before, it was refused with `definition_drift` on
+`environment_files`; the profile switch pinned the env digest again.
+
+
+- **m5 model get: pass.** On the current agent, downloaded
+  `hf:hf-internal-testing/tiny-random-gpt2` into the declared `models`
+  store. The target `/Users/yannik/Models/huggingface/tiny-random-gpt2`
+  was absent before the test. The agent reported 10 files downloaded.
+  Operation `ee3cfe32-97a4-46ad-b8c2-858288247ed5` succeeded at 18:23 PST.
+  The `--for llama-swap` argument selected the operation journal workload.
+- **m5 model rm: pass.** The preview targeted only that path, reported
+  12,591,104 bytes and listed zero references. The confirmed removal
+  returned `removed: true`. A Mac filesystem check confirmed the path
+  was absent afterward.
+- **Workstation model add and edit: pending.** The deployed CLI and API
+  support disable, which retains the row and its ID in `model list --all`
+  and catalog exports. The requested cleanup requires removing the row.
+  No disposable record or catalog ID was created on any host.
+- **Cleanup verification:** `model list --all --json` was byte-for-byte
+  unchanged on the workstation, m5 and mbp2 (54, 14 and 8 catalog models,
+  all at revision 1). `audit --all --since 2026-11-28T02:23:10Z --json`
+  was unchanged with zero findings on all three hosts.
+
+Gap 3 remains open for the live catalog add/edit and record cleanup.
+
+**2026-11-27, later:** the owner chose a delete verb over a disabled
+leftover row ("Add a catalog delete"). `model delete <model>` is built
+on branch `m6b-cutover` (`df4d113`): a preview with a token, refused while
+a workload or a preset names the record; the weights stay. It reaches the
+agents with the M6d deploy, so the workstation `model add`, `model edit`
+and `model delete` check runs after M6d, before the M6f switch.
+
+## Earlier status
+
 **Status 2026-11-27, later:** the M5f rehearsal passed two times
 ([RUST-M5-REHEARSAL.md](RUST-M5-REHEARSAL.md)). Each row of the M5 exit
 checklist now has a pass or an owner-accepted gap.

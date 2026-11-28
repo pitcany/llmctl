@@ -12,6 +12,13 @@ The lane's start script does the GPU hand-over; this module only sequences it:
 
 Every side effect goes through :class:`LaneSwapDeps` so tests run without
 systemd, sudo or a GPU.
+
+Cutover mode (``llmctl_next.mode: cutover``, llmctl M6b): llmctl-next owns the
+lifecycle. Every unit write here goes through the guard
+(:func:`llmctl.integrations.llmctl_next.delegate`): an enrolled unit is sent to
+the agent, any other unit is refused, and no systemctl, sudo or lane script
+runs. The agent plans the stops and the rollback itself, so a swap is one
+``llmctl-next run <workload> --wait``. In any other mode nothing changes.
 """
 
 from __future__ import annotations
@@ -88,11 +95,62 @@ class LaneSwapResult:
     restore_failed: list[str] = field(default_factory=list)
 
 
+def cutover_delegation():  # noqa: ANN201 - NextDelegation, imported lazily
+    """The delegation when the mode is cutover, else None."""
+    from llmctl.integrations.llmctl_next import load_delegation
+
+    delegation = load_delegation()
+    return delegation if delegation.cutover else None
+
+
+def unit_write(verb: str, unit: str, argv: Sequence[str], deps: LaneSwapDeps) -> bool:
+    """One lifecycle write (``start``/``stop``) on ``unit``; True on success.
+
+    Cutover mode: through the guard. An enrolled unit goes to the agent; any
+    other unit is refused with the llmctl-next verb to use. ``argv`` does not
+    run. Any other mode: ``argv``, exactly as before.
+    """
+    delegation = cutover_delegation()
+    if delegation is None:
+        return deps.run_quiet(argv) == 0
+    from llmctl.integrations.llmctl_next import delegate
+
+    answer = delegate(verb, unit, delegation)
+    rc, err = (answer[0], answer[2]) if answer is not None else (6, f"no answer for {verb} {unit}")
+    if rc != 0:
+        deps.log(f"  {err.strip()}")
+    return rc == 0
+
+
 def stop_user_unit(unit: str, deps: LaneSwapDeps) -> bool:
-    """``systemctl --user stop unit``; True on success."""
+    """``systemctl --user stop unit``; True on success. Cutover: see :func:`unit_write`."""
 
     with gpu_operation_lock(purpose=f"stop unit {unit}", interface="llmctl"):
-        return deps.run_quiet(["systemctl", "--user", "stop", unit]) == 0
+        return unit_write("stop", unit, ["systemctl", "--user", "stop", unit], deps)
+
+
+def _cutover_lane_start(target: Lane, delegation, deps: LaneSwapDeps) -> LaneSwapResult:  # noqa: ANN001
+    """Cutover: start ``target`` with one agent operation. No script, no systemctl."""
+    from llmctl.integrations.llmctl_next import delegate
+
+    started = deps.clock()
+    if target.unit is None:
+        return LaneSwapResult(
+            ok=False,
+            error=(
+                f"llmctl-next cutover: lane {target.name} has no unit, so it has no workload. "
+                "Use llmctl-next run with its enrolled workload name."
+            ),
+        )
+    deps.log(f"starting {target.name} through llmctl-next ...")
+    answer = delegate("start", target.unit, delegation)
+    rc, err = (answer[0], answer[2]) if answer is not None else (6, "no answer from the guard")
+    result = LaneSwapResult(ok=rc == 0, seconds=deps.clock() - started)
+    if result.ok:
+        deps.record(target.name, result.seconds)
+    else:
+        result.error = err.strip() or f"llmctl-next exited {rc}"
+    return result
 
 
 def wait_ready(
@@ -132,9 +190,10 @@ def restore_previous(
 
     mark_phase(OperationPhase.RESTORING)
     with gpu_operation_lock(purpose="rollback restart", interface="llmctl"):
+        cutover = cutover_delegation() is not None
         if restart_vllm:
             argv = ["sudo", "-n", "systemctl", "start", vllm_unit]
-            if deps.run_quiet(argv) == 0:
+            if unit_write("start", vllm_unit, argv, deps):
                 result.restored.append(vllm_unit)
                 deps.log(f"  rollback: started {vllm_unit} again (previous preset)")
             else:
@@ -144,9 +203,14 @@ def restore_previous(
                     f"sudo systemctl start {vllm_unit}"
                 )
         for lane in previous_lanes:
+            label = lane.unit or lane.name
+            if cutover:
+                # No lane script in cutover mode: the agent starts the unit.
+                ok = lane.unit is not None and unit_write("start", lane.unit, (), deps)
+                (result.restored if ok else result.restore_failed).append(label)
+                continue
             deps.log(f"  rollback: restarting {lane.name} ({' '.join(lane.start_cmd)})")
             rc = deps.run_script(lane.start_cmd, lane.health_timeout_s + _SCRIPT_GRACE_S)
-            label = lane.unit or lane.name
             # A failed start script cannot become ready: do not sit out the
             # whole health timeout before reporting it.
             ready = rc == 0 and wait_ready(
@@ -184,6 +248,9 @@ def swap_to_lane(
 
     with gpu_operation_lock(purpose=f"swap to lane {target.name}", interface="llmctl"):
         deps = deps or LaneSwapDeps()
+        delegation = cutover_delegation()
+        if delegation is not None:
+            return _cutover_lane_start(target, delegation, deps)
         result = LaneSwapResult(ok=False)
         started = deps.clock()
         start_cmd = share_start_cmd(target.start_cmd) if share_gpus else target.start_cmd
@@ -277,6 +344,9 @@ def swap_to_vllm(
     with gpu_operation_lock(purpose="swap to vllm", interface="llmctl"):
         deps = deps or LaneSwapDeps()
         lanes = LaneSwapResult(ok=True)
+        if cutover_delegation() is not None:
+            # The agent stops what is in the way and rolls back (as `llmctl run` does).
+            return start(), lanes
         stopped: list[Lane] = []
         for lane in active_lanes:
             if lane.unit is None:

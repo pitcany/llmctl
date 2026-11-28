@@ -9,6 +9,7 @@ what the guard ran.
 
 from __future__ import annotations
 
+import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -157,6 +158,43 @@ def test_settings_shape_and_env_cmd_override(tmp_path, monkeypatch):
 
     monkeypatch.setenv("LLMCTL_NEXT_CMD", "/tmp/standin --data-dir /tmp/x")
     assert load_delegation().cmd == ("/tmp/standin", "--data-dir", "/tmp/x")
+
+
+def test_cutover_routes_owned_writes_and_refuses_unowned_writes(tmp_path, monkeypatch, standin):
+    monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "settings.yaml").write_text(
+        "llmctl_next:\n  mode: cutover\n  enabled: false\n  units: {engine.service: engine}\n"
+    )
+    monkeypatch.setenv("LLMCTL_NEXT_CMD", shlex.join(_cmd(standin, tmp_path, 0)))
+    seen: list[list[str]] = []
+    runner = SystemctlRunner(runner=_fake_systemctl(seen))
+
+    assert runner.start("engine", user=True).ok
+    refused = runner.restart("unowned.service", user=True)
+    assert refused.returncode == 5
+    assert "cutover" in refused.stderr and "llmctl-next restart unowned" in refused.stderr
+    assert _argv(tmp_path, 0) == ["run engine --wait"]
+    assert seen == []
+
+    assert runner.run(SystemctlVerb.IS_ACTIVE, "engine", user=True).ok
+    assert seen == [["systemctl", "--user", "is-active", "engine"]]
+
+
+def test_cutover_refuses_environment_bypass(tmp_path, monkeypatch, standin):
+    monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "settings.yaml").write_text(
+        "llmctl_next:\n  mode: cutover\n  enabled: true\n  units: {engine: engine}\n"
+    )
+    monkeypatch.setenv("LLMCTL_NEXT_DISABLED", "1")
+    monkeypatch.setenv("LLMCTL_NEXT_CMD", shlex.join(_cmd(standin, tmp_path, 0)))
+    seen: list[list[str]] = []
+    runner = SystemctlRunner(runner=_fake_systemctl(seen))
+
+    refused = runner.stop("engine", user=True)
+    assert refused.returncode == 4
+    assert "LLMCTL_NEXT_DISABLED=1" in refused.stderr and "cutover" in refused.stderr
+    assert not (tmp_path / "argv-0.txt").exists()
+    assert seen == []
 
 
 def test_both_unit_name_forms_hit_the_map(tmp_path, standin):

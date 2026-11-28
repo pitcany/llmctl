@@ -64,3 +64,15 @@ def test_compare_reports_each_difference():
     down = sig.compare(agent, [_record(active=False, pid=None, listening=False, models=None)])
     assert len(down) == 2 and "agent says Running" in down[0] and "does not listen" in down[1]
     assert "endpoint lists ['other']" in sig.compare(agent, [_record(models=["other"])])[0]
+
+
+def test_compare_uses_the_engine_kind_and_the_pid_of_a_0_2_0_agent():
+    vllm = {"name": "engine", "process": "Running", "readiness": "Ready", "served_model": "m",
+            "served_model_verified": True, "engine_kind": "vllm", "pid": 10}
+    assert sig.compare([vllm], [_record()]) == []
+    # A vLLM endpoint that lists two ids is compared now.
+    assert "endpoint lists" in sig.compare([vllm], [_record(models=["x", "y"])])[0]
+    assert "says pid 10, the service manager says 11" in sig.compare([vllm], [_record(pid=11)])[0]
+    ollama = {**vllm, "engine_kind": "ollama", "served_model": "ollama"}
+    assert sig.compare([ollama], [_record(models=["qwen3-coder:30b"])]) == []
+

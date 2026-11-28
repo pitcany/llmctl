@@ -33,8 +33,10 @@ from llmctl.db import SessionStatus
 from llmctl.services.lane_swap import (
     LaneSwapDeps,
     LaneSwapResult,
+    cutover_delegation,
     restore_previous,
     stop_user_unit,
+    unit_write,
 )
 from llmctl.services.lanes import Gpus, Lane, gpus_overlap
 from llmctl.services.op_lock import gpu_operation_lock
@@ -211,6 +213,13 @@ def swap_to_session(
     with gpu_operation_lock(purpose="session swap", interface="llmctl"):
         deps = deps or LaneSwapDeps()
         result = SessionSwapResult(ok=False)
+        if cutover_delegation() is not None:
+            # A session is a process llmctl starts itself: not an llmctl-next workload.
+            result.error = (
+                f"llmctl-next cutover: llmctl does not start {name} itself. "
+                "Use llmctl-next run <workload> --wait."
+            )
+            return result
         if placement.problem:
             result.error = placement.problem
             return result
@@ -232,7 +241,7 @@ def swap_to_session(
         stopped_vllm = False
         if error is None and vllm_active:
             deps.log(f"stopping {vllm_unit} ...")
-            if deps.run_quiet(["sudo", "-n", "systemctl", "stop", vllm_unit]) == 0:
+            if unit_write("stop", vllm_unit, ["sudo", "-n", "systemctl", "stop", vllm_unit], deps):
                 stopped_vllm = True
                 result.stopped.append(vllm_unit)
             else:

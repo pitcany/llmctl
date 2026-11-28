@@ -3,8 +3,8 @@
 //! Every observation pass compares each managed workload's state with the
 //! last state the agent recorded. A change of running/stopped, pid or
 //! served model that no admitted operation explains becomes a
-//! `foreign_transition` finding in the journal DB: the evidence behind
-//! "no legacy lifecycle writes" and the pilot day's second condition.
+//! finding in the journal DB. Llama-swap lane changes with a known,
+//! unchanged service PID are classified separately as `engine_scheduler`.
 //!
 //! A transition is explained only by a matching post-effect observation
 //! recorded by an executor in this baseline window. Merely admitting or
@@ -41,6 +41,8 @@ use crate::db::FindingRow;
 
 /// Findings returned per listing call.
 pub const LIST_LIMIT: usize = 500;
+pub(crate) const ENGINE_SCHEDULER: &str = "engine_scheduler";
+const FOREIGN_TRANSITION: &str = "foreign_transition";
 
 /// The comparison signature of one workload at one pass.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -278,8 +280,9 @@ pub async fn compare(state: &Arc<AppState>, observations: &[Observation]) -> Vec
             }
         };
 
-        let changed = unit_change(&baseline, &current) || lane_change(&baseline, &current);
-        if changed {
+        let unit_changed = unit_change(&baseline, &current);
+        let lanes_changed = lane_change(&baseline, &current);
+        if unit_changed || lanes_changed {
             let explained = ops
                 .iter()
                 .filter(|op| op.status.is_terminal())
@@ -296,11 +299,15 @@ pub async fn compare(state: &Arc<AppState>, observations: &[Observation]) -> Vec
                     id: 0,
                     host: inv.host.to_string(),
                     workload: name.to_string(),
-                    kind: "foreign_transition".into(),
-                    what: if baseline.lanes.is_some() || current.lanes.is_some() {
-                        "unit+lanes".into()
+                    kind: if engine_scheduler(&baseline, &current) {
+                        ENGINE_SCHEDULER.into()
                     } else {
-                        "unit".into()
+                        FOREIGN_TRANSITION.into()
+                    },
+                    what: match (unit_changed, lanes_changed) {
+                        (true, true) => "unit+lanes".into(),
+                        (true, false) => "unit".into(),
+                        _ => "lanes".into(),
                     },
                     before_state: encode(&baseline),
                     after_state: encode(&current),
@@ -360,6 +367,32 @@ fn lane_change(before: &SeenState, after: &SeenState) -> bool {
     }
 }
 
+fn engine_scheduler(before: &SeenState, after: &SeenState) -> bool {
+    before.process == "running"
+        && before.pid.is_some_and(|pid| pid > 0)
+        && before.pid == after.pid
+        && !unit_change(before, after)
+        && lane_change(before, after)
+}
+
+/// M5 recorded all changes as foreign transitions. The two lane
+/// observations come from a llama-swap lane store, even if that workload
+/// has since been removed from the inventory.
+pub(crate) fn classify_finding(mut row: FindingRow) -> FindingRow {
+    if row.kind == FOREIGN_TRANSITION && matches!(row.what.as_str(), "unit+lanes" | "lanes") {
+        if let (Ok(before), Ok(after)) = (
+            serde_json::from_str::<SeenState>(&row.before_state),
+            serde_json::from_str::<SeenState>(&row.after_state),
+        ) {
+            if engine_scheduler(&before, &after) {
+                row.kind = ENGINE_SCHEDULER.into();
+                row.what = "lanes".into();
+            }
+        }
+    }
+    row
+}
+
 /// Name the actor for a lane-set change when the records can: a lane that
 /// vanished and declared a TTL was unloaded by llama-swap's own timer.
 fn lane_actor(
@@ -388,11 +421,12 @@ fn lane_actor(
 pub async fn list(
     state: &Arc<AppState>,
     since: Option<DateTime<Utc>>,
+    unexplained: bool,
 ) -> Result<Vec<FindingRow>, crate::ops::OpsError> {
     state
         .ops
         .db()
-        .list_findings(since, LIST_LIMIT)
+        .list_findings(since, LIST_LIMIT, unexplained)
         .await
         .map_err(crate::ops::OpsError::Db)
 }

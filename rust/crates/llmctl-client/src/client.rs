@@ -273,14 +273,30 @@ impl ControlClient {
         &self,
         since: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<crate::wire::AuditResponse, ClientError> {
+        self.audit_at("/v1/audit", since).await
+    }
+
+    /// Unexplained findings, excluding llama-swap scheduler events.
+    pub async fn audit_unexplained(
+        &self,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<crate::wire::AuditResponse, ClientError> {
+        self.audit_at("/v1/audit/unexplained", since).await
+    }
+
+    async fn audit_at(
+        &self,
+        path: &str,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<crate::wire::AuditResponse, ClientError> {
         match since {
             Some(t) => {
                 // `Z` suffix, not `+00:00`: the offset's `+` is not
                 // URL-safe in a query string.
                 let q = t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                self.get_json(&format!("/v1/audit?since={q}")).await
+                self.get_json(&format!("{path}?since={q}")).await
             }
-            None => self.get_json("/v1/audit").await,
+            None => self.get_json(path).await,
         }
     }
 

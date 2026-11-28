@@ -31,4 +31,6 @@ libc = "0.2.191"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# backup: history_e2e makes a `.backup` copy of a WAL-mode DB.
+rusqlite = { workspace = true, features = ["backup"] }
 uuid = { workspace = true }

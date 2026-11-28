@@ -32,6 +32,7 @@ pub mod lanes;
 pub mod llamacpp;
 pub mod llamacpp_engine;
 pub mod gpu;
+pub mod history;
 pub mod hooks;
 pub mod inflight;
 pub mod local_config;

@@ -31,6 +31,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/inventory", get(inventory))
         .route("/v1/intents", get(intents))
         .route("/v1/audit", get(audit))
+        .route("/v1/audit/unexplained", get(audit_unexplained))
         .route("/v1/stores", get(stores))
         .route("/v1/models/acquire", post(models_acquire))
         .route("/v1/models/remove", post(models_remove))
@@ -303,6 +304,21 @@ async fn audit(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<llmctl_client::wire::AuditResponse>, ApiError> {
+    audit_response(&state, &params, false).await
+}
+
+async fn audit_unexplained(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<llmctl_client::wire::AuditResponse>, ApiError> {
+    audit_response(&state, &params, true).await
+}
+
+async fn audit_response(
+    state: &Arc<AppState>,
+    params: &std::collections::HashMap<String, String>,
+    unexplained: bool,
+) -> Result<Json<llmctl_client::wire::AuditResponse>, ApiError> {
     let since = match params.get("since") {
         None => None,
         Some(raw) => Some(
@@ -315,7 +331,7 @@ async fn audit(
                 })?,
         ),
     };
-    let findings = crate::audit::list(&state, since)
+    let findings = crate::audit::list(state, since, unexplained)
         .await
         .map_err(|e| ApiError::from_ops(&e))?;
     Ok(Json(llmctl_client::wire::AuditResponse {
@@ -417,6 +433,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
                 recovery_policy: def
                     .recovery
                     .map(|p| format!("{}/{}s", p.max_attempts, p.window_secs)),
+                pid: obs.and_then(|o| o.pid),
+                engine_kind: Some(def.engine_kind.to_string()),
             }
         })
         .collect();

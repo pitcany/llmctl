@@ -104,10 +104,11 @@ enum DbMsg {
         oneshot::Sender<Result<bool, DbError>>,
     ),
     InsertFinding(Box<FindingRow>, oneshot::Sender<Result<(), DbError>>),
-    /// (since, limit): findings at or after `since`, newest first.
+    /// (since, limit, unexplained): findings at or after `since`, newest first.
     ListFindings(
         Option<DateTime<Utc>>,
         usize,
+        bool,
         oneshot::Sender<Result<Vec<FindingRow>, DbError>>,
     ),
     /// Operations updated at or after `since`, plus all active operations.
@@ -117,6 +118,8 @@ enum DbMsg {
         oneshot::Sender<Result<Vec<OpRow>, DbError>>,
     ),
     SeenAll(oneshot::Sender<Result<Vec<SeenRow>, DbError>>),
+    LegacyAll(oneshot::Sender<Result<Vec<LegacyRow>, DbError>>),
+    LegacyInsert(Vec<LegacyRow>, oneshot::Sender<Result<(), DbError>>),
     SetSeen(String, String, DateTime<Utc>, oneshot::Sender<Result<(), DbError>>),
     /// Keep `audit_seen` rows only for these workloads (inventory left one).
     PruneSeen(Vec<String>, oneshot::Sender<Result<(), DbError>>),
@@ -129,7 +132,7 @@ pub struct FindingRow {
     pub id: i64,
     pub host: String,
     pub workload: String,
-    /// Always `foreign_transition` in M5.
+    /// `foreign_transition` or `engine_scheduler`.
     pub kind: String,
     /// What changed: `unit` (process/pid/served model) or `lanes`.
     pub what: String,
@@ -361,9 +364,10 @@ impl Db {
         &self,
         since: Option<DateTime<Utc>>,
         limit: usize,
+        unexplained: bool,
     ) -> Result<Vec<FindingRow>, DbError> {
         let (tx, rx) = oneshot::channel();
-        self.send(DbMsg::ListFindings(since, limit, tx))?;
+        self.send(DbMsg::ListFindings(since, limit, unexplained, tx))?;
         rx.await.map_err(|_| DbError::Closed)?
     }
 
@@ -371,6 +375,21 @@ impl Db {
     pub async fn ops_updated_since(&self, since: DateTime<Utc>) -> Result<Vec<OpRow>, DbError> {
         let (tx, rx) = oneshot::channel();
         self.send(DbMsg::OpsUpdatedSince(since, tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    /// Every imported legacy row, by id.
+    pub async fn legacy_all(&self) -> Result<Vec<LegacyRow>, DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::LegacyAll(tx))?;
+        rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    /// Insert rows in one transaction; an id that exists is an error (the
+    /// importer compares first), so nothing is ever overwritten.
+    pub async fn legacy_insert(&self, rows: Vec<LegacyRow>) -> Result<(), DbError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(DbMsg::LegacyInsert(rows, tx))?;
         rx.await.map_err(|_| DbError::Closed)?
     }
 
@@ -468,7 +487,29 @@ CREATE TABLE IF NOT EXISTS audit_seen(
   state TEXT NOT NULL,
   at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS legacy_history(
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  host TEXT NOT NULL,
+  row_json TEXT NOT NULL,
+  row_sha TEXT NOT NULL,
+  snapshot_sha TEXT NOT NULL,
+  imported_at TEXT NOT NULL
+);
 "#;
+
+/// One row of the frozen Python history (M6 decision 9): read-only, never
+/// read by admission or recovery. `row_json` is the source row verbatim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LegacyRow {
+    pub id: String,
+    pub kind: String,
+    pub host: String,
+    pub row_json: String,
+    pub row_sha: String,
+    pub snapshot_sha: String,
+    pub imported_at: DateTime<Utc>,
+}
 
 fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::Error>> {
     // Each message handler is one committed transaction; none of them wait
@@ -752,31 +793,27 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
                 });
             let _ = tx.send(out);
         }
-        DbMsg::ListFindings(since, limit, tx) => {
-            let mut stmt = match since {
-                Some(_) => conn.prepare(
+        DbMsg::ListFindings(since, limit, unexplained, tx) => {
+            let out = (|| -> Result<Vec<FindingRow>, DbError> {
+                let mut stmt = conn.prepare(
                     "SELECT id, host, workload, kind, what, before_state, after_state, actor, observed_at
                      FROM audit_findings WHERE observed_at >= ?1
                      ORDER BY observed_at DESC, id DESC LIMIT ?2",
-                )?,
-                None => conn.prepare(
-                    "SELECT id, host, workload, kind, what, before_state, after_state, actor, observed_at
-                     FROM audit_findings
-                     ORDER BY observed_at DESC, id DESC LIMIT ?1",
-                )?,
-            };
-            let out = match since {
-                Some(s) => stmt
-                    .query_map(params![s.to_rfc3339(), limit as i64], finding_row_from)
-                    .map_err(DbError::from)?
+                )?;
+                // Filter before the result limit so a burst of scheduler
+                // events cannot hide older unexplained findings.
+                let cutoff = since.map(|at| at.to_rfc3339()).unwrap_or_default();
+                let sql_limit = if unexplained { -1 } else { limit as i64 };
+                let rows = stmt.query_map(params![cutoff, sql_limit], finding_row_from)?;
+                rows.map(|row| row.map(crate::audit::classify_finding))
+                    .filter(|row| {
+                        !unexplained
+                            || !row.as_ref().is_ok_and(|f| f.kind == crate::audit::ENGINE_SCHEDULER)
+                    })
+                    .take(limit)
                     .collect::<Result<Vec<_>, _>>()
-                    .map_err(DbError::from),
-                None => stmt
-                    .query_map(params![limit as i64], finding_row_from)
-                    .map_err(DbError::from)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(DbError::from),
-            };
+                    .map_err(DbError::from)
+            })();
             let _ = tx.send(out);
         }
         DbMsg::OpsUpdatedSince(since, tx) => {
@@ -793,6 +830,42 @@ fn handle(conn: &mut Connection, msg: DbMsg) -> Result<(), Box<dyn std::error::E
                 .map_err(DbError::from)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(DbError::from);
+            let _ = tx.send(out);
+        }
+        DbMsg::LegacyAll(tx) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, kind, host, row_json, row_sha, snapshot_sha, imported_at
+                 FROM legacy_history ORDER BY id",
+            )?;
+            let out = stmt
+                .query_map([], |r| {
+                    Ok(LegacyRow {
+                        id: r.get(0)?,
+                        kind: r.get(1)?,
+                        host: r.get(2)?,
+                        row_json: r.get(3)?,
+                        row_sha: r.get(4)?,
+                        snapshot_sha: r.get(5)?,
+                        imported_at: parse_rfc3339(r.get(6)?),
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from);
+            let _ = tx.send(out);
+        }
+        DbMsg::LegacyInsert(rows, tx) => {
+            let out = (|| -> Result<(), rusqlite::Error> {
+                let t = conn.transaction()?;
+                for r in &rows {
+                    t.execute(
+                        "INSERT INTO legacy_history(id, kind, host, row_json, row_sha, snapshot_sha, imported_at)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                        params![r.id, r.kind, r.host, r.row_json, r.row_sha, r.snapshot_sha, r.imported_at.to_rfc3339()],
+                    )?;
+                }
+                t.commit()
+            })()
+            .map_err(DbError::from);
             let _ = tx.send(out);
         }
         DbMsg::SeenAll(tx) => {

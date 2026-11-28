@@ -19,7 +19,12 @@ use crate::engine::{Engine, FakeEngine, RoutedEngine};
 use crate::ops::OpManager;
 use crate::supervisor::Supervisor;
 
-pub const DEFAULT_DATA_DIR_SUFFIX: &str = "llmctl-next-dev";
+/// The agent's data dir under the state home: the layout of the Macs and of
+/// M7 (M6 decision 3). On the workstation it is a symlink to the live dir.
+pub const DEFAULT_DATA_DIR_SUFFIX: &str = "llmctl-next";
+/// The default before M6. The workstation's host enrollments are still there
+/// until the M6 deploy moves them (`hosts.json`, `hosts/`).
+pub const LEGACY_DATA_DIR_SUFFIX: &str = "llmctl-next-dev";
 
 #[derive(Debug, Clone)]
 pub struct DevPaths {
@@ -54,6 +59,11 @@ pub fn default_data_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
     dirs_state_home().join(DEFAULT_DATA_DIR_SUFFIX)
+}
+
+/// The pre-M6 default data dir (see [`LEGACY_DATA_DIR_SUFFIX`]).
+pub fn legacy_data_dir() -> PathBuf {
+    dirs_state_home().join(LEGACY_DATA_DIR_SUFFIX)
 }
 
 fn dirs_state_home() -> PathBuf {

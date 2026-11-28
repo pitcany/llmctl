@@ -56,6 +56,14 @@ pub struct WorkloadView {
     /// Recovery budget when configured, `max/window_secs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_policy: Option<String>,
+    /// Main pid as the service manager names it (M6b; absent from older
+    /// agents and when the manager names none). The serving signature
+    /// compares it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// The recipe's engine kind (`vllm`, `ollama`, `llama_swap`, ...; M6b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_kind: Option<String>,
 }
 
 fn external() -> String {
@@ -356,7 +364,7 @@ pub struct AuditFinding {
     pub id: i64,
     pub host: String,
     pub workload: String,
-    /// Always `foreign_transition` in M5.
+    /// `foreign_transition` or `engine_scheduler`.
     pub kind: String,
     /// What changed: `unit`, `lanes`, or `unit+lanes`.
     pub what: String,
