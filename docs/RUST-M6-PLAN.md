@@ -4,8 +4,9 @@ Status 2026-11-28: **M6c passed** twice from a fresh container
 ([RUST-M6-REHEARSAL.md](RUST-M6-REHEARSAL.md)). One change for this plan:
 in R2, run `catalog export` before step 3 stops the agent (the export asks
 the agent). The imports do not need the host lock released (design
-decision 6). Finding 3 (an audit gap) is fixed in the agent (`5ac909b`),
-so M6d deploys that build. Next: the owner decision on finding 2, then M6d.
+decision 6). Finding 2 is fixed in `llm-unit` (`~/AI` `1752e34f`) and
+finding 3 in the agent (`5ac909b`): M6d deploys those or later. Next: merge
+both branches, then M6d.
 
 Status 2026-11-27, evening: **M6b built for all eight items** on four
 branches, not merged, not deployed, every switch off:

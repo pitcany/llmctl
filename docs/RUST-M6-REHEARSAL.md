@@ -1,16 +1,18 @@
 # Rust successor — M6c rehearsal (the cutover and both reversals)
 
 Status 2026-11-28: **passed twice in a row from a fresh container**,
-74 of 74 checks each run, at llmctl `5ac909b` (2026-11-28 07:34 UTC),
-with the audit fix of finding 3. The rehearsal found three facts that
+75 of 75 checks each run, at llmctl `fb4a2cc` (2026-11-28 07:57 UTC),
+with the fixes of findings 2 and 3. The rehearsal found three facts that
 change the M6f procedure or the code (findings 1 to 3). No live host
 changed.
 
-The recorded run: the agent is the static build of `5ac909b`, sha256
-`e5f723a918a1be88…`; `~/AI` `c489f514`, llm-router `ca42338`, local-llm
-`19d46dc`; the DB copy sha256 `fb28a7cedb5cba3f…`. Log:
-`rust/dist/m6c-rehearsal-5ac909b494e8.log` (gitignored). The first pass
-(`da6dc70`, agent of `51ff6b5`) passed 73 of 73 twice, with N13b as an
+The recorded run: the agent is the static build of `5ac909b` (`rust/` is
+the same at `fb4a2cc`), sha256 `e5f723a918a1be88…`; `~/AI` `1752e34f`
+(branch `fix/llm-unit-start-noop`, `LLMCTL_M6C_AI_REF`), llm-router
+`ca42338`, local-llm `19d46dc`; the DB copy sha256 `fb28a7cedb5cba3f…`.
+Log: `rust/dist/m6c-rehearsal-fb4a2cc0f636.log` (gitignored). Earlier
+passes: `da6dc70` (agent `51ff6b5`, `~/AI` `c489f514`) 73 of 73 twice with
+N5b and N13b as information lines; `5ac909b` 74 of 74 twice with N5b as an
 information line. After the runs: no container left, the live agent active,
 `engine-pins-check` ok, port 1234 free.
 
@@ -110,7 +112,7 @@ the live agent the 2026-11-19 import gave 53 `new` and 1 `no_store`.
 | N3 | Python `start-unit` of a unit that is not enrolled | pass: exit 1, names the `llmctl-next` verb |
 | N4 | `llm-unit start` of a unit that is not enrolled | pass: exit 5, nothing starts |
 | N5 | A lane script's `lane_unit start` of the stopped lane | pass: through `llm-unit` to the agent, one operation |
-| N5b | `lane_unit start` of the **running** lane | information: the lane restarts (finding 2) |
+| N5b | `lane_unit start` of the **running** lane | pass: exit 0, "reh-lane is active; nothing to start", pid and operation count unchanged (before the fix of finding 2: the lane restarted) |
 | N5c | ...the engine on other cards keeps its pid | pass |
 | N6, N7 | llm-router switch to `reh-b` with `llmctl_next_only` | pass: one `llmctl-next run reh-engine --profile-env … --model reh/model-b`; the active env is the profile |
 | N8 | Agent stopped: a router switch | pass: exit 1, nothing changes |
@@ -158,16 +160,19 @@ the live agent the 2026-11-19 import gave 53 `new` and 1 `no_store`.
    the running agent (`client.catalog_export()`). The plan's R2 stops the
    agent in step 3 and exports in step 4. The rehearsal exports first
    (R2.2). Change for M6f and the plan: run `catalog export` before step 3.
-2. **A delegated `start` of a running unit restarts it** (N5b, every run).
-   In cutover, `lane_unit start` → `llm-unit start` → `llmctl-next run
-   <workload>`. For a running workload the agent stops and starts it
-   (operation phases "stop reh-lane", "start reh-lane"). `systemctl
-   start` of an active unit does nothing. The real lane scripts check
-   `is-active` before they start (`strata-start`), so they are not hit.
-   Python `start-unit` checks "already active" first, so it is not hit.
-   Any other caller of `llm-unit start` on a running enrolled unit
-   restarts the engine. **Owner decision:** make `llm-unit start` a no-op
-   for an active unit, or accept it and list it in the runbook.
+2. **A delegated `start` of a running unit restarted it** (N5b on `~/AI`
+   `c489f514`, every run). **Fixed in `~/AI` `1752e34f`** (branch
+   `fix/llm-unit-start-noop`; owner: "Make it a no-op"). In cutover, and
+   in the delegate state, `lane_unit start` → `llm-unit start` →
+   `llmctl-next run <workload>`, and for a running workload the agent
+   stops and starts it. `systemctl start` of an active unit does nothing.
+   Now `llm-unit start` of an `active`, `activating` or `reloading` unit
+   exits 0 before any hand-off; `restart` and `llmctl-next run` still
+   restart. Python `start-unit` already checked "already active". Tests:
+   `test_start_of_a_running_or_loading_unit_changes_nothing`,
+   `test_start_of_a_stopped_unit_and_restart_of_a_running_one_still_delegate`
+   (`tests/test_llm_unit.py` 37 and the lane gate 7 pass). M6d deploys
+   `llm-unit` from that commit or later.
 3. **`audit` missed a raw stop that followed an agent stop and run with
    no observation pass in between** (N13b on `51ff6b5`, every run). **Fixed
    in `5ac909b`** (owner: "Fix the audit gap now"). Cause: the agent's own
