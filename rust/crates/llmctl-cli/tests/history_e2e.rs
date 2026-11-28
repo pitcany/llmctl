@@ -124,3 +124,35 @@ fn a_python_db_copy_is_imported_read_only_and_only_with_its_token() {
     let o1 = json(&a, &["history", "list", "--json"])["entries"][0]["summary"]["phase"].clone();
     assert_eq!(o1, "completed", "the first import is kept");
 }
+
+/// A `.backup` copy of a WAL-mode DB is itself in WAL mode. Reading it must not
+/// create `-wal`/`-shm` beside it: the `--confirm` call would refuse it as a live DB.
+#[test]
+fn a_wal_mode_backup_copy_is_imported_and_nothing_is_written_beside_it() {
+    let a = start();
+    let live = a.root.join("live.sqlite3");
+    snapshot(&live, "completed");
+    let src = rusqlite::Connection::open(&live).unwrap();
+    let mode: String = src.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)).unwrap();
+    assert_eq!(mode, "wal");
+    src.execute("INSERT INTO sessions VALUES('s3','VLLM','STOPPED',NULL,'2026-11-01 00:00:00')", []).unwrap();
+    let copy = a.root.join("wal copy 100%?#.sqlite3"); // a path a URI must escape
+    {
+        let mut dst = rusqlite::Connection::open(&copy).unwrap();
+        let backup = rusqlite::backup::Backup::new(&src, &mut dst).unwrap();
+        backup.run_to_completion(64, Duration::ZERO, None).unwrap();
+    }
+    let beside = |suffix: &str| PathBuf::from(format!("{}{suffix}", copy.display()));
+    let _ = (std::fs::remove_file(beside("-wal")), std::fs::remove_file(beside("-shm")));
+    assert_eq!(std::fs::read(&copy).unwrap()[18..20], [2, 2], "the copy is in WAL mode");
+    assert!(a.root.join("live.sqlite3-wal").exists(), "the source is a live WAL-mode DB");
+    let s = copy.to_str().unwrap();
+
+    let report = json(&a, &["history", "import", s, "--as", "yannik-desktop", "--json"]);
+    assert_eq!(report["counts"], serde_json::json!({"new": 4, "other_host": 1}), "{report:#}");
+    assert!(!beside("-wal").exists() && !beside("-shm").exists(), "the dry run wrote beside the copy");
+    let token = report["confirm"].as_str().unwrap().to_string();
+    let done = json(&a, &["history", "import", s, "--as", "yannik-desktop", "--confirm", &token, "--json"]);
+    assert_eq!((done["applied"].as_bool(), done["total"].as_u64()), (Some(true), Some(4)));
+    assert!(!beside("-wal").exists() && !beside("-shm").exists(), "--confirm wrote beside the copy");
+}

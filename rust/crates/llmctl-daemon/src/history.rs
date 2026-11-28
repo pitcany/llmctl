@@ -36,6 +36,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Read a Python DB snapshot: `(sha256 of the file, rows)`. Refuses a file
 /// with a `-wal` beside it (a live DB: take `sqlite3 <db> ".backup <copy>"`).
+///
+/// The copy is opened immutable. A `.backup` copy of a WAL-mode DB is in WAL
+/// mode too, and a plain read-only open creates `-wal` and `-shm` beside it:
+/// the next call (`--confirm`) then refused the same copy as a live DB.
+/// Immutable also means SQLite reads the same bytes that the sha256 is of.
 pub fn read_snapshot(path: &Path) -> Result<(String, Vec<HistoryRow>), String> {
     let wal = path.with_file_name(format!(
         "{}-wal",
@@ -49,7 +54,13 @@ pub fn read_snapshot(path: &Path) -> Result<(String, Vec<HistoryRow>), String> {
         ));
     }
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let conn = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    // The path goes in a URI: escape the three characters a URI gives a meaning.
+    let uri = format!(
+        "file:{}?mode=ro&immutable=1",
+        path.to_string_lossy().replace('%', "%25").replace('?', "%3f").replace('#', "%23")
+    );
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let conn = rusqlite::Connection::open_with_flags(&uri, flags)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     let mut rows = Vec::new();
     for (table, kind) in TABLES {
