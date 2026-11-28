@@ -217,7 +217,7 @@ The owner asked on 2026-11-27 to start M6b and close M5 after gaps 2 and 3
 pass. Run both checks on the existing agents before the M6d deploy. Record
 the date, host and result for each check in [RUST-M5-PROGRESS.md](RUST-M5-PROGRESS.md).
 
-- [ ] **Gap 2 (W1):** In an approved workstation window, record the serving
+- [x] **Gap 2 (W1): passed 2026-11-27** (see the progress log). In an approved workstation window, record the serving
   model and intent. Preview a named preset switch and the return to the
   original preset. Run the named switch with `--wait`, verify readiness
   and restore the original preset. Record both operation IDs and compare

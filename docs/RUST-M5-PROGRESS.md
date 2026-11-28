@@ -3,7 +3,28 @@
 Work log for [RUST-M5-PLAN.md](RUST-M5-PLAN.md). Rows are dated; newest
 at the bottom of each section. Status line first.
 
-## Gap 3 live acceptance — 2026-11-27
+## Gap 2 live acceptance — 2026-11-27
+
+**Pass.** The owner approved the window ("Now", 2026-11-27). It ran as
+longjob `m5-gap2-preset --router` at 18:34 PST, right after the
+custom-harness eval `ch-portfolio-handoff2` ended (its local arm used the
+default model). Before the start: no other job, 0 router requests in
+flight. Agent build `ccabf75`, the CLI verb `run <preset> --wait`.
+
+| Step | Result |
+|---|---|
+| Before | `vllm-engine` Running, Ready, `qwen3.8-27b`, port 8003, intent running, pid 4022288, inventory revision 55 |
+| Preview | `run qwen27b-awq --dry-run`: stop, apply profile `vllm-engine.env.qwen27b-awq`, start, readiness, verify; rollback to the previous env |
+| Switch | `run qwen27b-awq --wait`: rc 0 in 284 s, operation `f469da26-3797-433c-b132-739fc9509ae8`. Served `qwen3.8-27b-awq`, pid 1886967, one card (29 GiB on card 0). One request answered `OK` |
+| Return | `run qwen27b --wait`: rc 0 in 103 s, operation `c383e964-b7a9-43a2-ab88-fe4a01cb09c8` |
+| After | `vllm-engine` Running, Ready, `qwen3.8-27b`, port 8003, intent running, pid 1926111, both cards (26 GiB each), inventory revision 57. One request answered `OK`. Model, port and intent equal the start; the pid is new, as each start gives one |
+| Checks | `audit` since the switch: 0 foreign writes. `preset list`: `qwen27b` serving, four ready. llm-router: `qwen27b` loaded, no rollback recorded. `engine-pins-check`: ok |
+
+The default model was away for about 6.5 minutes (two cold loads, the AWQ
+weights from the HDD). Side effect: `run vllm-engine --dry-run` plans
+again. Before, it was refused with `definition_drift` on
+`environment_files`; the profile switch pinned the env digest again.
+
 
 - **m5 model get: pass.** On the current agent, downloaded
   `hf:hf-internal-testing/tiny-random-gpt2` into the declared `models`
