@@ -22,6 +22,7 @@ def _install_lms(home: Path) -> Path:
 
 
 def test_lms_binary_falls_back_to_the_install_location(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("LLMCTL_LMS_BIN")
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     assert lmstudio.lms_binary() is None
@@ -30,6 +31,7 @@ def test_lms_binary_falls_back_to_the_install_location(tmp_path, monkeypatch) ->
 
 
 def test_lmstudio_backend_is_available_without_lms_on_path(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("LLMCTL_LMS_BIN")
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     monkeypatch.setenv("LLMCTL_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -41,3 +43,16 @@ def test_lmstudio_backend_is_available_without_lms_on_path(tmp_path, monkeypatch
     rows = {r["backend"]: r for r in detect_backends(http_get=unreachable)}
     assert rows["lmstudio"]["available"] is True
     assert rows["lmstudio"]["path"] == str(lms)
+
+
+def test_the_override_wins_and_none_means_not_installed(tmp_path, monkeypatch) -> None:
+    lms = _install_lms(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("LLMCTL_LMS_BIN", "/opt/other/lms")
+    assert lmstudio.lms_binary() == "/opt/other/lms"
+    monkeypatch.setenv("LLMCTL_LMS_BIN", "none")
+    assert lmstudio.lms_binary() is None
+    monkeypatch.delenv("LLMCTL_LMS_BIN")
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert lmstudio.lms_binary() == str(lms)
+

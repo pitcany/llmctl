@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -45,7 +46,14 @@ def lms_binary() -> str | None:
     LM Studio installs ``lms`` in ``~/.lmstudio/bin`` and puts that on PATH
     only from ``~/.bashrc``, so a TUI started from tmux, ssh or a launcher
     does not see it. Fall back to the install location.
+
+    ``LLMCTL_LMS_BIN`` overrides both (``none`` = not installed). The test
+    suite sets it: the real ``lms`` starts LM Studio's ``llmster`` daemon
+    outside its systemd unit on almost any command (2026-11-27).
     """
+    override = os.environ.get("LLMCTL_LMS_BIN")
+    if override:
+        return None if override == "none" else override
     found = shutil.which("lms")
     if found:
         return found

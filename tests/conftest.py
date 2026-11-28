@@ -67,6 +67,27 @@ def _no_live_settings(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("LLMCTL_API_TOKEN", raising=False)
 
 
+@pytest.fixture(scope="session")
+def _lms_stub_dir(tmp_path_factory) -> str:
+    d = tmp_path_factory.mktemp("no-lms")
+    stub = d / "lms"
+    stub.write_text("#!/bin/sh\nexit 1\n")
+    stub.chmod(0o755)
+    return str(d)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_lms(monkeypatch, _lms_stub_dir) -> None:
+    """Never run the real LM Studio CLI. ``lms link status`` (an LM Studio
+    adapter's discovery) started the ``llmster`` daemon outside its systemd
+    unit on every test run, which held port 1234 and broke the llmctl-next
+    serving signature (2026-11-27). ``LLMCTL_LMS_BIN=none`` makes LM Studio
+    "not installed", and a failing ``lms`` first on PATH catches a bare
+    ``lms`` call. ``tests/test_lms_binary.py`` opts out of the first."""
+    monkeypatch.setenv("LLMCTL_LMS_BIN", "none")
+    monkeypatch.setenv("PATH", f"{_lms_stub_dir}:{os.environ.get('PATH', '')}")
+
+
 @pytest.fixture(autouse=True)
 def _isolated_op_lock(monkeypatch, tmp_path) -> None:
     """Point the host-wide GPU operation lock at a per-test tmp path.
