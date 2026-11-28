@@ -1,5 +1,9 @@
 # Rust successor — M6 plan (cutover)
 
+Status 2026-11-27, evening: **M6b built for all eight items** on four
+branches, not merged, not deployed, every switch off:
+[RUST-M6-PROGRESS.md](RUST-M6-PROGRESS.md). Next: review, then M6c.
+
 Status 2026-11-27: **M6b started** in a worktree based on `ea5963a`.
 The opt-in Python guard covers unit writes and vLLM preset runs. The
 agent classifies llama-swap scheduler changes for `audit --unexplained`.
