@@ -6,9 +6,11 @@
 //! finding in the journal DB. Llama-swap lane changes with a known,
 //! unchanged service PID are classified separately as `engine_scheduler`.
 //!
-//! A transition is explained only by a matching post-effect observation
-//! recorded by an executor in this baseline window. Merely admitting or
-//! acknowledging an operation is not evidence that it changed anything.
+//! The reference for a pass is the state the workload's newest post-effect
+//! observation (recorded by an executor in this baseline window) left it
+//! in, else the last pass's state. Any change from the reference is a
+//! finding. Merely admitting or acknowledging an operation is not evidence
+//! that it changed anything.
 //! Active operations defer comparison until their effects are settled.
 //!
 //! Honest limits, on purpose:
@@ -106,37 +108,27 @@ fn effects(op: &crate::db::OpRow) -> Vec<EffectObservation> {
         .unwrap_or_default()
 }
 
-fn explains(effect: &EffectObservation, current: &SeenState, baseline_at: DateTime<Utc>) -> bool {
-    effect.at >= baseline_at
-        && effect.state.process == current.process
-        && current.pid.is_none_or(|pid| effect.state.pid == Some(pid))
-        && current
-            .model
-            .as_ref()
-            .is_none_or(|model| effect.state.model.as_ref() == Some(model))
-        && current.lanes.as_ref().is_none_or(|lanes| {
-            let mut expected = effect.state.lanes.clone().unwrap_or_default();
-            let mut actual = lanes.clone();
-            expected.sort();
-            actual.sort();
-            effect.state.lanes.is_some() && expected == actual
-        })
-}
-
-/// Only the workload's newest effect since the baseline can explain its
-/// current state: an older one describes a state the agent left again
-/// (a stop, then a run, then a raw stop before any pass — M6c finding 3).
-fn explained_by_newest(
+/// What `current` is compared with: the state the workload's newest effect
+/// since the baseline left it in, else the baseline. The agent's own
+/// operations move no baseline, so an agent stop, run and a raw stop
+/// before the next pass looked like "stopped -> stopped" (M6c finding 3).
+fn reference_state(
+    baseline: &SeenState,
+    baseline_at: DateTime<Utc>,
     effects: &[EffectObservation],
     workload: &str,
-    current: &SeenState,
-    baseline_at: DateTime<Utc>,
-) -> bool {
-    effects
+) -> SeenState {
+    match effects
         .iter()
         .filter(|e| e.workload == workload && e.at >= baseline_at)
         .max_by_key(|e| e.at)
-        .is_some_and(|e| explains(e, current, baseline_at))
+    {
+        Some(e) => SeenState {
+            lanes: e.state.lanes.clone().or_else(|| baseline.lanes.clone()),
+            ..e.state.clone()
+        },
+        None => baseline.clone(),
+    }
 }
 
 /// Capture the result of completed effects while this executor still
@@ -255,6 +247,11 @@ pub async fn compare(state: &Arc<AppState>, observations: &[Observation]) -> Vec
         }
     }
 
+    let done: Vec<EffectObservation> = ops
+        .iter()
+        .filter(|op| op.status.is_terminal())
+        .flat_map(effects)
+        .collect();
     let mut findings = Vec::new();
     let mut managed: Vec<String> = Vec::new();
     for def in &inv.workloads {
@@ -287,8 +284,8 @@ pub async fn compare(state: &Arc<AppState>, observations: &[Observation]) -> Vec
         }) {
             continue;
         }
-        let (baseline, baseline_at) = match baselines.get(name) {
-            Some((seen, at)) => (seen.clone(), *at),
+        let baseline = match baselines.get(name) {
+            Some((seen, at)) => reference_state(seen, *at, &done, name),
             None => {
                 // First sight of this workload: record, never conclude.
                 let _ = db.set_seen(name, &encode(&current), obs.observed_at).await;
@@ -298,40 +295,34 @@ pub async fn compare(state: &Arc<AppState>, observations: &[Observation]) -> Vec
 
         let unit_changed = unit_change(&baseline, &current);
         let lanes_changed = lane_change(&baseline, &current);
+        // `baseline` is already the state the agent's newest effect left:
+        // nothing the agent did explains a change from it.
         if unit_changed || lanes_changed {
-            let done: Vec<EffectObservation> = ops
-                .iter()
-                .filter(|op| op.status.is_terminal())
-                .flat_map(effects)
-                .collect();
-            let explained = explained_by_newest(&done, name, &current, baseline_at);
-            if !explained {
-                let actor = match (&baseline.lanes, &current.lanes) {
-                    (Some(before), Some(after)) => {
-                        lane_actor(&lane_stores[name], before, after)
-                    }
-                    _ => None,
-                };
-                findings.push(FindingRow {
-                    id: 0,
-                    host: inv.host.to_string(),
-                    workload: name.to_string(),
-                    kind: if engine_scheduler(&baseline, &current) {
-                        ENGINE_SCHEDULER.into()
-                    } else {
-                        FOREIGN_TRANSITION.into()
-                    },
-                    what: match (unit_changed, lanes_changed) {
-                        (true, true) => "unit+lanes".into(),
-                        (true, false) => "unit".into(),
-                        _ => "lanes".into(),
-                    },
-                    before_state: encode(&baseline),
-                    after_state: encode(&current),
-                    actor,
-                    observed_at: now,
-                });
-            }
+            let actor = match (&baseline.lanes, &current.lanes) {
+                (Some(before), Some(after)) => {
+                    lane_actor(&lane_stores[name], before, after)
+                }
+                _ => None,
+            };
+            findings.push(FindingRow {
+                id: 0,
+                host: inv.host.to_string(),
+                workload: name.to_string(),
+                kind: if engine_scheduler(&baseline, &current) {
+                    ENGINE_SCHEDULER.into()
+                } else {
+                    FOREIGN_TRANSITION.into()
+                },
+                what: match (unit_changed, lanes_changed) {
+                    (true, true) => "unit+lanes".into(),
+                    (true, false) => "unit".into(),
+                    _ => "lanes".into(),
+                },
+                before_state: encode(&baseline),
+                after_state: encode(&current),
+                actor,
+                observed_at: now,
+            });
         }
         let _ = db.set_seen(name, &encode(&current), obs.observed_at).await;
     }
@@ -461,63 +452,57 @@ mod tests {
         }
     }
 
-    #[test]
-    fn effect_evidence_expires_and_must_match_the_observed_identity() {
-        let at = Utc::now();
-        let effect = EffectObservation {
-            workload: "coder".into(),
-            at,
-            state: seen("running", Some(100), Some("qwen")),
-        };
-        assert!(explains(&effect, &effect.state, at));
-        // Updating/acknowledging the operation does not renew this timestamp.
-        assert!(!explains(
-            &effect,
-            &effect.state,
-            at + chrono::Duration::seconds(1)
-        ));
-        assert!(!explains(&effect, &seen("stopped", None, None), at));
-        assert!(!explains(
-            &effect,
-            &seen("running", Some(101), Some("qwen")),
-            at
-        ));
-        assert!(!explains(
-            &effect,
-            &seen("running", Some(100), Some("different")),
-            at
-        ));
+    /// The finding rule: `unit_change(reference_state(..), current)`.
+    fn finds(baseline: &SeenState, at: DateTime<Utc>, effects: &[EffectObservation], current: &SeenState) -> bool {
+        unit_change(&reference_state(baseline, at, effects, "lane"), current)
     }
 
     #[test]
-    fn only_the_newest_effect_since_the_baseline_explains() {
-        // M6c finding 3: an agent stop, then an agent run, then a raw stop
-        // before any observation pass. The old stop must not explain it.
+    fn effect_evidence_expires_and_must_match_the_observed_identity() {
+        let at = Utc::now();
+        let before = seen("stopped", None, None);
+        let effect = EffectObservation {
+            workload: "lane".into(),
+            at,
+            state: seen("running", Some(100), Some("qwen")),
+        };
+        let fx = std::slice::from_ref(&effect);
+        assert!(!finds(&before, at, fx, &effect.state));
+        // Updating/acknowledging the operation does not renew this timestamp.
+        assert!(finds(&before, at + chrono::Duration::seconds(1), fx, &effect.state));
+        assert!(finds(&before, at, fx, &seen("running", Some(101), Some("qwen"))));
+        assert!(finds(&before, at, fx, &seen("running", Some(100), Some("different"))));
+        // Another workload's effect explains nothing here.
+        let other = EffectObservation { workload: "engine".into(), ..effect.clone() };
+        assert!(finds(&before, at, &[other], &effect.state));
+    }
+
+    #[test]
+    fn the_newest_effect_since_the_baseline_is_the_reference() {
+        // M6c finding 3: the last pass saw the lane stopped (a raw stop);
+        // then the agent stopped it and ran it, and a raw stop followed
+        // before any pass. The reference is "running", so it is found.
         let base = Utc::now();
+        let stopped = seen("stopped", None, None);
         let stop = EffectObservation {
             workload: "lane".into(),
             at: base + chrono::Duration::seconds(1),
-            state: seen("stopped", None, None),
+            state: stopped.clone(),
         };
         let run = EffectObservation {
             workload: "lane".into(),
             at: base + chrono::Duration::seconds(2),
             state: seen("running", Some(200), Some("m")),
         };
-        let other = EffectObservation {
-            workload: "engine".into(),
-            at: base + chrono::Duration::seconds(3),
-            state: seen("stopped", None, None),
-        };
-        let effects = [run.clone(), stop.clone(), other];
-        let raw_stop = seen("stopped", None, None);
-        assert!(!explained_by_newest(&effects, "lane", &raw_stop, base));
-        assert!(explained_by_newest(&effects, "lane", &run.state, base));
-        // One effect: unchanged behaviour.
-        assert!(explained_by_newest(std::slice::from_ref(&stop), "lane", &raw_stop, base));
-        let later = base + chrono::Duration::seconds(5);
-        assert!(!explained_by_newest(&[stop], "lane", &raw_stop, later));
-        assert!(!explained_by_newest(&[], "lane", &raw_stop, base));
+        let fx = [run.clone(), stop.clone()];
+        assert!(finds(&stopped, base, &fx, &stopped));
+        assert!(!finds(&stopped, base, &fx, &run.state));
+        // From running: the agent's stop alone explains a stop.
+        let running = seen("running", Some(100), Some("m"));
+        assert!(!finds(&running, base, std::slice::from_ref(&stop), &stopped));
+        // No effect: the baseline is the reference.
+        assert!(finds(&running, base, &[], &stopped));
+        assert!(!finds(&stopped, base, &[], &stopped));
     }
 
     #[test]
