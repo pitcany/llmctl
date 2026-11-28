@@ -86,7 +86,7 @@ git -C ~/AI archive "$ai_ref" bin heal services packages/llmctl-stack | tar -x -
 git -C ~/AI/llm-router archive "$router_ref" | tar -x -C "$src/llm-router" \
   || die "git archive llm-router $router_ref"
 ssh -o BatchMode=yes -o ConnectTimeout=10 "${mac_spec%%:*}" \
-  "git -C ${mac_spec#*:} archive $mac_ref bin lib" | tar -x -C "$src/local-llm" \
+  "git -C ${mac_spec#*:} archive $mac_ref bin lib registry" | tar -x -C "$src/local-llm" \
   || die "git archive local-llm $mac_spec $mac_ref"
 say "sources: llmctl $short, ~/AI $(git -C ~/AI rev-parse --short "$ai_ref"), llm-router $(git -C ~/AI/llm-router rev-parse --short "$router_ref"), local-llm $(ssh -o BatchMode=yes "${mac_spec%%:*}" "git -C ${mac_spec#*:} rev-parse --short $mac_ref")"
 cp "$agent_bin" "$src/llmctl-next"

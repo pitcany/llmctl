@@ -70,7 +70,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
-        body = {"/health": b"OK", "/v1/models": json.dumps({"data": [{"id": "reh-mac-lane"}]}).encode(),
+        body = {"/health": b"OK", "/v1/models": json.dumps({"data": [{"id": sys.argv[2]}]}).encode(),
                 "/running": json.dumps({"running": []}).encode()}.get(self.path.split("?")[0], b"[]")
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
@@ -775,10 +775,16 @@ def main():
         )
         agent("run", "reh-lane", "--wait")
         wait_for(lambda: served(LANE_PORT) == ["reh/lane"])
-        swap = subprocess.Popen([sys.executable, WORK / "swap.py", str(SWAP_PORT)])
+        # A real lane id of the Mac registry; the stand-in llama-swap lists it.
+        mac_lane = next(
+            line.split(":", 1)[1].strip()
+            for line in (SRC / "local-llm/registry/models.yaml").read_text().splitlines()
+            if line.strip().startswith("- id:")
+        )
+        swap = subprocess.Popen([sys.executable, WORK / "swap.py", str(SWAP_PORT), mac_lane])
         time.sleep(0.5)
         rc, out, err = sh(
-            ["bash", SRC / "local-llm/bin/llmctl", "start", "reh-mac-lane"],
+            ["bash", SRC / "local-llm/bin/llmctl", "start", mac_lane],
             env={
                 "LLMCTL_CONFIG": str(MAC_CONF),
                 "LLMCTL_FORCE": "1",
@@ -788,7 +794,9 @@ def main():
         swap.terminate()
         check(
             "N14 Mac llmctl next_only: a lane the agent does not own is refused, no launchctl call",
-            rc != 0 and not (WORK / "launchctl.calls").exists(),
+            rc != 0
+            and "next_only: 1 makes llmctl-next the only path" in out + err
+            and not (WORK / "launchctl.calls").exists(),
             f"rc {rc}: {tail(out, err, 120)}",
         )
         rc, out, err = agent("run", "reh-a", "--workload", "reh-engine", "--wait")
