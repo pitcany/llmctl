@@ -49,24 +49,54 @@ pub struct Hosts {
     pub hosts: Vec<HostRecord>,
 }
 
+static STORE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The data dir this CLI run addresses (`--data-dir`, else the socket's dir,
+/// else the default). Set once in `main`; the store follows it, so a run
+/// against a temp agent never reads or writes the live `hosts.json` (M6a
+/// finding 8).
+pub fn use_data_dir(dir: PathBuf) {
+    let _ = STORE_DIR.set(dir);
+}
+
+fn store_dir() -> PathBuf {
+    STORE_DIR.get().cloned().unwrap_or_else(llmctl_daemon::app::default_data_dir)
+}
+
 /// The enrollment store: `<data-dir>/hosts.json`.
 pub fn hosts_path() -> PathBuf {
-    llmctl_daemon::app::default_data_dir().join("hosts.json")
+    store_dir().join("hosts.json")
 }
 
 /// Cache of the last successful remote status (freshness display when a
 /// host is unreachable — observations shown stale, never "stopped").
 pub fn status_cache_path(name: &str) -> PathBuf {
-    llmctl_daemon::app::default_data_dir()
-        .join("hosts")
-        .join(format!("{name}.status.json"))
+    store_dir().join("hosts").join(format!("{name}.status.json"))
 }
 
 pub fn load_hosts() -> Hosts {
-    match std::fs::read_to_string(hosts_path()) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-        Err(_) => Hosts::default(),
-    }
+    load_hosts_at(&hosts_path(), &llmctl_daemon::app::legacy_data_dir().join("hosts.json"))
+}
+
+/// The store at `path`. While it does not exist, the pre-M6 store at `legacy`
+/// is read (the workstation's enrollments were written there before the data
+/// dir default changed); the next save writes `path`.
+fn load_hosts_at(path: &std::path::Path, legacy: &std::path::Path) -> Hosts {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(_) => match std::fs::read_to_string(legacy) {
+            Ok(text) if legacy != path => {
+                eprintln!(
+                    "note: no {}; reading the enrollments at {} (copy hosts.json and hosts/ into the data dir)",
+                    path.display(),
+                    legacy.display()
+                );
+                text
+            }
+            _ => return Hosts::default(),
+        },
+    };
+    serde_json::from_str(&text).unwrap_or_default()
 }
 
 pub fn save_hosts(hosts: &Hosts) -> Result<(), String> {
@@ -652,6 +682,33 @@ exit 0
             xml.contains("<string>--host-id</string>\n\t\t<string>mbp2</string>"),
             "the agent answers to its enrollment name: {xml}"
         );
+    }
+
+    #[test]
+    fn the_store_falls_back_to_the_pre_m6_dir_only_while_its_own_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (new, legacy) = (dir.path().join("new/hosts.json"), dir.path().join("old/hosts.json"));
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, r#"{"hosts":[]}"#).unwrap();
+        let mut old = Hosts::default();
+        old.hosts.push(HostRecord {
+            name: "m5".into(),
+            io_platform_uuid: "UUID-OLD".into(),
+            ssh_alias: "m5".into(),
+            remote_bin: "~/.local/bin/llmctl-next".into(),
+            remote_data_dir: "~/.local/state/llmctl-next".into(),
+            arch: "arm64".into(),
+            agent_version: None,
+            protocol: Some(1),
+            enrolled_at: Utc::now(),
+            last_seen: None,
+        });
+        std::fs::write(&legacy, serde_json::to_string(&old).unwrap()).unwrap();
+        assert_eq!(load_hosts_at(&new, &legacy), old, "absent store: the legacy one is read");
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        std::fs::write(&new, r#"{"hosts":[]}"#).unwrap();
+        assert_eq!(load_hosts_at(&new, &legacy), Hosts::default(), "an existing store wins");
+        assert_eq!(load_hosts_at(&legacy, &legacy), old);
     }
 
     #[test]

@@ -138,6 +138,9 @@ def observe(workload, launchctl_table, held):
     }
 
 
+#: Engines whose endpoint serves one model, the one the agent verifies.
+SINGLE_MODEL = {"vllm", "sglang", "strata", "llama_cpp", "mtplx", "mlx_vlm", "mlx_serve", "ds4"}
+
 STABLE = ("name", "unit", "active", "pid", "port", "listening", "models", "gpus")
 
 
@@ -159,14 +162,19 @@ def compare(agent_workloads, records):
             out.append(f"{w['name']}: agent says {w.get('process')}, observed {seen_now}")
         if w.get("readiness") == "Ready" and not r["listening"]:
             out.append(f"{w['name']}: agent says Ready, port {r['port']} does not listen")
-        # shortcut: only an endpoint that lists one id is compared. For a
-        # service with many models (Ollama, LM Studio, llama-swap) the agent
-        # records the service identity, not a model id. Upgrade when
-        # `status --json` carries the engine kind.
-        one = r["models"] if r["models"] and len(r["models"]) == 1 else None
-        if w.get("served_model_verified") and one and w.get("served_model") not in one:
-            served = w.get("served_model")
-            out.append(f"{w['name']}: agent says it serves {served}, endpoint lists {one}")
+        # A service with many models (Ollama, LM Studio, llama-swap) records its
+        # identity, not a model id. Agents before 0.2.0 send no engine kind:
+        # then only an endpoint that lists one id is compared.
+        kind = w.get("engine_kind")
+        single = kind in SINGLE_MODEL if kind else bool(r["models"]) and len(r["models"]) == 1
+        if w.get("served_model_verified") and single and r["models"] is not None:
+            if w.get("served_model") not in r["models"]:
+                served = w.get("served_model")
+                listed = r["models"]
+                out.append(f"{w['name']}: agent says it serves {served}, endpoint lists {listed}")
+        if w.get("pid") and r["pid"] and w["pid"] != r["pid"]:
+            pids = f"agent says pid {w['pid']}, the service manager says {r['pid']}"
+            out.append(f"{w['name']}: {pids}")
     return out
 
 

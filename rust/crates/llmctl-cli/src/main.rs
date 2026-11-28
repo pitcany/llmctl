@@ -35,7 +35,7 @@ struct Cli {
     /// Control socket path (default: <data-dir>/control.sock)
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
-    /// Dev data directory (default: $LLMCTL_NEXT_DATA_DIR or ~/.local/state/llmctl-next-dev)
+    /// Data directory (default: $LLMCTL_NEXT_DATA_DIR or ~/.local/state/llmctl-next)
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
     /// Route every verb to this enrolled host's agent over the SSH bridge
@@ -851,6 +851,12 @@ async fn main() -> ExitCode {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     let cli = Cli::parse();
+    enroll::use_data_dir(
+        cli.data_dir
+            .clone()
+            .or_else(|| cli.socket.as_ref().and_then(|s| s.parent().map(PathBuf::from)))
+            .unwrap_or_else(llmctl_daemon::app::default_data_dir),
+    );
     let command = cli.command.clone();
     let result = dispatch(&cli, command).await;
     match result {

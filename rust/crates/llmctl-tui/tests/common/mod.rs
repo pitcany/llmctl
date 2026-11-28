@@ -53,6 +53,8 @@ pub fn workload(name: &str, process: &str, readiness: &str, intent: &str, serves
         adopted_digest: None,
         recovery_state: "alive".into(),
         recovery_policy: None,
+        pid: None,
+        engine_kind: None,
     }
 }
 

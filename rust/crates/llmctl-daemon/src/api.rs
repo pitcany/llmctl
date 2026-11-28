@@ -433,6 +433,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<StatusRespons
                 recovery_policy: def
                     .recovery
                     .map(|p| format!("{}/{}s", p.max_attempts, p.window_secs)),
+                pid: obs.and_then(|o| o.pid),
+                engine_kind: Some(def.engine_kind.to_string()),
             }
         })
         .collect();
