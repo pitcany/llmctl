@@ -682,15 +682,14 @@ def main():
             rc == 0 and len(ops()) == n + 1 and wait_for(lambda: served(LANE_PORT) == ["reh/lane"]),
             f"rc {rc}, ops {n} -> {len(ops())}",
         )
-        before_pid, eng_pid = pids()[LANE], pids()[ENGINE]
+        before_pid, eng_pid, n = pids()[LANE], pids()[ENGINE], len(ops())
         rc, out, err = lane_unit("start", f"{LANE}.service")
-        wait_for(lambda: served(LANE_PORT) == ["reh/lane"])
-        print(
-            f"INFO  N5b lane_unit start of the running lane: rc {rc}, lane pid {before_pid} -> {pids()[LANE]}, "
-            f"engine pid {eng_pid} -> {pids()[ENGINE]} (systemctl start would change nothing)",
-            flush=True,
+        check(
+            "N5b lane_unit start of the running lane changes nothing, as systemctl start (finding 2, fixed)",
+            rc == 0 and pids()[LANE] == before_pid and len(ops()) == n,
+            f"rc {rc}, lane pid {before_pid} -> {pids()[LANE]}, ops {n} -> {len(ops())}: {tail(out, err, 80)}",
         )
-        check("N5c ...and the engine on other cards kept its pid", pids()[ENGINE] == eng_pid)
+        check("N5c ...and the engine kept its pid", pids()[ENGINE] == eng_pid)
         rc, out, err = router_switch("reh-b")
         check(
             "N6 preset switch through llm-router (agent run): rc 0, serves reh/model-b",
