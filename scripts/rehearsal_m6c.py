@@ -408,6 +408,7 @@ def setup(as_host):
     MAC_CONF.write_text(
         f"router: http://127.0.0.1:{SWAP_PORT}\nnext_enabled: 1\nnext_only: 1\n"
         f"next_bin: {NEXT}\nnext_data: {DATA}\nnext_workload: reh-swap\nlogdir: {WORK}/mac-logs\n"
+        f"swap_config: {WORK}/swap-config.yaml\n"
     )
     write_settings("delegate")
     write_router(only=False, refusal_final=True)
@@ -781,6 +782,7 @@ def main():
             for line in (SRC / "local-llm/registry/models.yaml").read_text().splitlines()
             if line.strip().startswith("- id:")
         )
+        (WORK / "swap-config.yaml").write_text(f"models:\n  {mac_lane}:\n    cmd: /bin/true\n")
         swap = subprocess.Popen([sys.executable, WORK / "swap.py", str(SWAP_PORT), mac_lane])
         time.sleep(0.5)
         rc, out, err = sh(
@@ -793,9 +795,10 @@ def main():
         )
         swap.terminate()
         check(
-            "N14 Mac llmctl next_only: a lane the agent does not own is refused, no launchctl call",
+            # The agent has no llama-swap workload here: this is the fail-closed path.
+            "N14 Mac llmctl next_only, no agent answer for llama-swap: start refused, no launchctl call",
             rc != 0
-            and "next_only: 1 makes llmctl-next the only path" in out + err
+            and "refusing to touch llama-swap directly" in out + err
             and not (WORK / "launchctl.calls").exists(),
             f"rc {rc}: {tail(out, err, 120)}",
         )

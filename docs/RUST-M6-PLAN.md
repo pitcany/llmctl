@@ -1,5 +1,11 @@
 # Rust successor — M6 plan (cutover)
 
+Status 2026-11-28: **M6c passed** twice from a fresh container
+([RUST-M6-REHEARSAL.md](RUST-M6-REHEARSAL.md)). One change for this plan:
+in R2, run `catalog export` before step 3 stops the agent (the export asks
+the agent). The imports do not need the host lock released (design
+decision 6). Next: owner decisions on findings 2 and 3, then M6d.
+
 Status 2026-11-27, evening: **M6b built for all eight items** on four
 branches, not merged, not deployed, every switch off:
 [RUST-M6-PROGRESS.md](RUST-M6-PROGRESS.md). Next: review, then M6c.
