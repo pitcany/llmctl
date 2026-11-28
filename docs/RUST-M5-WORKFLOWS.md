@@ -1,5 +1,11 @@
 # M5 workflow matrix — what a day looks like, per host
 
+Status 2026-11-27: **close-out walk done**, see
+[Close-out walk](#close-out-walk-2026-11-27) at the end. Of 28 rows, 13 pass with no gap, 8 have only
+accepted gaps and 7 have an open gap. M5 closes when the owner accepts
+the open gaps. The tables
+below are the 2026-11-18 text and are not changed.
+
 Status 2026-11-18: written in M5a from the facts in
 [RUST-M5-PLAN.md](RUST-M5-PLAN.md) (checked read-only the same day) plus a
 read of the tools named below. Every row names the llmctl-next path that
@@ -88,3 +94,160 @@ M4), the live inventory `~/.local/state/llmctl-next-m4a/inventory.json`
 A counted day touches, at minimum: one read row (R1/R4/R5/R7), one write
 row (W1–W5), and `audit` clean (R7) on every host that day. Rows still ❌
 at pilot time must be owner-accepted gaps and say so here.
+
+## Close-out walk 2026-11-27
+
+The M5 pilot ended at 20:52 UTC 2026-11-27 with seven counted days
+([pilot log](RUST-M5-PILOT.md)). This section walks each row of the
+tables above. Each result is one of:
+
+- **pass**: the llmctl-next path exists on its host and has evidence.
+- **gap, accepted**: an owner decision already covers it. The decision is
+  named.
+- **gap, open**: no owner decision covers it. The owner must accept it or
+  ask for the work.
+
+All three agents run build `ccabf75` (workstation sha256 `208bdf1c…`, Macs
+`f559fbc8…`, protocol 1). Each check on 2026-11-27 was read-only: `status
+--all`, `audit --all`, `preset list`, `preset diff`, `model list`, `model
+scan`, `stores`, `vram`, `intent`, `logs`, `lanes memory`, `lanes matrix`,
+`lanes show`, `run … --dry-run`, `tui --read-only` and `tui --bench 5`.
+Nothing on a host was changed.
+
+### Daily reads
+
+| # | Result | Evidence |
+|---|---|---|
+| R1 | pass | `status --all` shows the three hosts, each seen 0 to 1 s ago. The TUI Hosts screen shows the same 15 workloads on the three agents (seen live 2026-11-27, mbp2 included). |
+| R2 | pass, with one open gap | Readiness per workload is in `status`, `engine` and the TUI. **Gap, open:** no verb gives one pass or fail for the host, as Python `llmctl health` does. Python `llmctl health` is a read verb and M6 does not change read verbs. |
+| R3 | gap, accepted | `ops` and `op` show the agent's operations (168 rows in the TUI). The Python session rows stay in the Python DB. M6 decision 9 imports them (`history import`, M6b item 7). |
+| R4 | pass | `status` shows the enrolled and the foreign processes per card. `vram` shows the free memory and four measured workloads. The TUI GPUs screen shows the same for the three hosts. |
+| R5 | pass | `lanes memory llama-swap` on m5: budget 104 GiB, 14 lane peaks, 7 set combinations fit, 3 `risky*` sets are over the budget and accepted. On mbp2: budget 46 GiB, no matrix. The row names `lanes status`; the verb is `lanes show`. |
+| R6 | pass | `logs vllm-engine` shows the journal of the unit. `lanes logs` exists for a lane. |
+| R7 | pass | `audit --all --since` is the evidence of each pilot day. After the pilot end it shows 0 foreign writes on the three hosts. |
+
+### Switching and lifecycle
+
+| # | Result | Evidence |
+|---|---|---|
+| W1 | pass in the pilot; **refused on 2026-11-27, gap, open** | The router switched `vllm-engine` through the agent on pilot days 2, 3, 4 and 6 and on 2026-11-27 (22:38 UTC, succeeded). `run <preset>` and the TUI Run screen on presets are in the deployed build. No pilot line shows a use of `run <preset>` by name. On 2026-11-27 at 23:42 UTC each run of `vllm-engine` is refused with `definition_drift` (finding 1 below). Finding 1 was resolved the same day: `run qwen27b-awq --dry-run` gives a plan (a preset switch by name). A plain `run vllm-engine` is still refused on `environment_files`. |
+| W2 | pass for owned lanes; gap, accepted for the others | m5: 24 `LaneSwap` operations on pilot day 2. Workstation: `strata-fast`, `flash` (round trip on 2026-11-27) and `gpt-oss-120b` go through the agent. `flash-uncensored`, `dsv41` and `glm53` are not adopted: M6 decision 6, M6e item 1. |
+| W3 | pass | A manual stop of `vllm-engine` and `gpt-oss-120b` held from 18:09 UTC 2026-11-24 through pilot day 5. No recovery and no healer started them. |
+| W4 | pass | `restart` ran on `llamacpp-router` on pilot day 3. Router models were unloaded by verb on days 3 and 4. `unload` exists for Ollama and LM Studio. |
+| W5 | pass on m5; gap, accepted on mbp2 | m5 has `next_enabled: 1` and its lane changes are agent operations. The memory budget guards a matrix write (e2e test); `lanes matrix` was read live on m5, and no matrix write was made live. mbp2 has no `next_enabled` line: M6f step 7 turns it on. |
+| W6 | pass for the owned units; gap, accepted for the script | Drill 3 passed on 2026-11-21: `take-gpus` stopped `vllm-engine` through the agent. `qwen3coder30b-start` still starts `ollama-gpu1` with `systemctl`: row B4. |
+| W7 | pass; gap, accepted for the router move | `run` and `stop` of `gpt-oss-120b` ran on pilot days 3 and 4. The move into the llama.cpp router (M5d step 7) comes after the M6 exit: M6 decision 2. |
+
+### Config, presets, catalog
+
+| # | Result | Evidence |
+|---|---|---|
+| C1 | pass | `preset list` shows five presets, `qwen27b` is `serving`, four are `ready`. `preset diff qwen27b` says `in sync; serving now`. `preset settle --write` ran live on 2026-11-18. The parity test holds 18 renders and 58 edits byte for byte against Python. |
+| C2 | pass, with one open gap | The registry is imported on the three agents (54, 14 and 8 models). `model list` and `model scan` ran live on 2026-11-27. **Gap, open:** the catalog revision is still 1 on the workstation, thus `model add`, `model edit` and `model scan --add` were not used live. They have e2e tests. |
+| C3 | pass, with one open gap | `model rm` is in the build since M4 and has tests. **Gap, open:** no pilot line shows a live use. |
+| C4 | **gap, open** | No Rust code reads `~/.config/llmctl/router_aliases.json` (`git grep` in `rust/crates`: no result). The file last changed on 2026-10-13. Python `llmctl aliases` and `set-alias` stay the only path. The file is not a managed resource in the M6 plan. |
+| C5 | **gap, open** | `stores` shows five stores with their free space. No Rust code reads `model_dirs.yaml`. That file has only roots with an empty `runtimes` list; Python `llmctl validate` uses it for the broken-symlink check. |
+| C6 | pass, with one open gap | The Mac catalogs hold the imported rows. `hf` is installed on m5 (`/opt/homebrew/bin/hf`, 2.4.0, since 2026-11-16; the progress log says it is open). Lane stores exist on both Macs (`lanes show`: 2 lanes on mbp2, revision 5; 14 lanes on m5, revision 11). **Gap, open:** `model get` was not used live on a Mac. |
+
+### Background writers
+
+| # | Result | Evidence |
+|---|---|---|
+| B1 | pass, with finding 4 | The guard is on since 2026-11-20 (`llmctl_next.enabled: true`, read through the guard's own parser). Seven days with 0 legacy writes. The unit map has seven units and does not name `llamacpp-router.service` (finding 4 below). |
+| B2 | pass | Drill 3, 2026-11-21. |
+| B3 | pass on m5; gap, accepted on mbp2 | As W5. |
+| B4 | gap, accepted | The `load` verb is in the deployed build. The router backend `qwen3coder30b` has no `llmctl_next` key. M6 decision 7, M6e item 3. |
+| B5 | pass as designed; gap, accepted | The healers ask `intent` first. A direct repair shows in `audit`. M6 decision 8 makes them report-only. |
+| B6 | pass | No change in M5. M6a item 3 reads `llmctl-warm` again. |
+| B7 | pass | Kept. M6 makes it a no-op with a flag file. |
+| B8 | pass | `llmctl-reconcile.timer` is active and writes session rows only. M6 stops it. |
+
+### M4 carry-overs
+
+| # | Result | Evidence |
+|---|---|---|
+| 1 | pass | `enroll` and `authority` are in the build (`records_e2e`). |
+| 2 | pass, no live write | `lanes matrix` shows the m5 matrix (14 vars, 8 sets). The budget guards the write in the e2e test. |
+| 3 | pass | `run --profile-env` plans against the fit. `run <preset>` is the same swap. |
+| 4 | pass | Both Macs have the macro `llamacpp` on the staged release `b12527`. Each Mac answered one request from a llama.cpp lane on 2026-11-19. |
+| 5 | pass | Built in M5d item 2 (progress log). Not checked again here. |
+
+### M5 exit checklist
+
+| Criterion | Result |
+|---|---|
+| Minimal multi-host TUI | **pass.** Six of the seven screens seen live against the three agents (Hosts, Run, Operations, GPUs/memory, Catalog, Audit; not Logs). `tui --bench 5`: key to frame p50 0.35 ms, hosts refresh p50 263 ms, p95 472 ms. |
+| Config/preset parity | **pass for parity; gap, open for "used in the pilot".** No pilot line shows `run <preset>` by name. |
+| Catalog operations | **pass for import and export; gap, open for live `add` and `rm`.** `scan` ran live on 2026-11-27. |
+| llama.cpp on every host, several models | **pass, with one accepted gap.** Router models were loaded and unloaded by verb on the workstation. Each Mac answered from a pinned llama.cpp lane. `gpt-oss-120b` in the router: M6 decision 2. |
+| Migration/reversal rehearsal | **gap, open.** `docs/RUST-M5-REHEARSAL.md` does not exist. The M6 plan puts the rehearsal into M6c and requires it before the live cutover. |
+| Daily workflows across hosts | **this walk.** Of 28 rows, 13 pass with no gap, 8 have only accepted gaps (R3, W2, W5, W6, W7, B3, B4, B5) and 7 have an open gap (R2, W1, C2, C3, C4, C5, C6). |
+| No legacy lifecycle writes | **pass.** Pilot log, seven days. |
+| Seven consecutive days | **pass.** Pilot log. |
+
+### Gaps that need the owner's acceptance
+
+1. **R2:** no aggregated health verb. Proposed: accept; use `status` and
+   the TUI, and Python `llmctl health` for the one-line answer.
+2. **W1:** `run <preset>` by name has no pilot use. Proposed: accept, and
+   use it one time in the M6 acceptance window. First resolve finding 1.
+3. **C2, C3, C6:** `model add`, `model edit`, `model rm` and a Mac `model
+   get` were not used live. Proposed: accept; the M6 acceptance window
+   uses each one time.
+4. **C4:** router aliases stay in the Python tool. Proposed: accept; it
+   is a config file that no agent record names.
+5. **C5:** `model_dirs.yaml` stays a Python-only file. Proposed: accept;
+   it feeds only the Python broken-symlink check.
+6. **Rehearsal (M5f):** done in M6c. Proposed: accept; M6c runs both
+   directions two times before any live step.
+
+### Findings of the walk
+
+These are live facts from 2026-11-27. No fix was applied.
+
+1. **`vllm-engine` cannot be started through the agent now.** `run
+   vllm-engine --dry-run`, `run qwen27b --dry-run` and the router's form
+   (`run vllm-engine --profile-env … --model …  --dry-run`) each answer
+   `409 definition_drift: … differing: environment_files,
+   version.lock_digest`. Cause: at 15:23 PST 2026-11-27 an editable
+   `pip install --user` of `agentkit` (from a worktree below
+   `~/.custom-harness/worktrees/`) wrote `anyio 4.16.0`, `httpx 0.29.0`,
+   `httpcore`, `h11` and `typing_extensions` into
+   `~/.local/lib/python3.12/site-packages`. The `vllm-muse` interpreter is
+   Python 3.12.14 and has the user site on. Its `pip freeze` now lists
+   those packages, thus the lock digest is not the pinned one. The same
+   packages come before the env's own `anyio 4.15.1` and `httpx 0.28.1` on
+   the next start of the engine. The engine that runs now (pid 4022288,
+   started 14:38 PST) is not changed. Effect: the next router switch to a
+   vLLM profile is refused, and `llmctl_next_refusal_final` is `true`.
+   The `environment_files` difference alone is a content difference that
+   a profile switch accepts.
+
+   **Resolved 2026-11-27 16:0x PST (owner: "Remove packages").** The
+   directory `~/.local/lib/python3.12` and the script `~/.local/bin/httpx`
+   were moved to `~/.local/lib/python3.12.removed-2026-11-27` (nothing was
+   deleted; no process had the files open). After the move: `version
+   vllm-engine` shows no drift and the live lock digest equals the pin
+   (`635b205d…`). The router's form (`run vllm-engine --profile-env …
+   --model … --dry-run`) and a switch to another preset (`run qwen27b-awq
+   --dry-run`) give a plan. The serving signature digest is the same as
+   before (`2e267a06…`) and `audit` shows 0 foreign writes. What stays:
+   `run vllm-engine --dry-run` and `run qwen27b --dry-run` (the preset
+   that serves now) still answer `definition_drift … environment_files`.
+   The pinned digest of `vllm-engine.env` is older than the file (the
+   profile envs were edited at 19:50 PST 2026-11-24), and only a profile
+   switch accepts a content difference (`ops.rs:349`). It can come back:
+   the longjob `ch-portfolio-m4b` (custom-harness) runs until about 18:25
+   PST and the first run of that job made the install.
+2. **An LM Studio server runs outside its unit on the workstation.** A
+   process `llmster` (pid 3820672, started 18:43 PST 2026-11-26, in
+   `session-3.scope`) listens on 127.0.0.1:1234. `llmster.service` is
+   inactive and the agent's record says Stopped. The agent reads the
+   loaded models from that port.
+3. **The pilot notes say `llmster` stays down by owner choice.** Its
+   recorded intent is `running` and its recovery state is `gave_up`. The
+   same holds for `llamacpp-router`. The record does not say what the
+   owner decided.
+4. **The Python guard's unit map does not name `llamacpp-router.service`.**
+   The agent owns that workload. A Python `llmctl` write to that unit
+   goes to `systemctl` directly.
