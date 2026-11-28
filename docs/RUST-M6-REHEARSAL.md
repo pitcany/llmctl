@@ -1,15 +1,17 @@
 # Rust successor — M6c rehearsal (the cutover and both reversals)
 
 Status 2026-11-28: **passed twice in a row from a fresh container**,
-73 of 73 checks each run, at llmctl `da6dc70` (2026-11-28 07:14 UTC).
-The rehearsal found three facts that change the M6f procedure or need an
-owner decision (findings 1 to 3). No live host changed.
+74 of 74 checks each run, at llmctl `5ac909b` (2026-11-28 07:34 UTC),
+with the audit fix of finding 3. The rehearsal found three facts that
+change the M6f procedure or the code (findings 1 to 3). No live host
+changed.
 
-The recorded run: the agent is the static build of `51ff6b5` (`rust/` is
-the same at `da6dc70`), sha256 `725303c880662293…`; `~/AI` `c489f514`,
-llm-router `ca42338`, local-llm `19d46dc`; the DB copy sha256
-`fb28a7cedb5cba3f…`. Log: `rust/dist/m6c-rehearsal-da6dc7056447.log`
-(gitignored). After the runs: no container left, the live agent active,
+The recorded run: the agent is the static build of `5ac909b`, sha256
+`e5f723a918a1be88…`; `~/AI` `c489f514`, llm-router `ca42338`, local-llm
+`19d46dc`; the DB copy sha256 `fb28a7cedb5cba3f…`. Log:
+`rust/dist/m6c-rehearsal-5ac909b494e8.log` (gitignored). The first pass
+(`da6dc70`, agent of `51ff6b5`) passed 73 of 73 twice, with N13b as an
+information line. After the runs: no container left, the live agent active,
 `engine-pins-check` ok, port 1234 free.
 
 Plan text: [RUST-M6-PLAN.md](RUST-M6-PLAN.md), M6c, and the "Reversal"
@@ -116,7 +118,7 @@ the live agent the 2026-11-19 import gave 53 `new` and 1 `no_store`.
 | N10 | The agent back after one minute; the engine kept its pid | pass |
 | N11 | A crash (`kill -s KILL`) of the owned lane; `llm-heal run` with `llmctl_next_report_only: true` | pass: held, "report only: reh-lane is owned by llmctl-next, whose recovery is the only retry loop" |
 | N12 | A raw `systemctl --user stop` of the enrolled lane | pass: `audit --unexplained` has one new finding |
-| N13b | The same raw stop right after an agent stop and run | information: no finding (finding 3) |
+| N13b | The same raw stop right after an agent stop and run, before any observation pass | pass: one new finding (before the fix of finding 3: none) |
 | N14 | Mac `llmctl start <lane>` with `next_only: 1` and no agent answer for the llama-swap workload (the Mac bash script of `19d46dc`, a real registry lane) | pass: exit 1, "refusing to touch llama-swap directly", no `launchctl` call |
 | N15, N16 | One preset switch by the agent (`run reh-a --workload reh-engine --wait`); drained | pass |
 | N17 | Signature agrees with the agent | pass |
@@ -166,15 +168,19 @@ the live agent the 2026-11-19 import gave 53 `new` and 1 `no_store`.
    Any other caller of `llm-unit start` on a running enrolled unit
    restarts the engine. **Owner decision:** make `llm-unit start` a no-op
    for an active unit, or accept it and list it in the runbook.
-3. **`audit` misses a raw stop that follows an agent stop and run with no
-   observation pass in between** (N13b, every run). `audit::explains()`
-   accepts any terminal effect after the baseline with the same process
-   state. The old "stopped" effect of the agent's stop explains the later
-   raw stop. The window is one watcher interval (15 s) after the run.
-   **Owner decision:** compare only with the newest effect of the workload
-   (or set the baseline in `record_effects`), in M6 or after the exit.
-   It does not block M6f: the window is short and the M6f drill takes a
-   status pass before the raw stop.
+3. **`audit` missed a raw stop that followed an agent stop and run with
+   no observation pass in between** (N13b on `51ff6b5`, every run). **Fixed
+   in `5ac909b`** (owner: "Fix the audit gap now"). Cause: the agent's own
+   operations move no baseline. The last pass had seen the lane stopped
+   (the N12 raw stop); after the agent's stop and run, the next raw stop
+   compared "stopped" with "stopped". Fix: a pass compares with the state
+   the workload's newest effect since the baseline left it in, else the
+   baseline; any change from it is a finding (`audit::reference_state`;
+   `explains()` is removed). A first attempt (`f3fb8d3`, newest effect
+   explains) did not reach this case: N13b still failed, 1 → 1. Tests:
+   `the_newest_effect_since_the_baseline_is_the_reference`; Rust workspace
+   372 passed, 1 failed (the known `bridge_subcommand` flake; 3 of 3
+   alone).
 4. **The imports do not need the host lock released** (plan design
    decision 6 asked this). `catalog import` and `history import` run while
    another process holds the lock (F8 to F12).
@@ -231,8 +237,9 @@ Workstation. Run each step; compare with the check named.
    with no request in flight; `llm-unit mode` prints `cutover` (F17, F18).
 8. Release the lease. Signature "after" = "before"; no pid changed; the
    sha256 list is equal apart from `settings.yaml` and `router.yaml` (F19, F20).
-9. Negative drills N1 to N14, each on a unit that can be away. Take a
-   `status` pass before a raw stop (finding 3).
+9. Negative drills N1 to N14, each on a unit that can be away. With an
+   agent older than `5ac909b`, take a `status` pass before a raw stop
+   (finding 3).
 
 R1: restore the settings of the "Reversal" table, then `catalog export`,
 `llmctl import-registry <file> --update-models`, `llmctl reconcile`, one
