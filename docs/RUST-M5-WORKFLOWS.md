@@ -1,10 +1,11 @@
 # M5 workflow matrix — what a day looks like, per host
 
 Status 2026-11-27: **close-out walk done**, see
-[Close-out walk](#close-out-walk-2026-11-27) at the end. Of 28 rows, 13 pass with no gap, 8 have only
-accepted gaps and 7 have an open gap. M5 closes when the owner accepts
-the open gaps. The tables
-below are the 2026-11-18 text and are not changed.
+[Close-out walk](#close-out-walk-2026-11-27) at the end. Of 28 rows, 13 pass with no gap. The owner
+decided the six gaps on 2026-11-27: gaps 1, 4 and 5 are built (three
+verbs on branch `m5-gap-verbs`, not deployed), gaps 2, 3 and 6 are
+accepted. No open gap is left. The tables below are the 2026-11-18 text
+and are not changed.
 
 Status 2026-11-18: written in M5a from the facts in
 [RUST-M5-PLAN.md](RUST-M5-PLAN.md) (checked read-only the same day) plus a
@@ -119,7 +120,7 @@ Nothing on a host was changed.
 | # | Result | Evidence |
 |---|---|---|
 | R1 | pass | `status --all` shows the three hosts, each seen 0 to 1 s ago. The TUI Hosts screen shows the same 15 workloads on the three agents (seen live 2026-11-27, mbp2 included). |
-| R2 | pass, with one open gap | Readiness per workload is in `status`, `engine` and the TUI. **Gap, open:** no verb gives one pass or fail for the host, as Python `llmctl health` does. Python `llmctl health` is a read verb and M6 does not change read verbs. |
+| R2 | pass; gap built 2026-11-27 | Readiness per workload is in `status`, `engine` and the TUI. The verb `health [--all] [--json]` gives one pass or fail per host: a workload passes when the observation equals its recorded intent, and exit 1 means not healthy. It reaches the hosts with the M6d deploy. |
 | R3 | gap, accepted | `ops` and `op` show the agent's operations (168 rows in the TUI). The Python session rows stay in the Python DB. M6 decision 9 imports them (`history import`, M6b item 7). |
 | R4 | pass | `status` shows the enrolled and the foreign processes per card. `vram` shows the free memory and four measured workloads. The TUI GPUs screen shows the same for the three hosts. |
 | R5 | pass | `lanes memory llama-swap` on m5: budget 104 GiB, 14 lane peaks, 7 set combinations fit, 3 `risky*` sets are over the budget and accepted. On mbp2: budget 46 GiB, no matrix. The row names `lanes status`; the verb is `lanes show`. |
@@ -145,8 +146,8 @@ Nothing on a host was changed.
 | C1 | pass | `preset list` shows five presets, `qwen27b` is `serving`, four are `ready`. `preset diff qwen27b` says `in sync; serving now`. `preset settle --write` ran live on 2026-11-18. The parity test holds 18 renders and 58 edits byte for byte against Python. |
 | C2 | pass, with one open gap | The registry is imported on the three agents (54, 14 and 8 models). `model list` and `model scan` ran live on 2026-11-27. **Gap, open:** the catalog revision is still 1 on the workstation, thus `model add`, `model edit` and `model scan --add` were not used live. They have e2e tests. |
 | C3 | pass, with one open gap | `model rm` is in the build since M4 and has tests. **Gap, open:** no pilot line shows a live use. |
-| C4 | **gap, open** | No Rust code reads `~/.config/llmctl/router_aliases.json` (`git grep` in `rust/crates`: no result). The file last changed on 2026-10-13. Python `llmctl aliases` and `set-alias` stay the only path. The file is not a managed resource in the M6 plan. |
-| C5 | **gap, open** | `stores` shows five stores with their free space. No Rust code reads `model_dirs.yaml`. That file has only roots with an empty `runtimes` list; Python `llmctl validate` uses it for the broken-symlink check. |
+| C4 | gap built 2026-11-27 | `alias list` and `alias set` read and write `~/.config/llmctl/router_aliases.json` over settings.yaml `router.aliases`, with the lock file and the bytes of Python `set-alias`. The file last changed on 2026-10-13. Its consumer, the Python gateway (`llmctl-gateway`, port 9000), does not run. The file is not a managed resource in the M6 plan. |
+| C5 | gap built 2026-11-27 | `stores` shows five stores with their free space. `stores roots` reads `model_dirs.yaml`, shows each root with the stores that cover it, and does the broken-symlink check of Python `llmctl validate`. That file has only roots with an empty `runtimes` list. |
 | C6 | pass, with one open gap | The Mac catalogs hold the imported rows. `hf` is installed on m5 (`/opt/homebrew/bin/hf`, 2.4.0, since 2026-11-16; the progress log says it is open). Lane stores exist on both Macs (`lanes show`: 2 lanes on mbp2, revision 5; 14 lanes on m5, revision 11). **Gap, open:** `model get` was not used live on a Mac. |
 
 ### Background writers
@@ -181,11 +182,16 @@ Nothing on a host was changed.
 | Catalog operations | **pass for import and export; gap, open for live `add` and `rm`.** `scan` ran live on 2026-11-27. |
 | llama.cpp on every host, several models | **pass, with one accepted gap.** Router models were loaded and unloaded by verb on the workstation. Each Mac answered from a pinned llama.cpp lane. `gpt-oss-120b` in the router: M6 decision 2. |
 | Migration/reversal rehearsal | **gap, open.** `docs/RUST-M5-REHEARSAL.md` does not exist. The M6 plan puts the rehearsal into M6c and requires it before the live cutover. |
-| Daily workflows across hosts | **this walk.** Of 28 rows, 13 pass with no gap, 8 have only accepted gaps (R3, W2, W5, W6, W7, B3, B4, B5) and 7 have an open gap (R2, W1, C2, C3, C4, C5, C6). |
+| Daily workflows across hosts | **this walk.** Of 28 rows, 13 pass with no gap. 12 have only accepted gaps (R3, W2, W5, W6, W7, B3, B4, B5, and since 2026-11-27 W1, C2, C3, C6). 3 had an open gap that is now built and not yet deployed (R2, C4, C5). |
 | No legacy lifecycle writes | **pass.** Pilot log, seven days. |
 | Seven consecutive days | **pass.** Pilot log. |
 
 ### Gaps that need the owner's acceptance
+
+**Owner decision, 2026-11-27.** The six gaps were put to the owner with
+the words "accept all, or name the numbers you want built". The answer
+was "Build 1, 4, and 5". Thus gaps 1, 4 and 5 are built (below), and gaps
+2, 3 and 6 are accepted as proposed. No open gap is left.
 
 1. **R2:** no aggregated health verb. Proposed: accept; use `status` and
    the TUI, and Python `llmctl health` for the one-line answer.
@@ -200,6 +206,34 @@ Nothing on a host was changed.
    it feeds only the Python broken-symlink check.
 6. **Rehearsal (M5f):** done in M6c. Proposed: accept; M6c runs both
    directions two times before any live step.
+
+### Built for gaps 1, 4 and 5 (2026-11-27)
+
+Three verbs of the `llmctl-next` CLI, on branch `m5-gap-verbs`. They add
+no API route and no wire field, thus the protocol stays 1. They are **not
+deployed**: they reach the hosts with the M6d deploy.
+
+| Gap | Verb | What it does |
+|---|---|---|
+| 1 (R2) | `health [--all] [--json]` | One line per host: `healthy` or `UNHEALTHY`, and one `FAIL` line per workload whose observation does not equal its recorded intent. Intent `unmanaged` is skipped. With `--all`, a host that does not answer fails. Exit 0 = healthy, 1 = not. |
+| 4 (C4) | `alias list [--json]`, `alias set <alias> <target>` | The merged view of Python (`router.aliases` of settings.yaml, else the seven default roles, overlaid by `router_aliases.json`). A target is `healthy` when a workload that is running and ready has it as its name or as its served model. `alias set` takes the lock file of Python `set-alias` and writes the same bytes; `-` removes a binding. A file that is not a JSON object is refused (Python reads it as empty and then loses its aliases). |
+| 5 (C5) | `stores roots [--json]` | Each enabled root of `model_dirs.yaml` with its path (resolved as Python does), the declared stores above or below it, and each broken symlink under it (the same depth limit as Python). Exit 1 when a broken symlink exists. |
+
+Limits. `alias` and `stores roots` read files on the host where the
+command runs; with `--host` they refuse. `alias` has no live consumer
+today: the Python gateway that resolves aliases does not run.
+
+Read-only check with a debug build against the live workstation agent
+(2026-11-27, no write):
+
+- `health`: `host workstation: UNHEALTHY (2 of 8 fail; 6 ok, 0
+  unmanaged)`, with `llmster` and `llamacpp-router` (intent running,
+  observed Stopped, `gave_up`). This is finding 3 below.
+- `alias list`: seven aliases; `coding` is bound, `long-context` and
+  `tutoring` are healthy, four roles are unbound. Python `llmctl aliases`
+  gives the same seven rows.
+- `stores roots`: five roots, 0 broken symlinks. Python `llmctl validate`
+  also reports 0 findings.
 
 ### Findings of the walk
 

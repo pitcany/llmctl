@@ -34,6 +34,7 @@ pub mod llamacpp_engine;
 pub mod gpu;
 pub mod hooks;
 pub mod inflight;
+pub mod local_config;
 pub mod logfile;
 pub mod ops;
 pub mod own;
