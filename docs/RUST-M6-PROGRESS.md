@@ -42,7 +42,40 @@ e2e agent reads no presets of the owner.
 2. The Python build with `import-registry --update-models` and the
    cutover mode must be in `~/AI/.venv` before the switch (M6d step 6).
 3. The lane scripts call `llm-unit` by its full path: a user unit has no
-   `~/AI/bin` on `PATH`.
+   `~/AI/bin` on `PATH`. They call it only in cutover mode (review fix 1).
+
+### Review fixes (2026-11-27)
+
+Seven findings of the code review. Each new behaviour is off until its
+switch is set. Commits in `~/AI` are on `feat/m6b-cutover-healers-scripts`,
+the others on `m6b-cutover`.
+
+| # | Commit | What changed | Test |
+|---|---|---|---|
+| 1 | `~/AI` `e9facc4a` | The lane scripts deadlocked with every switch off: `llm-unit` sent an enrolled unit to the agent while the caller held the host lock. `services/lanes/_unit.sh` `lane_unit` now uses `llm-unit` only in cutover mode and `systemctl --user <verb> <unit>` in any other mode. New verb `llm-unit mode` prints `cutover` or `delegate` | `tests/test_lane_scripts_use_llm_unit.py` (the six scripts use the helper; three `lane_unit` tests), `test_mode_*` in `tests/test_llm_unit.py` |
+| 2 | `1dbb007` | Cutover mode guarded only `llmctl run <preset>`. Now `lane_swap.unit_write` is the one place for a unit write: `llmctl stop <lane>`, the TUI swap helpers and the rollback go to the agent for an enrolled unit and are refused for any other. `llmctl run <enrolled lane>` is one `llmctl-next run <workload> --wait`. A session start is refused. `install_unit` does not `enable --now` | `tests/test_cutover_writes.py` (12 tests: agent, refusal, old argv) |
+| 3 | `1f31e0f` | `history import --confirm` refused a WAL-mode `.backup` copy: the dry run had created `-wal` and `-shm` beside it. The snapshot is opened `file:<path>?mode=ro&immutable=1` | `history_e2e.rs` `a_wal_mode_backup_copy_is_imported_and_nothing_is_written_beside_it` |
+| 4 | `~/AI` `2dbe07ea` | `llm-unit` refused every unit when the guard could not be imported, also with the switches off. It now reads the cutover switch itself (line scan of `settings.yaml`): cutover and no guard = exit 3, else `systemctl` as before | `tests/test_llm_unit.py` (import failure and missing guard Python, both modes) |
+| 5 | `~/AI` `0055fc82` | The healers repaired the agent's engines when the agent did not answer. With report-only on and no usable answer they hold every engine repair and still repair front doors. Off: unchanged | `test_report_only_holds_*`, `test_report_only_still_repairs_a_front_door_*` in `tests/test_llm_heal.py` and `tests/test_mac_heal.py` |
+| 6 | `~/AI` `153bb70f` | `take-gpus` ran `ollama stop <model>`. In cutover mode with `ollama.service` enrolled it runs `llmctl-next unload <workload> <model> --wait`; a refusal is a failed take | `test_cutover_unload*` in `packages/llmctl-stack/tests/test_take_gpus.py` |
+| 7 | `9405286` | Any data dir read the pre-M6 `hosts.json`, so a temp agent bridged to the real Macs. Only the default dir and `~/.local/state/llmctl-next-m4a` read it now | `enroll.rs` `only_the_default_and_the_live_workstation_dir_read_the_pre_m6_store` |
+
+Also `~/AI` `5829eea3`: the llmctl-stack suite tests the checkout. Before,
+a git worktree tested the copy that `~/AI/.venv` has installed.
+
+Suites after the fixes: llmctl Python 1861 passed; Rust workspace 371
+passed, 32 ignored, and `bridge_subcommand_relays_http_to_the_socket`
+failed once (the known flake; 3 of 3 passed alone); the five `~/AI` test
+files 148 passed.
+
+Facts for M6d from the fixes:
+
+1. Deploy `llm-unit` and `services/lanes/_unit.sh` together. An old
+   `llm-unit` has no `mode` verb: `lane_unit` then uses `systemctl`.
+2. In cutover mode `llmctl run <lane>` needs the lane's unit in
+   `llmctl_next.units`. The agent plans the stops; llmctl stops nothing.
+3. Report-only with a stopped agent holds every engine repair. The alert
+   says "llmctl-next did not answer".
 
 ### Open in M6b
 
