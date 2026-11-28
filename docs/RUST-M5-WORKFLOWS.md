@@ -181,7 +181,7 @@ Nothing on a host was changed.
 | Config/preset parity | **pass for parity; gap, open for "used in the pilot".** No pilot line shows `run <preset>` by name. |
 | Catalog operations | **pass for import and export; gap, open for live `add` and `rm`.** `scan` ran live on 2026-11-27. |
 | llama.cpp on every host, several models | **pass, with one accepted gap.** Router models were loaded and unloaded by verb on the workstation. Each Mac answered from a pinned llama.cpp lane. `gpt-oss-120b` in the router: M6 decision 2. |
-| Migration/reversal rehearsal | **gap, open.** `docs/RUST-M5-REHEARSAL.md` does not exist. The M6 plan puts the rehearsal into M6c and requires it before the live cutover. |
+| Migration/reversal rehearsal | **pass.** Both directions passed two times on 2026-11-27, 33 of 33 checks each ([RUST-M5-REHEARSAL.md](RUST-M5-REHEARSAL.md)). The owner asked for it before M6b. It found one reversal fault, fixed on the same branch (`import-registry --update-models`). M6c extends it. |
 | Daily workflows across hosts | **this walk.** Of 28 rows, 13 pass with no gap. 12 have only accepted gaps (R3, W2, W5, W6, W7, B3, B4, B5, and since 2026-11-27 W1, C2, C3, C6). 3 had an open gap that is now built and not yet deployed (R2, C4, C5). |
 | No legacy lifecycle writes | **pass.** Pilot log, seven days. |
 | Seven consecutive days | **pass.** Pilot log. |
@@ -191,7 +191,8 @@ Nothing on a host was changed.
 **Owner decision, 2026-11-27.** The six gaps were put to the owner with
 the words "accept all, or name the numbers you want built". The answer
 was "Build 1, 4, and 5". Thus gaps 1, 4 and 5 are built (below), and gaps
-2, 3 and 6 are accepted as proposed. No open gap is left.
+2, 3 and 6 are accepted as proposed. No open gap is left. Later the same
+day the owner changed gap 6 from accepted to done: see item 6.
 
 1. **R2:** no aggregated health verb. Proposed: accept; use `status` and
    the TUI, and Python `llmctl health` for the one-line answer.
@@ -205,7 +206,10 @@ was "Build 1, 4, and 5". Thus gaps 1, 4 and 5 are built (below), and gaps
 5. **C5:** `model_dirs.yaml` stays a Python-only file. Proposed: accept;
    it feeds only the Python broken-symlink check.
 6. **Rehearsal (M5f):** done in M6c. Proposed: accept; M6c runs both
-   directions two times before any live step.
+   directions two times before any live step. **Changed by the owner on
+   2026-11-27 ("Do a rehearsal before M6b"): the M5-level rehearsal ran
+   the same day and passed, see [RUST-M5-REHEARSAL.md](RUST-M5-REHEARSAL.md).
+   The gap is closed, not accepted.**
 
 ### Built for gaps 1, 4 and 5 (2026-11-27)
 
