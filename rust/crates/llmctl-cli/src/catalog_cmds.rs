@@ -1,12 +1,12 @@
-//! `model list/show/add/edit/enable/disable/scan` and `catalog
+//! `model list/show/add/edit/enable/disable/delete/scan` and `catalog
 //! import/export` (Rust M5c item 3). Per host: `--host` routes to that
 //! host's agent and its catalog.
 
 use clap::Subcommand;
 
 use llmctl_client::catalog::{
-    CatalogImportRequest, CatalogModel, ModelAddRequest, ModelEditRequest, ModelEnableRequest,
-    ModelWriteResponse, ScanRequest,
+    CatalogImportRequest, CatalogModel, ModelAddRequest, ModelDeleteRequest, ModelEditRequest,
+    ModelEnableRequest, ModelWriteResponse, ScanRequest,
 };
 use llmctl_client::wire::PROTOCOL_VERSION;
 
@@ -62,6 +62,16 @@ pub enum ModelCatalogCmd {
     Enable { model: String },
     /// Disable a record (kept, hidden from `model list`, exported inactive).
     Disable { model: String },
+    /// Delete a record from this host's catalog. Without --confirm it shows
+    /// the record, what still names it and the token. Refused while a
+    /// workload or a preset names it. The weights stay (`model rm`).
+    Delete {
+        model: String,
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Walk the declared stores: weights the catalog does not name, and
     /// records whose weights are gone. --add records what is new.
     Scan {
@@ -198,6 +208,27 @@ pub async fn cmd_model_catalog(cli: &Cli, cmd: ModelCatalogCmd) -> Result<u8, Cl
             ensure_protocol(&client).await?;
             let resp = client.model_enable(&ModelEnableRequest { protocol: PROTOCOL_VERSION, model, enabled: false }).await?;
             print_write(&resp, false);
+            Ok(0)
+        }
+        ModelCatalogCmd::Delete { model, confirm, json } => {
+            ensure_protocol(&client).await?;
+            let applying = confirm.is_some();
+            let resp = client.model_delete(&ModelDeleteRequest { protocol: PROTOCOL_VERSION, model, confirm }).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+                return Ok(0);
+            }
+            println!("{}", row(&resp.model));
+            for w in &resp.warnings {
+                println!("  note: {w}");
+            }
+            if resp.deleted {
+                println!("  deleted (catalog revision {}); its weights are not touched", resp.revision);
+            } else if !resp.references.is_empty() {
+                println!("  still named by: {}; a delete is refused", resp.references.join(", "));
+            } else if !applying {
+                println!("  dry run. Delete exactly this with --confirm {}", resp.confirm);
+            }
             Ok(0)
         }
         ModelCatalogCmd::Scan { store, add, json } => {

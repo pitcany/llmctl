@@ -33,6 +33,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/catalog/models/add", post(catalog_add))
         .route("/v1/catalog/models/edit", post(catalog_edit))
         .route("/v1/catalog/models/enable", post(catalog_enable))
+        .route("/v1/catalog/models/delete", post(catalog_delete))
         .route("/v1/catalog/scan", post(catalog_scan))
         .route("/v1/records/enroll", post(records_enroll))
         .route("/v1/records/authority", post(records_authority))
@@ -208,6 +209,14 @@ async fn catalog_enable(
 ) -> Result<Json<cat::ModelWriteResponse>, M5cError> {
     check_protocol(req.protocol)?;
     Ok(Json(crate::catalog::enable(&state, &req).await?))
+}
+
+async fn catalog_delete(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<cat::ModelDeleteRequest>,
+) -> Result<Json<cat::ModelDeleteResponse>, M5cError> {
+    check_protocol(req.protocol)?;
+    Ok(Json(crate::catalog::delete(&state, &req).await?))
 }
 
 async fn catalog_scan(

@@ -21,7 +21,8 @@ use serde_json::Value;
 
 use llmctl_client::catalog::{
     CatalogImportRequest, CatalogImportResponse, CatalogListResponse, ModelAddRequest,
-    ModelEditRequest, ModelEnableRequest, ModelWriteResponse, ScanFound, ScanRequest, ScanResponse,
+    ModelDeleteRequest, ModelDeleteResponse, ModelEditRequest, ModelEnableRequest,
+    ModelWriteResponse, ScanFound, ScanRequest, ScanResponse,
 };
 use llmctl_core::catalog::{self as cat, CatalogModel, RowOutcome, RowReport};
 use llmctl_core::{ModelStore, StoreKind};
@@ -456,6 +457,81 @@ pub async fn enable(state: &AppState, req: &ModelEnableRequest) -> Result<ModelW
     }
     let revision = save(state, store).await?;
     Ok(ModelWriteResponse { changes: changes(&old, &m), model: m, revision })
+}
+
+/// What still names `m`: a workload whose model is its name or source, and a
+/// preset whose `model_id` is its path or source.
+fn references(m: &CatalogModel, workloads: &[(String, String)], presets: &[(String, String)]) -> Vec<String> {
+    let ids: Vec<&str> = [Some(m.name.as_str()), m.source.as_deref()].into_iter().flatten().collect();
+    let files: Vec<&str> = [m.path.as_deref(), m.source.as_deref()].into_iter().flatten().collect();
+    let mut out: Vec<String> = workloads
+        .iter()
+        .filter(|(_, model)| ids.contains(&model.as_str()))
+        .map(|(name, _)| format!("workload {name}"))
+        .collect();
+    out.extend(
+        presets
+            .iter()
+            .filter(|(_, model_id)| files.contains(&model_id.as_str()))
+            .map(|(alias, _)| format!("preset {alias}")),
+    );
+    out
+}
+
+fn delete_token(m: &CatalogModel, revision: u64) -> String {
+    format!("del-{}", &digest(format!("{}\n{revision}", m.id).as_bytes())[7..23])
+}
+
+/// Delete one record (preview without `confirm`). Refused while a workload or
+/// a preset names it. The weights stay.
+pub async fn delete(state: &AppState, req: &ModelDeleteRequest) -> Result<ModelDeleteResponse, CatalogError> {
+    let _one = state.adopt_lock.lock().await;
+    let mut store = load(state).await?;
+    let m = find(&store, &req.model)?.clone();
+    let workloads: Vec<(String, String)> =
+        state.ops.inventory().await.workloads.iter().map(|w| (w.name.to_string(), w.model.clone())).collect();
+    let presets: Vec<(String, String)> = crate::presets::load_all()
+        .0
+        .into_iter()
+        .map(|r| (r.preset.alias.clone(), r.preset.model_id.clone()))
+        .collect();
+    let refs = references(&m, &workloads, &presets);
+    let mut warnings = Vec::new();
+    if m.origin == "import" {
+        warnings.push(
+            "this record came from the Python registry: a reversal keeps the Python row \
+             (import-registry merges); `model disable` hides it there too"
+                .into(),
+        );
+    }
+    let confirm = delete_token(&m, store.revision);
+    let preview = |deleted: bool, revision: u64, warnings: Vec<String>| ModelDeleteResponse {
+        model: m.clone(),
+        references: refs.clone(),
+        warnings,
+        confirm: confirm.clone(),
+        deleted,
+        revision,
+    };
+    let Some(token) = &req.confirm else {
+        return Ok(preview(false, store.revision, warnings));
+    };
+    if token != &confirm {
+        return Err(CatalogError::Refused(format!(
+            "the confirm token does not match this record at catalog revision {}; preview again",
+            store.revision
+        )));
+    }
+    if !refs.is_empty() {
+        return Err(CatalogError::Refused(format!(
+            "{} is still named by {}; change those first, or use `model disable`",
+            m.name,
+            refs.join(", ")
+        )));
+    }
+    store.models.retain(|x| x.id != m.id);
+    let revision = save(state, store).await?;
+    Ok(preview(true, revision, warnings))
 }
 
 // ---- scan ----------------------------------------------------------------------------

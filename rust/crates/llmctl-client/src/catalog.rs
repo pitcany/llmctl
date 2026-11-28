@@ -314,6 +314,32 @@ pub struct ModelEnableRequest {
     pub enabled: bool,
 }
 
+/// Delete one catalog record (M5 gap 3). Without `confirm` it is a preview:
+/// the record, what still names it, and the token that applies exactly this.
+/// The weights are not touched (`model rm` removes weights).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelDeleteRequest {
+    pub protocol: u32,
+    /// Id, or a name that is unique on this host.
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelDeleteResponse {
+    pub model: CatalogModel,
+    /// What still names the record (`workload <name>`, `preset <alias>`).
+    /// A delete is refused while this is not empty.
+    pub references: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// The token for `confirm` (bound to the record and the catalog revision).
+    pub confirm: String,
+    pub deleted: bool,
+    pub revision: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelWriteResponse {
     pub model: CatalogModel,
@@ -389,6 +415,10 @@ impl ControlClient {
 
     pub async fn model_enable(&self, req: &ModelEnableRequest) -> Result<ModelWriteResponse, ClientError> {
         self.post_json("/v1/catalog/models/enable", req).await
+    }
+
+    pub async fn model_delete(&self, req: &ModelDeleteRequest) -> Result<ModelDeleteResponse, ClientError> {
+        self.post_json("/v1/catalog/models/delete", req).await
     }
 
     pub async fn model_scan(&self, req: &ScanRequest) -> Result<ScanResponse, ClientError> {
